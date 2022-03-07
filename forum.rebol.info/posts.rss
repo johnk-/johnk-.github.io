@@ -5,6 +5,247 @@
     <link>https://forum.rebol.info</link>
     <description>Latest posts</description>
       <item>
+        <title>(No) Alternative Local Notation in the Func Spec Dialect</title>
+        <dc:creator><![CDATA[@hostilefork Hostile Fork]]></dc:creator>
+        <description><![CDATA[ <h1>TL;DR:</h1>
+<p>When using a spec in FUNCTION (remember <a href="https://forum.rebol.info/t/abbreviations-as-synonyms/1211">FUNC is a synonym now</a>):</p>
+<ul>
+<li>
+<p><strong>if you want to specify locals you say <code>[... &lt;local&gt; x y z ...]</code></strong> (/LOCAL is a normal refinement like any other in Ren-C.</p>
+</li>
+<li>
+<p><strong>there is no longer a datatype-based shortcut for locals as a way to save the trouble of finding <code>&lt;local&gt;</code> in specs and inserting at the right point</strong>.</p>
+<ul>
+<li>
+<p>Once you could toss random SET-WORD!s anywhere in a spec, like <strong><code>[a b c: d]</code></strong> and it would act like <strong><code>[a b d &lt;local&gt; c]</code></strong>.  This feature was to make higher-level function generators easier to write, to save them from having to find <code>&lt;local&gt;</code> in the spec...add it if not there...and do everything at the right point.</p>
+</li>
+<li>
+<p>When multi-returns began using SET-WORD! this was changed to be <strong><code>[a b .c d]</code></strong> just to move it out of the way.</p>
+</li>
+<li>
+<p>What this was trying to achieve has been obsoleted by newer and better methods, which actually entwine with the idea that <em>you should never know what local variables a function you are composing on top of has</em>.</p>
+</li>
+</ul>
+</li>
+</ul>
+<h1>More Explanation</h1>
+<p>Long ago, when I was looking at some of the higher-level function generators (like FUNCT on top of FUNCTION) I was struck by how tricky it was to get the adaptations written correctly.</p>
+<p>We can look at <a href="https://github.com/rebol/rebol/blob/25033f897b2bd466068d7663563cd3ff64740b94/src/mezz/base-funcs.r#L28">FUNCT from R3-Alpha</a> and see some of that complexity, even just to try and add some local variables.</p>
+<p>It had to check to see if there was already a /LOCAL, and add it if not:</p>
+<pre><code>; Copy the spec and add /local to the end if not found
+unless find spec: copy/deep spec /local [append spec [
+	/local ; In a block so the generated source gets the newlines
+]]
+</code></pre>
+<p><em>Bear in mind that specifying /LOCAL twice would be a duplicate refinement error, and /LOCAL did not have to be at the end of a spec.</em>  Things were tricky, because there were "private refinements".  These refinements were an artifact of how help worked--they were not shown--but weren't actually private.</p>
+<p>So you had to be careful, to insert things after local but not after the private refinements, or they'd be arguments to those refinements:</p>
+<pre><code>; Collect all set-words in the body as words to be used as locals, and add
+; them to the spec. Don't include the words already in the spec or object.
+insert find/tail spec /local collect-words/deep/set/ignore body either with [
+   ...
+]
+</code></pre>
+<p><strong>I wanted to take better advantage of datatypes, so I adopted the TAG! <code>&lt;local&gt;</code> in the spec so that /LOCAL could be used like any other refinement... e.g. GET-TIME/LOCAL or GET-LANGUAGE/LOCAL.</strong>  This is an idea preserved to this day, and I think it's a better move (though LET has been developing as the more viable general option for making locals).</p>
+<p>But another concept I had was to make SET-WORD! in the dialect be another way to put a local anywhere in the spec.  So if you were writing code munging function specs you could just throw local variables on:</p>
+<pre><code>foo: func [a b c: d] [...]
+
+&lt;= equivalent to =&gt;
+
+foo: func [a b d &lt;local&gt; c] [...]
+</code></pre>
+<p>But the idea was that <code>&lt;local&gt;</code> itself was transformed into the SET-WORD!, so the only language you needed to understand was that of the SET-WORD!s:</p>
+<pre><code>&gt;&gt; foo: func [a b d &lt;local&gt; c] [...]
+
+&gt;&gt; spec-of :foo
+== [a b d c:]
+</code></pre>
+<p>When multi-returns came about and took SET-WORD!s, this idea was bumped around to be done with TUPLE!s with leading blanks like <strong>.c</strong></p>
+<h1><a href="https://www.youtube.com/watch?v=2q9MaEKHakY">... but Everything Changed <img src="https://forum.rebol.info/images/emoji/twitter/robot.png?v=9" title=":robot:" class="emoji" alt=":robot:"> ...</a></h1>
+<p>I've been marching toward something more like <a href="https://forum.rebol.info/t/seeing-all-action-s-as-variadic-frame-makers/1002">"Seeing all ACTION!s as Variadic Frame Makers?"</a></p>
+<p>Function composition tools operate on FRAME!s using tools like ADAPT, SPECIALIZE, AUGMENT, ENCLOSE, etc.  There is no API for getting at the locals <em>because when you build on top of a function you can't see them, they're not part of the interface...they are sealed inside.</em>   This is good because you can build on top of a function without worrying about the details of the parts from which it was composed.</p>
+<p>The migration to where <a href="https://forum.rebol.info/t/pure-and-refined-simplifying-refinements-to-one-or-zero-args/1120">refinements are their own arguments</a> has been key in making function calls easier to model as an object.</p>
+<p><strong>In this world we do not need a representation for locals in the spec to add them...because the entire concept of how FUNCT was written is gone.</strong>  If you want to add locals you use tools like AUGMENT and don't worry about it.</p>
+<h1>There Are Still (many) Problems To Solve</h1>
+<p>Consider that you can do something like ask for a FRAME! of something like APPEND, then enumerate the keys:</p>
+<pre><code>&gt;&gt; f: make frame! :append
+
+&gt;&gt; for-each key f [print mold key]
+return
+series
+value
+part
+dup
+line
+only
+</code></pre>
+<p>There are a lot of questions to answer about the unique nature of the main function's RETURN.  Although other multi-returns have to be on the interface, should you be able to put a variable in that return?  Consider that you could use multi-return with append today:</p>
+<pre><code>&gt;&gt; [var]: append "abc" "d"
+== "abcd"
+
+&gt;&gt; var
+== "abcd"
+</code></pre>
+<p>So should you be able to preload the frame with <strong>f.return: 'var</strong> and get the same effect?  This is competitive with the notion that RETURN is a concept of a local variable to the action, that holds an action that returns specifically from that action... so the responsibilities are somewhat murky for this distinguished result.</p>
+<p>But we can also see that if we only look at object keys, we don't know which things are refinements or which are not...if they are refinements we don't know if they are 0-arg or 1-arg form, we don't know what types they take... or are they <code>&lt;end&gt;</code>-able.  <strong>I believe getting at this information should be done by means other than analysis of some spec block you filter out for description strings/etc. so that is on the right track.</strong>  But it's still a long road.</p> ]]></description>
+        <link>https://forum.rebol.info/t/no-alternative-local-notation-in-the-func-spec-dialect/1793/1</link>
+        <pubDate>Sat, 05 Mar 2022 20:33:12 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-5785</guid>
+      </item>
+      <item>
+        <title>Could strings have context?</title>
+        <dc:creator><![CDATA[@hostilefork Hostile Fork]]></dc:creator>
+        <description><![CDATA[ <p>Red is continuing their investment in a kind of string interpolation:</p>
+<p><a href="https://github.com/red/red/pull/5085">https://github.com/red/red/pull/5085</a></p>
+<p>They are defaulting to parentheses instead of $, and escaping parentheses with backslash <code>(\on the inside, curiously\)</code></p>
+<p>It's worth thinking about what a good default is, though ultimately I think it should be customizable (as with historical REWORD).  I had been considering plain parentheses for the same reasons at first, but leaned to $ just because of how popular it is in other languages for interpolation.</p>
+<p>My concept is different because it is not a hardcoded preprocessor behavior, but making binding information available on strings as a map of words to values.  See <a href="https://forum.rebol.info/t/rebol-and-scopes-well-why-not/1751">"Rebol and Scopes: Well, why not?"</a> for thoughts on that distinction and the challenges it presents.</p> ]]></description>
+        <link>https://forum.rebol.info/t/could-strings-have-context/587/13</link>
+        <pubDate>Wed, 23 Feb 2022 19:18:05 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-5784</guid>
+      </item>
+      <item>
+        <title>Shall we CONTINUE?</title>
+        <dc:creator><![CDATA[@hostilefork Hostile Fork]]></dc:creator>
+        <description><![CDATA[ <aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="1790">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/40/26_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>How about WHILE or REPEAT or FOR-EACH? If we wanted it to be novel, it could say "don't change the pending overall result from whatever the last loop iteration would have returned":</p>
+<pre><code>&gt;&gt; for-each x [1 2 3] [
+     if x = 3 [continue] else [x * 10]
+]
+== 20
+</code></pre>
+<p>Although I like that in theory, it would break the loop composition rules unless loops were allowed to be invisible. :-/</p>
+</blockquote>
+</aside>
+<p>So what I'd missed here in the composition rules is a wrinkle that if you try the FOR-BOTH construct and the second list is <em>empty</em>, then you wind up overwriting the last result from the first list.  It creates the same kind of problem as if you wanted a CONTINUE with ~none~ to preserve the last value.</p>
+<p>The tool to tackle this would be something that vanishes plain ~none~ after a META, or a version of meta that elides ~none~ isotopes.  So:</p>
+<pre><code>for-both: func ['var blk1 blk2 body] [
+    unmeta all [
+        meta for-each :var blk1 body
+        none-to-void/meta meta for-each :var blk2 body
+    ]
+]
+</code></pre>
+<p>or:</p>
+<pre><code>for-both: func ['var blk1 blk2 body] [
+    unmeta all [
+        meta for-each :var blk1 body
+        meta/none-to-void for-each :var blk2 body
+    ]
+]
+</code></pre>
+<p>Naming is open to discussion there.  Could be META/VANISHABLE or somesuch.  You can also make it symmetrical by doing it for both loops, it just doesn't matter because the ALL will give ~none~ isotope if the body turns up empty:</p>
+<pre><code>for-both: func ['var blk1 blk2 body] [
+    unmeta all [
+        meta/vanishable for-each :var blk1 body
+        meta/vanishable for-each :var blk2 body
+    ]
+]
+</code></pre>
+<p>The consequence of this, though, is that you can't force a ~none~ isotope return result from a loop once the body has returned any non-~none~-isotope value.  You'd have to do something like a CATCH with a THROW of ~none~.</p>
+<p>I can't offhand tell you if that's annoying or a feature.  You could always META your body result and UNMETA it outside the loop.</p> ]]></description>
+        <link>https://forum.rebol.info/t/shall-we-continue/1790/2</link>
+        <pubDate>Wed, 23 Feb 2022 16:57:16 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-5783</guid>
+      </item>
+      <item>
+        <title>My Summary of the Big Picture</title>
+        <dc:creator><![CDATA[@hostilefork Hostile Fork]]></dc:creator>
+        <description><![CDATA[ <aside class="quote no-group" data-username="hostilefork" data-post="4" data-topic="1792">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/40/26_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>I think if you look at the FOR-BOTH example in Ren-C, it really tells a story that isn't there in historical Rebol.</p>
+</blockquote>
+</aside>
+<p>Hmmm, I realize there is a deficiency here...</p>
+<pre><code> &gt;&gt; for-both x [1 2] [] [print ["x is" x], x * 10]
+ x is 1
+ x is 2
+ == ~none~  ; isotope
+</code></pre>
+<p>What I want is for that to be 20.</p>
+<p>For that to happen, the second FOR-EACH would have to vaporize somehow.</p>
+<p>This means either the second clause would be invisible -or- something about the nature of ALL would choose to throw out a product.</p>
+<p>There is NONE-TO-VOID but then you get in the trap of what if the second loop ran but intentionally produced a ~none~.  I guess we could say that ~none~ is skipped, which would manifest something along the lines of:</p>
+<pre><code>&gt;&gt; for-each x [1 2] [
+      if x = 2 [~none~] else [x * 10]
+  ]
+ == 10
+</code></pre>
+<p>Basically saying that "none isotopes don't count".  If that were the policy then turning nones into voids so they vanish in aggregating constructs would be considered acceptable.</p>
+<p>I still maintain this is getting closer.  Just have to keep looking at it.</p> ]]></description>
+        <link>https://forum.rebol.info/t/my-summary-of-the-big-picture/1792/5</link>
+        <pubDate>Wed, 23 Feb 2022 07:30:23 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-5782</guid>
+      </item>
+      <item>
+        <title>My Summary of the Big Picture</title>
+        <dc:creator><![CDATA[@hostilefork Hostile Fork]]></dc:creator>
+        <description><![CDATA[ <aside class="quote no-group" data-username="rgchris" data-post="3" data-topic="1792">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/rgchris/40/14_2.png" class="avatar"> rgchris:</div>
+<blockquote>
+<p>which <em>more solidly designed language</em> used by non-crackpots are people more likely to opt for vs. popular languages</p>
+</blockquote>
+</aside>
+<p>I'd guess the sort of competition in the homoiconic space I'd have in mind would be people using things like Clojure (or <a href="https://clojurescript.org/">ClojureScript</a>).  But I think if you look at things like Julia or Go, there are some real strengths there.  And Rust and Haskell are good projects for those who want to step away from popularity but get rigor as a benefit.</p>
+<blockquote>
+<p>The language itself wasn't <em>composable</em> the way one might like languages to be</p>
+</blockquote>
+<p>I think if you look at the FOR-BOTH example in Ren-C, it really tells a story that isn't there in historical Rebol.</p>
+<pre><code>for-both: func ['var blk1 blk2 body] [
+    unmeta all [
+        meta for-each :var blk1 body
+        meta for-each :var blk2 body
+    ]
+]
+</code></pre>
+<p>It's just across the board more solid.  Not only does definitional RETURN mean that a return in the body will act as the person using the loop would expect, but BREAK and CONTINUE will behave correctly...returning the aggregate loop result.</p>
+<pre><code> &gt;&gt; for-both x [1 2] [3 4] [print ["x is" x], x * 10]
+ x is 1
+ x is 2
+ x is 3
+ x is 4
+ == 40
+
+&gt;&gt; for-both x [1 2] [3 4] [print ["x is" x], if x = 2 [break]]
+x is 1
+x is 2
+; null
+
+&gt;&gt; for-both x [] [] [print ["x is" x], &lt;result&gt;]
+== ~none~  ; isotope
+</code></pre>
+<p>All the ideas come together here.  With META ~unset~ isotopes and ~none~ isotopes etc. become plain BAD-WORD!s which are truthy, NULL goes to NULL, everything else (including plain BAD-WORD!) becomes one level more quoted than it was, and all QUOTED! (including a quoted #[false]) are truthy.  NULL is reserved uniquely for the signal of BREAK, and so everything... works.</p> ]]></description>
+        <link>https://forum.rebol.info/t/my-summary-of-the-big-picture/1792/4</link>
+        <pubDate>Tue, 22 Feb 2022 20:24:25 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-5781</guid>
+      </item>
+      <item>
+        <title>My Summary of the Big Picture</title>
+        <dc:creator><![CDATA[@rgchris Chris]]></dc:creator>
+        <description><![CDATA[ <p>Not disputing this overview <em>per se</em>—however these statements aren't immediately elucidated without some digging. Is there a succinct citation for each of them?</p>
+<ul>
+<li>
+<p>When serious language theorists look at Rebol, they notice it is riddled with design holes</p>
+</li>
+<li>
+<p>The language itself wasn't <em>composable</em> the way one might like languages to be</p>
+</li>
+</ul>
+<hr>
+<p>Would echo (I think) <a class="mention" href="/u/iarnold">@iArnold</a>'s sense on 3—which <em>more solidly designed language</em> used by non-crackpots are people more likely to opt for vs. popular languages which may have the same or worse design issues but have the security blanket implied by that popularity?</p> ]]></description>
+        <link>https://forum.rebol.info/t/my-summary-of-the-big-picture/1792/3</link>
+        <pubDate>Mon, 21 Feb 2022 22:21:52 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-5780</guid>
+      </item>
+      <item>
         <title>Should END-able constructs all use ^META parameters?</title>
         <dc:creator><![CDATA[@hostilefork Hostile Fork]]></dc:creator>
         <description><![CDATA[ <aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="1783">
@@ -571,6 +812,7 @@ Control your result
 
 &gt;&gt; for-both x [1 2] [3 4] [print ["x is" x], if x = 2 [break]]
 x is 1
+x is 2
 ; null
 
 &gt;&gt; for-both x [] [] [print ["x is" x], &lt;result&gt;]
@@ -891,271 +1133,6 @@ The dynamics of REN-C, changing even core behavior if seen as a promising experi
         <link>https://forum.rebol.info/t/understanding-definitional-scoping/1785/2</link>
         <pubDate>Mon, 24 Jan 2022 12:11:02 +0000</pubDate>
         <guid isPermaLink="false">forum.rebol.info-post-5754</guid>
-      </item>
-      <item>
-        <title>Understanding Definitional Scoping</title>
-        <dc:creator><![CDATA[@DefinitionalUsername]]></dc:creator>
-        <description><![CDATA[ <p>I just started learning Red/Rebol, and I was having trouble understanding the scoping rules. I did read the <a href="https://stackoverflow.com/a/21964858" rel="noopener nofollow ugc">Stack Overflow</a> and <a href="https://en.wikibooks.org/wiki/Rebol_Programming/Advanced/Bindology" rel="noopener nofollow ugc">Bindology</a>, and I think I somewhat understand, but I'm not sure! I'd be grateful if someone can confirm the my deductions about the following code from the SE post:</p>
-<pre><code class="lang-auto">rebol []
-
-a: 1
-
-func-1: func [] [a]
-
-inner: context [
-    a: 2
-    func-2: func [] [a]
-    func-3: func [/local a] [a: 3 func-1]
-]
-
-reduce [func-1 inner/func-2 inner/func-3]
-</code></pre>
-<ol>
-<li>
-<strong>Compile-time:</strong> First, when the code is compiled, a list of top-level names is created. <em>(<code>a</code>, <code>func-1</code>, <code>inner</code>)</em>
-</li>
-<li>
-<strong>Load-time:</strong> When the code is loaded, context <strong>A</strong> is created with those symbols as members. Also, the entire code is walked through, and every occurrence of those symbols is bound to these entries. <em>(e.g., <code>a</code> inside <code>func-2</code> would be bound to the top-level <code>a</code>)</em>
-</li>
-<li>
-<strong>Run-time:</strong> When <code>a: 1</code> is executed, the value <code>1</code> is stored in the <code>a</code>'s slot in the context.</li>
-<li>The <code>func</code> keyword after <code>func-1:</code> creates a new function, and assigns it to <code>func-1</code>. However, it leaves the binding of <code>a</code> intact.</li>
-<li>The <code>context</code> keyword after <code>inner:</code> creates a new context <strong>B</strong>, walks over all the block, collecting all new symbols, and inserts those in the new object.</li>
-<li>
-<code>a: 2</code> assigns value <code>2</code> in <code>a</code>'s slot in the new context.</li>
-<li>
-<code>func</code> after <code>func-2:</code> creates a function while keeping <code>a</code>'s new binding intact, and assigns it to <code>func-2</code>'s slot.</li>
-<li>
-<code>func</code> after <code>func-3:</code> creates a function and creates a new context <strong>C</strong> in which <code>a</code> is inserted and bound.</li>
-<li>Upon execution of <code>reduce</code>, <code>func-1</code> returns <code>1</code> from context <strong>A</strong>, <code>func-2</code> return <code>2</code> from context <strong>B</strong>, and <code>func-3</code> executes <code>func-1</code> which returns <code>1</code> from context <strong>A</strong> again.</li>
-</ol>
-<p>So, now,  a few questions:</p>
-<ul>
-<li>Is the above correct? If it is,</li>
-<li>How does the <code>context</code> keyword determine which set-words it should create a slot for? i.e.,
-<ul>
-<li>if <code>a: 2</code> didn't exist, will it still create the slot for <code>a</code> due to <code>a: 3</code> deep inside?</li>
-<li>What about if <code>a:3</code> didn't exist either? Will the new context contain a slot for <code>a</code> just due to <code>a</code> inside <code>func-2</code>'s body?</li>
-</ul>
-</li>
-<li>Did <code>context</code> bind <code>a</code> in <code>[/local a]</code> too, before <code>func</code> was executed?</li>
-<li>When a new context is created, does it copy existing symbols or bindings from the older context? If not,</li>
-<li>Is there a parent-child relationship between contexts, or are they free-standing? Given a context, can I chase some pointer to its parent or child?</li>
-</ul>
-<p>Sorry for so many questions, I think I am getting extra confused since I already have programming experience and need to unlearn some stuff before being able to grok Rebol.</p>
-<p>Thank you.</p> ]]></description>
-        <link>https://forum.rebol.info/t/understanding-definitional-scoping/1785/1</link>
-        <pubDate>Sat, 22 Jan 2022 08:13:51 +0000</pubDate>
-        <guid isPermaLink="false">forum.rebol.info-post-5734</guid>
-      </item>
-      <item>
-        <title>Should END-able constructs all use ^META parameters?</title>
-        <dc:creator><![CDATA[@hostilefork Hostile Fork]]></dc:creator>
-        <description><![CDATA[ <p>R3-Alpha and Rebol2 could only have functions that were "endable" if the argument they took was quoted.  This feature was added primarily for HELP, so that you could say either:</p>
-<pre><code>&gt;&gt; help
-; (would display generic HELP usage information)
-
-&gt;&gt; help topic
-; (would display help for the given topic)
-</code></pre>
-<p>It was a <em>very limited form of variadic-ness</em>...generally used only in console-oriented commands (HELP, LS).  You couldn't write a function that was evaluative, like:</p>
-<pre><code>redbol&gt;&gt; printer 1 + 2
-3
-
-redbol&gt;&gt; printer
-You called the PRINTER function with no arguments
-    ; ^-- not possible to accomplish with an otherwise evaluative argument!
-</code></pre>
-<p>Being able to handle getting to the end of input was entwined with taking quoted arguments.</p>
-<h2>Ren-C added <code>&lt;end&gt;</code>-able Evaluative Parameters</h2>
-<p>To facilitate certain demos in Ren Garden, Ren-C could mark an ordinary parameter as being <code>&lt;end&gt;</code>-able.  This would mean that the argument would show up as being NULL if the end was reached before an argument was seen.</p>
-<p>This was--however--ambiguous with if you actually passed an evaluative NULL.</p>
-<pre><code>ren-c&gt;&gt; printer 1 + 2
-3
-
-ren-c&gt;&gt; printer
-You called the PRINTER function with no arguments
-
-ren-c&gt;&gt; printer null  
-You called the PRINTER function with no arguments  ; d'oh
-</code></pre>
-<p><strong>This kind of ambiguity wasn't new...the Redbol version had it.</strong>  The signal for quoted parameters that were endable-and-missing was to make the parameter an UNSET!.  Which meant they couldn't tell the difference between <strong>help #[unset!]</strong> and just-plain-help:</p>
-<pre><code>red&gt;&gt; help #[unset!]
-To use HELP, supply a word or value as its
-argument:
-
-    help insert
-    help system
-    help system/script
-
-To view all words that...
-</code></pre>
-<p><strong>Interestingly enough, Ren-C has a solution for this with quoted parameters, because NULL cannot appear literally in source...so it can't be at the callsite.  Thus NULL can represent a missing quoted argument.</strong>  Which is neat.</p>
-<h2>^META parameters can do <code>&lt;end&gt;</code> another way...</h2>
-<p>A meta parameter is quoted, but will be a plain non-quoted BAD-WORD! if the callsite was passing an isotope.  With the <a href="https://forum.rebol.info/t/pure-vs-impure-invisibility-do-we-need-both/1782">recent design concept that suggests ~void~ isotopes are "pure" and equivalent to the full absence of a value</a>, you get evaluative endability without needing a separate feature.</p>
-<p>So if our PRINTER took a ^META argument:</p>
-<pre><code>&gt;&gt; printer 1 + 2
-3
-; (it actually received '3, quoted)
-
-&gt;&gt; printer
-You called the PRINTER function with no arguments
-; (it actually received ~void~, not quoted)
-</code></pre>
-<p>The ambiguity is still there, though...</p>
-<pre><code>&gt;&gt; printer ~void~
-You called the PRINTER function with no arguments
-; (again, it actually received ~void~, not quoted)
-</code></pre>
-<p>If you're following the details then I pointed out that supermeta parameters would be necessary to implement something that would know the difference in the suggested model.</p>
-<p><strong>But at least you could differentiate NULL from an end.</strong>  The conflation of an invisible argument with the end doesn't seem that troubling to me, as the problem with HELP is fixed since it quotes and can tell when you say <strong>help ~void~</strong> vs. plain <strong>help</strong></p>
-<h2>Killing off <code>&lt;end&gt;</code> as a core parameter flag would simplify things...</h2>
-<ul>
-<li>
-<p>If a quoted parameter tolerates NULL as one of its legal types that's sufficient to say it is "endable"</p>
-</li>
-<li>
-<p>If an evaluative parameter needs to detect endability, it could be your job to make it a ^META parameter and look for void, and unquote it to handle other results.</p>
-</li>
-</ul>
-<p>The code and typeset flags for <code>&lt;end&gt;</code> could then be scrapped.</p>
-<p>If someone really liked the NULL conflating version of endability they could write something to do it in usermode.</p>
-<p><strong>You'd have to see the code to understand why I would think throwing away <strong><code>&lt;end&gt;</code></strong> is worth it.</strong> The way the type checking is done frames have to be filled first, which means if a function doesn't want an actual null but wants just ends to reflect as null... or wants an actual null but doesn't want ends reflected as null... hidden bits need to be grafted onto these nulls at the time of frame fulfillment to say whether it's an "endish" null or a regular null.  Various parts of the system then need to test a NULL for this invisible property.  <strong>^META parameters pull such invisible state into the light.</strong></p>
-<p><strong>Basically take my word for it: meta is much cleaner, and offers a way to expose these distinctions to the user--so I think the odds are that <code>&lt;end&gt;</code> and its current mechanics need to die.</strong></p> ]]></description>
-        <link>https://forum.rebol.info/t/should-end-able-constructs-all-use-meta-parameters/1783/1</link>
-        <pubDate>Fri, 21 Jan 2022 17:01:03 +0000</pubDate>
-        <guid isPermaLink="false">forum.rebol.info-post-5732</guid>
-      </item>
-      <item>
-        <title>Pure vs. Impure Invisibility: Do We Need Both?</title>
-        <dc:creator><![CDATA[@hostilefork Hostile Fork]]></dc:creator>
-        <description><![CDATA[ <p>"Invisibles" <a href="https://forum.rebol.info/t/issues-with-invisibles-a-truly-disappearing-comment/405">were conceived 4 years ago</a>...long before BAD-WORD!s, isotopes, ^META parameters, etc.</p>
-<p>The terminology needs a bit of an update, because I want to make a distinction between two different kinds:</p>
-<ul>
-<li>
-<p><strong>IMPURE INVISIBLITY</strong> is when a special state (like a ~void~ isotope) is discarded in contexts where it's assumed to represent an invisible intent.</p>
-<p>Remember that plain BAD-WORD!s (unevaluated) are normal values and can be in blocks.</p>
-<pre><code>&gt;&gt; first [~void~]
-== ~void~
-</code></pre>
-<p>But an evaluated ~void~ becomes an isotope, and operations like ALL are willing to tolerate that as a signal of invisible intent it should discard:</p>
-<pre><code>&gt;&gt; ~void~
-== ~void~  ; isotope
-
-&gt;&gt; all [10 + 20, ~void~]
-== 30
-</code></pre>
-<p>Unfortunately, this is extra work that ALL must do, since ~void~ isotopes are valid evaluative products.  Every construct that wants to integrate impure invisibility bears the burden.</p>
-</li>
-<li>
-<p><strong>PURE INVISIBILITY</strong> is an evaluator feature when a function call can truly erase arbitrary code, such as to the right of a SET-WORD!:</p>
-<pre><code>&gt;&gt; y: elide (1 + 2 print "Erased!" 3 + 4) 10 + 20
-Erased!
-== 30
-
-&gt;&gt; y
-== 30
-</code></pre>
-<p>This can only be done when a function like ELIDE specially says that it is not expected to return any result at all.  Otherwise it's not clear whether <strong>y:</strong> is supposed to get the <code>~void~</code> isotope or something after it.</p>
-<p>(Over time I embraced the odd idea that just saying RETURN and not giving it an argument would be the way of being purely invisible...which has the interesting property that <strong><code>(return some-other-function ...)</code></strong> can actually chain cases where the other function is sometimes purely invisible and sometimes not!  This insight arose because of the frustrating fact that C/C++ cannot do such chains... if you say <strong><code>return some_other_function(...);</code></strong> and then change the other function from returning <code>int</code> to <code>void</code>, it will complain that you cannot use <code>return</code> with an argument inside of void functions...even if that function itself returns void.)</p>
-</li>
-</ul>
-<h2>Why Not Make "Impure" Invisibility Act "Pure" ("Semipure?")</h2>
-<p>The existence of the ^META types and operators raises an interesting theoretical option...that a ~void~ isotope could be treated as pure by the evaluator, and it's your responsibility to use meta operations if you wanted to see it:</p>
-<pre><code>&gt;&gt; 1 + 2 ~void~
-== 1 + 2
-
-&gt;&gt; x: ~void~ 1 + 2
-== 3
-
-&gt;&gt; x
-== 3
-
-&gt;&gt; y: ^ ~void~ 1 + 2
-== 3
-
-&gt;&gt; y
-== ~void~
-    ; ^-- not an isotope
-</code></pre>
-<p>Pondering the potential implications of this form of thinking, it would mean there wouldn't be a form of invisibility that could beat a ^META operation:</p>
-<pre><code>&gt;&gt; z: ^ comment ["hi"] ~something~
-== ~something~  ; isotope
-
-&gt;&gt; z
-== ~void~
-   ; ^-- the COMMENT was seen by the ^META, instead of bypassed
-   ; (today COMMENT's status as a purely invisible construct means you
-   ; would get Z as a non-isotope ~something~)
-</code></pre>
-<p><strong>Note that since parameters to functions are allowed to be meta if they need to be, changing a parameter from normal to meta would break commenting constructs.</strong>  This is not too surprising, as if you have <code>my-function comment "hi" 1 + 2</code> and change MY-FUNCTION's argument to be quoted instead of evaluated, that's another kind of parameter change that would break the commenting feature.</p>
-<p>Meta parameters should be used very sparingly--far more sparingly than quoted parameters--so this may not be a problem.  I notice that a function like RETURN (which takes its argument meta so it can return isotopes) could still chain an invisible function, as it would receive ~void~ as a measure of what an isotope was.</p>
-<h2>If Truly Pure Invisibility Is Not Implemented, Would People Just Reinvent it with Variadics in a Less Efficient Way Than The Current Evaluator Internals Do It?</h2>
-<p>Let's say someone writes:</p>
-<pre><code>foo: func [] [return comment "hi" 1 + 2]
-</code></pre>
-<p>Today this returns 3 due to comment's "purely invisible" status, RETURN takes its argument as a ^META parameter.  If we decide meta parameters are allowed to see the "semipure" void isotopes described above, then it would just be like you'd written:</p>
-<pre><code>foo: func [] [return comment "hi"]
-</code></pre>
-<p><strong>That would make it seem like COMMENT is unreliable.</strong>  True, if you take a quoted argument you expect COMMENT to break in such cases as well...but meta parameters are evaluative and so it's a bit different.</p>
-<p>Perhaps it should be just the <strong>^</strong> operator at the callsite that has the special vision, and meta parameters are evaluated and discard the void isotopes.  This would mean you only have to learn the rule that <strong>^ comment "hi"</strong> breaks the invisibility.</p>
-<p><em>(Here we wind up with <strong>^</strong> either being a built-in thing the user has no way to write themselves, or invent a "supermeta" parameter flag to say "I can see void isotopes, too".)</em></p>
-<h2>Either way, "Impure Invisibility" Is MUCH Easier To Work With</h2>
-<p>The easy meta-transformations between ~void~ isotopes and plain ~void~ BAD-WORD! allow you to work with an invisible function gracefully...even when you don't know if it's invisible or not.</p>
-<p>Early problems cropped up with pure invisible COMMENT like this:</p>
-<pre><code>&gt;&gt; f: make frame! :comment
-&gt;&gt; f.discarded: "Ignore Me"
-
-&gt;&gt; x: do f   y: 1 + 2
-== 3
-
-&gt;&gt; x
-== 3  ; this could seem surprising, but maybe not?
-</code></pre>
-<p>But the new world does have at least <em>an</em> answer, meta your result and you can test for void cases and handle them as you wish.</p>
-<pre><code>&gt;&gt; x: ^ do f  y: 1 + 2
-== 3
-
-&gt;&gt; x
-== ~void~
-
-; alternately could have said `[^x]: do f  y: 1 + 2`
-</code></pre>
-<p>Yet it's still uncomfortable to imagine that an operation like DO could vanish, which is why DO tried to use void isotopes as a proxy for its return value.  A ~void~ isotope could then be semantically interpreted or converted to pure invisibility on an as-needed basis.</p>
-<h2>"If You Don't Know What You're Doing, Then Do It Meta"</h2>
-<p>My urge to build safety into the system is driven by wanting to enable people to write generic code.</p>
-<p>...but... trying to protect people from <strong><code>do f</code></strong> from vanishing when <strong><code>f</code></strong> is a FRAME! for the COMMENT function may be misguided.  That protection could be breaking the very cool trick they are trying to perform.</p>
-<p>And there's a real complexity cost to having a distinction between pure and impure invisibility.  If you allow that distinction then impure invisibility has a meta form (a plain ~void~ BAD-WORD!) while pure invisibility doesn't have one.  The powerful tool of META therefore offers no answers for a purely invisible function.</p>
-<p>Maybe things like DO should have a switch to say <strong>do/vanishable</strong> and that's the right protection, otherwise they error if they could vanish.  Same with <strong>unmeta</strong>?</p>
-<p>Or maybe there's a better finesse, to say that the evaluator has some generalized protection which notices when you might have meant for an invisible result to be used, and there's generic mitigation for such cases.  Like with <strong><code>x: do f  y: 1 + 2</code></strong>, if it notices the potential for misunderstanding you can say <strong><code>x: vanishable do f y: 1 + 2</code></strong>...and you'd be provoked to decide if you wanted to use VANISHABLE or ^ based on what you were actually trying to accomplish.</p>
-<p><em>That actually sounds like a really clever mitigation, if a word or symbol were picked for it!</em></p>
-<hr>
-<p><strong>This post has been in draft form for a while, as I let it turn over in my head.  But I think I am turning to feeling that void isotopes cannot be stored in variables but are something whose existence can only be philosophically imagined by seeing a meta state register as a plain ~void~ BAD-WORD!.  This is bolstered by the idea that function frames cannot receive isotopes, and parallels to the idea that ~null~ isotopes cannot be stored in variables either (though they decay to ordinary NULL)</strong></p> ]]></description>
-        <link>https://forum.rebol.info/t/pure-vs-impure-invisibility-do-we-need-both/1782/1</link>
-        <pubDate>Fri, 21 Jan 2022 09:19:01 +0000</pubDate>
-        <guid isPermaLink="false">forum.rebol.info-post-5731</guid>
-      </item>
-      <item>
-        <title>Cggong</title>
-        <dc:creator><![CDATA[@hostilefork Hostile Fork]]></dc:creator>
-        <description><![CDATA[ <aside class="quote no-group" data-username="cggong" data-post="17" data-topic="1776">
-<div class="title">
-<div class="quote-controls"></div>
-<img alt="" width="20" height="20" src="https://forum.rebol.info/letter_avatar_proxy/v4/letter/c/71c47a/40.png" class="avatar"> cggong:</div>
-<blockquote>
-<p>Is there a way to run multiple instances of Ren-C interpreter in the same process?</p>
-</blockquote>
-</aside>
-<p><em>At one time</em> I thought we'd try doing what the JavaScript V8 engine behind Chrome/Node/etc. uses, something called "isolates":</p>
-<p><a href="https://stackoverflow.com/questions/29299397/whats-the-role-of-isolate-in-v8-and-how-can-it-be-possible-to-make-isolate" class="inline-onebox">javascript - What's the role of "Isolate" in V8? and how can it be possible to make "Isolate" isolately? - Stack Overflow</a></p>
-<p>But the direction I imagine going in now is more like Go, e.g. "green threads" as a more cooperative way of letting the interpreter shuffle state around:</p>
-<p><a href="https://journal.stuffwithstuff.com/2015/02/01/what-color-is-your-function/" class="inline-onebox">What Color is Your Function? – journal.stuffwithstuff.com</a><br>
-<a href="https://forum.rebol.info/t/switching-to-stackless-why-this-why-now/1247" class="inline-onebox">Switching to Stackless: Why this, Why now?</a></p>
-<p>So concurrency would be managed within the interpreter "service" itself--not as something that you'd have to do "locks" in native C code to surround on different threads.  This would allow for concurrency...though (probably) only one CPU core would be running the interpreter code; just shuffling between whichever tasks/threads that were requesting to use it.</p>
-<p>I'm in constant transit, currently in a search for a new place to live, and that's taking up a lot of time.  So I don't really know what the timetable is on stackless, or much of anything at this point <img src="https://forum.rebol.info/images/emoji/twitter/hourglass_flowing_sand.png?v=9" title=":hourglass_flowing_sand:" class="emoji" alt=":hourglass_flowing_sand:"> <img src="https://forum.rebol.info/images/emoji/twitter/frowning.png?v=9" title=":frowning:" class="emoji" alt=":frowning:">  I'll see about getting around to my New Years status post shortly.</p> ]]></description>
-        <link>https://forum.rebol.info/t/cggong/1776/18</link>
-        <pubDate>Mon, 10 Jan 2022 23:52:13 +0000</pubDate>
-        <guid isPermaLink="false">forum.rebol.info-post-5730</guid>
       </item>
   </channel>
 </rss>
