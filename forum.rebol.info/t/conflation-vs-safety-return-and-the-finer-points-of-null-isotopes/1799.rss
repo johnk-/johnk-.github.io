@@ -1,0 +1,574 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Conflation vs. Safety, RETURN and the Finer Points of ~null~ Isotopes</title>
+    <link>https://forum.rebol.info/t/conflation-vs-safety-return-and-the-finer-points-of-null-isotopes/1799</link>
+    <description>`~null~` isotopes are a novel solution shaped to solve a specific problem.  As a reminder of what the goal is...
+
+# The Goal is to Please @rgchris *AND* Please me
+
+NULL is the signal of &quot;soft failure&quot;.  It&#39;s a unique result reserved for when a branch fails, or when a loop is halted by a BREAK, when PARSE fails...etc.
+
+Its property of not being storable in blocks makes it critical to disambiguating this historical problem:
+
+    redbol&gt;&gt; third [a b #[none]]
+    == #[none]
+
+    redbol&gt;&gt; third [a b]
+    == #[none]
+
+In a language that prides itself on letting you work with code structure, *this is the tip of the iceberg of the problems that null solves*, and you will find the distinction&#39;s utility across the board (obviously, in tools like COMPOSE).  It facilitates rigorous analysis and rearrangements...without needing to drop to C or write convoluted code:
+
+    &gt;&gt; third [a b _]
+    == _
+
+    &gt;&gt; third [a b]
+    ; null
+
+Hence NULL has taken the place of blank (&quot;none!&quot;) in many places, one of which is the unique result of failed conditionals.  
+
+But unlike the elements in a block, a branch that evaluates isn&#39;t required to be non-NULL.  Which leads us to the long running question of what to bend NULL branches to so they don&#39;t conflate with the branch-not-taken result.
+
+## Chris has (rightly) expressed concern
+
+At times I&#39;ve said that it&#39;s not that big a deal that branches can&#39;t evaluate to NULL and get distorted.  &quot;You didn&#39;t have a NULL before, so why get so worked up about control constructs not returning it?&quot;
+
+But the now-pervasive nature of NULL means it can&#39;t be avoided.  So:
+
+*&quot;How do you express branching code which wants to do some work but also produce NULL as an evaluative product?&quot;*
+
+Conflation was not a problem, e.g. in Rebol2:
+
+    rebol2&gt;&gt; exampler: func [x] [
+         print &quot;returning sample or none if not found&quot;
+         case [
+             x = &lt;string&gt; [print &quot;sample string&quot; {hello}]
+             x = &lt;integer&gt; [print &quot;sample integer&quot; 3]
+             x = &lt;none&gt; [print &quot;sample none&quot; none]
+         ]
+      ]
+
+    rebol2&gt;&gt; exampler &lt;string&gt;
+    returning sample or none if not found
+    sample string
+    == &quot;hello&quot;
+
+    rebol2&gt;&gt; exampler &lt;blatz&gt;
+    returning sample or none if not found
+    == #[none]
+
+    rebol2&gt;&gt; exampler &lt;none&gt;
+    returning sample or none if not found
+    sample none
+    == #[none]
+
+However NULL is now the basic currency of &quot;soft failure&quot;.  As such it would not be uncommon to be in the situation where a branching decision process would want to intentionally return NULL as part of the work it does.
+
+Without something like the isotope decay mechanism, unpleasant convolutions would be needed, for instance surrounding anything that wanted to tunnel a NULL with a CATCH and THROW&#39;ing it:
+
+    x: catch [
+        throw switch 1 + 2 [
+            1 [print &quot;one&quot; 1]
+            2 [print &quot;two&quot;, &lt;two&gt;]
+            3 [print &quot;three&quot;, throw null]
+         ]
+    ]
+
+Definitely not good.  But regarding the pleasing-me-part, remember I am trying to avoid this situation:
+
+    &gt;&gt; case [
+         true [
+              print &quot;case branch&quot;
+              if 1 &gt; 2 [print &quot;failed inner&quot;]
+         ]
+       ] else [
+         print &quot;else branch&quot;
+       ]
+
+    case branch
+    else branch  ; ugh
+
+I don&#39;t want the CASE branch to evaluate to NULL just because the failed IF inside the branch was NULL.  That would mean the ELSE tied to the CASE runs even though the code for the branch ran.
+
+## Enter Isotopes
+
+One thing null isotopes have in common with NULL (like all BAD-WORD! isotopes) is that they can&#39;t be put in blocks.  But they have been automatically &quot;decaying&quot; into regular NULL when stored into variables.
+
+    &gt;&gt; ~null~
+    == ~null~  ; isotope
+
+    &gt;&gt; x: ~null~
+    == ~null~  ; isotope  &lt;-- note the overall expression is still an isotope
+
+    &gt;&gt; x
+    ; null
+
+The twist is that they are *different enough* from true NULL such that a THEN or an ELSE can consider them a situation where the branch did not run:
+
+    &gt;&gt; if false [&lt;ignored&gt;]
+    ; null
+
+    &gt;&gt; if true [null]
+    == ~null~  ; isotope
+
+    &gt;&gt; if true [null] else [print &quot;This won&#39;t run&quot;]
+    == ~null~  ; isotope
+
+The reason functions like ELSE can &quot;see&quot; the isotope is that they don&#39;t take an ordinary parameter on their left.  They take a ^META argument.  These can see the distinction between a ~null~ isotope and a &quot;true&quot; NULL.
+
+**I&#39;d largely say this has been working well...certainly better than its conceptual predecessors.**  It makes piping NULL out of branches trivially easy, when the fear of conflation is not a problem.
+
+    &gt;&gt; x: switch 1 + 2 [
+         1 [print &quot;one&quot; 1]
+         2 [print &quot;two&quot;, &lt;two&gt;]
+         3 [print &quot;three&quot;, null]
+       ]
+    three
+    == ~null~
+
+    &gt;&gt; x
+    ; null
+
+The automatic decay in variable storage prevents you from needing an explicit operation to turn ~null~ isotopes into pure nulls:
+
+    &gt;&gt; x: decay switch 1 + 2 [
+         1 [print &quot;one&quot; 1]
+         2 [print &quot;two&quot;, &lt;two&gt;]
+         3 [print &quot;three&quot;, null]
+       ]
+    three
+    ; null
+
+# But @rgchris Would Likely Want any *NORMAL* arg decay
+
+At the very moment I am writing this, ~null~ isotopes are like all other BAD-WORD! isotopes and not accepted as normal parameters.
+
+**They *could* decay to pure NULL for all normal args.**  But let me explain a bummer of what we lose in that bargain.
+
+It takes away a safety idea I had with functions like MATCH.
+
+    &gt;&gt; match [&lt;opt&gt; integer!] 3
+    == 3
+
+    &gt;&gt; match [&lt;opt&gt; integer!] &quot;notaninteger&quot;
+    ; null
+
+    &gt;&gt; match [&lt;opt&gt; integer!] null
+    == ~null~  ; isotope
+
+The idea was that it could say &quot;yes, this matched&quot; but if ~null~ isotopes were tested, they&#39;d give an error:
+
+    &gt;&gt; if (match [&lt;opt&gt; integer!] null) [print &quot;Yes it matched!&quot;]
+    ** Error: IF does not accept ~null~ isotopes without a ^META condition
+
+Were MATCH to have passed through a plain NULL it would have succeeded in the match but not run the branch.  So it&#39;s nice to get the warning on the isotope.
+
+**Or it could just return a ~matched~ isotope**.  But this loses the following nice isotopic property:
+
+    &gt;&gt; x: match [&lt;opt&gt; integer!] null else [fail &quot;NO MATCH&quot;]
+    == ~null~  ; isotope
+
+    &gt;&gt; x
+    ; null
+
+In fact I instituted other decaying variants for ~blank~ and ~false~
+
+    &gt;&gt; y: match [blank!] _ else [fail &quot;NO MATCH!&quot;]
+    == ~blank~  ; isotope
+
+    &gt;&gt; y
+    == _
+
+    &gt;&gt; z: match [logic!] 1 = 2 else [fail &quot;NO MATCH!&quot;]
+    == ~false~  ; isotope
+
+    &gt;&gt; z
+    == #[false]
+
+# So What To Do About MATCH and its bretheren?
+
+Seems the options are:
+
+1. *Don&#39;t worry about it.*  If you write **match [logic!] 1 = 2** you get back **#[false]** and should you write an expression like **if (match [logic!] 1 = 2) [print &quot;Match!]** you get what you deserve.
+
+2. *Use a different isotope.*  Let&#39;s say that **`match [&lt;opt&gt;] null`** is simply **~matched~ (isotope)**.  It wouldn&#39;t have the decaying property, but would have the invalidness property.
+
+3. *Have a MATCH/FALSEY variant.*  Let plain **match** on a falsey thing trigger an error and if you write **if match/falsey ...** then you clearly do know what you&#39;re doing so it becomes like case (1).
+
+4. *Make all conditional arguments take ^META arguments for their conditions.*  This would put the responsibility for checking for isotopes on them, and they&#39;d uniquely disallow them before UNMETA&#39;ing them and then testing for truth/falsehood.
+
+Option (4) is too taxing...impacting not just the interface to IF but the implementation of CASE and any conditional construct.
+
+**I think I like (3) because it punts the ball down the road a bit.**
+
+But this might still not suit Chris.
+
+# Should Non-Meta Arguments Decay Null isotopes?
+
+The &quot;auto-decay&quot; of ~null~ isotopes means no variable can ever hold a NULL isotope.  And there&#39;s also a rule that no *normal* parameter can ever be passed an isotope, only ^META parameters.
+
+In the beginning, it seemed useful if normal arguments would automatically decay null isotopes:
+
+    &gt;&gt; foo: func [x] [if null? x [print &quot;Yup, it&#39;s null&quot;]]
+
+    &gt;&gt; foo if true [null]
+    Yup it&#39;s null
+
+    &gt;&gt; metafoo: func [^x] [
+        case [
+            null? x [print &quot;regular null&quot;]
+            x = &#39;~null~ [print &quot;null isotope&quot;]
+            true [print &quot;something else&quot;]
+         ]
+       ]
+
+    &gt;&gt; metafoo if false [null]
+    regular null
+
+    &gt;&gt; metafoo if true [null]
+    null isotope
+
+There is a manual DECAY operator which could be used, but would not meet that wish:
+
+    &gt;&gt; ~null~
+    == ~null~  ; isotope
+
+    &gt;&gt; decay ~null~
+    ; null
+
+    &gt;&gt; ~blank~
+    == ~blank~  ; isotope
+
+    &gt;&gt; decay ~blank~
+    == _
+
+    &gt;&gt; ~false~
+    == ~false~  ; isotope
+
+    &gt;&gt; decay ~false~
+    == #[false]
+
+# Should DECAY Conflation Be A Customization?
+
+Another avenue of satisfaction could be to say that you simply customize your environment with some definitions to make auto-decaying constructs:
+
+    switch: chain [:switch | :decay]
+    case: chain [:case | :decay]
+    ...
+
+    &gt;&gt; case [true [null]]
+    ; null
+
+    &gt;&gt; case [false [10]]
+    ; null
+
+
+I don&#39;t like it, but if someone isn&#39;t going to use ELSE (or is willing to accept this very easily unintentional conflation if they do) it could be an option.
+
+**I really do believe the ability to tell from outside the construct if a branch has been taken is an interesting property, which even those who think they won&#39;t use ELSE or THEN can leverage, especially when building constructs atop each other.**  But this isn&#39;t something that can be appreciated without usage, or trying to write something like UPARSE generically in usermode.
+
+# Should function RETURN decay by default?
+
+Continuing along these lines, this has to do with the pattern of:
+
+    foo: func [x] [
+        return switch x [
+             1 [print &quot;one&quot;, #one]
+             2 [print &quot;two&quot;, null]
+             3 [print &quot;three&quot;, &lt;three&gt;]
+        ]
+    ]
+
+    &gt;&gt; foo 1 + 2
+    two
+    == ???   ; should this be ~null~ isotope or just NULL
+
+Also, should it matter whether there&#39;s a RETURN there or not?  Is this something the type spec should distinguish?
+
+Right now there&#39;s a refinement called /ISOTOPE on RETURN which asks it not to decay.
+
+**If all non-^META parameters decay by default, then it seems isotopic decay is the right default for RETURN even though it takes a ^META parameter and returns non-decaying isotopes.**
+
+## As Always, A Lot To Think About
+
+Want to get this posted because it&#39;s preventing me from making new drafts (Discourse won&#39;t let you have multiple top-level post drafts in-flight for some reason).
+
+Will keep mulling it all over.
+
+*&quot;A designer knows he has achieved perfection not when there is nothing left to add, but when there is nothing left to take away.&quot;*</description>
+    
+    <lastBuildDate>Thu, 07 Apr 2022 11:58:11 +0000</lastBuildDate>
+    <category>Internals</category>
+    <atom:link href="https://forum.rebol.info/t/conflation-vs-safety-return-and-the-finer-points-of-null-isotopes/1799.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Conflation vs. Safety, RETURN and the Finer Points of ~null~ Isotopes</title>
+        <dc:creator><![CDATA[BlackATTR]]></dc:creator>
+        <description><![CDATA[
+            <p>Great refresher and summary of the issues.</p>
+          <p><a href="https://forum.rebol.info/t/conflation-vs-safety-return-and-the-finer-points-of-null-isotopes/1799/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/conflation-vs-safety-return-and-the-finer-points-of-null-isotopes/1799/2</link>
+        <pubDate>Thu, 07 Apr 2022 11:58:11 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1799-2</guid>
+        <source url="https://forum.rebol.info/t/conflation-vs-safety-return-and-the-finer-points-of-null-isotopes/1799.rss">Conflation vs. Safety, RETURN and the Finer Points of ~null~ Isotopes</source>
+      </item>
+      <item>
+        <title>Conflation vs. Safety, RETURN and the Finer Points of ~null~ Isotopes</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p><code>~null~</code> isotopes are a novel solution shaped to solve a specific problem.  As a reminder of what the goal is...</p>
+<h1>The Goal is to Please <a class="mention" href="/u/rgchris">@rgchris</a> <em>AND</em> Please me</h1>
+<p>NULL is the signal of "soft failure".  It's a unique result reserved for when a branch fails, or when a loop is halted by a BREAK, when PARSE fails...etc.</p>
+<p>Its property of not being storable in blocks makes it critical to disambiguating this historical problem:</p>
+<pre><code>redbol&gt;&gt; third [a b #[none]]
+== #[none]
+
+redbol&gt;&gt; third [a b]
+== #[none]
+</code></pre>
+<p>In a language that prides itself on letting you work with code structure, <em>this is the tip of the iceberg of the problems that null solves</em>, and you will find the distinction's utility across the board (obviously, in tools like COMPOSE).  It facilitates rigorous analysis and rearrangements...without needing to drop to C or write convoluted code:</p>
+<pre><code>&gt;&gt; third [a b _]
+== _
+
+&gt;&gt; third [a b]
+; null
+</code></pre>
+<p>Hence NULL has taken the place of blank ("none!") in many places, one of which is the unique result of failed conditionals.</p>
+<p>But unlike the elements in a block, a branch that evaluates isn't required to be non-NULL.  Which leads us to the long running question of what to bend NULL branches to so they don't conflate with the branch-not-taken result.</p>
+<h2>Chris has (rightly) expressed concern</h2>
+<p>At times I've said that it's not that big a deal that branches can't evaluate to NULL and get distorted.  "You didn't have a NULL before, so why get so worked up about control constructs not returning it?"</p>
+<p>But the now-pervasive nature of NULL means it can't be avoided.  So:</p>
+<p><em>"How do you express branching code which wants to do some work but also produce NULL as an evaluative product?"</em></p>
+<p>Conflation was not a problem, e.g. in Rebol2:</p>
+<pre><code>rebol2&gt;&gt; exampler: func [x] [
+     print "returning sample or none if not found"
+     case [
+         x = &lt;string&gt; [print "sample string" {hello}]
+         x = &lt;integer&gt; [print "sample integer" 3]
+         x = &lt;none&gt; [print "sample none" none]
+     ]
+  ]
+
+rebol2&gt;&gt; exampler &lt;string&gt;
+returning sample or none if not found
+sample string
+== "hello"
+
+rebol2&gt;&gt; exampler &lt;blatz&gt;
+returning sample or none if not found
+== #[none]
+
+rebol2&gt;&gt; exampler &lt;none&gt;
+returning sample or none if not found
+sample none
+== #[none]
+</code></pre>
+<p>However NULL is now the basic currency of "soft failure".  As such it would not be uncommon to be in the situation where a branching decision process would want to intentionally return NULL as part of the work it does.</p>
+<p>Without something like the isotope decay mechanism, unpleasant convolutions would be needed, for instance surrounding anything that wanted to tunnel a NULL with a CATCH and THROW'ing it:</p>
+<pre><code>x: catch [
+    throw switch 1 + 2 [
+        1 [print "one" 1]
+        2 [print "two", &lt;two&gt;]
+        3 [print "three", throw null]
+     ]
+]
+</code></pre>
+<p>Definitely not good.  But regarding the pleasing-me-part, remember I am trying to avoid this situation:</p>
+<pre><code>&gt;&gt; case [
+     true [
+          print "case branch"
+          if 1 &gt; 2 [print "failed inner"]
+     ]
+   ] else [
+     print "else branch"
+   ]
+
+case branch
+else branch  ; ugh
+</code></pre>
+<p>I don't want the CASE branch to evaluate to NULL just because the failed IF inside the branch was NULL.  That would mean the ELSE tied to the CASE runs even though the code for the branch ran.</p>
+<h2>Enter Isotopes</h2>
+<p>One thing null isotopes have in common with NULL (like all BAD-WORD! isotopes) is that they can't be put in blocks.  But they have been automatically "decaying" into regular NULL when stored into variables.</p>
+<pre><code>&gt;&gt; ~null~
+== ~null~  ; isotope
+
+&gt;&gt; x: ~null~
+== ~null~  ; isotope  &lt;-- note the overall expression is still an isotope
+
+&gt;&gt; x
+; null
+</code></pre>
+<p>The twist is that they are <em>different enough</em> from true NULL such that a THEN or an ELSE can consider them a situation where the branch did not run:</p>
+<pre><code>&gt;&gt; if false [&lt;ignored&gt;]
+; null
+
+&gt;&gt; if true [null]
+== ~null~  ; isotope
+
+&gt;&gt; if true [null] else [print "This won't run"]
+== ~null~  ; isotope
+</code></pre>
+<p>The reason functions like ELSE can "see" the isotope is that they don't take an ordinary parameter on their left.  They take a ^META argument.  These can see the distinction between a ~null~ isotope and a "true" NULL.</p>
+<p><strong>I'd largely say this has been working well...certainly better than its conceptual predecessors.</strong>  It makes piping NULL out of branches trivially easy, when the fear of conflation is not a problem.</p>
+<pre><code>&gt;&gt; x: switch 1 + 2 [
+     1 [print "one" 1]
+     2 [print "two", &lt;two&gt;]
+     3 [print "three", null]
+   ]
+three
+== ~null~
+
+&gt;&gt; x
+; null
+</code></pre>
+<p>The automatic decay in variable storage prevents you from needing an explicit operation to turn ~null~ isotopes into pure nulls:</p>
+<pre><code>&gt;&gt; x: decay switch 1 + 2 [
+     1 [print "one" 1]
+     2 [print "two", &lt;two&gt;]
+     3 [print "three", null]
+   ]
+three
+; null
+</code></pre>
+<h1>But <a class="mention" href="/u/rgchris">@rgchris</a> Would Likely Want any <em>NORMAL</em> arg decay</h1>
+<p>At the very moment I am writing this, ~null~ isotopes are like all other BAD-WORD! isotopes and not accepted as normal parameters.</p>
+<p><strong>They <em>could</em> decay to pure NULL for all normal args.</strong>  But let me explain a bummer of what we lose in that bargain.</p>
+<p>It takes away a safety idea I had with functions like MATCH.</p>
+<pre><code>&gt;&gt; match [&lt;opt&gt; integer!] 3
+== 3
+
+&gt;&gt; match [&lt;opt&gt; integer!] "notaninteger"
+; null
+
+&gt;&gt; match [&lt;opt&gt; integer!] null
+== ~null~  ; isotope
+</code></pre>
+<p>The idea was that it could say "yes, this matched" but if ~null~ isotopes were tested, they'd give an error:</p>
+<pre><code>&gt;&gt; if (match [&lt;opt&gt; integer!] null) [print "Yes it matched!"]
+** Error: IF does not accept ~null~ isotopes without a ^META condition
+</code></pre>
+<p>Were MATCH to have passed through a plain NULL it would have succeeded in the match but not run the branch.  So it's nice to get the warning on the isotope.</p>
+<p><strong>Or it could just return a ~matched~ isotope</strong>.  But this loses the following nice isotopic property:</p>
+<pre><code>&gt;&gt; x: match [&lt;opt&gt; integer!] null else [fail "NO MATCH"]
+== ~null~  ; isotope
+
+&gt;&gt; x
+; null
+</code></pre>
+<p>In fact I instituted other decaying variants for ~blank~ and ~false~</p>
+<pre><code>&gt;&gt; y: match [blank!] _ else [fail "NO MATCH!"]
+== ~blank~  ; isotope
+
+&gt;&gt; y
+== _
+
+&gt;&gt; z: match [logic!] 1 = 2 else [fail "NO MATCH!"]
+== ~false~  ; isotope
+
+&gt;&gt; z
+== #[false]
+</code></pre>
+<h1>So What To Do About MATCH and its bretheren?</h1>
+<p>Seems the options are:</p>
+<ol>
+<li>
+<p><em>Don't worry about it.</em>  If you write <strong>match [logic!] 1 = 2</strong> you get back <strong>#[false]</strong> and should you write an expression like <strong>if (match [logic!] 1 = 2) [print "Match!]</strong> you get what you deserve.</p>
+</li>
+<li>
+<p><em>Use a different isotope.</em>  Let's say that <strong><code>match [&lt;opt&gt;] null</code></strong> is simply <strong>~matched~ (isotope)</strong>.  It wouldn't have the decaying property, but would have the invalidness property.</p>
+</li>
+<li>
+<p><em>Have a MATCH/FALSEY variant.</em>  Let plain <strong>match</strong> on a falsey thing trigger an error and if you write <strong>if match/falsey ...</strong> then you clearly do know what you're doing so it becomes like case (1).</p>
+</li>
+<li>
+<p><em>Make all conditional arguments take ^META arguments for their conditions.</em>  This would put the responsibility for checking for isotopes on them, and they'd uniquely disallow them before UNMETA'ing them and then testing for truth/falsehood.</p>
+</li>
+</ol>
+<p>Option (4) is too taxing...impacting not just the interface to IF but the implementation of CASE and any conditional construct.</p>
+<p><strong>I think I like (3) because it punts the ball down the road a bit.</strong></p>
+<p>But this might still not suit Chris.</p>
+<h1>Should Non-Meta Arguments Decay Null isotopes?</h1>
+<p>The "auto-decay" of ~null~ isotopes means no variable can ever hold a NULL isotope.  And there's also a rule that no <em>normal</em> parameter can ever be passed an isotope, only ^META parameters.</p>
+<p>In the beginning, it seemed useful if normal arguments would automatically decay null isotopes:</p>
+<pre><code>&gt;&gt; foo: func [x] [if null? x [print "Yup, it's null"]]
+
+&gt;&gt; foo if true [null]
+Yup it's null
+
+&gt;&gt; metafoo: func [^x] [
+    case [
+        null? x [print "regular null"]
+        x = '~null~ [print "null isotope"]
+        true [print "something else"]
+     ]
+   ]
+
+&gt;&gt; metafoo if false [null]
+regular null
+
+&gt;&gt; metafoo if true [null]
+null isotope
+</code></pre>
+<p>There is a manual DECAY operator which could be used, but would not meet that wish:</p>
+<pre><code>&gt;&gt; ~null~
+== ~null~  ; isotope
+
+&gt;&gt; decay ~null~
+; null
+
+&gt;&gt; ~blank~
+== ~blank~  ; isotope
+
+&gt;&gt; decay ~blank~
+== _
+
+&gt;&gt; ~false~
+== ~false~  ; isotope
+
+&gt;&gt; decay ~false~
+== #[false]
+</code></pre>
+<h1>Should DECAY Conflation Be A Customization?</h1>
+<p>Another avenue of satisfaction could be to say that you simply customize your environment with some definitions to make auto-decaying constructs:</p>
+<pre><code>switch: chain [:switch | :decay]
+case: chain [:case | :decay]
+...
+
+&gt;&gt; case [true [null]]
+; null
+
+&gt;&gt; case [false [10]]
+; null
+</code></pre>
+<p>I don't like it, but if someone isn't going to use ELSE (or is willing to accept this very easily unintentional conflation if they do) it could be an option.</p>
+<p><strong>I really do believe the ability to tell from outside the construct if a branch has been taken is an interesting property, which even those who think they won't use ELSE or THEN can leverage, especially when building constructs atop each other.</strong>  But this isn't something that can be appreciated without usage, or trying to write something like UPARSE generically in usermode.</p>
+<h1>Should function RETURN decay by default?</h1>
+<p>Continuing along these lines, this has to do with the pattern of:</p>
+<pre><code>foo: func [x] [
+    return switch x [
+         1 [print "one", #one]
+         2 [print "two", null]
+         3 [print "three", &lt;three&gt;]
+    ]
+]
+
+&gt;&gt; foo 1 + 2
+two
+== ???   ; should this be ~null~ isotope or just NULL
+</code></pre>
+<p>Also, should it matter whether there's a RETURN there or not?  Is this something the type spec should distinguish?</p>
+<p>Right now there's a refinement called /ISOTOPE on RETURN which asks it not to decay.</p>
+<p><strong>If all non-^META parameters decay by default, then it seems isotopic decay is the right default for RETURN even though it takes a ^META parameter and returns non-decaying isotopes.</strong></p>
+<h2>As Always, A Lot To Think About</h2>
+<p>Want to get this posted because it's preventing me from making new drafts (Discourse won't let you have multiple top-level post drafts in-flight for some reason).</p>
+<p>Will keep mulling it all over.</p>
+<p><em>"A designer knows he has achieved perfection not when there is nothing left to add, but when there is nothing left to take away."</em></p>
+          <p><a href="https://forum.rebol.info/t/conflation-vs-safety-return-and-the-finer-points-of-null-isotopes/1799/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/conflation-vs-safety-return-and-the-finer-points-of-null-isotopes/1799/1</link>
+        <pubDate>Thu, 07 Apr 2022 04:14:06 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1799-1</guid>
+        <source url="https://forum.rebol.info/t/conflation-vs-safety-return-and-the-finer-points-of-null-isotopes/1799.rss">Conflation vs. Safety, RETURN and the Finer Points of ~null~ Isotopes</source>
+      </item>
+  </channel>
+</rss>

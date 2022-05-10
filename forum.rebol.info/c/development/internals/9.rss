@@ -5,8 +5,271 @@
     <link>https://forum.rebol.info/c/development/internals/9</link>
     <description>Topics in the &#39;Internals&#39; category Internals of the Rebol language</description>
     
-      <lastBuildDate>Fri, 21 Jan 2022 17:01:02 +0000</lastBuildDate>
+      <lastBuildDate>Thu, 07 Apr 2022 04:14:06 +0000</lastBuildDate>
       <atom:link href="https://forum.rebol.info/c/development/internals/9.rss" rel="self" type="application/rss+xml" />
+        <item>
+          <title>Conflation vs. Safety, RETURN and the Finer Points of ~null~ Isotopes</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Internals</category>
+          <description><![CDATA[
+            <p><code>~null~</code> isotopes are a novel solution shaped to solve a specific problem.  As a reminder of what the goal is...</p>
+<h1>The Goal is to Please <a class="mention" href="/u/rgchris">@rgchris</a> <em>AND</em> Please me</h1>
+<p>NULL is the signal of "soft failure".  It's a unique result reserved for when a branch fails, or when a loop is halted by a BREAK, when PARSE fails...etc.</p>
+<p>Its property of not being storable in blocks makes it critical to disambiguating this historical problem:</p>
+<pre><code>redbol&gt;&gt; third [a b #[none]]
+== #[none]
+
+redbol&gt;&gt; third [a b]
+== #[none]
+</code></pre>
+<p>In a language that prides itself on letting you work with code structure, <em>this is the tip of the iceberg of the problems that null solves</em>, and you will find the distinction's utility across the board (obviously, in tools like COMPOSE).  It facilitates rigorous analysis and rearrangements...without needing to drop to C or write convoluted code:</p>
+<pre><code>&gt;&gt; third [a b _]
+== _
+
+&gt;&gt; third [a b]
+; null
+</code></pre>
+<p>Hence NULL has taken the place of blank ("none!") in many places, one of which is the unique result of failed conditionals.</p>
+<p>But unlike the elements in a block, a branch that evaluates isn't required to be non-NULL.  Which leads us to the long running question of what to bend NULL branches to so they don't conflate with the branch-not-taken result.</p>
+<h2>Chris has (rightly) expressed concern</h2>
+<p>At times I've said that it's not that big a deal that branches can't evaluate to NULL and get distorted.  "You didn't have a NULL before, so why get so worked up about control constructs not returning it?"</p>
+<p>But the now-pervasive nature of NULL means it can't be avoided.  So:</p>
+<p><em>"How do you express branching code which wants to do some work but also produce NULL as an evaluative product?"</em></p>
+<p>Conflation was not a problem, e.g. in Rebol2:</p>
+<pre><code>rebol2&gt;&gt; exampler: func [x] [
+     print "returning sample or none if not found"
+     case [
+         x = &lt;string&gt; [print "sample string" {hello}]
+         x = &lt;integer&gt; [print "sample integer" 3]
+         x = &lt;none&gt; [print "sample none" none]
+     ]
+  ]
+
+rebol2&gt;&gt; exampler &lt;string&gt;
+returning sample or none if not found
+sample string
+== "hello"
+
+rebol2&gt;&gt; exampler &lt;blatz&gt;
+returning sample or none if not found
+== #[none]
+
+rebol2&gt;&gt; exampler &lt;none&gt;
+returning sample or none if not found
+sample none
+== #[none]
+</code></pre>
+<p>However NULL is now the basic currency of "soft failure".  As such it would not be uncommon to be in the situation where a branching decision process would want to intentionally return NULL as part of the work it does.</p>
+<p>Without something like the isotope decay mechanism, unpleasant convolutions would be needed, for instance surrounding anything that wanted to tunnel a NULL with a CATCH and THROW'ing it:</p>
+<pre><code>x: catch [
+    throw switch 1 + 2 [
+        1 [print "one" 1]
+        2 [print "two", &lt;two&gt;]
+        3 [print "three", throw null]
+     ]
+]
+</code></pre>
+<p>Definitely not good.  But regarding the pleasing-me-part, remember I am trying to avoid this situation:</p>
+<pre><code>&gt;&gt; case [
+     true [
+          print "case branch"
+          if 1 &gt; 2 [print "failed inner"]
+     ]
+   ] else [
+     print "else branch"
+   ]
+
+case branch
+else branch  ; ugh
+</code></pre>
+<p>I don't want the CASE branch to evaluate to NULL just because the failed IF inside the branch was NULL.  That would mean the ELSE tied to the CASE runs even though the code for the branch ran.</p>
+<h2>Enter Isotopes</h2>
+<p>One thing null isotopes have in common with NULL (like all BAD-WORD! isotopes) is that they can't be put in blocks.  But they have been automatically "decaying" into regular NULL when stored into variables.</p>
+<pre><code>&gt;&gt; ~null~
+== ~null~  ; isotope
+
+&gt;&gt; x: ~null~
+== ~null~  ; isotope  &lt;-- note the overall expression is still an isotope
+
+&gt;&gt; x
+; null
+</code></pre>
+<p>The twist is that they are <em>different enough</em> from true NULL such that a THEN or an ELSE can consider them a situation where the branch did not run:</p>
+<pre><code>&gt;&gt; if false [&lt;ignored&gt;]
+; null
+
+&gt;&gt; if true [null]
+== ~null~  ; isotope
+
+&gt;&gt; if true [null] else [print "This won't run"]
+== ~null~  ; isotope
+</code></pre>
+<p>The reason functions like ELSE can "see" the isotope is that they don't take an ordinary parameter on their left.  They take a ^META argument.  These can see the distinction between a ~null~ isotope and a "true" NULL.</p>
+<p><strong>I'd largely say this has been working well...certainly better than its conceptual predecessors.</strong>  It makes piping NULL out of branches trivially easy, when the fear of conflation is not a problem.</p>
+<pre><code>&gt;&gt; x: switch 1 + 2 [
+     1 [print "one" 1]
+     2 [print "two", &lt;two&gt;]
+     3 [print "three", null]
+   ]
+three
+== ~null~
+
+&gt;&gt; x
+; null
+</code></pre>
+<p>The automatic decay in variable storage prevents you from needing an explicit operation to turn ~null~ isotopes into pure nulls:</p>
+<pre><code>&gt;&gt; x: decay switch 1 + 2 [
+     1 [print "one" 1]
+     2 [print "two", &lt;two&gt;]
+     3 [print "three", null]
+   ]
+three
+; null
+</code></pre>
+<h1>But <a class="mention" href="/u/rgchris">@rgchris</a> Would Likely Want any <em>NORMAL</em> arg decay</h1>
+<p>At the very moment I am writing this, ~null~ isotopes are like all other BAD-WORD! isotopes and not accepted as normal parameters.</p>
+<p><strong>They <em>could</em> decay to pure NULL for all normal args.</strong>  But let me explain a bummer of what we lose in that bargain.</p>
+<p>It takes away a safety idea I had with functions like MATCH.</p>
+<pre><code>&gt;&gt; match [&lt;opt&gt; integer!] 3
+== 3
+
+&gt;&gt; match [&lt;opt&gt; integer!] "notaninteger"
+; null
+
+&gt;&gt; match [&lt;opt&gt; integer!] null
+== ~null~  ; isotope
+</code></pre>
+<p>The idea was that it could say "yes, this matched" but if ~null~ isotopes were tested, they'd give an error:</p>
+<pre><code>&gt;&gt; if (match [&lt;opt&gt; integer!] null) [print "Yes it matched!"]
+** Error: IF does not accept ~null~ isotopes without a ^META condition
+</code></pre>
+<p>Were MATCH to have passed through a plain NULL it would have succeeded in the match but not run the branch.  So it's nice to get the warning on the isotope.</p>
+<p><strong>Or it could just return a ~matched~ isotope</strong>.  But this loses the following nice isotopic property:</p>
+<pre><code>&gt;&gt; x: match [&lt;opt&gt; integer!] null else [fail "NO MATCH"]
+== ~null~  ; isotope
+
+&gt;&gt; x
+; null
+</code></pre>
+<p>In fact I instituted other decaying variants for ~blank~ and ~false~</p>
+<pre><code>&gt;&gt; y: match [blank!] _ else [fail "NO MATCH!"]
+== ~blank~  ; isotope
+
+&gt;&gt; y
+== _
+
+&gt;&gt; z: match [logic!] 1 = 2 else [fail "NO MATCH!"]
+== ~false~  ; isotope
+
+&gt;&gt; z
+== #[false]
+</code></pre>
+<h1>So What To Do About MATCH and its bretheren?</h1>
+<p>Seems the options are:</p>
+<ol>
+<li>
+<p><em>Don't worry about it.</em>  If you write <strong>match [logic!] 1 = 2</strong> you get back <strong>#[false]</strong> and should you write an expression like <strong>if (match [logic!] 1 = 2) [print "Match!]</strong> you get what you deserve.</p>
+</li>
+<li>
+<p><em>Use a different isotope.</em>  Let's say that <strong><code>match [&lt;opt&gt;] null</code></strong> is simply <strong>~matched~ (isotope)</strong>.  It wouldn't have the decaying property, but would have the invalidness property.</p>
+</li>
+<li>
+<p><em>Have a MATCH/FALSEY variant.</em>  Let plain <strong>match</strong> on a falsey thing trigger an error and if you write <strong>if match/falsey ...</strong> then you clearly do know what you're doing so it becomes like case (1).</p>
+</li>
+<li>
+<p><em>Make all conditional arguments take ^META arguments for their conditions.</em>  This would put the responsibility for checking for isotopes on them, and they'd uniquely disallow them before UNMETA'ing them and then testing for truth/falsehood.</p>
+</li>
+</ol>
+<p>Option (4) is too taxing...impacting not just the interface to IF but the implementation of CASE and any conditional construct.</p>
+<p><strong>I think I like (3) because it punts the ball down the road a bit.</strong></p>
+<p>But this might still not suit Chris.</p>
+<h1>Should Non-Meta Arguments Decay Null isotopes?</h1>
+<p>The "auto-decay" of ~null~ isotopes means no variable can ever hold a NULL isotope.  And there's also a rule that no <em>normal</em> parameter can ever be passed an isotope, only ^META parameters.</p>
+<p>In the beginning, it seemed useful if normal arguments would automatically decay null isotopes:</p>
+<pre><code>&gt;&gt; foo: func [x] [if null? x [print "Yup, it's null"]]
+
+&gt;&gt; foo if true [null]
+Yup it's null
+
+&gt;&gt; metafoo: func [^x] [
+    case [
+        null? x [print "regular null"]
+        x = '~null~ [print "null isotope"]
+        true [print "something else"]
+     ]
+   ]
+
+&gt;&gt; metafoo if false [null]
+regular null
+
+&gt;&gt; metafoo if true [null]
+null isotope
+</code></pre>
+<p>There is a manual DECAY operator which could be used, but would not meet that wish:</p>
+<pre><code>&gt;&gt; ~null~
+== ~null~  ; isotope
+
+&gt;&gt; decay ~null~
+; null
+
+&gt;&gt; ~blank~
+== ~blank~  ; isotope
+
+&gt;&gt; decay ~blank~
+== _
+
+&gt;&gt; ~false~
+== ~false~  ; isotope
+
+&gt;&gt; decay ~false~
+== #[false]
+</code></pre>
+<h1>Should DECAY Conflation Be A Customization?</h1>
+<p>Another avenue of satisfaction could be to say that you simply customize your environment with some definitions to make auto-decaying constructs:</p>
+<pre><code>switch: chain [:switch | :decay]
+case: chain [:case | :decay]
+...
+
+&gt;&gt; case [true [null]]
+; null
+
+&gt;&gt; case [false [10]]
+; null
+</code></pre>
+<p>I don't like it, but if someone isn't going to use ELSE (or is willing to accept this very easily unintentional conflation if they do) it could be an option.</p>
+<p><strong>I really do believe the ability to tell from outside the construct if a branch has been taken is an interesting property, which even those who think they won't use ELSE or THEN can leverage, especially when building constructs atop each other.</strong>  But this isn't something that can be appreciated without usage, or trying to write something like UPARSE generically in usermode.</p>
+<h1>Should function RETURN decay by default?</h1>
+<p>Continuing along these lines, this has to do with the pattern of:</p>
+<pre><code>foo: func [x] [
+    return switch x [
+         1 [print "one", #one]
+         2 [print "two", null]
+         3 [print "three", &lt;three&gt;]
+    ]
+]
+
+&gt;&gt; foo 1 + 2
+two
+== ???   ; should this be ~null~ isotope or just NULL
+</code></pre>
+<p>Also, should it matter whether there's a RETURN there or not?  Is this something the type spec should distinguish?</p>
+<p>Right now there's a refinement called /ISOTOPE on RETURN which asks it not to decay.</p>
+<p><strong>If all non-^META parameters decay by default, then it seems isotopic decay is the right default for RETURN even though it takes a ^META parameter and returns non-decaying isotopes.</strong></p>
+<h2>As Always, A Lot To Think About</h2>
+<p>Want to get this posted because it's preventing me from making new drafts (Discourse won't let you have multiple top-level post drafts in-flight for some reason).</p>
+<p>Will keep mulling it all over.</p>
+<p><em>"A designer knows he has achieved perfection not when there is nothing left to add, but when there is nothing left to take away."</em></p>
+            <p><small>2 posts - 2 participants</small></p>
+            <p><a href="https://forum.rebol.info/t/conflation-vs-safety-return-and-the-finer-points-of-null-isotopes/1799">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/conflation-vs-safety-return-and-the-finer-points-of-null-isotopes/1799</link>
+          <pubDate>Thu, 07 Apr 2022 04:14:06 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-1799</guid>
+          <source url="https://forum.rebol.info/t/conflation-vs-safety-return-and-the-finer-points-of-null-isotopes/1799.rss">Conflation vs. Safety, RETURN and the Finer Points of ~null~ Isotopes</source>
+        </item>
         <item>
           <title>Should END-able constructs all use ^META parameters?</title>
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
@@ -1978,87 +2241,6 @@ C
           <discourse:topicArchived>No</discourse:topicArchived>
           <guid isPermaLink="false">forum.rebol.info-topic-1408</guid>
           <source url="https://forum.rebol.info/t/multiple-returns-and-branching-could-it-unseat-voidification/1408.rss">Multiple Returns and Branching: Could It Unseat Voidification?</source>
-        </item>
-        <item>
-          <title>Semantics of Predicates</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Internals</category>
-          <description><![CDATA[
-            <p>Predicates are IMNSHO an extremely clever notational trick, taking advantage of the inert TUPLE! forms that lead with BLANK!.  It's already out there for a few functions, but now I'm going to add it to more...like ANY:</p>
-<pre><code>&gt;&gt; any .not.even? [2 4 6 7 10]
-== 7
-</code></pre>
-<p>This hinges on the idea that ANY can be confident you weren't trying to pass a value to act as the BLOCK! to be ANY'd, because .NOT.EVEN? is otherwise inert:</p>
-<pre><code>&gt;&gt; .not.even?
-== .not.even?  ; inert (e.g. evaluated to itself)
-
-&gt;&gt; to block! .not.even?
-== [_ not even?]  ; BLANK! is inert, and inert-headed TUPLE! are also inert
-
-&gt;&gt; 3.also.inert
-== 3.also.inert  ; Same rule would apply for things like INTEGER!
-</code></pre>
-<p>So a skippable callsite parameter can pick it up, and run it on each value as the test (vs. the default test just for logical trueness).</p>
-<h2>But...What Does it Mean?</h2>
-<p>In my ANY example, the predicate is determining which values "pass" or "fail" consideration.</p>
-<p>But notice we return the <em>input</em> to that process, not the <em>result</em> of the test.  If we'd returned the result, we'd have gotten the result of the NOT EVEN? call, e.g. a LOGIC!</p>
-<pre><code>&gt;&gt; any .not.even? [2 4 6 7 10]
-== #[true]  ; in this formulation, would be the result of `not even? 7`
-</code></pre>
-<p>That's not very useful in this case.  Though we <em>could</em> have said you're supposed to pass in some kind of MATCH function, where it was both the test -and- the result.</p>
-<pre><code>&gt;&gt; any .match.tag! [1 "two" &lt;three&gt; #four]
-== &lt;three&gt;  ; the result of `match tag! &lt;three&gt;`
-</code></pre>
-<p>But given that ANY is returning a single result derived from its contained items, is it <em>really</em> necessary to fold a potential transformation in with the act of picking?  Can't you just apply the transformation <em>after</em> you've picked?</p>
-<p><em>It seems that the best role of the predicate with ANY is to focus on picking, and have the understanding that its result will be either one of the items from the container or NULL.</em></p>
-<h2>But Wait--Generally Speaking, it's the <em>REDUCED</em> Item...</h2>
-<p>In the simple example I show, all the items in the ANY are inert.  But they don't have to be.</p>
-<p>This raises a question I've wondered about for a long time: <em>What if you want to do an ANY operation on a block of stuff, but you don't want to reduce it</em>?</p>
-<p>In Ren-C all items have a quoted form, so you could MAP-EACH the block to a quoted version.</p>
-<pre><code>&gt;&gt; block: [1 + 2]
-
-&gt;&gt; q-block: map-each item block [quote item]
-== ['1 '+ '2]
-
-&gt;&gt; any .word? q-block
-== +
-</code></pre>
-<p>Seems a bit roundabout.  But, at least it's possible.</p>
-<p>But this might suggest an alternate axis for parameterizing ANY.  What if instead of changing the test, you changed the evaluator, or took out the behavior of the evaluator altogether?</p>
-<pre><code>&gt;&gt; any .identity [1 + 2]
-== +  ; or something like this
-</code></pre>
-<h2>I Just Wanted To Introduce The Questions...</h2>
-<p>I don't know if we want to bend ANY all out of shape to get it to work just on inert data just as well as evaluated data.  Maybe that's a job for another function?</p>
-<p>But this is shaping up to be an important design issue, and it's new...so every operation is going to have to deal with it.</p>
-<p>Something odd occurred to me about this idea of "before-or-after" results, realizing that even IF could have a predicate.  That might seem useless, but conditionals pass the condition to the branch...so what if you could split your test out from that branch?</p>
-<pre><code>&gt;&gt; value: 1020
-
-&gt;&gt; if even? value (x -&gt; [print ["x is" x]])
-x is #[true]  ; IF received result of (EVEN? VALUE) as single argument
-
-&gt;&gt; if .even? value (x -&gt; [print ["x is" x]])
-x is 1020  ; IF got VALUE but ran EVEN? on it, then still had VALUE
-</code></pre>
-<p>Whether you think IF needs such a feature or not, the decision of whether the branch gets the result of the predicate or the value that was tested is something that has to be answered for things like CASE.</p>
-<pre><code>case/all .not.even? [
-    4 [print "This won't print"]
-    7 [print "This will print"]
-    9 (x -&gt; [print ["x is" x]])
-]
-</code></pre>
-<p>This seems pretty clear that you'd rather have the x be 9, and not #[true]</p>
-<p><strong>Anyway, I think this is all very cool...and I've managed to fiddle things around so that predicates are much faster.</strong>  They no longer generate functions, they actually just splice the TUPLE! array directly into the evaluator feed.  It's really neat stuff, so I hope people are looking forward to applying it.</p>
-            <p><small>4 posts - 2 participants</small></p>
-            <p><a href="https://forum.rebol.info/t/semantics-of-predicates/1404">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/semantics-of-predicates/1404</link>
-          <pubDate>Wed, 18 Nov 2020 01:41:05 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-1404</guid>
-          <source url="https://forum.rebol.info/t/semantics-of-predicates/1404.rss">Semantics of Predicates</source>
         </item>
   </channel>
 </rss>

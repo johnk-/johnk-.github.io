@@ -1,0 +1,375 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:discourse="http://www.discourse.org/" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Cryptography - AltRebol</title>
+    <link>https://forum.rebol.info/c/domains/cryptography/57</link>
+    <description>Topics in the &#39;Cryptography&#39; category Discussion of things related to cryptography, which includes low level primitives (ciphers, hashes, and key exchange) as well as higher-level protocols such as TLS.</description>
+    
+      <lastBuildDate>Mon, 09 May 2022 18:20:50 +0000</lastBuildDate>
+      <atom:link href="https://forum.rebol.info/c/domains/cryptography/57.rss" rel="self" type="application/rss+xml" />
+        <item>
+          <title>Key Exchange Methods in Ren-C</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Cryptography</category>
+          <description><![CDATA[
+            <p>Having given a summary of <a href="https://forum.rebol.info/t/checksums-and-secure-hashes-in-ren-c/1808/">Checksums and Secure Hashes</a>, I thought I'd follow up with a quick description of something you're likely not as familiar with: <strong>Key Exchanges</strong>.</p>
+<p>There's old quote I like (but can't find a source for):</p>
+<blockquote>
+<p>"The shared secret is capital.  We may spend it or squander it."</p>
+</blockquote>
+<p>An example of taking advantage of a shared secret is when people want to share an encrypted .ZIP file.  If you and your friend both know the encryption password that no one else knows...then you could put the file on a public server for your friend to download.  If you trust the encryption, the fact it was public would not matter.</p>
+<p><strong>But what if the situation is that your friend has a password that only they know... and you have a password that only you know?</strong>  That wouldn't seem to help with the .ZIP file scenario, because it expects the same password to decrypt as was used to encrypt it.</p>
+<p>Key Exchange is a way of taking your individual "passwords" and coming to an agreement on a third "password" that only the two of you know.  Amazingly enough, you can carry out the conversation where you establish the shared password in public.</p>
+<h2>Creating one Shared Secret from two Non-Shared Secrets</h2>
+<p>For educational purposes, people use paint-mixing as an analogy for key exchange.  It's really "multiplying big prime numbers" instead of mixing paint, but it's visual and easy to see.</p>
+<p><div class="lightbox-wrapper"><a class="lightbox" href="https://forum.rebol.info/uploads/default/original/1X/184fa9035c24ffa1250e324b61acaa3915f7757e.png" data-download-href="https://forum.rebol.info/uploads/default/184fa9035c24ffa1250e324b61acaa3915f7757e" title="image"><img src="https://forum.rebol.info/uploads/default/optimized/1X/184fa9035c24ffa1250e324b61acaa3915f7757e_2_345x500.png" alt="image" data-base62-sha1="3t485Do7kYfAw6HMsMv5klePtsq" width="345" height="500" srcset="https://forum.rebol.info/uploads/default/optimized/1X/184fa9035c24ffa1250e324b61acaa3915f7757e_2_345x500.png, https://forum.rebol.info/uploads/default/original/1X/184fa9035c24ffa1250e324b61acaa3915f7757e.png 1.5x, https://forum.rebol.info/uploads/default/original/1X/184fa9035c24ffa1250e324b61acaa3915f7757e.png 2x" data-small-upload="https://forum.rebol.info/uploads/default/optimized/1X/184fa9035c24ffa1250e324b61acaa3915f7757e_2_10x10.png"><div class="meta">
+<svg class="fa d-icon d-icon-far-image svg-icon" aria-hidden="true"><use xlink:href="#far-image"></use></svg><span class="filename">image</span><span class="informations">480×695 28 KB</span><svg class="fa d-icon d-icon-discourse-expand svg-icon" aria-hidden="true"><use xlink:href="#discourse-expand"></use></svg>
+</div></a></div></p>
+<p>This assumes everyone in the world has some kind of weird "common paint".  This paint isn't white (because if you mixed it with something that would be too easy to guess at the precise shade you had mixed it with).  And it isn't black (because mixing might just get you something too dark to measure well).</p>
+<p>But the key point to absorb is what the diagram says: <strong>we assume that mixture separation is expensive</strong>.  Once you've mixed the common paint with your secret color, it produces a new shade that no one else knows how to make exactly.</p>
+<p>When you and your friend exchange your mixtures you cleverly go to your private lairs and each add your secret color to the other's mixture.  <strong>Now both of you have the same weird color, and this is a secret you share.</strong></p>
+<h2>Ren-C Supports Diffie-Hellman Key Exchange</h2>
+<p>I oversimplified this by saying you each start with a "password"...because that made it sound like you could just pick a phrase out of your head.  In reality, choosing your secret involves some tricky math...to make sure your secret paint color is a <em>good</em> secret paint color.  You don't pick these--you ask the computer to generate it.</p>
+<p>To get the ball rolling, you need to specify what kind of "common paint" to use.  You make that by picking two suitable prime numbers, a modulus and a base.  Then you can ask for a unique random secret to be generated.</p>
+<p>For the sake of education, I've made it possible to use <em>relatively bad</em> paint mixes with the /INSECURE refinement.  It won't allow numbers that are so broken the process won't work (for instance: non-primes, or primes that don't meet the basic requirements of the algorithm).  This lets you work with small enough numbers that you can see for yourself what's going on more easily.</p>
+<p>So let's use a modulus of 9 and a base of 3:</p>
+<pre><code>&gt;&gt; mine: dh-generate-keypair/insecure #{09} #{05}
+== make object! [
+    modulus: #{09}
+    generator: #{05}
+    private-key: #{07}
+    public-key: #{05}
+]
+
+&gt;&gt; theirs: dh-generate-keypair/insecure #{09} #{05}
+== make object! [
+    modulus: #{09}
+    generator: #{05}
+    private-key: #{05}
+    public-key: #{02}
+]
+</code></pre>
+<p>So privately, my secret is 7... and their secret is 5.  But we want to come to an agreement on a new number while only sharing with the public my "mixture" of 5 and their mixture of 2.</p>
+<pre><code>&gt;&gt; my-shared: dh-compute-secret mine theirs.public-key
+== #{02}
+
+&gt;&gt; their-shared: dh-compute-secret theirs mine.public-key
+== #{02}
+</code></pre>
+<p>So here you see each of us could come to a common agreement of 2.  You can follow through the math on the <a href="https://en.wikipedia.org/wiki/Diffie%E2%80%93Hellman_key_exchange">Wikipedia page</a> if you want...but it's enough to know that it works.</p>
+<p>What makes for a good (big!) modulus and base to use?  You don't really need to come up with them yourself, although <a href="https://security.stackexchange.com/a/103924">there are algorithms for it</a>.  There are papers that publish some good choices--and we should probably provide a way to default to well-known ones, like maybe accept either an object or an ISSUE!</p>
+<pre><code>&gt;&gt; dh-generate-keypair #RFC-3526
+; ...or...
+&gt;&gt; dh-generate-keypair make object [base: ..., modulus: ...]
+</code></pre>
+<p>But the main thing to know is that <strong>both sides have to agree on the "common paint" to use</strong>, in order to come to the same conclusion.  So <code>dh-compute-secret</code> won't work unless the same numbers were used here.</p>
+<h2>We Also Support Elliptic Curve Key Exchange (ECHDE)</h2>
+<p>Modern Internet Transport Security has moved on from traditional Diffie Hellman to trickier math.  But the premise is the same.</p>
+<p>In the interface, we only support two "common paints" for this method: "secp256r1" and "curve25519".  There's no option for small answers here:</p>
+<pre><code>&gt;&gt; mine: ecc-generate-keypair 'curve25519
+== make object! [
+    public-key: make object! [
+        x: #{121413C34DC265025F24CBEBBA6065B9
+             75F1BFA6E493D07A0F4776FAE03DC245}
+        y: #{00000000000000000000000000000000
+             00000000000000000000000000000000}
+    ]
+    private-key: #{610A8D99A72500B3A2E8A1FD714FA412
+                   17F0A0EA5EDFC9CFBDAE0425E199DC70}
+]
+
+&gt;&gt; theirs: ecc-generate-keypair 'curve25519
+== make object! [
+    public-key: make object! [
+        x: #{10D65366D8C9229591C99903D3B5EB0F
+             57709AD27E37989E4782050D2B9B2B93}
+        y: #{00000000000000000000000000000000
+             00000000000000000000000000000000}
+    ]
+    private-key: #{7C3262BF6028B049EEDC6C37E37A8261
+                   EA4DF31F16E4D534D92A7EF11D974618}
+]
+</code></pre>
+<p>But it works the same way; you come to the same conclusion when combining your partner's public portion with your private portion:</p>
+<pre><code>&gt;&gt; my-secret: (
+    ecdh-shared-secret 'curve25519 mine.private-key theirs.public-key
+)
+== #{E27891074A60250580B8F2C7CB2448A9AA491C97161D7C8D381348D90E438025}
+
+&gt;&gt; their-secret: (
+    ecdh-shared-secret 'curve25519 mine.private-key theirs.public-key
+)
+== #{E27891074A60250580B8F2C7CB2448A9AA491C97161D7C8D381348D90E438025}
+
+&gt;&gt; my-secret = their-secret
+== #[true]
+</code></pre>
+<h2>Would Average Users Ever Need Key Exchange Functions?</h2>
+<p>Right now, the main reason most people would care whether the language has these key exchanges is because without them you can't do TLS.  So no reading or writing over HTTPS.</p>
+<p>You really only need key exchanges when protocols are trying to establish private channels of communication.  So notably, some cryptographic protocols (like Bitcoin) don't need key exchanges...because they're carrying out their work in public.</p>
+<ul>
+<li>
+<p><strong>It would be neat if we could democratize the creation of cryptographic protocols</strong>.  I think giving people easier and more transparent access to these kinds of things could foster some grassroots innovation, where people would build <em>exactly the security they needed</em> into a program's design...no more and no less.</p>
+<ul>
+<li>This would stand in contrast to today's methods, where "security" is accomplished by standing on top of a mountain of protocols (using a literal zoo of cryptographic algorithms) to tunnel and log in somewhere that they are "safe"...and putting more data than they need to in that place.</li>
+</ul>
+</li>
+<li>
+<p><strong>But even "simple" cryptography is tricky to reason about, and people are lazy.</strong>  I myself am pretty guilty of doing things like falling back on my GitHub password and resetting my keys instead of doing a good job of filing them in safe places.</p>
+<ul>
+<li>Convincing people their programs should be "organic and locally sourced"... by tailor-making the protocols and asking their users to keep track of files, is going to be a hard sell to those who are happy to use OAuth and leave this all up to Google.</li>
+</ul>
+</li>
+</ul>
+<p>So pessimistically speaking, I don't know that we're going to be able to market easy-to-use key exchange to anyone as a killer feature.  It's a nice thought, and I certainly like having it available to tinker with.  But I'd be surprised if anyone reading this has an idea how to use it in something they're working on.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/key-exchange-methods-in-ren-c/1809">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/key-exchange-methods-in-ren-c/1809</link>
+          <pubDate>Mon, 09 May 2022 18:20:50 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-1809</guid>
+          <source url="https://forum.rebol.info/t/key-exchange-methods-in-ren-c/1809.rss">Key Exchange Methods in Ren-C</source>
+        </item>
+        <item>
+          <title>Checksums and Secure Hashes in Ren-C</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Cryptography</category>
+          <description><![CDATA[
+            <p>I thought I'd write up a quick post about algorithms that take in a bunch of bytes--like a BINARY!--and produce a (usually) shorter "fingerprint" of that data.</p>
+<ul>
+<li>
+<p>It's not hard to make an <em>insecure</em> hash...like taking the first couple of letters of a string: <code>"DICKENS" =&gt; DI</code>.  That might be useful if you're trying to divide book authors into drawers of an old-fashioned library card catalog.</p>
+</li>
+<li>
+<p>But it's easy to find another string that would make the same "DI" fingerprint, like "DIABOLICAL" or "DIR^/FORMAT C:"</p>
+</li>
+<li>
+<p>If you were using a fingerprint to trust something was what it was supposed to be, the easiness of generating these "collisions" is a liability!! <img src="https://forum.rebol.info/images/emoji/twitter/skull_and_crossbones.png?v=9" title=":skull_and_crossbones:" class="emoji" alt=":skull_and_crossbones:"></p>
+</li>
+<li>
+<p>Secure hashes do complicated "one-way functions" in math to make it <em>really hard</em> on today's computers to fabricate any binary sequence--even garbage--that will give you the same fingerprint as any other input.</p>
+</li>
+</ul>
+<p>You've certainly seen web pages that redirect you off to download a file, but beforehand give you some bytes of what the file should securely hash to.  <sub>(And you've probably never checked to make sure they match.)</sub></p>
+<h2>If the Fingerprint is Shorter than the data, <a href="https://en.wikipedia.org/wiki/Pigeonhole_principle">COLLISIONS EXIST!</a>
+</h2>
+<p>You obviously can't give every 500mb file in the universe a unique fingerprint that's 32-bits, 128-bits, 512-bits, 2048-bits etc.</p>
+<p>So the concept behind a secure hash is just supposed to be you can't find a collision until we're all dead and no one cares.  Less grimly: we might pair a hash with an expiration date to say not to trust a hash after a very conservative guess at how long it would take for computers to advance enough to break it.</p>
+<p>When this hope falls apart (e.g. if any researcher can show two inputs that generate the same fingerprint) it's generally considered that the "secure" part of that hash is broken...for the purposes of whatever time-bubble you're living in.</p>
+<h2>We Have Four Secure Hashes in the Box Right Now...</h2>
+<p>It shouldn't be surprising that longer fingerprints correlate with being harder to find collisions:</p>
+<pre><code>&gt;&gt; checksum/method {DICKENS} 'md5
+== #{3717A787E2F16310EA51DC0308E88803}  ; considered vulnerable
+
+&gt;&gt; checksum/method {DICKENS} 'sha1
+== #{DFE5DD61B2B19C319DBC4F44328CDF8D24366F88}  ; considered vulnerable
+
+&gt;&gt; checksum/method {DICKENS} 'sha256
+== #{52A095CF1F0319EF44FF9134AAD2EF5E2BFE1A48307DCB0AD0408F1CE393C950}
+
+&gt;&gt; checksum/method {DICKENS} 'sha512
+== #{
+E8DBC26DE28FAA1BC2A6A3E1BC6DD22C1ECB3FD0D5FCBBFB69BC63C6AAC6A9CE
+FB76294EFFB0522D4C90A5E5829233FC5BC5B811AE6684A6EA632ECB3FF88DA1
+}
+
+&gt;&gt; checksum/method {DICKENS} 'ripemd160         ; bitcoin uses this one
+== #{ADC86945BE4CEF31F0CFCAF66775E1DA5160F877}  ; ...no one knows why
+</code></pre>
+<p>But longer isn't <em>intrinsically</em> better...there might be a weakness to exploit in the method used by a longer hash which isn't present in shorter ones.  However, a bunch of mathematicians look at this stuff and we would generally hope that we'd be getting what we pay for--more bytes meaning more security (unless they're from the NSA and trying to punk us).</p>
+<h2>We Also Have Three <em>Insecure</em> Hashes...</h2>
+<p>These are fine when you're doing something that is not supposed to be protecting against adversarial attacks.  They're smaller to store and much cheaper to calculate...but it's trivial to find other input data that would produces the same 32-bit result:</p>
+<pre><code>&gt;&gt; checksum/method {DICKENS} 'crc32
+== #{FB05F0BC}  ; used to very gzip files (among other places)
+
+&gt;&gt; checksum/method {DICKENS} 'adler32
+== #{0202D207}  ; used by zlib deflate and inflate
+</code></pre>
+<p>If you want a <em>really</em> cheapskate insecure checksum, we include the one that is in TCP packets on the internet:</p>
+<pre><code>&gt;&gt; checksum/method {DICKENS} 'tcp
+== #{CA32}
+</code></pre>
+<hr>
+<blockquote>
+<p><strong>Fun Corner</strong>: Let's find a collision!</p>
+<pre><code>&gt;&gt; until [
+    string: copy {}
+    repeat (random 10) [append string make char! 64 + random 26]
+    #{CA32} = checksum/method string 'tcp
+]
+== #[true]
+
+&gt;&gt; print string
+AOGTDDN
+
+&gt;&gt; checksum/method {AOGTDDN} 'tcp
+== #{CA32}
+</code></pre>
+<p>That wasn't so hard, but... if you can find collisions for any of the <em>secure</em> hashes above (even the relatively-weak MD5 or SHA1) <em>you will be famous!</em></p>
+</blockquote>
+<h2>We're Primed To Make <strong>STREAMING</strong> Secure (or Insecure) Hashes !</h2>
+<p>R3-Alpha did not have fancy modern hashes like SHA256 or SHA512.  But also the code it used was copy-pasted out of a library that required you to have all the data at once.</p>
+<p>Hence if you have a multi-gigabyte DVD .iso file that you want to checksum, you have to read that into a multi-gigabyte BINARY! to process it.</p>
+<p>But since Ren-C is leveraging the cryptography of the <a href="https://github.com/Mbed-TLS/mbedtls">pure C library known as mbedTLS</a>, the foundations are there to stream in little blobs at a time...and it is generalized so we can just flip on or off any hashes we care about.  <a href="https://forum.rebol.info/t/what-is-a-port/617/5">If we only knew how to express streaming with PORT!s (or whatever)</a>.</p>
+<p>And also, the CRC32 and ADLER32 algorithms we have "for free" by including Zlib are now set up in a way that the insecure hashes can be streamed too.</p>
+<h2>
+<img src="https://forum.rebol.info/images/emoji/twitter/globe_with_meridians.png?v=9" title=":globe_with_meridians:" class="emoji" alt=":globe_with_meridians:"> <em>"How Does This Tie Into The Web Repl Story"?</em> <img src="https://forum.rebol.info/images/emoji/twitter/globe_with_meridians.png?v=9" title=":globe_with_meridians:" class="emoji" alt=":globe_with_meridians:">
+</h2>
+<p>I really want to have a laser focus on whether investing effort into something is going to be something that pays off or not, and to me a part of that payoff question is "will people using the web build care".</p>
+<p><strong>Right now the web build does not include the CHECKSUM function at all.</strong>  <img src="https://forum.rebol.info/images/emoji/twitter/frowning.png?v=9" title=":frowning:" class="emoji" alt=":frowning:"></p>
+<p>That is too bad, because I do believe that putting secure hashes into the hands of users at the Web Repl prompt (as well as other basic crypto parts) would be a great playground.</p>
+<p>But it would be rather heavyweight to push secure hashing into the default .wasm being pulled down on every site if it didn't use it.  This is why I really want to get "Wasm extensions" working, that can be dynamically loaded.  There's something called "side modules" that I have meant to explore but haven't.</p>
+<p>Anyway, I hope this summary gives a little insight into where this is at, and perhaps educational for those who don't have experience with the difference between secure/insecure hashing.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/checksums-and-secure-hashes-in-ren-c/1808">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/checksums-and-secure-hashes-in-ren-c/1808</link>
+          <pubDate>Mon, 09 May 2022 04:04:00 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-1808</guid>
+          <source url="https://forum.rebol.info/t/checksums-and-secure-hashes-in-ren-c/1808.rss">Checksums and Secure Hashes in Ren-C</source>
+        </item>
+        <item>
+          <title>Dropping RC4 Support from the Crypto Extension</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Cryptography</category>
+          <description><![CDATA[
+            <p>I pretty sure no one out there is using it, but the RC4 cipher has been deprecated for a pretty long time now.  Per Wikipedia:</p>
+<blockquote>
+<p>In <a href="https://en.wikipedia.org/wiki/Cryptography">cryptography</a>, <strong>RC4</strong> (Rivest Cipher 4 also known as <strong>ARC4</strong> or <strong>ARCFOUR</strong> meaning Alleged RC4, see below) is a <a href="https://en.wikipedia.org/wiki/Stream_cipher">stream cipher</a>. While it is remarkable for its simplicity and speed in software, multiple vulnerabilities have been discovered in RC4, rendering it insecure.</p>
+</blockquote>
+<p>The insecurity of RC4 led the IETF to <a href="https://tools.ietf.org/html/rfc7465">prohibit RC4 for TLS use in 2015</a></p>
+<p>However, the original cryptography code (mostly from AxTLS) had an RC4 function, and it was in mbedTLS 2.  So I went ahead and kept it working.</p>
+<p>It is now dropped from mbedTLS 3.  So in the scheme of things, time to let it go.</p>
+<h2>Code Being Dropped</h2>
+<p>The files arc4.h and arc4.c from mbedTLS are now gone, and this was the crypt module code for supporting it:</p>
+<pre><code>static void cleanup_rc4_ctx(const REBVAL *v)
+{
+    struct mbedtls_arc4_context *ctx
+        = VAL_HANDLE_POINTER(struct mbedtls_arc4_context, v);
+    mbedtls_arc4_free(ctx);
+    FREE(struct mbedtls_arc4_context, ctx);
+}
+
+
+//
+//  export rc4-key: native [
+//
+//  "Encrypt/decrypt data (modifies) using RC4 algorithm."
+//
+//      return: [handle!]
+//      key [binary!]
+//  ]
+//
+REBNATIVE(rc4_key)
+//
+// !!! RC4 was originally included for use with TLS.  However, the insecurity
+// of RC4 led the IETF to prohibit RC4 for TLS use in 2015:
+//
+// https://tools.ietf.org/html/rfc7465
+//
+// So it is not in use at the moment.  It isn't much code, but could probably
+// be moved to its own extension so it could be selected to build in or not,
+// which is how cryptography methods should probably be done.
+{
+    CRYPT_INCLUDE_PARAMS_OF_RC4_KEY;
+
+    struct mbedtls_arc4_context *ctx = TRY_ALLOC(struct mbedtls_arc4_context);
+    mbedtls_arc4_init(ctx);
+
+    REBSIZ key_len;
+    const REBYTE *key = VAL_BINARY_SIZE_AT(&amp;key_len, ARG(key));
+    mbedtls_arc4_setup(ctx, key, key_len);
+
+    return Init_Handle_Cdata_Managed(
+        D_OUT,
+        ctx,
+        sizeof(struct mbedtls_arc4_context),
+        &amp;cleanup_rc4_ctx
+    );
+}
+
+
+//
+//  export rc4-stream: native [
+//
+//  "Encrypt/decrypt data (modifies) using RC4 algorithm."
+//
+//      return: &lt;none&gt;
+//      ctx "Stream cipher context"
+//          [handle!]
+//      data "Data to encrypt/decrypt (modified)"
+//          [binary!]
+//  ]
+//
+REBNATIVE(rc4_stream)
+{
+    CRYPT_INCLUDE_PARAMS_OF_RC4_STREAM;
+
+    REBVAL *data = ARG(data);
+
+    if (VAL_HANDLE_CLEANER(ARG(ctx)) != cleanup_rc4_ctx)
+        rebJumps ("fail [{Not a RC4 Context:}", ARG(ctx), "]");
+
+    struct mbedtls_arc4_context *ctx
+        = VAL_HANDLE_POINTER(struct mbedtls_arc4_context, ARG(ctx));
+
+    REBVAL *error = nullptr;
+
+    REBSIZ length;
+    REBYTE *output = VAL_BINARY_SIZE_AT_ENSURE_MUTABLE(&amp;length, data);
+    const REBYTE *input = output;
+    IF_NOT_0(cleanup, error, mbedtls_arc4_crypt(
+        ctx,
+        length,
+        input,  // input "message"
+        output  // output (same, since it modifies)
+    ));
+
+  cleanup:
+     if (error)
+        rebJumps ("fail", error);
+
+    return rebNone();
+}
+</code></pre>
+<p>...and here is the very basic test, also being removed...</p>
+<pre><code>ctx: rc4-key as binary! "Deprecated Algorithm"
+data: as binary! "But Implemented Anyway"
+rc4-stream ctx data
+data = #{0C4E2F3BD157EA7214C33F280BE4D9DF1DFB580563A6}</code></pre>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/dropping-rc4-support-from-the-crypto-extension/1807">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/dropping-rc4-support-from-the-crypto-extension/1807</link>
+          <pubDate>Mon, 09 May 2022 01:32:56 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-1807</guid>
+          <source url="https://forum.rebol.info/t/dropping-rc4-support-from-the-crypto-extension/1807.rss">Dropping RC4 Support from the Crypto Extension</source>
+        </item>
+        <item>
+          <title>About the Cryptography category</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Cryptography</category>
+          <description><![CDATA[
+            <p>Discussion of things related to cryptography, which includes low level primitives (ciphers, hashes, and key exchange) as well as higher-level protocols such as TLS.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/about-the-cryptography-category/1806">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/about-the-cryptography-category/1806</link>
+          <pubDate>Mon, 09 May 2022 01:11:25 +0000</pubDate>
+          <discourse:topicPinned>Yes</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-1806</guid>
+          <source url="https://forum.rebol.info/t/about-the-cryptography-category/1806.rss">About the Cryptography category</source>
+        </item>
+  </channel>
+</rss>
