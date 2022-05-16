@@ -1,0 +1,224 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Asymmetric Encryption/Decryption in Ren-C</title>
+    <link>https://forum.rebol.info/t/asymmetric-encryption-decryption-in-ren-c/1812</link>
+    <description>The most easily recognized form of encryption is symmetric, where the same password is used to encrypt something as to decrypt it.
+
+But a weirder form is **asymmetric encryption**, *where the key used to encrypt is different from the one used to decrypt*.
+
+## Ren-C Supports RSA Public/Private Encryption
+
+You generate your keys in a pair, which come back via multiple return results.  You must specify a size for the public key (in *bits*, not *bytes*...[because that&#39;s the convention](https://crypto.stackexchange.com/questions/58124/))
+
+We&#39;ll start using [raw] RSA encryption:
+
+    ; use /INSECURE to override errors that tell you the key is too small
+    ; (makes examples more readable)
+
+    &gt;&gt; [public-key private-key]: rsa-generate-keypair/padding/insecure 128 [raw]
+    == make object! [
+        padding: [raw]
+        n: #{C097238C34E7191561DD7D30BBB77C65}
+        e: #{010001}
+    ]
+
+    &gt;&gt; length of public-key.n
+    == 16  ; 16 bytes is 128 bits
+
+When you use raw mode encryption, the data you encrypt must be *exactly the same size* as the key you made.  We&#39;ll show how to work around this later, but for now let&#39;s just deal with it.
+
+    &gt;&gt; data: #{0123456789ABCDEFFEDCBA9876543210}
+
+    &gt;&gt; length of data
+    == 16  ; same size as our key
+
+    &gt;&gt; encrypted: rsa-encrypt data public-key
+    == #{3F7E8ACD2DEE61D09B7A6FC914E22295}
+    
+    &gt;&gt; length of encrypted
+    == 16  ; also same length as key
+
+Now, decryption is done with the private key:
+    
+    &gt;&gt; rsa-decrypt encrypted private-key
+    == #{0123456789ABCDEFFEDCBA9876543210}
+
+## But `[raw]` Makes The Same Message Every Time...
+
+Raw RSA doesn&#39;t waste any space (e.g. 4096 bytes in means 4096 bytes out).  **But a given output always produces the same output with raw RSA**:
+
+    &gt;&gt; rsa-encrypt data public-key
+    == #{3F7E8ACD2DEE61D09B7A6FC914E22295}
+
+    &gt;&gt; rsa-encrypt data public-key
+    == #{3F7E8ACD2DEE61D09B7A6FC914E22295}
+
+This can make it easy (or at least, easier) for someone who doesn&#39;t have the private key to do some factoring with the public key, and see if they can generate input that produces that output...effectively defeating the encryption.
+
+Also since it requires exactly the keysize of data coming in, you&#39;re likely going to have a lot of cases where you have to throw in some padding.  But naive answers to padding also create security problems:
+
+* **It would be bad to pad the data block with zeros (or whatever)**, because such predictable behavior generally makes it easier to guess what the encrypted information might be.
+
+* **It would be bad to just put random data in the padding**, because the person doing the decryption wouldn&#39;t know if the gibberish they got when decrypting was the same gibberish you put in.
+
+    * Attackers could leverage this random tolerance to forge data in the non-padded portions, then forging the padding in a way that compensated.
+
+**[Real-World problems motivated the tricks that are used to resist attacks.](https://security.stackexchange.com/a/183330)**  You can read about them if you want...or just don&#39;t use `[raw]` and you&#39;ll get a sensible default.
+
+    &gt;&gt; [public-a private-a]: rsa-generate-keypair/insecure 128
+    == make object! [
+        padding: [pkcs1-v15]
+        n: #{A9EE9282744CC0FC6765824EB2B87539}
+        e: #{010001}
+    ]
+
+    &gt;&gt; one: rsa-encrypt #{DECAFBAD} public-a  ; Note: shorter input than key
+    == #{13C14811A3B1CD95100BA4F3273F0962}
+
+    &gt;&gt; two: rsa-encrypt #{DECAFBAD} public-a
+    == #{3245179A18C6B488FD39CDE7B4F5E3EC}  ; different!
+
+    &gt;&gt; rsa-decrypt one private-a
+    == #{DECAFBAD}
+
+    &gt;&gt; rsa-decrypt two private-a
+    == #{DECAFBAD}
+
+## That Encrypts Smaller Than The Key...But What About Bigger?
+
+A fundamental issue with RSA encryption/decryption is it is relatively S-L-O-W.  And if you want to futureproof a key to use with big file sizes, those keys would also be B-I-G!
+
+**But you can use a smaller asymmetric key as a stepping stone to providing a symmetric key.**
+
+It&#39;s easy!  Let&#39;s say someone has published their 4096-bit public key and you want to send them a 100 megabyte file that only they will know how to open.  Follow these steps:
+
+1. Generate a random string that&#39;s less than 4096 bits, and encrypt *that* with their public key
+
+2. Encrypt the file using a faster symmetric algorithm, with that random string as the password
+
+3. Send the recipient both the asymmetrically-encrypted random string and the symmetrically-encrypted 100mb file
+
+4. Your recipient uses their private key to decrypt the one-off password you randomly generated, and decrypts the symmetrically encrypted file with it.
+
+## It&#39;s All New, So Help Design the Interface...
+
+The original motivation to research mbedTLS was so that @gchiu didn&#39;t have to call out to external utilities to generate RSA keys.
+
+But the generation abilities weren&#39;t actually written until now.  And honestly, I&#39;m not sure the RSA stuff was even working at all.  :-/  **[Now there&#39;s at least a minimal amount of testing.](https://github.com/metaeducation/ren-c/blob/master/extensions/crypt/tests/rsa.test.reb)**
+
+I think the multiple return values are a good start on making it clear, but it&#39;s certainly a good time for feedback if anyone has any.</description>
+    
+    <lastBuildDate>Fri, 13 May 2022 01:37:02 +0000</lastBuildDate>
+    <category>Cryptography</category>
+    <atom:link href="https://forum.rebol.info/t/asymmetric-encryption-decryption-in-ren-c/1812.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Asymmetric Encryption/Decryption in Ren-C</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>The most easily recognized form of encryption is symmetric, where the same password is used to encrypt something as to decrypt it.</p>
+<p>But a weirder form is <strong>asymmetric encryption</strong>, <em>where the key used to encrypt is different from the one used to decrypt</em>.</p>
+<h2>Ren-C Supports RSA Public/Private Encryption</h2>
+<p>You generate your keys in a pair, which come back via multiple return results.  You must specify a size for the public key (in <em>bits</em>, not <em>bytes</em>...<a href="https://crypto.stackexchange.com/questions/58124/">because that's the convention</a>)</p>
+<p>We'll start using [raw] RSA encryption:</p>
+<pre><code>; use /INSECURE to override errors that tell you the key is too small
+; (makes examples more readable)
+
+&gt;&gt; [public-key private-key]: rsa-generate-keypair/padding/insecure 128 [raw]
+== make object! [
+    padding: [raw]
+    n: #{C097238C34E7191561DD7D30BBB77C65}
+    e: #{010001}
+]
+
+&gt;&gt; length of public-key.n
+== 16  ; 16 bytes is 128 bits
+</code></pre>
+<p>When you use raw mode encryption, the data you encrypt must be <em>exactly the same size</em> as the key you made.  We'll show how to work around this later, but for now let's just deal with it.</p>
+<pre><code>&gt;&gt; data: #{0123456789ABCDEFFEDCBA9876543210}
+
+&gt;&gt; length of data
+== 16  ; same size as our key
+
+&gt;&gt; encrypted: rsa-encrypt data public-key
+== #{3F7E8ACD2DEE61D09B7A6FC914E22295}
+
+&gt;&gt; length of encrypted
+== 16  ; also same length as key
+</code></pre>
+<p>Now, decryption is done with the private key:</p>
+<pre><code>&gt;&gt; rsa-decrypt encrypted private-key
+== #{0123456789ABCDEFFEDCBA9876543210}
+</code></pre>
+<h2>But <code>[raw]</code> Makes The Same Message Every Time...</h2>
+<p>Raw RSA doesn't waste any space (e.g. 4096 bytes in means 4096 bytes out).  <strong>But a given output always produces the same output with raw RSA</strong>:</p>
+<pre><code>&gt;&gt; rsa-encrypt data public-key
+== #{3F7E8ACD2DEE61D09B7A6FC914E22295}
+
+&gt;&gt; rsa-encrypt data public-key
+== #{3F7E8ACD2DEE61D09B7A6FC914E22295}
+</code></pre>
+<p>This can make it easy (or at least, easier) for someone who doesn't have the private key to do some factoring with the public key, and see if they can generate input that produces that output...effectively defeating the encryption.</p>
+<p>Also since it requires exactly the keysize of data coming in, you're likely going to have a lot of cases where you have to throw in some padding.  But naive answers to padding also create security problems:</p>
+<ul>
+<li>
+<p><strong>It would be bad to pad the data block with zeros (or whatever)</strong>, because such predictable behavior generally makes it easier to guess what the encrypted information might be.</p>
+</li>
+<li>
+<p><strong>It would be bad to just put random data in the padding</strong>, because the person doing the decryption wouldn't know if the gibberish they got when decrypting was the same gibberish you put in.</p>
+<ul>
+<li>Attackers could leverage this random tolerance to forge data in the non-padded portions, then forging the padding in a way that compensated.</li>
+</ul>
+</li>
+</ul>
+<p><strong><a href="https://security.stackexchange.com/a/183330">Real-World problems motivated the tricks that are used to resist attacks.</a></strong>  You can read about them if you want...or just don't use <code>[raw]</code> and you'll get a sensible default.</p>
+<pre><code>&gt;&gt; [public-a private-a]: rsa-generate-keypair/insecure 128
+== make object! [
+    padding: [pkcs1-v15]
+    n: #{A9EE9282744CC0FC6765824EB2B87539}
+    e: #{010001}
+]
+
+&gt;&gt; one: rsa-encrypt #{DECAFBAD} public-a  ; Note: shorter input than key
+== #{13C14811A3B1CD95100BA4F3273F0962}
+
+&gt;&gt; two: rsa-encrypt #{DECAFBAD} public-a
+== #{3245179A18C6B488FD39CDE7B4F5E3EC}  ; different!
+
+&gt;&gt; rsa-decrypt one private-a
+== #{DECAFBAD}
+
+&gt;&gt; rsa-decrypt two private-a
+== #{DECAFBAD}
+</code></pre>
+<h2>That Encrypts Smaller Than The Key...But What About Bigger?</h2>
+<p>A fundamental issue with RSA encryption/decryption is it is relatively S-L-O-W.  And if you want to futureproof a key to use with big file sizes, those keys would also be B-I-G!</p>
+<p><strong>But you can use a smaller asymmetric key as a stepping stone to providing a symmetric key.</strong></p>
+<p>It's easy!  Let's say someone has published their 4096-bit public key and you want to send them a 100 megabyte file that only they will know how to open.  Follow these steps:</p>
+<ol>
+<li>
+<p>Generate a random string that's less than 4096 bits, and encrypt <em>that</em> with their public key</p>
+</li>
+<li>
+<p>Encrypt the file using a faster symmetric algorithm, with that random string as the password</p>
+</li>
+<li>
+<p>Send the recipient both the asymmetrically-encrypted random string and the symmetrically-encrypted 100mb file</p>
+</li>
+<li>
+<p>Your recipient uses their private key to decrypt the one-off password you randomly generated, and decrypts the symmetrically encrypted file with it.</p>
+</li>
+</ol>
+<h2>It's All New, So Help Design the Interface...</h2>
+<p>The original motivation to research mbedTLS was so that <a class="mention" href="/u/gchiu">@gchiu</a> didn't have to call out to external utilities to generate RSA keys.</p>
+<p>But the generation abilities weren't actually written until now.  And honestly, I'm not sure the RSA stuff was even working at all.  :-/  <strong><a href="https://github.com/metaeducation/ren-c/blob/master/extensions/crypt/tests/rsa.test.reb">Now there's at least a minimal amount of testing.</a></strong></p>
+<p>I think the multiple return values are a good start on making it clear, but it's certainly a good time for feedback if anyone has any.</p>
+          <p><a href="https://forum.rebol.info/t/asymmetric-encryption-decryption-in-ren-c/1812/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/asymmetric-encryption-decryption-in-ren-c/1812/1</link>
+        <pubDate>Fri, 13 May 2022 01:17:30 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1812-1</guid>
+        <source url="https://forum.rebol.info/t/asymmetric-encryption-decryption-in-ren-c/1812.rss">Asymmetric Encryption/Decryption in Ren-C</source>
+      </item>
+  </channel>
+</rss>

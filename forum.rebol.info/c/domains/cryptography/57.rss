@@ -5,8 +5,239 @@
     <link>https://forum.rebol.info/c/domains/cryptography/57</link>
     <description>Topics in the &#39;Cryptography&#39; category Discussion of things related to cryptography, which includes low level primitives (ciphers, hashes, and key exchange) as well as higher-level protocols such as TLS.</description>
     
-      <lastBuildDate>Mon, 09 May 2022 18:20:50 +0000</lastBuildDate>
+      <lastBuildDate>Fri, 13 May 2022 01:17:30 +0000</lastBuildDate>
       <atom:link href="https://forum.rebol.info/c/domains/cryptography/57.rss" rel="self" type="application/rss+xml" />
+        <item>
+          <title>Asymmetric Encryption/Decryption in Ren-C</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Cryptography</category>
+          <description><![CDATA[
+            <p>The most easily recognized form of encryption is symmetric, where the same password is used to encrypt something as to decrypt it.</p>
+<p>But a weirder form is <strong>asymmetric encryption</strong>, <em>where the key used to encrypt is different from the one used to decrypt</em>.</p>
+<h2>Ren-C Supports RSA Public/Private Encryption</h2>
+<p>You generate your keys in a pair, which come back via multiple return results.  You must specify a size for the public key (in <em>bits</em>, not <em>bytes</em>...<a href="https://crypto.stackexchange.com/questions/58124/">because that's the convention</a>)</p>
+<p>We'll start using [raw] RSA encryption:</p>
+<pre><code>; use /INSECURE to override errors that tell you the key is too small
+; (makes examples more readable)
+
+&gt;&gt; [public-key private-key]: rsa-generate-keypair/padding/insecure 128 [raw]
+== make object! [
+    padding: [raw]
+    n: #{C097238C34E7191561DD7D30BBB77C65}
+    e: #{010001}
+]
+
+&gt;&gt; length of public-key.n
+== 16  ; 16 bytes is 128 bits
+</code></pre>
+<p>When you use raw mode encryption, the data you encrypt must be <em>exactly the same size</em> as the key you made.  We'll show how to work around this later, but for now let's just deal with it.</p>
+<pre><code>&gt;&gt; data: #{0123456789ABCDEFFEDCBA9876543210}
+
+&gt;&gt; length of data
+== 16  ; same size as our key
+
+&gt;&gt; encrypted: rsa-encrypt data public-key
+== #{3F7E8ACD2DEE61D09B7A6FC914E22295}
+
+&gt;&gt; length of encrypted
+== 16  ; also same length as key
+</code></pre>
+<p>Now, decryption is done with the private key:</p>
+<pre><code>&gt;&gt; rsa-decrypt encrypted private-key
+== #{0123456789ABCDEFFEDCBA9876543210}
+</code></pre>
+<h2>But <code>[raw]</code> Makes The Same Message Every Time...</h2>
+<p>Raw RSA doesn't waste any space (e.g. 4096 bytes in means 4096 bytes out).  <strong>But a given output always produces the same output with raw RSA</strong>:</p>
+<pre><code>&gt;&gt; rsa-encrypt data public-key
+== #{3F7E8ACD2DEE61D09B7A6FC914E22295}
+
+&gt;&gt; rsa-encrypt data public-key
+== #{3F7E8ACD2DEE61D09B7A6FC914E22295}
+</code></pre>
+<p>This can make it easy (or at least, easier) for someone who doesn't have the private key to do some factoring with the public key, and see if they can generate input that produces that output...effectively defeating the encryption.</p>
+<p>Also since it requires exactly the keysize of data coming in, you're likely going to have a lot of cases where you have to throw in some padding.  But naive answers to padding also create security problems:</p>
+<ul>
+<li>
+<p><strong>It would be bad to pad the data block with zeros (or whatever)</strong>, because such predictable behavior generally makes it easier to guess what the encrypted information might be.</p>
+</li>
+<li>
+<p><strong>It would be bad to just put random data in the padding</strong>, because the person doing the decryption wouldn't know if the gibberish they got when decrypting was the same gibberish you put in.</p>
+<ul>
+<li>Attackers could leverage this random tolerance to forge data in the non-padded portions, then forging the padding in a way that compensated.</li>
+</ul>
+</li>
+</ul>
+<p><strong><a href="https://security.stackexchange.com/a/183330">Real-World problems motivated the tricks that are used to resist attacks.</a></strong>  You can read about them if you want...or just don't use <code>[raw]</code> and you'll get a sensible default.</p>
+<pre><code>&gt;&gt; [public-a private-a]: rsa-generate-keypair/insecure 128
+== make object! [
+    padding: [pkcs1-v15]
+    n: #{A9EE9282744CC0FC6765824EB2B87539}
+    e: #{010001}
+]
+
+&gt;&gt; one: rsa-encrypt #{DECAFBAD} public-a  ; Note: shorter input than key
+== #{13C14811A3B1CD95100BA4F3273F0962}
+
+&gt;&gt; two: rsa-encrypt #{DECAFBAD} public-a
+== #{3245179A18C6B488FD39CDE7B4F5E3EC}  ; different!
+
+&gt;&gt; rsa-decrypt one private-a
+== #{DECAFBAD}
+
+&gt;&gt; rsa-decrypt two private-a
+== #{DECAFBAD}
+</code></pre>
+<h2>That Encrypts Smaller Than The Key...But What About Bigger?</h2>
+<p>A fundamental issue with RSA encryption/decryption is it is relatively S-L-O-W.  And if you want to futureproof a key to use with big file sizes, those keys would also be B-I-G!</p>
+<p><strong>But you can use a smaller asymmetric key as a stepping stone to providing a symmetric key.</strong></p>
+<p>It's easy!  Let's say someone has published their 4096-bit public key and you want to send them a 100 megabyte file that only they will know how to open.  Follow these steps:</p>
+<ol>
+<li>
+<p>Generate a random string that's less than 4096 bits, and encrypt <em>that</em> with their public key</p>
+</li>
+<li>
+<p>Encrypt the file using a faster symmetric algorithm, with that random string as the password</p>
+</li>
+<li>
+<p>Send the recipient both the asymmetrically-encrypted random string and the symmetrically-encrypted 100mb file</p>
+</li>
+<li>
+<p>Your recipient uses their private key to decrypt the one-off password you randomly generated, and decrypts the symmetrically encrypted file with it.</p>
+</li>
+</ol>
+<h2>It's All New, So Help Design the Interface...</h2>
+<p>The original motivation to research mbedTLS was so that <a class="mention" href="/u/gchiu">@gchiu</a> didn't have to call out to external utilities to generate RSA keys.</p>
+<p>But the generation abilities weren't actually written until now.  And honestly, I'm not sure the RSA stuff was even working at all.  :-/  <strong><a href="https://github.com/metaeducation/ren-c/blob/master/extensions/crypt/tests/rsa.test.reb">Now there's at least a minimal amount of testing.</a></strong></p>
+<p>I think the multiple return values are a good start on making it clear, but it's certainly a good time for feedback if anyone has any.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/asymmetric-encryption-decryption-in-ren-c/1812">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/asymmetric-encryption-decryption-in-ren-c/1812</link>
+          <pubDate>Fri, 13 May 2022 01:17:30 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-1812</guid>
+          <source url="https://forum.rebol.info/t/asymmetric-encryption-decryption-in-ren-c/1812.rss">Asymmetric Encryption/Decryption in Ren-C</source>
+        </item>
+        <item>
+          <title>Transitioning from mbedTLS 2 to mbedTLS 3: Promise and Peril</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Cryptography</category>
+          <description><![CDATA[
+            <p>Historically R3-Alpha had its few pieces of crypto math cobbled together from generally unknown sources on the Internet...</p>
+<ul>
+<li>
+<p>My understanding is that Rebol2's support for talking to a limited set of HTTPS sites was written entirely in C.  It's never been open-sourced, so we don't know much about it--such as whether it was original code or done with some early TLS library of the time.</p>
+</li>
+<li>
+<p>Saphirion chose to split out the code for the Transport-Layer-Security protocol and make it usermode Rebol.  Only the foundational cryptographic primitives like <a href="https://forum.rebol.info/t/checksums-and-secure-hashes-in-ren-c/1808">Secure Hashes</a> or <a href="https://forum.rebol.info/t/key-exchange-methods-in-ren-c/1809">Key Exchange</a> were written in C.</p>
+<ul>
+<li>
+<p><strong>Many of R3-Alpha's C cryptography bits seemed to come from the (one-man?) effort known as <a href="http://axtls.sourceforge.net/">Axolotl TLS (AxTLS)</a></strong></p>
+</li>
+<li>
+<p>The Rebol parts were written by Cyphre (Richard Smolak)</p>
+</li>
+</ul>
+</li>
+</ul>
+<h2>I Was Initially Very Skeptical of Continuing Saphirion's Strategy...</h2>
+<p>If a change ever rippled into affecting the TLS file, it was a voodoo nightmare to figure out how to fix it.  I didn't understand why limited efforts should be stretched into involvement with "something the language wasn't really good for".</p>
+<p><em>My impression was also that the %prot-tls.r implementation was bad.</em>  But when I got to looking at the details, the most insidious problems weren't so much the fault of the protocol code.  It more-or-less followed the spec, in a pretty literate way (that I <a href="https://forum.rebol.info/t/dissecting-the-tls-emit-dialect/1498">improved with some dialecting</a>).</p>
+<p>The main frustrations regarding prot-tls came from the fact that <a href="https://forum.rebol.info/t/the-weirdness-of-wait/1703">R3-Alpha's asynchronous port model made no sense</a>.  When I rewrote it to use the "seemingly-synchronous" model (which aims to parallel the Go language), it became more clear.</p>
+<p><strong>Through the process of implementing TLS 1.2, I began to get the impression that such protocols may actually be a fitting domain for a language like Rebol.</strong></p>
+<p>Today's %prot-tls.r is an aggressive and practical test of dialecting.  If it continues to be enhanced may be a case of exposing the workings of an important protocol to the layperson.</p>
+<h2>We Needed More Cryptography, and mbedTLS Fit the Bill</h2>
+<p>Adding TLS 1.2 wasn't going to do any good without also providing some of the newer exotic cipher suites that are demanded these days.  That meant getting things like elliptic curve key exchange, or SHA512, or anything else the future may demand.</p>
+<p>When I found mbedTLS it was much "cleaner" than OpenSSL, and seemed perfect:</p>
+<ul>
+<li>
+<p>It was targeting embedded processors, with <a href="https://github.com/Mbed-TLS/mbedtls/blob/42650260a9109f53d2058f82e1133205545fd65b/include/mbedtls/mbedtls_config.h">incredibly granular controls</a> for doing things like using smaller/slower algorithms vs. bigger/faster ones.</p>
+<ul>
+<li>
+<p>Pure C code, that could be compiled even by TCC.</p>
+</li>
+<li>
+<p>This meant the conference demo of bootstrap could still work, with a TCC-built R3-WITH-TCC having enough cryptography in it to download its own source from an HTTPS GitHub link.</p>
+</li>
+</ul>
+</li>
+<li>
+<p>The cryptography primitives could be lifted out "a la carte" from the C-based TLS protocol code; the files seemed completely separate:</p>
+<ul>
+<li>
+<p>If we wanted to, we could have a C-based mbedTLS extension option instead of using %prot-tls.r, and it could reuse the same cryptography.</p>
+</li>
+<li>
+<p>(We may at some point have to resort to this, if keeping %prot-tls.r up to date with the times proves impractical.)</p>
+</li>
+</ul>
+</li>
+<li>
+<p>The interfaces for every cipher and hash supported streaming, so we'd have the ability to incrementally do cryptography on large files or network connections (assuming we figured out how to expose that).</p>
+</li>
+</ul>
+<p><strong>And critically, all of it was under the umbrella of a working group at ARM which would hopefully ensure that it was kept up to date, and being vetted for problems.</strong></p>
+<p>All of it made this seem like a no-brainer to build on, which <a href="https://github.com/metaeducation/ren-c/commit/06e110235efb68500700fead3478a3216899d780">I did in April of 2020</a>:</p>
+<blockquote>
+<p>The mbedTLS library is an embedded-focused set of cryptography hashes,<br>
+key exchanges, block ciphers, and other tools.  Its components range<br>
+from lower-level facilities like BigNum arithmetic, to higher-level<br>
+services like TLS negotiation and certificate validation.  Its<br>
+facilities are well-factored such that each piece can be used with only<br>
+its dependencies:</p>
+<p><a href="https://tls.mbed.org/">https://tls.mbed.org/</a></p>
+<p>Because of its fine-grained control, it's possible to use its basic<br>
+tools while still keeping higher-level negotiations as spec-driven<br>
+usermode Rebol (e.g. the TLS protocol itself) to facilitate more<br>
+hooking and understanding.  And because it offers a consistent set of<br>
+vetted and active code, it can replace the "hodgepodge" of cut-and-paste<br>
+snippets for cryptography (originating from axTLS, internet sources,<br>
+custom code, edited OpenSSL, etc.) where there are problems like not<br>
+being written to a common BigNum implementation.</p>
+<p>Additionally--due to the factoring, it is hoped that this code could be<br>
+used as the basis for implementing BigNum arithmetic in the interpreter<br>
+core itself...which would be naturally reused in the implementation<br>
+of these C algorithms when cryptographic extensions are loaded.</p>
+</blockquote>
+<p>Possibly inspired by this--or just his own coming to the same conclusions--<a href="https://github.com/Oldes/Rebol3/commit/77515519655a579fbef99f7e185a27a4451718d7">Oldes changed his hashes to use mbedTLS in January 2021</a></p>
+<h2>...and Then, Version 3.0 Came... <img src="https://forum.rebol.info/images/emoji/twitter/dragon.png?v=9" title=":dragon:" class="emoji" alt=":dragon:">
+</h2>
+<p><em>I probably should have been paying more attention to what mbedTLS was planning in their future branches.</em></p>
+<p>What I've gathered is that ARM (or someone) was pointing out that mbedTLS not only needed to implement TLS 1.3, but that it wasn't sufficiently fast vs. the competition.</p>
+<p>A somewhat-sensible approach to optimization is to first tighten the control over your data structures, making them more opaque to clients.  By limiting the APIs you can use to access those structures, you can know more about the states they are in...and take more for granted.  Your functions can then make optimizations which leverage these rules--adding or rearranging fields in more clever ways.</p>
+<p><strong>But I didn't want cleverness, I just wanted the math.</strong>  I liked that our objects for things like Diffie-Hellman showed you the true cryptographic parameters, and wasn't some kind of "black box".  If we were closed off from that, everything would be a HANDLE! and you would have limited ways of extracting parameters from it.</p>
+<p>Not only did they close off access to the structure members, many APIs they offered were TLS-specific!</p>
+<ul>
+<li>
+<p>If a cryptographic primitive depended on parameters X and Y and produced Z, they'd offer a function that takes in a blob of data representing X and Y <em>in the specific format that TLS messages encode them</em>.</p>
+</li>
+<li>
+<p>If you were building some protocol that <em>wasn't</em> TLS using that basic crypto primitive, the only way offered to load the parameters was to make a TLS-format message buffer and pass it.</p>
+</li>
+<li>
+<p>The TLS-specific functions were creeping into what were supposed to be the "a la carte" cryptography files, adding bloat at compile time (if not also runtime) if you weren't using them.</p>
+</li>
+</ul>
+<p>One can imagine that this seems good from the point of view of speeding up their C TLS protocol, but bad for anyone trying to use the underlying cryptography.</p>
+<p>There was an announcement I missed that it would be split into two libraries: "mbed crypto" and "mbedTLS", to serve the two different audiences for the code.  But that seemed to be short-lived, and "mbed crypto" was reabsorbed into the mbedTLS codebase.  Not before the damage had been done to the layering and generality.</p>
+<p>So now mbedTLS seems to be playing catch-up on serving the audience that wanted the crypto primitives.  But functionality that had an endorsed method to do in mbedTLS 2 now requires hacking beneath the approved API to accomplish.</p>
+<h2>On the bright side...</h2>
+<p>Since the re-absorption of "mbed crypto", mbedTLS seems amenable to having answers for the a-la-carte crypto crowd.  <a href="https://github.com/Mbed-TLS/mbedtls/issues/5818">A request I made is at least marked medium importance</a>.</p>
+<p>Also, the API becoming more formalized is pointing out some weird mistakes that were made before in the code...filling structure parameters that were unused, for instance.  Having to call each of these things into question is a good vetting of the code.</p>
+<p>And although I had to use hacks to do it, we now can run https on top of mbedTLS 3.  I've been a little on the fence of whether to stick with mbedTLS 2 (support ending in 2024) or find some other library.  But writing about cryptography has made me realize it's a bit of a red herring on the importance scale, and I think we're better off rolling with the punches of mbedTLS 3 than going it some other route.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/transitioning-from-mbedtls-2-to-mbedtls-3-promise-and-peril/1810">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/transitioning-from-mbedtls-2-to-mbedtls-3-promise-and-peril/1810</link>
+          <pubDate>Tue, 10 May 2022 14:47:25 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-1810</guid>
+          <source url="https://forum.rebol.info/t/transitioning-from-mbedtls-2-to-mbedtls-3-promise-and-peril/1810.rss">Transitioning from mbedTLS 2 to mbedTLS 3: Promise and Peril</source>
+        </item>
         <item>
           <title>Key Exchange Methods in Ren-C</title>
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
