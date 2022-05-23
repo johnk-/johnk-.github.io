@@ -1,0 +1,251 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Why THEN and ELSE are Mutually Exclusive</title>
+    <link>https://forum.rebol.info/t/why-then-and-else-are-mutually-exclusive/1080</link>
+    <description>A NULL produced by a THEN is turned into its isotope...just like running any other branch.  So in a chain of THENs: *if one THEN runs, all subsequent THEN branches will be assured of running.*
+
+     case [
+         1 &lt; 2 [print &quot;This runs&quot;, null]
+         ...
+     ] then [
+         print &quot;Runs because it receives ~null~ isotope&quot;
+         null  ; gets isotopified
+     ] then [
+         print &quot;Runs because it also receives ~null~ isotope&quot;
+     ]
+
+**This is the final rule, and I&#39;m going to explain why.**
+
+## Non-Isotopifying THEN Was a Disaster
+
+At one point I was using Promise chains in JavaScript, and noticed they are designed to work by taking each .then() and feeding it from the previous .then(), where any step can stop the process.  In that world, they don&#39;t all run just because the first one ran.
+
+So I thought I&#39;d try making THEN not isotopify its branch.  If it returned NULL, any subsequent THEN would not run:
+
+    ; Behavior of a non-isotopifying THEN
+    ;
+    &gt;&gt; if true [print &quot;runs&quot;, null] then [print &quot;runs too&quot;, null] then [print &quot;doesn&#39;t&quot;]
+    runs
+    runs too
+
+*It&#39;s way too easy to screw up.*  It bit me several times and I tried to tolerate it, but this real-world code was the last straw:
+
+    any [
+        not ^rules.1
+        find [, | ||] ^rules.1
+    ]
+    then [
+        if not endable? bind param f [
+            fail &quot;Too few parameters for combinator&quot;
+        ]
+        f.(param): null  ; the THEN is thus *incidentally* evaluating to NULL
+    ]
+    else [
+        f.(param): [# rules]: parsify state rules
+    ]
+
+*...and that&#39;s not even hidden behind a function call*--the NULL is right there. Other cases are less obvious:
+
+    then [
+        ...
+        if condition [branch]  ; if the condition is false, the outer ELSE won&#39;t run!
+    ]
+    else [
+        ...
+    ]
+    
+Too often you write a branch and aren&#39;t conscious of what it produces at all.  It was a terrible idea.
+
+## So THEN *must* isotopify NULL.  How about ELSE?
+
+Once you take away the idea of THENs being conditional on the previous THEN, it&#39;s hard to have any sensible reasoning about what the following should do:
+
+    case [
+        ...  ; (1)
+    ] else [
+        ...  ; (2)
+    ] then [
+        ...  ; (3)
+    ] else [
+        ...  ; (4)
+    ]
+
+I think symmetry is the easiest idea to absorb... that ELSE treats its branch just like any other, and it gets isotopified.  That suggests there&#39;s no way for the code in (4) above to run.
+
+With this strategy, the only possibilities are:
+
+* **`(1) =&gt; (2) =&gt; (3)`** - if the case doesn&#39;t take a branch it feeds NULL to the first ELSE, which isotopifies its result.  This guarantees the THEN will run, which then isotopifies its result...never feeding pure NULL to the last ELSE.
+
+* **`(1) =&gt; (3)`** - if the case does take a branch it will isotopify any NULL and thus the first ELSE won&#39;t run.  It has to pass through the value that it rejected, which gets to the THEN, which runs and isotopifies its result.  Again never feeding pure NULL to the last ELSE.
+
+Easy to understand.  But it&#39;s pointless to put more than one ELSE in a chain.
+
+## What About a Branch Type Meaning &quot;Suppress Isotopification&quot;?
+
+For a while I thought the answer might be to create a system-wide concept of requesting not to isotopify branches.
+
+    &gt;&gt; if true [null]
+    == ~null~  ; isotope
+
+    &gt;&gt; if true @[null]
+    ; null
+
+If you could do it on any branch that would cover THEN and ELSE too.
+
+However, **[subverting isotopification is no longer under consideration for branching constructs](https://forum.rebol.info/t/how-to-subvert-voidification/1304)**.  It disables building higher level conditionals out of lower level ones.
+
+Making THEN and ELSE exceptions to the rule would wind up competing with the other interesting meanings of `@[...]` branches that are chosen.  But THEN and ELSE want to be compatible with all branch features!
+
+    &gt;&gt; if false &#39;[we want] else &#39;[all the features]
+    == [all the features]
+
+## *We Shouldn&#39;t Be Mimicking JavaScript Anyway* :man_facepalming: 
+
+Who wants to write a long chain of THENs when you can capture your code in a higher-level CASE-like expression, which has interesting controls for deciding how and when to run through phases?
+
+Or build your own dialect, and inside of that dialect THEN and ELSE can behave differently.  **But out of the box they isotopify, and are mutually exclusive.**</description>
+    
+    <lastBuildDate>Wed, 18 May 2022 09:43:49 +0000</lastBuildDate>
+    <category>Internals</category>
+    <atom:link href="https://forum.rebol.info/t/why-then-and-else-are-mutually-exclusive/1080.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Why THEN and ELSE are Mutually Exclusive</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>I've cleaned up the 8 posts that were in this thread to beeline to its conclusion: that THEN and ELSE both turn NULL branch products into ~null~ isotopes...and that this is the law of the land for all branches now.</p>
+<h2><em>But Requesting Not To Isotopify Was Completely Backwards!</em></h2>
+<p><img src="https://forum.rebol.info/images/emoji/twitter/back.png?v=9" title=":back:" class="emoji only-emoji" alt=":back:"></p>
+<p>What we <em>really</em> wanted was a way to ask the THEN or ELSE to <strong>decay its input</strong>!</p>
+<p>It's the consumer of the branch who is weird, not the producer.  After all, imagine if that weird "don't decay" branch idea existed:</p>
+<pre><code>] then @[
+   ... pages ...
+   ... of ...
+   ... code ...
+   null
+]
+else [
+   ... by the time you get here, the @ is far off the screen ...
+   ... you've forgotten about it! ...
+]
+</code></pre>
+<p>But what if the ELSE said it considers ~null~ isotopes to be the same as NULL.  We could have input-decaying THEN and ELSE!</p>
+<pre><code>] then [
+   ...
+   null
+]
+*else [
+    print "This will run!"
+]
+</code></pre>
+<p>This puts the idea that you're driving from the nullity of the immediate left result at a more appropriate place.</p>
+<p>I've chosen to specialize THEN/DECAY and ELSE/DECAY with the shorthand of <strong><code>*THEN</code></strong> and <strong><code>*ELSE</code></strong> with the star on the left, to accentuate that its doing some pre-processing before the operation.  The parallels are <strong><code>DID*</code></strong> and <strong><code>DIDN'T*</code></strong>, which put the star on the right to indicate it's decaying the argument to the right.  If anyone has a better idea feel free to suggest it.</p>
+<p>Elegant!</p>
+          <p><a href="https://forum.rebol.info/t/why-then-and-else-are-mutually-exclusive/1080/9">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/why-then-and-else-are-mutually-exclusive/1080/9</link>
+        <pubDate>Tue, 17 May 2022 22:26:43 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1080-9</guid>
+        <source url="https://forum.rebol.info/t/why-then-and-else-are-mutually-exclusive/1080.rss">Why THEN and ELSE are Mutually Exclusive</source>
+      </item>
+      <item>
+        <title>Why THEN and ELSE are Mutually Exclusive</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>A NULL produced by a THEN is turned into its isotope...just like running any other branch.  So in a chain of THENs: <em>if one THEN runs, all subsequent THEN branches will be assured of running.</em></p>
+<pre><code> case [
+     1 &lt; 2 [print "This runs", null]
+     ...
+ ] then [
+     print "Runs because it receives ~null~ isotope"
+     null  ; gets isotopified
+ ] then [
+     print "Runs because it also receives ~null~ isotope"
+ ]
+</code></pre>
+<p><strong>This is the final rule, and I'm going to explain why.</strong></p>
+<h2>Non-Isotopifying THEN Was a Disaster</h2>
+<p>At one point I was using Promise chains in JavaScript, and noticed they are designed to work by taking each .then() and feeding it from the previous .then(), where any step can stop the process.  In that world, they don't all run just because the first one ran.</p>
+<p>So I thought I'd try making THEN not isotopify its branch.  If it returned NULL, any subsequent THEN would not run:</p>
+<pre><code>; Behavior of a non-isotopifying THEN
+;
+&gt;&gt; if true [print "runs", null] then [print "runs too", null] then [print "doesn't"]
+runs
+runs too
+</code></pre>
+<p><em>It's way too easy to screw up.</em>  It bit me several times and I tried to tolerate it, but this real-world code was the last straw:</p>
+<pre><code>any [
+    not ^rules.1
+    find [, | ||] ^rules.1
+]
+then [
+    if not endable? bind param f [
+        fail "Too few parameters for combinator"
+    ]
+    f.(param): null  ; the THEN is thus *incidentally* evaluating to NULL
+]
+else [
+    f.(param): [# rules]: parsify state rules
+]
+</code></pre>
+<p><em>...and that's not even hidden behind a function call</em>--the NULL is right there. Other cases are less obvious:</p>
+<pre><code>then [
+    ...
+    if condition [branch]  ; if the condition is false, the outer ELSE won't run!
+]
+else [
+    ...
+]
+</code></pre>
+<p>Too often you write a branch and aren't conscious of what it produces at all.  It was a terrible idea.</p>
+<h2>So THEN <em>must</em> isotopify NULL.  How about ELSE?</h2>
+<p>Once you take away the idea of THENs being conditional on the previous THEN, it's hard to have any sensible reasoning about what the following should do:</p>
+<pre><code>case [
+    ...  ; (1)
+] else [
+    ...  ; (2)
+] then [
+    ...  ; (3)
+] else [
+    ...  ; (4)
+]
+</code></pre>
+<p>I think symmetry is the easiest idea to absorb... that ELSE treats its branch just like any other, and it gets isotopified.  That suggests there's no way for the code in (4) above to run.</p>
+<p>With this strategy, the only possibilities are:</p>
+<ul>
+<li>
+<p><strong><code>(1) =&gt; (2) =&gt; (3)</code></strong> - if the case doesn't take a branch it feeds NULL to the first ELSE, which isotopifies its result.  This guarantees the THEN will run, which then isotopifies its result...never feeding pure NULL to the last ELSE.</p>
+</li>
+<li>
+<p><strong><code>(1) =&gt; (3)</code></strong> - if the case does take a branch it will isotopify any NULL and thus the first ELSE won't run.  It has to pass through the value that it rejected, which gets to the THEN, which runs and isotopifies its result.  Again never feeding pure NULL to the last ELSE.</p>
+</li>
+</ul>
+<p>Easy to understand.  But it's pointless to put more than one ELSE in a chain.</p>
+<h2>What About a Branch Type Meaning "Suppress Isotopification"?</h2>
+<p>For a while I thought the answer might be to create a system-wide concept of requesting not to isotopify branches.</p>
+<pre><code>&gt;&gt; if true [null]
+== ~null~  ; isotope
+
+&gt;&gt; if true @[null]
+; null
+</code></pre>
+<p>If you could do it on any branch that would cover THEN and ELSE too.</p>
+<p>However, <strong><a href="https://forum.rebol.info/t/how-to-subvert-voidification/1304">subverting isotopification is no longer under consideration for branching constructs</a></strong>.  It disables building higher level conditionals out of lower level ones.</p>
+<p>Making THEN and ELSE exceptions to the rule would wind up competing with the other interesting meanings of <code>@[...]</code> branches that are chosen.  But THEN and ELSE want to be compatible with all branch features!</p>
+<pre><code>&gt;&gt; if false '[we want] else '[all the features]
+== [all the features]
+</code></pre>
+<h2>
+<em>We Shouldn't Be Mimicking JavaScript Anyway</em> <img src="https://forum.rebol.info/images/emoji/twitter/man_facepalming.png?v=9" title=":man_facepalming:" class="emoji" alt=":man_facepalming:">
+</h2>
+<p>Who wants to write a long chain of THENs when you can capture your code in a higher-level CASE-like expression, which has interesting controls for deciding how and when to run through phases?</p>
+<p>Or build your own dialect, and inside of that dialect THEN and ELSE can behave differently.  <strong>But out of the box they isotopify, and are mutually exclusive.</strong></p>
+          <p><a href="https://forum.rebol.info/t/why-then-and-else-are-mutually-exclusive/1080/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/why-then-and-else-are-mutually-exclusive/1080/1</link>
+        <pubDate>Thu, 21 Feb 2019 07:41:06 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1080-1</guid>
+        <source url="https://forum.rebol.info/t/why-then-and-else-are-mutually-exclusive/1080.rss">Why THEN and ELSE are Mutually Exclusive</source>
+      </item>
+  </channel>
+</rss>

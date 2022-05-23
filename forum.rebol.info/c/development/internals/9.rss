@@ -1560,6 +1560,20 @@ append [] 'a
 <pre><code>x: breakpoint append [] 'a
 </code></pre>
 <p>Why shouldn't you be able to put a breakpoint wherever you want, I wondered?  So it became legal.</p>
+<p>In the fever dream of making invisibles able to do anything, there were tests like this:</p>
+<pre><code>unset 'x
+unset 'y
+unset 'z
+x: 10
+y: 1 comment [+ 2
+    z: 30] + 7
+did all [
+    x = 10
+    y = 8
+    not set? 'z
+]
+</code></pre>
+<p>But the same problems apply when a SET-WORD! is not present in the general case; the ability to bend the "shape" of the source so arbitraily has a big complexity cost in the interpreter.  It then has to be explained in terms of <a href="https://github.com/metaeducation/ren-c/blob/0b5b42003a4c181f38f3eb28e4378dc53d3a14f1/src/mezz/base-defs.r#L150">why COMMENT is ENFIX</a> and a litany of limitations where it doesn't work.  Documenting it is maddening...and it seems to have diminishing returns.</p>
 <p><strong>Now I'm having serious second thoughts about the lenience.</strong>  I don't know this tradeoff is ultimately worth it; it becomes very slippery when you are dealing with constructs that you aren't necessarily noticing are invisible.  This problem feels like it gets worse in PARSE, if plain GROUP!s are invisible and people accidentally put them in slots where they think they are the value, but the value actually comes later:</p>
 <pre><code>&gt;&gt; uparse [1 &lt;whoops&gt;] [return collect [
        keep integer! keep ("that was a number!") tag!
@@ -1584,7 +1598,7 @@ append [] 'a
 <pre><code> x: (&lt;default-value&gt; thing-that-may-be-invisible)
 </code></pre>
 <p>There needs to be some way of specifically evaluating something and finding out if it was invisible...much like there needs to be a way of evaluating something and knowing if it threw, or raised an error, etc.  Not everything fits cleanly as a "result value".  But this shows there'd be at least one way of dealing with it besides that.</p>
-            <p><small>4 posts - 2 participants</small></p>
+            <p><small>6 posts - 2 participants</small></p>
             <p><a href="https://forum.rebol.info/t/non-interstitial-invisibles-more-trouble-than-theyre-worth/1582">Read full topic</a></p>
           ]]></description>
           <link>https://forum.rebol.info/t/non-interstitial-invisibles-more-trouble-than-theyre-worth/1582</link>
@@ -2138,101 +2152,75 @@ is truthy
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
           <category>Internals</category>
           <description><![CDATA[
-            <p>NULL's storied history has taken it from being the <em>"true undefined"</em> to being the <em>"true NONE!"</em></p>
-<p>This is seemingly not very profound, since even languages like JavaScript distinguish "undefined" and "null".  In much the same way...an undefined variable is one you haven't assigned yet.  NULL is one you've set to NULL.</p>
-<pre><code>// Chrome Console Session
-&gt; asdf
-VM66:1 Uncaught ReferenceError: asdf is not defined
+            <p>Something you may notice when you MAKE FRAME! is that all the fields start out as <em>~unset~ isotopes</em>.</p>
+<pre><code>; Remember that non-isotopic BAD-WORD!s would be quoted,
+; e.g. `series: '~unset~` --  since these are not quoted they imply
+; evaluation, which would make the ~unset~ become an isotope.
 
-&gt; typeof asdf
-&lt;- "undefined"
-
-&gt; asdf = null
-&lt;- null
-
-&gt; asdf
-&lt;- null
-
-&gt; typeof asdf
-&lt;- "object"
-</code></pre>
-<p><em>(If you're curious why the <strong>typeof</strong> null is an object in JavaScript: <a href="https://stackoverflow.com/questions/18808226/why-is-typeof-null-object">"Because the spec says so.  This is generally regarded as a mistake."</a>.  The move of not having an answer for the value of the type, e.g. saying the answer to <strong>type of null</strong> is null - is much better)</em></p>
-<h2>So... MAKE FRAME! should set fields to ~undefined~, then (?)</h2>
-<p>There's certainly advantages to making the fields undefined instead of NULL.</p>
-<p>It <em>typically</em> makes it easier to keep track of which fields you've assigned and which ones you haven't:</p>
-<pre><code>&gt;&gt; f: make frame! :append
+&gt;&gt; f: make frame! :append
 == make frame! [
-    series: ~undefined~
-    value: ~undefined~
-    part: ~undefined~
-    only: ~undefined~
-    dup: ~undefined~
-    line: ~undefined~
+    series: ~unset~
+    value: ~unset~
+    part: ~unset~
+    only: ~unset~
+    dup: ~unset~
+    line: ~unset~
+]
+</code></pre>
+<h2>It's Critical These Are Isotopes And Not NULL</h2>
+<p><strong>The most important reason is that when a function is invoked, its frame cannot actually contain any isotopes.</strong>  So they can be out-of-band, and safely represent the intent of an unspecialized parameter.</p>
+<p>Isotopes can only be passed as arguments is if they are ^META parameters...and this means their value in the frame will have been pre-processed into a plain BAD-WORD!.</p>
+<p>Why is it plain?  Well, remember the META behaviors:</p>
+<pre><code>&gt;&gt; meta null  ; META of pure NULL gives pure NULL back
+; null
+
+&gt;&gt; ~whatever~  ; Recall that evaluation of a plain BAD-WORD! produces an isotope
+== ~whatever~  ; isotope
+
+&gt;&gt; meta ~whatever~  ; META of an isotope gives you the plain BAD-WORD! back
+== ~whatever~
+
+&gt;&gt; meta 1020  ; META of any other value will just quote it one more level
+== '1020
+
+&gt;&gt; meta the '''(a + b)
+== ''''(a + b)
+</code></pre>
+<p>So the evaluator is armed with the knowledge that the frame cannot legitimately have isotopes to be passed as arguments.  It can draw the conclusion that if it <em>does</em> see ~unset~ isotopes in a frame, that means the parameter was not specified.</p>
+<p>For refinements it's fine if the parameter was unspecified; they can just be defaulted to NULL.  For a required parameter, it means raising an error...just as if you had the parameter missing at a callsite.</p>
+<h2>You Can Specialize-Out Optional Arguments With NULL</h2>
+<p>Another perk of starting out the frame with isotopes is that you can remove parameters while leaving other parameters unspecified.  This permits partial specialization:</p>
+<pre><code>&gt;&gt; foo: func [x [integer!] /y [integer!]] [if y [x + y] else [x + 1000]]
+
+&gt;&gt; f: make frame! :foo
+== make frame! [
+    x: ~unset~
+    y: ~unset~
 ]
 
-&gt;&gt; if f/series [print "An error here makes sense, right?"]
-** Script Error: f/series is ~undefined~ (use GET/ANY to GET voids)
-</code></pre>
-<p>It also has the benefit of initializing all the locals in the frame to ~undefined~ <em>(you don't see the locals when you are viewing the frame from the "outside", as you are here)</em>.</p>
-<p><strong>But do you really want to have to set all the refinements to NULL before you DO the FRAME!?</strong></p>
-<p>It doesn't feel like you want to.  Because it's nice for this to work:</p>
-<pre><code>&gt;&gt; f: make frame! :append
-&gt;&gt; f/series: [a b c]
-&gt;&gt; f/value: &lt;d&gt;
-&gt;&gt; do f
-== [a b c &lt;d&gt;]
-</code></pre>
-<p>But if there weren't some intervention in the frame, you'd get the refinements as being undefined.</p>
-<p><em>This is why MAKE FRAME! initially defaulted the fields to NULL.</em>  But that still requires intervention, because the locals should be voided.  There really is no perfect answer to what uninitialized frame fields are.</p>
-<p><em>A key motivator for change was being able to notice specialization of refinements.</em>  While <code>~undefined~</code> is not a perfect answer, it can act as a reasonable marker of when things have been specialized out.</p>
-<p>Let's imagine you want to make a version of APPEND that doesn't offer a /DUP refinement and always appends a tag:</p>
-<pre><code>&gt;&gt; f: make frame! :append
-&gt;&gt; f/value: &lt;tag&gt;
-&gt;&gt; f/dup: null
+&gt;&gt; f.y: null
 
-&gt;&gt; apt: make action! f
+&gt;&gt; bar: make action! f
 
-&gt;&gt; parameters of :apt
-== [series /part /only /line]  ; see, no /dup or /value
+&gt;&gt; parameters of :foo
+== [x /y]
+
+&gt;&gt; parameters of :bar
+== [x]
+
+&gt;&gt; bar 20
+== 1020
 </code></pre>
-<p>Giving MAKE ACTION! knowledge of whether you set a refinement to NULL or not--plus the sensibility of erroring when accessing fields you hadn't assigned yet--made <code>~undefined~</code> seem like the natural default choice.</p>
-<h2>"But what if you actually want to append <code>~undefined~</code>..."</h2>
-<p>Gah.</p>
-<p>The current theory I have is that you would hide the field from view.  This would make it like other specialized-out parameters, or the locals.  So the only undefineds that would be nulled out in execution would be those that were user visible in the frame.</p>
-<pre><code>&gt;&gt; f: make frame! :append
-&gt;&gt; protect/hide 'f/value  ; just be HIDE?  what about `hide f/v: 1 + 2` syntax 
-
-&gt;&gt; apv: make action! f
-
-&gt;&gt; apv [a b c]
-== [a b c ~undefined~]
+<p>This shows pretty clearly why we don't want NULL to denote unspecialized fields--because it's desirable to be able to specialize them to NULL!  The distinction from an ~unset~ isotope lets the evaluator notice when that's happened.</p>
+<h2>You're Guarded By Errors When Using Unset Fields</h2>
+<p>While you're filling up the frame, it's nice to have a heads-up if you access frame fields that haven't been assigned yet:</p>
+<pre><code>&gt;&gt; if f.series [print "An error here makes sense, right?"]
+** Script Error: f.series is ~unset~ isotope (see ^(...) and GET/ANY)
 </code></pre>
-<p><em>There are technical issues with PROTECT/HIDE which prevent this from working today.</em>  The reason is that hiding tries to modify keylists, which in a frame is the function parameters.  This would mean that one frame hiding a parameter would effectively hide it for all function calls...even normal ones.  The bit needs to be moved somehow into the instance cells.</p>
-<p>What I like about this is that it's a generic mechanism which lets you put the bit on the values in a way that is "visible".  Of course, the visible effect is making the field vanish from view.  But at least that's something you can notice the impact of, as opposed to some not visible bit you are setting on a value to say whether it is a "specialized undefined" or an "unspecialized undefined".</p>
-<h2>Should Only ~undefined~ Count, or All Voids?</h2>
-<p>An interesting thing about having multiple void forms is that if your only need was to specialize a slot to a void, you could give another name.  This other-named void would be considered specialized:</p>
-<pre><code> &gt;&gt; f1: make frame! :append
- &gt;&gt; f1/value: ~undefined~  ; but it already was undefined :-/
- &gt;&gt; ap1: make action! f1
- &gt;&gt; ap1 [a b c]
- ** Error: ap1 is missing its value argument  ; so didn't append ~undefined~
-
- &gt;&gt; f2: make frame! :append
- &gt;&gt; f2/value: ~oogway~
- &gt;&gt; ap2: make action! f2
- &gt;&gt; ap2 [a b c]
- == [a b c ~oogway~]  ; not the magic ~undefined~, so it worked
-</code></pre>
-<p>This would mean the "harder to specialize" case would be limited down <em>specifically</em> to when you really did mean only ~undefined~...and no other void would do.</p>
-<p>Of course, by virtue of elevating ~undefined~ to such a unique behavioral status, <em>we are guaranteeing the existence of scenarios where meta code needs to produce an ~undefined~...and no other void would do</em>.</p>
-<p>Escape mechanisms are kind of funny that way.  <em><a href="https://www.youtube.com/watch?v=iGmHTbtPEac">"One often meets his destiny on the road he takes to avoid it."</a></em></p>
-<p><strong>What I don't like about this is that it might lead to complacency for anyone working with VOID!s, to not notice they'd crossed the line into a type that doesn't have 100% specializability.</strong>  It also gives a behavior to a specific name, which means no matter what language you speak the evaluator itself has blessed an English word.</p>
-<p>...though we're sort of already in that territory by having MAKE FRAME! create <code>~undefined~</code>s.  Should we instead be using plain label-free VOID! for these purposes <strong><code>~</code></strong> ?   This probably deserves a whole separate topic in "Naming"...</p>
-<h2>This Is Hopefully The Only Flip-Frame-While Evaluating Needed</h2>
-<p>I firmed up that refinements that are "present or not" are either <strong>NULL</strong> or <strong><code>#</code></strong>.  That means we don't have the added problem of trying to canonize (#[true] and #[false]) to (#[true] and NULL) or other semantic pitfalls.</p>
-<p>This is a different and simplistic rule.  Any non-hidden frame field that is VOID! will be mutated into a NULL at the time of execution.</p>
-<p>The question to resolve is: does it do this for all VOID!s, or just a special one.  And if it does it for a special one, is that specialness made language-agnostic by choosing <code>~</code> (and adjusting MAKE FRAME! accordingly), or do we embrace English in the core and use <code>~undefined~</code>?</p>
-            <p><small>5 posts - 1 participant</small></p>
+<h2>The Locals Are Initialized To ~unset~</h2>
+<p>This is something a bit hidden, because you don't see the locals when you are viewing the frame from the "outside" (as you are here).</p>
+<p>But from an implementation standpoint, it's nice to have all the locals start out as ~unset~, which is what you want them to be when the function runs.</p>
+            <p><small>4 posts - 1 participant</small></p>
             <p><a href="https://forum.rebol.info/t/default-values-and-make-frame/1412">Read full topic</a></p>
           ]]></description>
           <link>https://forum.rebol.info/t/default-values-and-make-frame/1412</link>
