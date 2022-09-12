@@ -1,0 +1,272 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>The Superpowers of Ren-C&#39;s Revamped COMPOSE</title>
+    <link>https://forum.rebol.info/t/the-superpowers-of-ren-cs-revamped-compose/979</link>
+    <description>COMPOSE is one of Rebol&#39;s most useful and recognizable constructs.  As with most-things-Ren-C, it has evolved to become far more powerful.
+
+## No Splicing By Default, BLOCK! Isotopes Request Splicing
+
+One of the immediately noticeable differences is that there is no /ONLY option any longer.  A plain GROUP! will not splice its evaluative result.  So if **block: [a b c]**, it is different from historical Redbol:
+
+    rebol2/r3-alpha/red&gt;&gt; compose [value: (block)]
+    == [value: a b c]
+
+    ren-c&gt;&gt; compose [value: (block)]
+    == [value: [a b c]]
+
+If you want to have something splice, you do this with BLOCK! isotopes.  For instance, SPREAD produces them:
+
+    ren-c&gt;&gt; compose [value: (block), (spread block)]
+    == [value: [a b c], a b c]
+
+* You can mix and match splicing parts and non-splicing parts in the same COMPOSE!
+
+* It gets rid of an instance of /ONLY, which has always been something that causes head-scratching to new users (&quot;only what?&quot;)
+
+**This is now in sync with APPEND&#39;s default of not splicing.**  I am convinced that practice has shown that not splicing is a safer and more intuitive default.  You&#39;re so often dealing with splicing several values at a time that the odds of you knowing precisely what data type all of them are become lesser.  I really believe this is the better behavior for people who are writing and reading the code.
+
+## The (...) Slots will Vaporize Voids!
+
+In my list of [&quot;non-negotiables&quot;](https://forum.rebol.info/t/the-canonical-list-of-non-negotiables/1244), I&#39;ve always said this *had* to be true, somehow:
+
+    &gt;&gt; compose [&lt;a&gt; (if false [&lt;b&gt;]) &lt;c&gt;]
+    == [&lt;a&gt; &lt;c&gt;]
+
+For quite some time, a conditional like IF that didn&#39;t run its branch would return NULL.  Because NULL couldn&#39;t be put in a block, it *seemed* like it was a good fit for signaling vaporization of a clause in a COMPOSE.  But I was nervous because as NULL came to mean &quot;soft failure&quot;, this felt like you could be sweeping a failure under the rug.
+
+Yet it was heavy-handed to need to say something like **`(maybe if false [&lt;b&gt;])`** to turn the NULL into a purely invisible VOID.  So it was a relief when the mechanics of [*&quot;impure invisibility&quot;*](https://forum.rebol.info/t/pure-vs-impure-invisibility-do-we-need-both/1782) allowed conditionals like IF to safely be void instead of null when a branch did not run.
+
+The result is the best of both worlds, where NULL can give a *specific* error tied to null splicing.
+
+    &gt;&gt; compose [&lt;a&gt; (select [a 10 b 20] &#39;c) &lt;c&gt;]
+    ** Script Error: non-NULL value required (see MAYBE, TRY, REIFY)
+
+    &gt;&gt; compose [&lt;a&gt; (maybe select [a 10 b 20] &#39;c) &lt;c&gt;]
+    == [&lt;a&gt; &lt;c&gt;]
+
+*(Trust me, this turns out to be powerful--not a hassle.  I&#39;ll show exactly how insaneo-style that is in an upcoming demonstration, so be looking forward to it. :sunglasses: )*
+
+## Decorated Groups (including quoted) Apply Their Decorations!
+
+Ren-C has a lot of variations of GROUP!:
+
+* **`(set-group!):`**
+* **`:(get-group!)`**
+* **`^(meta-group!)`**
+* **`@(the-group!)`**
+* **`&#39;&#39;&#39;&#39;(quoted!)`**  &lt;sub&gt;[yes, any number of quotes!](https://forum.rebol.info/t/quoted-arrives-formerly-known-as-lit-bit/995)&lt;/sub&gt;
+
+COMPOSE does useful magic for you, and if the type a GROUP! evaluates to supports the decoration, it will be applied!
+
+    &gt;&gt; fruits: [apple banana]
+    &gt;&gt; dispositions: [favorite least-favorite]
+
+    &gt;&gt; compose [(dispositions.1): &#39;@(second fruits)]
+    == [favorite: &#39;@banana]
+
+**Once you have this, you won&#39;t want to go back.**  The premise of the language is being able to dynamically play with code and generate structures on the fly.  This makes that feel extremely seamless.
+
+One little interesting thing to observe is that although you can&#39;t splice nulls, you can splice a quoted NULL:
+
+    &gt;&gt; compose [&#39;&#39;(second [a])]
+    == [&#39;&#39;]
+
+These little details turn out to be important: if you look closely at the implementation of something like the console you will see how they permit no-hassle handling of what may seem like difficult edge cases!
+
+## You Can Label the Specific Groups You Want Composed!
+
+One of the good things about templating is to be able to write most of your code normally, and then point out just the parts you want to substitute.  So if you&#39;re using so many groups that just being in a GROUP! isn&#39;t distinguishing what you want to substitute, **tagged COMPOSE** to the rescue:
+
+You can pick whatever label you want, and the first item of each group will be checked against it:
+
+    &gt;&gt; compose/label [(1 + 2) (&lt;*&gt; 1 + 2) (1 + 2)] &lt;*&gt;
+    == [(1 + 2) 3 (1 + 2)]
+
+As a neat shorthand for this, a skippable TAG! parameter can be used:
+
+    &gt;&gt; compose &lt;*&gt; [(1 + 2) (&lt;*&gt; 1 + 2) (1 + 2)]
+    == [(1 + 2) 3 (1 + 2)]
+
+The TAG! has to be given literally between the COMPOSE and the expression you want to compose.  (This is a requirement for `&lt;skip&gt;`-ability.
+
+You don&#39;t have to use symbols...any tag will do.  Could be a whole word with meaningful names, which might be valuable if you were doing it in several steps...where earlier phases could leave tags for later phases to compose.  You might also tag with numbers, `&lt;1&gt;` `&lt;2&gt;`...
+
+## Predicate Functions Can Process the Compose Slots!
+
+We now have the ability to run functions on the groups before you splice them.
+
+So if you want to define COMPOSE that acts historically like Rebol2 (splicing unless you say /ONLY), here&#39;s one way you can do it:
+
+    compose2: adapt augment :compose [/only] [
+        if not only [
+            predicate: func [group &lt;local&gt; product] [
+                either any-array? product: eval group [spread product] [:product]
+            ]
+        ]
+    ]
+
+We added the /ONLY refinement, and if you don&#39;t use it then it adds a processing function for arrays.  This gives you the historical result!
+
+:surfing_man:
+
+This only scratches the surface of what&#39;s possible, with these bendable and useful ergonomics.</description>
+    
+    <lastBuildDate>Mon, 18 Jul 2022 21:32:37 +0000</lastBuildDate>
+    <category>Feature Discover</category>
+    <atom:link href="https://forum.rebol.info/t/the-superpowers-of-ren-cs-revamped-compose/979.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>The Superpowers of Ren-C&#39;s Revamped COMPOSE</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>2 posts were split to a new topic: <a href="/t/doubled-groups-as-a-dialecting-tool/1893">((Doubled Groups)) as a Dialecting Tool</a></p>
+          <p><a href="https://forum.rebol.info/t/the-superpowers-of-ren-cs-revamped-compose/979/11">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/the-superpowers-of-ren-cs-revamped-compose/979/11</link>
+        <pubDate>Mon, 18 Jul 2022 21:58:38 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-979-11</guid>
+        <source url="https://forum.rebol.info/t/the-superpowers-of-ren-cs-revamped-compose/979.rss">The Superpowers of Ren-C&#39;s Revamped COMPOSE</source>
+      </item>
+      <item>
+        <title>The Superpowers of Ren-C&#39;s Revamped COMPOSE</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>3 posts were merged into an existing topic: <a href="/t/lkppo-stephane/1289/2">LkpPo (Stéphane)</a></p>
+          <p><a href="https://forum.rebol.info/t/the-superpowers-of-ren-cs-revamped-compose/979/4">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/the-superpowers-of-ren-cs-revamped-compose/979/4</link>
+        <pubDate>Sun, 19 Jun 2022 14:12:14 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-979-4</guid>
+        <source url="https://forum.rebol.info/t/the-superpowers-of-ren-cs-revamped-compose/979.rss">The Superpowers of Ren-C&#39;s Revamped COMPOSE</source>
+      </item>
+      <item>
+        <title>The Superpowers of Ren-C&#39;s Revamped COMPOSE</title>
+        <dc:creator><![CDATA[BlackATTR]]></dc:creator>
+        <description><![CDATA[
+            <p>Scrumptious enhancements here! <img src="//forum.rebol.info/images/emoji/twitter/tongue.png?v=7" title=":tongue:" class="emoji" alt=":tongue:"><br>
+I've used COMPOSE quite a bit in my code previously and was grateful for it, but it was just a normal rebol way of getting things done. The labeling and predicate changes make it much more likely that I'll be building a lot more of my code with this powerful function.</p>
+          <p><a href="https://forum.rebol.info/t/the-superpowers-of-ren-cs-revamped-compose/979/8">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/the-superpowers-of-ren-cs-revamped-compose/979/8</link>
+        <pubDate>Wed, 06 Mar 2019 14:19:26 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-979-8</guid>
+        <source url="https://forum.rebol.info/t/the-superpowers-of-ren-cs-revamped-compose/979.rss">The Superpowers of Ren-C&#39;s Revamped COMPOSE</source>
+      </item>
+      <item>
+        <title>The Superpowers of Ren-C&#39;s Revamped COMPOSE</title>
+        <dc:creator><![CDATA[giuliolunati]]></dc:creator>
+        <description><![CDATA[
+            <p>Very useful!<br>
+Maybe also the FILE! type could be enabled:</p>
+<pre><code>compose % [(1 + 2) (% 1 + 2)] ...
+</code></pre>
+<blockquote>
+<p><strong>UPDATE:</strong> This feature wish has been granted!</p>
+</blockquote>
+          <p><a href="https://forum.rebol.info/t/the-superpowers-of-ren-cs-revamped-compose/979/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/the-superpowers-of-ren-cs-revamped-compose/979/2</link>
+        <pubDate>Thu, 27 Dec 2018 13:10:00 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-979-2</guid>
+        <source url="https://forum.rebol.info/t/the-superpowers-of-ren-cs-revamped-compose/979.rss">The Superpowers of Ren-C&#39;s Revamped COMPOSE</source>
+      </item>
+      <item>
+        <title>The Superpowers of Ren-C&#39;s Revamped COMPOSE</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>COMPOSE is one of Rebol's most useful and recognizable constructs.  As with most-things-Ren-C, it has evolved to become far more powerful.</p>
+<h2>No Splicing By Default, BLOCK! Isotopes Request Splicing</h2>
+<p>One of the immediately noticeable differences is that there is no /ONLY option any longer.  A plain GROUP! will not splice its evaluative result.  So if <strong>block: [a b c]</strong>, it is different from historical Redbol:</p>
+<pre><code>rebol2/r3-alpha/red&gt;&gt; compose [value: (block)]
+== [value: a b c]
+
+ren-c&gt;&gt; compose [value: (block)]
+== [value: [a b c]]
+</code></pre>
+<p>If you want to have something splice, you do this with BLOCK! isotopes.  For instance, SPREAD produces them:</p>
+<pre><code>ren-c&gt;&gt; compose [value: (block), (spread block)]
+== [value: [a b c], a b c]
+</code></pre>
+<ul>
+<li>
+<p>You can mix and match splicing parts and non-splicing parts in the same COMPOSE!</p>
+</li>
+<li>
+<p>It gets rid of an instance of /ONLY, which has always been something that causes head-scratching to new users ("only what?")</p>
+</li>
+</ul>
+<p><strong>This is now in sync with APPEND's default of not splicing.</strong>  I am convinced that practice has shown that not splicing is a safer and more intuitive default.  You're so often dealing with splicing several values at a time that the odds of you knowing precisely what data type all of them are become lesser.  I really believe this is the better behavior for people who are writing and reading the code.</p>
+<h2>The (...) Slots will Vaporize Voids!</h2>
+<p>In my list of <a href="https://forum.rebol.info/t/the-canonical-list-of-non-negotiables/1244">"non-negotiables"</a>, I've always said this <em>had</em> to be true, somehow:</p>
+<pre><code>&gt;&gt; compose [&lt;a&gt; (if false [&lt;b&gt;]) &lt;c&gt;]
+== [&lt;a&gt; &lt;c&gt;]
+</code></pre>
+<p>For quite some time, a conditional like IF that didn't run its branch would return NULL.  Because NULL couldn't be put in a block, it <em>seemed</em> like it was a good fit for signaling vaporization of a clause in a COMPOSE.  But I was nervous because as NULL came to mean "soft failure", this felt like you could be sweeping a failure under the rug.</p>
+<p>Yet it was heavy-handed to need to say something like <strong><code>(maybe if false [&lt;b&gt;])</code></strong> to turn the NULL into a purely invisible VOID.  So it was a relief when the mechanics of <a href="https://forum.rebol.info/t/pure-vs-impure-invisibility-do-we-need-both/1782"><em>"impure invisibility"</em></a> allowed conditionals like IF to safely be void instead of null when a branch did not run.</p>
+<p>The result is the best of both worlds, where NULL can give a <em>specific</em> error tied to null splicing.</p>
+<pre><code>&gt;&gt; compose [&lt;a&gt; (select [a 10 b 20] 'c) &lt;c&gt;]
+** Script Error: non-NULL value required (see MAYBE, TRY, REIFY)
+
+&gt;&gt; compose [&lt;a&gt; (maybe select [a 10 b 20] 'c) &lt;c&gt;]
+== [&lt;a&gt; &lt;c&gt;]
+</code></pre>
+<p><em>(Trust me, this turns out to be powerful--not a hassle.  I'll show exactly how insaneo-style that is in an upcoming demonstration, so be looking forward to it. <img src="https://forum.rebol.info/images/emoji/twitter/sunglasses.png?v=9" title=":sunglasses:" class="emoji" alt=":sunglasses:"> )</em></p>
+<h2>Decorated Groups (including quoted) Apply Their Decorations!</h2>
+<p>Ren-C has a lot of variations of GROUP!:</p>
+<ul>
+<li><strong><code>(set-group!):</code></strong></li>
+<li><strong><code>:(get-group!)</code></strong></li>
+<li><strong><code>^(meta-group!)</code></strong></li>
+<li><strong><code>@(the-group!)</code></strong></li>
+<li>
+<strong><code>''''(quoted!)</code></strong>  <sub><a href="https://forum.rebol.info/t/quoted-arrives-formerly-known-as-lit-bit/995">yes, any number of quotes!</a></sub>
+</li>
+</ul>
+<p>COMPOSE does useful magic for you, and if the type a GROUP! evaluates to supports the decoration, it will be applied!</p>
+<pre><code>&gt;&gt; fruits: [apple banana]
+&gt;&gt; dispositions: [favorite least-favorite]
+
+&gt;&gt; compose [(dispositions.1): '@(second fruits)]
+== [favorite: '@banana]
+</code></pre>
+<p><strong>Once you have this, you won't want to go back.</strong>  The premise of the language is being able to dynamically play with code and generate structures on the fly.  This makes that feel extremely seamless.</p>
+<p>One little interesting thing to observe is that although you can't splice nulls, you can splice a quoted NULL:</p>
+<pre><code>&gt;&gt; compose [''(second [a])]
+== ['']
+</code></pre>
+<p>These little details turn out to be important: if you look closely at the implementation of something like the console you will see how they permit no-hassle handling of what may seem like difficult edge cases!</p>
+<h2>You Can Label the Specific Groups You Want Composed!</h2>
+<p>One of the good things about templating is to be able to write most of your code normally, and then point out just the parts you want to substitute.  So if you're using so many groups that just being in a GROUP! isn't distinguishing what you want to substitute, <strong>tagged COMPOSE</strong> to the rescue:</p>
+<p>You can pick whatever label you want, and the first item of each group will be checked against it:</p>
+<pre><code>&gt;&gt; compose/label [(1 + 2) (&lt;*&gt; 1 + 2) (1 + 2)] &lt;*&gt;
+== [(1 + 2) 3 (1 + 2)]
+</code></pre>
+<p>As a neat shorthand for this, a skippable TAG! parameter can be used:</p>
+<pre><code>&gt;&gt; compose &lt;*&gt; [(1 + 2) (&lt;*&gt; 1 + 2) (1 + 2)]
+== [(1 + 2) 3 (1 + 2)]
+</code></pre>
+<p>The TAG! has to be given literally between the COMPOSE and the expression you want to compose.  (This is a requirement for <code>&lt;skip&gt;</code>-ability.</p>
+<p>You don't have to use symbols...any tag will do.  Could be a whole word with meaningful names, which might be valuable if you were doing it in several steps...where earlier phases could leave tags for later phases to compose.  You might also tag with numbers, <code>&lt;1&gt;</code> <code>&lt;2&gt;</code>...</p>
+<h2>Predicate Functions Can Process the Compose Slots!</h2>
+<p>We now have the ability to run functions on the groups before you splice them.</p>
+<p>So if you want to define COMPOSE that acts historically like Rebol2 (splicing unless you say /ONLY), here's one way you can do it:</p>
+<pre><code>compose2: adapt augment :compose [/only] [
+    if not only [
+        predicate: func [group &lt;local&gt; product] [
+            either any-array? product: eval group [spread product] [:product]
+        ]
+    ]
+]
+</code></pre>
+<p>We added the /ONLY refinement, and if you don't use it then it adds a processing function for arrays.  This gives you the historical result!</p>
+<p><img src="https://forum.rebol.info/images/emoji/twitter/surfing_man.png?v=9" title=":surfing_man:" class="emoji only-emoji" alt=":surfing_man:"></p>
+<p>This only scratches the surface of what's possible, with these bendable and useful ergonomics.</p>
+          <p><a href="https://forum.rebol.info/t/the-superpowers-of-ren-cs-revamped-compose/979/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/the-superpowers-of-ren-cs-revamped-compose/979/1</link>
+        <pubDate>Thu, 27 Dec 2018 08:01:33 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-979-1</guid>
+        <source url="https://forum.rebol.info/t/the-superpowers-of-ren-cs-revamped-compose/979.rss">The Superpowers of Ren-C&#39;s Revamped COMPOSE</source>
+      </item>
+  </channel>
+</rss>

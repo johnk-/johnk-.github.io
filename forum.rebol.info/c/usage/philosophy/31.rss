@@ -5,8 +5,188 @@
     <link>https://forum.rebol.info/c/usage/philosophy/31</link>
     <description>Topics in the &#39;Philosophy&#39; category How does Rebol differ from other computer languages and what makes code Rebolish and functional vs procedural coding.</description>
     
-      <lastBuildDate>Sat, 14 May 2022 05:39:18 +0000</lastBuildDate>
+      <lastBuildDate>Tue, 16 Aug 2022 10:23:16 +0000</lastBuildDate>
       <atom:link href="https://forum.rebol.info/c/usage/philosophy/31.rss" rel="self" type="application/rss+xml" />
+        <item>
+          <title>A Justification of Generalized Isotopes</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Philosophy</category>
+          <description><![CDATA[
+            <p><em>Here is a train of thought to help people realize why isotopes are needed, and why unifying their behaviors and mechanisms under a common umbrella makes sense.  It starts from the issue of solving /ONLY and then explains the generalization.</em></p>
+<p><em>As time permits, I'll come back and try to improve this...</em></p>
+<hr>
+<p>Years of fretting over the /ONLY debacle converged on a somewhat inescapable conclusion:</p>
+<p><em><strong>It's better to carry the intent of whether a value needs to be spliced on that value...as opposed to having subtle variants of core operations that modulate the splicing.</strong></em></p>
+<p>I'd worked up to a point where I was implementing the "mark of intent" by adding a quoting level to <em>suppress</em> splicing.  Yet this faced likely accidents when someone had a quoted value in a variable...and really meant to use it somewhere as-is, with the quote--vs. thinking of the quote as a splice-suppression signal which the operation should remove.</p>
+<p>Then <a href="https://forum.rebol.info/t/putting-splicing-intent-on-appended-value/1873/9">@rgchris made this remark</a>:</p>
+<aside class="quote no-group quote-modified" data-username="rgchris" data-post="9" data-topic="1873" data-full="true">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/rgchris/40/14_2.png" class="avatar"><a href="https://forum.rebol.info/t/putting-splicing-intent-on-appended-value/1873/9">Putting Splicing Intent On APPEND'ed Value</a>
+</div>
+<blockquote>
+<p>The issue I have with doing the opposite of ONLY—let's call it SPREAD—is what is the interim value?</p>
+<pre><code>&gt;&gt; block: [a b c [a b c]]
+
+&gt;&gt; find block pick block 4
+[[a b c]]
+
+&gt;&gt; find block spread pick block 4
+[a b c [a b c]]
+
+&gt;&gt; spread pick block 4
+???
+</code></pre>
+<p>It would seem to have virtue over ONLY and is a better word.</p>
+</blockquote>
+</aside>
+<h2>If Trying This In Historical Redbol, What Might One Do?</h2>
+<p>As a rough first cut, let's represent splices with a specially recognizable 2-element wrapper block.  We'll signal it's a splice with a series in the first slot--checking for the unique identity of that series.  Then put the block itself as the second element:</p>
+<pre><code>splice-cue: "!!!splice!!!"
+
+spread: func [block [block!]] [
+    return reduce [splice-cue block]
+]
+
+splice?: func [value] [
+    if not block? :value [return false]
+    return same? splice-cue first value
+]
+</code></pre>
+<p>Then we can write our new versions of things like APPEND that are specifically aware of this construct.</p>
+<pre><code>append*: func [series [series!] value] [
+    return either splice? :value [
+        append series second value
+    ][
+        append/only series :value
+    ]
+ ]
+</code></pre>
+<p>It works more or less in your average Redbol, e.g. in Red:</p>
+<pre><code>red&gt;&gt; append* [a b c] spread [d e]
+== [a b c d e]
+
+red&gt;&gt; append* [a b c] [d e]
+== [a b c [d e]]
+
+red&gt;&gt; append* [a b c] 'd
+== [a b c d]
+
+red&gt;&gt; append* [a b c] first ['d]
+== [a b c 'd]
+</code></pre>
+<p><em>In fact, this is essentially how the bootstrap executable for Ren-C simulates the SPREAD behavior.</em></p>
+<p>But the weaknesses are <em>immediately</em> apparent!!!  <img src="https://forum.rebol.info/images/emoji/twitter/pouting_cat.png?v=9" title=":pouting_cat:" class="emoji" alt=":pouting_cat:"></p>
+<h2>Not A Distinct Type: Too Easy To Overlook Handling</h2>
+<p>There's no special type for the spliced block...it's just a BLOCK!.  This means any routine that hasn't been written to handle it, will just let it leak through.</p>
+<pre><code>red&gt;&gt; reduce [spread [a b c] [a b c]]
+== [["!!!splice!!!" [a b c]] [a b c]]  ; not [a b c [a b c]]
+</code></pre>
+<p>Changing to some other generic type that can contain a block...such as an OBJECT!...doesn't help matters.  You are kind of in trouble any time an operation willfully lets you put these into an array.</p>
+<p><strong>The first instinct might be to introduce a new SPLICE! datatype, with a system-wide rule that splices can't be put into arrays.</strong>  <em>(Enforcing such a rule across all array-manipulating code is challenging...so let's sort of make a note of that fact, but continue.)</em></p>
+<p>Because of the peculiar nature of not being able to be put in a block, there'd have to be a decision made about function arguments as to whether or not they took this type.  Many functions designed to handle generic values would not be able to handle them, so there'd presumably need to be some typeset like ANY-NOTSPLICE! or ANY-NORMAL!.</p>
+<h2>How To Represent A Type That Can't Be Put In A Block?</h2>
+<p>Now we've got several things to ponder about our new type.  For instance: what you should see here?</p>
+<pre><code>&gt;&gt; obj: make object! [foo: spread [d e]]
+== make object! [
+    foo: ???
+]
+</code></pre>
+<p>We just said that a defining feature of SPLICE! is that you can't accidentally put them in blocks.  But the argument to MAKE OBJECT!, namely <strong><code>[foo: ???]</code></strong>, is a block.  If <code>???</code> can't itself be a splice!, then what is it?</p>
+<p>This brings up a possibly-related question: what if you want a way to put the intent of whether to splice or not into "suspended animation?"... in a way that you could collect it?</p>
+<p>Here's a sort of contrived example of the puzzle:</p>
+<pre><code>generate: func [n [integer!]] [
+   if even? n [return reduce [n n + 1]]
+   return spread reduce [n n + 1]
+]
+
+wrap: func [
+    return: [...]
+    in [splice! block!]
+][
+    ...
+]
+
+unwrap: func [
+    return: [splice! block!]
+    wrapped [...]
+][
+    ...
+]
+
+n: 0
+pending: collect [while [n &lt; 4] [keep wrap generate n]]
+
+data: copy []
+for-each item pending [append data unwrap item]
+</code></pre>
+<p>How would you write WRAP and UNWRAP such that at the end of the code above, you'd get:</p>
+<pre><code>&gt;&gt; data
+== [[0 1] 1 2 [2 3] 3 4]
+</code></pre>
+<p>If the system didn't provide some answer to this, you'd end up needing to re-invent something kind of equivalent to the primitive <code>["!!!splice!!!" [...]]</code> mechanic as a means of persistence:</p>
+<pre><code>&gt;&gt; pending
+== [[0 1] ["!!!splice!!!" [1 2]] [2 3] ["!!!splice!!!" [3 4]]]
+</code></pre>
+<h1>Isotopes Were Designed For This!</h1>
+<p>Isotopes are a set of curated answers for these problems.  Originally they were introduced to address issues like what an UNSET! was...which has some of the same class of problems as SPLICE! (such as not wanting to be put in BLOCK!s, and not accepted by default or by most routines).</p>
+<p>Isotopes are:</p>
+<ul>
+<li>
+<p><strong>general</strong> - all base value types (e.g. unquoted things that can be put into blocks, so not NULL or VOID or QUOTED!) have isotopic forms</p>
+</li>
+<li>
+<p><strong>efficient</strong> - isotopes do not require allocations, and merely are a different state of a byte in the value cell (the same byte that encodes quoting levels)</p>
+</li>
+<li>
+<p><strong>"meta-representable"</strong> - all isotopes have a corresponding single-value form known as a "quasi-form", which when evaluated (or run through a more narrow UNQUASI operation) will yield the isotopic form</p>
+</li>
+</ul>
+<p>I mentioned at the outset that it would be somewhat costly to bulletproof all of native code against the ability to do something like append a specific data type like "SPLICE!" to a block.  But with isotopes this problem has been solved once for all the forms...so the same code that prevents a so-called "UNSET!" from winding up in arrays works for splices.  <em>That's because a splice is actually an isotopic block!, and an unset is actually an isotopic blank!</em></p>
+<p>Above I asked:</p>
+<blockquote>
+<p>What you should see here?</p>
+<pre><code>&gt;&gt; obj: make object! [foo: spread [d e]]
+== make object! [
+    foo: ???
+]
+</code></pre>
+</blockquote>
+<p>Isotopes give us the answer, that it's <strong><code>foo: ~[d e]~</code></strong>.  This is the previously mentioned "QUASI!" form of BLOCK!, which when evaluated produces an isotope.</p>
+<p><em>But isotopes themselves have no canon representation.</em>  The console can print out a comment or show them in a different color, but to talk about them having a representation doesn't make much sense as you'll never see them in source.</p>
+<pre><code>&gt;&gt; ~[d e]~
+== ~[d e]~  ; isotope
+</code></pre>
+<p>I also asked:</p>
+<blockquote>
+<p>"How would you write WRAP and UNWRAP such that at the end of the code above, you'd get:"</p>
+<pre><code>&gt;&gt; data
+== [[0 1] 1 2 [2 3] 3 4]
+</code></pre>
+</blockquote>
+<p>With isotopic blocks representing splices, you don't need to write WRAP and UNWRAP... because these operations are built in operations called META and UNMETA.  And the pending array would look like:</p>
+<pre><code>&gt;&gt; pending
+== ['[0 1] ~[1 2]~ '[2 3] ~[3 4]~]
+</code></pre>
+<p>When the QUOTED! blocks are UNMETA'd, they become regular blocks and then are appended as-is.  When the QUASI! blocks are UNMETA'd they become isotopes and give the splice intent.  This produces the desired "suspended animation" to preserve the intent.</p>
+<p><em>That suspended animation is also used in the ^META parameter convention, which indicates a function argument can accept isotopes... and the add-quoting-or-quasi behavior brings those isotopic variables into a reified state so they can be safely handled.</em></p>
+<h2>The Proof Is In The Capabilities</h2>
+<p>I've explained about splices, and mentioned how it crosses needs with unset variable states.</p>
+<p>But isotopes are also a cornerstone of <a href="https://forum.rebol.info/t/default-values-and-make-frame/1412">how function and FRAME! specialization works</a>.</p>
+<p>The ERROR! isotope is used to have a sneaky out-of-band way to return <a href="https://forum.rebol.info/t/fail-vs-return-fail-the-new-age-of-definitional-failures/1852">definitional errors</a></p>
+<p>As their applications expand, they are slated to allow us to have non-literal modes to ask something like FIND that you want to look for <em>instances</em> of a datatype by passing that type isotopically... vs. looking for the datatype's appearance concretely in the target.  Concepts of making only isotopic ACTION!s run through WORD! references could make it completely safe to work with arguments passed as variables, saving you from needing GET-WORD!s to handle them.</p>
+<p>It's natural for there to be some confusion with the new idea--especially given all its churn through the course of design.  But the design is becoming clearer, and I think people are going to find this gives solidity to writing complicated but coherent code...vastly outpacing historical Redbol.</p>
+            <p><small>4 posts - 3 participants</small></p>
+            <p><a href="https://forum.rebol.info/t/a-justification-of-generalized-isotopes/1918">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/a-justification-of-generalized-isotopes/1918</link>
+          <pubDate>Tue, 16 Aug 2022 10:23:16 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-1918</guid>
+          <source url="https://forum.rebol.info/t/a-justification-of-generalized-isotopes/1918.rss">A Justification of Generalized Isotopes</source>
+        </item>
         <item>
           <title>The Rebellion Against Style Guides</title>
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
@@ -416,15 +596,15 @@ func: funco [
           <source url="https://forum.rebol.info/t/debunking-the-arity-1-make/1591.rss">Debunking the Arity-1 MAKE</source>
         </item>
         <item>
-          <title>Weird WORD!s - Allow, But Backtick Escape Them?</title>
+          <title>Weird WORD!s - Allow, But Escape Them?</title>
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
           <category>Philosophy</category>
           <description><![CDATA[
-            <p>I suggested the idea of using <strong><code>&lt;.&gt;</code></strong> as a weird TAG! in PARSE... then I remembered... that's a TUPLE!.</p>
-<p>My feeling is you should be able to build paths and tuples out of anything that's a valid WORD!.  But is it time we had an escaping mode for "weird words"?  If you want to make the above TUPLE!, what if you had to write:</p>
+            <p>My feeling is you should be able to build paths and tuples out of anything that's a valid WORD!.  But is it time we had an escaping mode for "weird words"?</p>
+<p>Let's say you didn't want <strong><code>&lt;.&gt;</code></strong> to be a  TAG!, but rather a TUPLE! where the first element was <strong><code>&lt;</code></strong> and the second was <strong><code>&gt;</code></strong>.</p>
+<p>We could do something like backquotes:</p>
 <pre><code>`&lt;`.`&gt;`
 </code></pre>
-<p>Otherwise, <code>&lt;.&gt;</code> would be a TAG!</p>
 <p>Having an escaping mode for words would open up more lexical space.  For instance,  I like the idea of allowing $FOO, $(FOO), $FOO/BAR, $[FOO BAR] etc. as another type...</p>
 <p>But this would seem to kill off the idea of being able to have <code>$</code> and <code>$$</code> etc. as WORD!s, because you get into ambiguous situations... is $/foo a PATH! with the $ word in the first slot, or an ENV-PATH! with an empty first slot?</p>
 <p>These ambiguities create problems for other things that might stand alone all right, because we don't want to have "second-class-citizen" WORD!s that can't appear in paths.</p>
@@ -444,16 +624,16 @@ I am colon!
 <p>It could work for other standalone characters, like <strong><code>@</code></strong> and perhaps <strong><code>&amp;</code></strong>.  <strong>%</strong> could be the same (with %"" or %{} used for empty file)</p>
 <p>I feel like # and / may not be good candidates for this treatment, it would need more thought.</p>
 <p><strong>The point wouldn't be that you'd likely be going crazy with paths involving these characters, but rather that you might want to do interesting things with them standalone.</strong>  It's just to put them on the map as legitimate words.</p>
-            <p><small>2 posts - 2 participants</small></p>
-            <p><a href="https://forum.rebol.info/t/weird-word-s-allow-but-backtick-escape-them/1560">Read full topic</a></p>
+            <p><small>5 posts - 2 participants</small></p>
+            <p><a href="https://forum.rebol.info/t/weird-word-s-allow-but-escape-them/1560">Read full topic</a></p>
           ]]></description>
-          <link>https://forum.rebol.info/t/weird-word-s-allow-but-backtick-escape-them/1560</link>
+          <link>https://forum.rebol.info/t/weird-word-s-allow-but-escape-them/1560</link>
           <pubDate>Mon, 15 Mar 2021 03:30:50 +0000</pubDate>
           <discourse:topicPinned>No</discourse:topicPinned>
           <discourse:topicClosed>No</discourse:topicClosed>
           <discourse:topicArchived>No</discourse:topicArchived>
           <guid isPermaLink="false">forum.rebol.info-topic-1560</guid>
-          <source url="https://forum.rebol.info/t/weird-word-s-allow-but-backtick-escape-them/1560.rss">Weird WORD!s - Allow, But Backtick Escape Them?</source>
+          <source url="https://forum.rebol.info/t/weird-word-s-allow-but-escape-them/1560.rss">Weird WORD!s - Allow, But Escape Them?</source>
         </item>
         <item>
           <title>Don&#39;t Fear The WORD!</title>
@@ -639,80 +819,6 @@ count-up x 1000000 [
           <discourse:topicArchived>No</discourse:topicArchived>
           <guid isPermaLink="false">forum.rebol.info-topic-1492</guid>
           <source url="https://forum.rebol.info/t/on-wasted-bits/1492.rss">On Wasted Bits</source>
-        </item>
-        <item>
-          <title>Why Isn&#39;t PRINT Invisible (&quot;void&quot;)?</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Philosophy</category>
-          <description><![CDATA[
-            <p>Since PRINT doesn't have an interesting return value, we might ask what the harm would be in making it invisible.</p>
-<p>But let's generalize the question to SOME-FUNCTION where the key point is that at the time you write it, you haven't thought of a meaningful result for it.</p>
-<h2>Catching Erroneous Assignments</h2>
-<p>Returning an "ornery" value helps catch mistakes more easily when a meaningless result is accidentally used.</p>
-<p>But with invisibles, we might adopt a philosophy like C's, and say you cannot put a void function directly after an assignment:</p>
-<pre><code>int x = some_void_function(...);  /* compiler will error */
-</code></pre>
-<p>Interestingly, C lets use them in comma-delimited expressions so long as they are discarded...you have to use parentheses to do it:</p>
-<pre><code>int x = (some_void_function(...), 10 + 20);  /* this is okay */
-int x =  some_void_function(...), 10 + 20;  /* this errors */
-</code></pre>
-<p>We could do something similar</p>
-<pre><code>x: comment "hi" 1 + 2  ; this could error
-x: (comment "hi" 1 + 2)  ; this could be okay
-</code></pre>
-<p>That's a little bit of a bummer for comment, but not the end of the world.</p>
-<p>However, I want to see Ren-C's void/invisible used for things like BREAKPOINT and other tools... where having to rearrange your code in this way could be a nuisance (or dialect-wise, the GROUP!s could have semantic implications, e.g. if the code was inside of a COMPOSE).</p>
-<p>But there are other issues...</p>
-<h2>Limiting Interface Flexibility</h2>
-<p>If at the time of writing a function you know that it doesn't have a meaningful return value, then making it void--instead of returning a trash value--ties your hands in changing it.</p>
-<p>People will start writing things like:</p>
-<pre><code>all [
-    ...
-    some-function ...  ; user assumes no effect, because invisible
-    ...
-]
-</code></pre>
-<p>But if SOME-FUNCTION had returned a trash value, then they could have gotten the same effect more obviously with:</p>
-<pre><code>all [
-    ...
-    elide some-function ...
-    ...
-]
-</code></pre>
-<p>This also gives more freedom to change the interface later, if you think of an interesting value to return.  You can progressively add more return types after the fact.  But once people assume you always return void, this trap will happen...you're locked in forever in a way that was pretty much completely avoidable.</p>
-<h2>In PRINT's Case, a Differentiated NULL Output Has Value</h2>
-<p>Having a return value from PRINT that is either an ornery value or nothing lets you offer the neat option of returning NULL if the result of the print was nothing.</p>
-<pre><code> &gt;&gt; line: "some text"
- &gt;&gt; print line then [print "We had output!"]
- some text
- We had output!
-
- &gt;&gt; line: _
- &gt;&gt; print line then [print "We had output!"]  ; no-op
-</code></pre>
-<p>To do this kind of thing requires having an output value.</p>
-<p>I might be convinced that how people want to use PRINT is universally enough that they would rather it be invisible.  But that would involve a very specific understanding of a very common function...similar to how <strong>elide</strong> and <strong>comment</strong> and <strong>assert</strong> and <strong>--</strong> are known to have no result.</p>
-<p>I don't think the average "no meaningful result" function fits in this category, and I'd say I'm fairly skeptical if PRINT belongs in it.</p>
-<h2>I Think "Void" Functions Should Be Used Sparingly</h2>
-<p>I think the feature should be <em>discoverable</em>, because how it's done is unique...and we are giving it a more normal name ("void function")</p>
-<p>I'm feeling a bit more amenable to the idea that these are void return modes, even if it creates barriers to a multi-valued RETURN:</p>
-<pre><code>f1: func [x] [return]
-f1: func [x] [return comment x]
-</code></pre>
-<p>But this means there needs to be a relatively comfortable syntax for returning a BAD-WORD! that is like what we're used to.  <a href="https://forum.rebol.info/t/the-return-of-none/1467">I'm wondering if <strong>return none</strong>, recycling the word none for <strong>~none~</strong>, is the right compromise.</a></p>
-<blockquote>
-<p><strong>UPDATE:</strong> I've found some other reasons why not to do this again.  So I think arity-0 RETURN is likely going to keep the "return meaningless (and ornery) value" semantic.</p>
-</blockquote>
-            <p><small>1 post - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/why-isnt-print-invisible-void/1466">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/why-isnt-print-invisible-void/1466</link>
-          <pubDate>Mon, 18 Jan 2021 01:40:15 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-1466</guid>
-          <source url="https://forum.rebol.info/t/why-isnt-print-invisible-void/1466.rss">Why Isn&#39;t PRINT Invisible (&quot;void&quot;)?</source>
         </item>
         <item>
           <title>THEN and ELSE are Essential</title>
@@ -1138,39 +1244,6 @@ modifier: func [blk [&lt;mutable&gt; block!]] [
           <source url="https://forum.rebol.info/t/const-parameters-by-default/1328.rss">Const Parameters By Default?</source>
         </item>
         <item>
-          <title>Terminology contention with functional programming: COMPOSE, MAP</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Philosophy</category>
-          <description><![CDATA[
-            <p>There's a <em>very</em> entrenched use of the term <strong>compose</strong> in math and functional programming to refer to the idea of <a href="https://en.wikipedia.org/wiki/Function_composition" rel="nofollow noopener">function composition</a>.  Ren-C has been pushing on the abilities so that you can CHAIN and SPECIALIZE functions.  But if anyone were searching on this they would ask <em>"how to compose two functions"</em>.</p>
-<p>When I was first experimenting with a new operator that was a replacement for REJOIN that had more predictable behavior (and would "dissolve nones"), I called it COMBINE.  Something I noticed that was frustrating is that I kept mixing up COMBINE and COMPOSE...typing one when I meant the other.</p>
-<p>Today the replacement is DELIMIT and its specializations SPACED and UNSPACED.  Which means the COMBINE word is free.  It's the same number of letters as COMPOSE and doesn't carry the baggage.</p>
-<p>As I'm not proposing any specific definition for the COMPOSE operation at this time, it could be just left as <em>"error: use COMBINE or do COMPOSE: :COMBINE"</em>.  This could also help alleviate confusion over COMPOSE's historical splicing behavior: COMBINE could get a fresh start with its behavior of only splicing blocks if <strong><code>((...))</code></strong> is used.</p>
-<hr>
-<p>On a similar note, I have a lot of questions about the MAP! datatype.  But one question would be its name.  The <strong>map</strong> term in almost all functional programming scenarios does something like:</p>
-<pre><code>&gt;&gt; map :negate [1 2 3]
-== [-1 -2 -3]
-</code></pre>
-<p>Ren-C can do some fancy tricks similar to these languages, e.g.</p>
-<pre><code>&gt;&gt; map (=&gt; 10 +) [1 2 3]
-== [11 12 13]
-</code></pre>
-<p>It's hard to think of a nicer word for this!</p>
-<p>The data structure could have other names... HASH! is a bit misleading (sounds like it's a hash value, as opposed to a HASHTABLE!).  DICTIONARY! is a pretty self-explanatory name that's used several places.  It's long to type out, but in a language that lets you say <strong>dict!: dictionary!</strong> it seems that maybe it's something people could abbreviate on their own if they think it's a problem.</p>
-<hr>
-<p>I've always felt that the functional programming languages had the most "reusable thought" and vetted libraries.  Today's world sees languages like Rust and Elm borrowing heavily from places like Haskell, and I think that's a lot of established prior art to be ignoring.  It's hard to imagine coming up with better...so these questions should be taken seriously if one expects to have traction with the thinking people of the world (!)</p>
-            <p><small>4 posts - 3 participants</small></p>
-            <p><a href="https://forum.rebol.info/t/terminology-contention-with-functional-programming-compose-map/1320">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/terminology-contention-with-functional-programming-compose-map/1320</link>
-          <pubDate>Sat, 22 Aug 2020 03:48:57 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-1320</guid>
-          <source url="https://forum.rebol.info/t/terminology-contention-with-functional-programming-compose-map/1320.rss">Terminology contention with functional programming: COMPOSE, MAP</source>
-        </item>
-        <item>
           <title>Modifying While Iterating: Crash, Nonsense, Predictable, or Illegal?</title>
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
           <category>Philosophy</category>
@@ -1395,57 +1468,6 @@ foo: adapt 'foo-core [
           <source url="https://forum.rebol.info/t/semantic-limits-of-eliminating-redundancy-via-specialization/1267.rss">Semantic Limits of Eliminating Redundancy via Specialization</source>
         </item>
         <item>
-          <title>Can `TAKE []` Just Return Null?</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Philosophy</category>
-          <description><![CDATA[
-            <p>Here is the behavior of TAKE in Rebol2:</p>
-<pre><code>rebol2&gt;&gt; block: compose [1020 (none)]
-== [1020 none]
-
-rebol2&gt;&gt; take block
-== 1020
-
-rebol2&gt;&gt; take block
-== none
-
- rebol2&gt;&gt; take block
- == none
-
- rebol2&gt;&gt; take block
- == none
-</code></pre>
-<p>One thing I was bothered about was the inability to notice a difference between taking from an empty block and taking from a block containing a NONE!.  Ren-C can resolve that with NULL as a unique response to taking from a block with no elements in it.</p>
-<p>But there's another concern which BrianH expressed, about a routine that you expected to have a side effect that did not.  If you write a line simply like <strong>take block</strong> and it doesn't take anything away, should it be silent about that fact?</p>
-<h2>Early Ren-C introduced <code>TAKE*</code> as distinct from <code>TAKE</code>...</h2>
-<p>Experiments at being prescriptive worried that getting back a NULL might not be enough to warn you about a misunderstanding.  So we wound up with this:</p>
-<pre><code>ren-c&gt;&gt; take []
-** Error: TAKE-ing from an empty block, use TAKE*
-
-ren-c&gt;&gt; take* []
-; null
-</code></pre>
-<p>To make things simple, TAKE was just a chained function derived from the lower-level <code>TAKE*</code>.  This seemed "safer"...at the time, and addressed BrianH's (pre-NULL) concern...as well as my general overarching desire to use things that are "more checked".</p>
-<p><strong>But this may be the wrong place to get paranoid about the user's intent, and we should just be happy that the NULL offers a unique result that means nothing was taken.</strong></p>
-<p>When I wrote about <a href="https://forum.rebol.info/t/make-your-own-safety/1118/3">"Make Your Own Safety"</a> I asked what the odds were that we could guess the top pet-peeve that every programmer would have.</p>
-<p>How many times have you been bitten by TAKE on an empty block you didn't know was empty?  When you did, how likely was it that you blamed yourself vs. the tool?</p>
-<p>Not only that, but what if you could get the "hardened" versions of <code>TAKE</code> and <code>TAKE*</code> in the files where it was bothering you as easily as:</p>
-<pre><code> take*: :lib/take
- take: (=&gt; non null lib/take)
-</code></pre>
-<p>This seems the better angle, and avoids making it feel like there's any kind of bias toward the "tics" that bother <a class="mention" href="/u/rgchris">@rgchris</a>, which the <code>*</code> may represent.  <strong>Give people the power to bend fast to address the specific concerns that are bothering them with the bent and personalized/customized code they are writing to solve the problem they have <em>right now</em>.</strong></p>
-            <p><small>3 posts - 2 participants</small></p>
-            <p><a href="https://forum.rebol.info/t/can-take-just-return-null/1265">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/can-take-just-return-null/1265</link>
-          <pubDate>Tue, 03 Mar 2020 20:45:06 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-1265</guid>
-          <source url="https://forum.rebol.info/t/can-take-just-return-null/1265.rss">Can `TAKE []` Just Return Null?</source>
-        </item>
-        <item>
           <title>Fight for the Future: How DELINE will save us from CR LF</title>
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
           <category>Philosophy</category>
@@ -1497,7 +1519,7 @@ ren-c&gt;&gt; take* []
 rebol2&gt;&gt; rejoin ["a" if false ["b"] "c"]
 == "anonec"
 </code></pre>
-<p>You had to throw in an EITHER with an empty branch:</p>
+<p>You had to throw in an EITHER with an empty branch, to get an UNSET!.</p>
 <pre><code>rebol2&gt;&gt; compose [&lt;a&gt; (either false [&lt;b&gt;] []) &lt;c&gt;]
 == [&lt;a&gt; &lt;c&gt;]
 
@@ -1505,15 +1527,24 @@ rebol2&gt;&gt; rejoin ["a" either false ["b"] [] "c"]
 == "ac"
 </code></pre>
 <p>So I advocated vaporizing NONE! by default for a while...facing resistance from those wanting to use them as placeholders in blocks, adamant that NONE! <em>was a value</em>.</p>
-<p>This tension spawned a new philosophy based around a NULL state...which had no datatype and could never be put in blocks.  This state was then used to uniquely represent the failure of a conditional.</p>
+<p>Hence the idea was moved around to being more like a failed conditional would return an UNSET!.  But because UNSET! was "a value", it could legitimately be put into blocks.</p>
+<p>Hence Ren-C rethought the playing field to have "non-valued" states...like NULL (which you couldn't put in blocks, but could assign to a variable) and the transient VOID state (which you could neither put in blocks nor assign variables to...attempting to do so would "unset" the variable).</p>
+<p>So failed conditionals were re-tuned to return VOID:</p>
 <pre><code>&gt;&gt; compose [&lt;a&gt; (if false [&lt;b&gt;]) &lt;c&gt;]
 == [&lt;a&gt; &lt;c&gt;]
 
 &gt;&gt; unspaced ["a" if false ["b"] "c"]
 == "ac"
 </code></pre>
-<p>I don't want to belabor how it's implemented too much (even though I'm 99.99% settled with NULL as <em>the</em> right answer, and correct result for all failed conditionals).  But I don't think it should be harder than this.  so no <strong>opt if condition [...]</strong> or other markings.</p>
-<p>If some brilliant replacement plan eliminated the idea of failed conditional returning something other than the absence of a value, then those would just have to dissolve in COMPOSE unless you use COMPOSE/ONLY or something.  But I'm not holding my breath.  NULL is the ticket, here.</p>
+<p>The NULL state was decided to be an error in these situations.  So you can't go directly from a NULL variable to a vanishing slot without something that turns it into VOID.   The construct that does so is called MAYBE.</p>
+<pre><code>&gt;&gt; var: null
+
+&gt;&gt; compose [&lt;a&gt; (var) &lt;c&gt;]
+** Error: need non-NULL value in COMPOSE slot
+
+&gt;&gt; compose [&lt;a&gt; (maybe var) &lt;c&gt;]
+== [&lt;a&gt; &lt;c&gt;]
+</code></pre>
 <h2>DEFINITIONAL RETURN</h2>
 <p>Novices using Rebol2 or Red aren't really clear on how their RETURN works.  (Or <em>doesn't</em> work, as the case my be.)  RETURN climbs the stack until it finds a function that is willing to accept returns.</p>
 <ul>
@@ -1544,7 +1575,7 @@ rebol2&gt;&gt; rejoin ["a" either false ["b"] [] "c"]
 <h2>...and...</h2>
 <p>That's only two off the top of my head.  But my idea was that we can keep adding posts to this thread whenever someone thinks of something.  What <em>has</em> to work else it's "dead to you"?  <a class="mention" href="/u/ingohohmann">@IngoHohmann</a>, <a class="mention" href="/u/rgchris">@rgchris</a>, <a class="mention" href="/u/gchiu">@gchiu</a>, <a class="mention" href="/u/mark-hi">@Mark-hi</a>, <a class="mention" href="/u/blackattr">@BlackAttr</a>... ?</p>
 <p>Like I say: please avoid functionality concepts like "has to talk to ODBC"...unless you have a very specific code sample that looks <em>exactly</em> right for how it needs to look for some case.</p>
-            <p><small>4 posts - 3 participants</small></p>
+            <p><small>3 posts - 2 participants</small></p>
             <p><a href="https://forum.rebol.info/t/the-canonical-list-of-non-negotiables/1244">Read full topic</a></p>
           ]]></description>
           <link>https://forum.rebol.info/t/the-canonical-list-of-non-negotiables/1244</link>
@@ -1589,6 +1620,113 @@ rebol2&gt;&gt; rejoin ["a" either false ["b"] [] "c"]
           <discourse:topicArchived>No</discourse:topicArchived>
           <guid isPermaLink="false">forum.rebol.info-topic-1241</guid>
           <source url="https://forum.rebol.info/t/the-cliffs-of-complexity-how-much-is-too-much/1241.rss">The Cliffs of Complexity: How Much Is Too Much?</source>
+        </item>
+        <item>
+          <title>Parameter Order in Rebol</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Philosophy</category>
+          <description><![CDATA[
+            <p>With the advent of <a href="https://forum.rebol.info/t/looking-into-a-usermode-pointfree/1236">Point-Free expression</a>, things that were wordy using SPECIALIZE are now succinct.  You don't have to name the parameters...which saves typing and also keeps you from having to look it up:</p>
+<pre><code>next: specialize 'skip [offset: 1]
+;
+; ...becomes
+;
+next: (&lt;- skip _ 1)
+</code></pre>
+<p>Though that placeholder is a little bit unsatisfying.  Which means one starts looking at questions like "in Rebol, why isn't the offset to skip by <em>first</em>".  In the narrow case of this specialization, it would make it a bit briefer and seem more natural...</p>
+<pre><code>next: (&lt;- skip 1)
+</code></pre>
+<p>And to play devil's advocate, if Rebol is to be English-inspired instead of traditional OOP inspired...wouldn't you say:</p>
+<pre><code>"Skip 10 pages ahead"
+</code></pre>
+<p>Instead of the more awkward:</p>
+<pre><code>"Skip pages ahead by 10"
+</code></pre>
+<p>It's almost like the underscore in the partial specialization is playing the role of <code>"by"</code>.  But, anyway--is there some kind of universal rule to guide such decisions?</p>
+<h2>Most-or-Least Important Thing First</h2>
+<p>Since this looks very Haskell-y, here's a good summary paragraph <a href="https://stackoverflow.com/a/31738041/211160">from a StackOverflow answer</a> on why Haskell users would favor <code>(&lt;- skip 1)</code> to <code>(&lt;- skip _ 1)</code>:</p>
+<blockquote>
+<p><em>"It's common practice in Haskell to order function parameters so that parameters which "configure" an operation come first, and the "main thing being operated on" comes last. This is often counter intuitive coming from other languages, since it tends to mean you end up passing the "least important" information first. It's especially jarring coming from OO where the "main" argument is usually the object on which the method is being invoked, occurring so early in in the call that it's out of the parameter list entirely!"</em></p>
+</blockquote>
+<p>One thing about the least important parameter is it is often briefer to express.  Consider the example we hit with DELIMIT when the data to act on was first:</p>
+<pre><code>delimit [
+    "here" "is" "my"
+    long block of code stuff
+    "and we go on for a while"
+] ","
+</code></pre>
+<p>By the time you get to the comma, you might have forgotten what you are doing.  It seems it's pretty rare for the thing you're delimiting with to be coming from a long and complex expression, while the thing you're operating on may well be a giant expression (like a COLLECT).</p>
+<p>So <a class="mention" href="/u/johnk">@johnk</a> and I thought it seemed better to say:</p>
+<pre><code>delimit "," [
+    "here" "is" "my"
+    long block of code stuff
+    "and we go on for a while"
+]
+</code></pre>
+<p>So that was changed...and as a consequence we get natural-looking specializations now like:</p>
+<pre><code>spaced: (&lt;- delimit space)
+</code></pre>
+<p>What does this mean for old-school institutions like SKIP?  I don't know.  <strong>But I do know it's getting faster and clearer to bend the system to anything you want it to be...</strong></p>
+            <p><small>4 posts - 2 participants</small></p>
+            <p><a href="https://forum.rebol.info/t/parameter-order-in-rebol/1238">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/parameter-order-in-rebol/1238</link>
+          <pubDate>Thu, 31 Oct 2019 10:32:27 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-1238</guid>
+          <source url="https://forum.rebol.info/t/parameter-order-in-rebol/1238.rss">Parameter Order in Rebol</source>
+        </item>
+        <item>
+          <title>Dynamic Linking, Static Linking, and the March of &quot;Progress&quot;</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Philosophy</category>
+          <description><![CDATA[
+            <p>The ability to pick up a Rebol executable and move it to another system has been a hallmark of the project.</p>
+<p><strong>Setting up the build process in the modern world to enable this is not trivial:</strong> even if the OS itself tries to remain backwards-compatible to run older executables, modern installations of that OS (or its dev tools) refuse to maintain switches that let you build for older platforms.</p>
+<p>e.g. <em>You might think you're building on the "same" platform, but in effect you are cross-compiling...a lot like trying to build a Windows executable on Linux or a Mac.  Cross-compilation is rarely easy on most systems...and the powers-that-be certainly don't think cross-compiling from Ubuntu 10.20 back to Ubuntu 3.04 (or whatever) is interesting enough to make easy.</em></p>
+<h2>A Real Example From Yesterday To Help Illustrate</h2>
+<p>Suppose you have Ubuntu 18.10 ("cosmic") installed.  This distribution was released in October 2018.</p>
+<p>The C standard libraries--and their associated files in <code>/usr/include</code>--are defined in such a way that the library function <a href="http://man7.org/linux/man-pages/man2/fcntl.2.html" rel="nofollow noopener"><code>fcntl()</code></a> now no longer compiles to link to a standard library function called <code>fcntl</code>.  Instead, the header files redefine it to compile to something called <code>fcntl64</code>.  That function was introduced in GLIBC 2.28...which was <a href="https://savannah.gnu.org/forum/forum.php?forum_id=9205" rel="nofollow noopener">announced in August 2018</a>.</p>
+<p>This means if you call <code>fcntl()</code> anywhere in your code and compile it on this October 2018 cosmic distribution, your resulting binary "cannot possibly" run on a distribution released before August 2018.  <strong>There are no compiler switches, linker switches, or <code>#defines</code> to turn back that clock.</strong></p>
+<h2>What Can Be Done About This?</h2>
+<p>When a toolchain only compiles for itself-or-newer...and each distribution enforces use of a toolchain that is paired with its release...<em>you are stuck keeping copies of the old OS and toolchain around if you want to keep this classic transferability property intact on such a platform</em>.</p>
+<p>...and keeping old ones around is what we're actually doing.  It's easier now with virtual machines--on Travis we can pick an archaic Linux, Windows, or old OS X to build with.  But it does create a level of overhead that most people won't want.  And in Travis's case, they expire these old images when they feel like it.</p>
+<p>The implication may (or may not) be clear: <strong>While Rebol core developers may try to keep old VMs around to build executables with good transferability properties on older or newer systems...the Rebol that an average person builds themselves on a recent Mac/Linux/Ubuntu download PROBABLY can't be made to have those properties to be able to run on older platforms.</strong></p>
+<p>I say "probably" because <a href="https://stackoverflow.com/questions/58472958/how-to-force-linkage-to-older-libc-fcntl-instead-of-fcntl64/58472959#58472959" rel="nofollow noopener">in the fcntl() case, I managed to hack around it</a>.  So your Rebol built on cosmic or whatever can still run on older systems.  <em>This time.</em> <img src="https://forum.rebol.info/images/emoji/twitter/face_with_raised_eyebrow.png?v=9" title=":face_with_raised_eyebrow:" class="emoji" alt=":face_with_raised_eyebrow:"></p>
+<p>Another option: you could use your own header files.  Don't <code>#include &lt;fcntl.h&gt;</code> where the devious <code>#define fcntl fcntl64</code> lives.  Maintain your own headers that speak to just the libc functions you want.  (This is essentially what Red has to do, as they mechanically <em>can't</em> <code>#include &lt;fcntl.h&gt;</code> in Red/System).  Not necessarily easier than snapshotting old toolchains in their entirety, and neither approach can protect you from when those old APIs are deemed not relevant on newer platforms.</p>
+<h2>What About Static Linking?</h2>
+<p>One answer that might come to mind is that if you were willing to ask a build of Rebol to be a little bigger, then you could bundle up the functions that you use into the executable.  A cosmic distribution of Linux could pack up its fcntl64() code and use that embedded version instead of the one in the system, letting it run on older Linuxes that only have fcntl().</p>
+<p>To address the question of why this may be problematic, here's one guy's writeup:</p>
+<p><a href="https://akkadia.org/drepper/no_static_linking.html" rel="nofollow noopener">Static Linking Considered Harmful</a></p>
+<blockquote>
+<p>"The often used argument about statically linked apps being more portable (i.e., can be copied to other systems and simply used since there are no dependencies) is not true since every non-trivial program needs dynamic linking at least for one of the reasons mentioned above. And dynamic linking kills the portability of statically linked apps."</p>
+</blockquote>
+<p>His main points are:</p>
+<ul>
+<li>Static linking means you're freezing your code in time so it doesn't get security updates from the platform it is running on</li>
+<li>Memory is used less efficiently since your app isn't sharing the same code pages all the other programs on the system are</li>
+<li>In the GLIBC world, several features of non-trivial programs simply won't work with static linking; they are mechanically dependent on dynamic linking.  <em>(Other libc implementations <a href="https://elinux.org/images/e/eb/Transitioning_From_uclibc_to_musl_for_Embedded_Development.pdf" rel="nofollow noopener">like musl</a> are designed differently so that they CAN be static linked, and it may well be that we should consider using them instead... <a href="https://doc.rust-lang.org/edition-guide/rust-2018/platform-and-target-support/musl-support-for-fully-static-binaries.html" rel="nofollow noopener">Rust does</a>.)</em>
+</li>
+</ul>
+<h2>Where Does This Leave Rebol?</h2>
+<p>Picking the one case I mention as a sort of focal point: The absence of the ability to say "I don't want this new fcntl" reveals that the GNU libc developers do not consider this to be a matter of much concern.  I'm skeptical they'd be very interested in hearing "fringe" thoughts on the matter; and have their own agenda.</p>
+<p>So one likely has to go outside of the Linux community to find the sort of people who this doesn't sit well with.  And that wouldn't be Apple (<em>cough</em> <sub><a href="https://www.forbes.com/sites/ewanspence/2019/10/10/apple-macos-catalina-update-broken-32bit-mac-imac-macbook-pro-fix-mistake/" rel="nofollow noopener">Catalina</a></sub> <em>cough</em>)</p>
+<p>One point of view would be <a href="https://forum.rebol.info/t/back-to-personal-computing/186">Carl's idea that Rebol needed a "phase two" of an operating system to complete the vision</a>.  But, no, there are not resources for that.</p>
+<p>Without a culture shift from OS developers to think that the reverse direction is important, it's simply not going to be practical (or even "possible") to make sure building with a newer OS will get you a binary that will run on an older OS.  <em>The best we can do here is make sure that when the OS developers who care about this show up, we can be up and building on their platform right away.</em>  We don't have to <strong>be</strong> them, we just have to <strong>be ready</strong> for them! <img src="https://forum.rebol.info/images/emoji/twitter/alien.png?v=9" title=":alien:" class="emoji" alt=":alien:"></p>
+<p><strong>Hence I propose thinking of the C source code as Rebol's formal means of exchange--with binaries being secondary.</strong>  The most important thing is that the Rebol source code of today still builds on old systems (allowing for a potential "prep" step that must be done on a newer system for bootstrap).</p>
+<p>If you find you really need a recent build for an older machine, let's do everything in our power to make sure that if you have a C compiler of that era on that machine that you can still build it.  And if there comes a time where being a distributor of binaries is relevant again, we can use various old virtual machines to make ones that are likely to run on newer ones too.  Though for now I want to not get too tied down being an .EXE distributor, and stay focused on the web build!  <img src="https://forum.rebol.info/images/emoji/twitter/globe_with_meridians.png?v=9" title=":globe_with_meridians:" class="emoji" alt=":globe_with_meridians:"> <img src="https://forum.rebol.info/images/emoji/twitter/globe_with_meridians.png?v=9" title=":globe_with_meridians:" class="emoji" alt=":globe_with_meridians:"> <img src="https://forum.rebol.info/images/emoji/twitter/globe_with_meridians.png?v=9" title=":globe_with_meridians:" class="emoji" alt=":globe_with_meridians:"></p>
+            <p><small>6 posts - 3 participants</small></p>
+            <p><a href="https://forum.rebol.info/t/dynamic-linking-static-linking-and-the-march-of-progress/1231">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/dynamic-linking-static-linking-and-the-march-of-progress/1231</link>
+          <pubDate>Sat, 19 Oct 2019 09:49:55 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-1231</guid>
+          <source url="https://forum.rebol.info/t/dynamic-linking-static-linking-and-the-march-of-progress/1231.rss">Dynamic Linking, Static Linking, and the March of &quot;Progress&quot;</source>
         </item>
   </channel>
 </rss>

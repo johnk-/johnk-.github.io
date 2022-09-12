@@ -1,0 +1,477 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>A Justification of Generalized Isotopes</title>
+    <link>https://forum.rebol.info/t/a-justification-of-generalized-isotopes/1918</link>
+    <description>*Here is a train of thought to help people realize why isotopes are needed, and why unifying their behaviors and mechanisms under a common umbrella makes sense.  It starts from the issue of solving /ONLY and then explains the generalization.*
+
+*As time permits, I&#39;ll come back and try to improve this...*
+
+---
+
+Years of fretting over the /ONLY debacle converged on a somewhat inescapable conclusion:
+
+***It&#39;s better to carry the intent of whether a value needs to be spliced on that value...as opposed to having subtle variants of core operations that modulate the splicing.***
+
+I&#39;d worked up to a point where I was implementing the &quot;mark of intent&quot; by adding a quoting level to *suppress* splicing.  Yet this faced likely accidents when someone had a quoted value in a variable...and really meant to use it somewhere as-is, with the quote--vs. thinking of the quote as a splice-suppression signal which the operation should remove.
+
+Then [@rgchris made this remark](https://forum.rebol.info/t/putting-splicing-intent-on-appended-value/1873/9):
+
+[quote=&quot;rgchris, post:9, topic:1873, full:true&quot;]
+The issue I have with doing the opposite of ONLY—let&#39;s call it SPREAD—is what is the interim value?
+
+    &gt;&gt; block: [a b c [a b c]]
+
+    &gt;&gt; find block pick block 4
+    [[a b c]]
+
+    &gt;&gt; find block spread pick block 4
+    [a b c [a b c]]
+
+    &gt;&gt; spread pick block 4
+    ???
+
+It would seem to have virtue over ONLY and is a better word.
+[/quote]
+
+## If Trying This In Historical Redbol, What Might One Do?
+
+As a rough first cut, let&#39;s represent splices with a specially recognizable 2-element wrapper block.  We&#39;ll signal it&#39;s a splice with a series in the first slot--checking for the unique identity of that series.  Then put the block itself as the second element:
+
+    splice-cue: &quot;!!!splice!!!&quot;
+
+    spread: func [block [block!]] [
+        return reduce [splice-cue block]
+    ]
+
+    splice?: func [value] [
+        if not block? :value [return false]
+        return same? splice-cue first value
+    ]
+
+Then we can write our new versions of things like APPEND that are specifically aware of this construct.
+
+    append*: func [series [series!] value] [
+        return either splice? :value [
+            append series second value
+        ][
+            append/only series :value
+        ]
+     ]
+
+It works more or less in your average Redbol, e.g. in Red:
+
+    red&gt;&gt; append* [a b c] spread [d e]
+    == [a b c d e]
+
+    red&gt;&gt; append* [a b c] [d e]
+    == [a b c [d e]]
+
+    red&gt;&gt; append* [a b c] &#39;d
+    == [a b c d]
+
+    red&gt;&gt; append* [a b c] first [&#39;d]
+    == [a b c &#39;d]
+
+*In fact, this is essentially how the bootstrap executable for Ren-C simulates the SPREAD behavior.*
+
+But the weaknesses are *immediately* apparent!!!  :pouting_cat:
+
+## Not A Distinct Type: Too Easy To Overlook Handling
+
+There&#39;s no special type for the spliced block...it&#39;s just a BLOCK!.  This means any routine that hasn&#39;t been written to handle it, will just let it leak through.
+
+    red&gt;&gt; reduce [spread [a b c] [a b c]]
+    == [[&quot;!!!splice!!!&quot; [a b c]] [a b c]]  ; not [a b c [a b c]]
+
+Changing to some other generic type that can contain a block...such as an OBJECT!...doesn&#39;t help matters.  You are kind of in trouble any time an operation willfully lets you put these into an array.
+
+**The first instinct might be to introduce a new SPLICE! datatype, with a system-wide rule that splices can&#39;t be put into arrays.**  *(Enforcing such a rule across all array-manipulating code is challenging...so let&#39;s sort of make a note of that fact, but continue.)*
+
+Because of the peculiar nature of not being able to be put in a block, there&#39;d have to be a decision made about function arguments as to whether or not they took this type.  Many functions designed to handle generic values would not be able to handle them, so there&#39;d presumably need to be some typeset like ANY-NOTSPLICE! or ANY-NORMAL!.
+
+## How To Represent A Type That Can&#39;t Be Put In A Block?
+
+Now we&#39;ve got several things to ponder about our new type.  For instance: what you should see here?
+
+    &gt;&gt; obj: make object! [foo: spread [d e]]
+    == make object! [
+        foo: ???
+    ]
+
+We just said that a defining feature of SPLICE! is that you can&#39;t accidentally put them in blocks.  But the argument to MAKE OBJECT!, namely **`[foo: ???]`**, is a block.  If `???` can&#39;t itself be a splice!, then what is it?
+
+This brings up a possibly-related question: what if you want a way to put the intent of whether to splice or not into &quot;suspended animation?&quot;... in a way that you could collect it?
+
+Here&#39;s a sort of contrived example of the puzzle:
+
+    generate: func [n [integer!]] [
+       if even? n [return reduce [n n + 1]]
+       return spread reduce [n n + 1]
+    ]
+
+    wrap: func [
+        return: [...]
+        in [splice! block!]
+    ][
+        ...
+    ]
+
+    unwrap: func [
+        return: [splice! block!]
+        wrapped [...]
+    ][
+        ...
+    ]
+
+    n: 0
+    pending: collect [while [n &lt; 4] [keep wrap generate n]]
+
+    data: copy []
+    for-each item pending [append data unwrap item]
+
+How would you write WRAP and UNWRAP such that at the end of the code above, you&#39;d get:
+
+    &gt;&gt; data
+    == [[0 1] 1 2 [2 3] 3 4]
+
+If the system didn&#39;t provide some answer to this, you&#39;d end up needing to re-invent something kind of equivalent to the primitive `[&quot;!!!splice!!!&quot; [...]]` mechanic as a means of persistence:
+
+    &gt;&gt; pending
+    == [[0 1] [&quot;!!!splice!!!&quot; [1 2]] [2 3] [&quot;!!!splice!!!&quot; [3 4]]]
+
+# Isotopes Were Designed For This!
+
+Isotopes are a set of curated answers for these problems.  Originally they were introduced to address issues like what an UNSET! was...which has some of the same class of problems as SPLICE! (such as not wanting to be put in BLOCK!s, and not accepted by default or by most routines).
+
+Isotopes are:
+
+* **general** - all base value types (e.g. unquoted things that can be put into blocks, so not NULL or VOID or QUOTED!) have isotopic forms
+
+* **efficient** - isotopes do not require allocations, and merely are a different state of a byte in the value cell (the same byte that encodes quoting levels)
+
+* **&quot;meta-representable&quot;** - all isotopes have a corresponding single-value form known as a &quot;quasi-form&quot;, which when evaluated (or run through a more narrow UNQUASI operation) will yield the isotopic form
+
+I mentioned at the outset that it would be somewhat costly to bulletproof all of native code against the ability to do something like append a specific data type like &quot;SPLICE!&quot; to a block.  But with isotopes this problem has been solved once for all the forms...so the same code that prevents a so-called &quot;UNSET!&quot; from winding up in arrays works for splices.  *That&#39;s because a splice is actually an isotopic block!, and an unset is actually an isotopic blank!*
+
+Above I asked:
+
+&gt; What you should see here?
+&gt;
+&gt;     &gt;&gt; obj: make object! [foo: spread [d e]]
+&gt;     == make object! [
+&gt;         foo: ???
+&gt;     ]
+
+Isotopes give us the answer, that it&#39;s **`foo: ~[d e]~`**.  This is the previously mentioned &quot;QUASI!&quot; form of BLOCK!, which when evaluated produces an isotope.
+
+*But isotopes themselves have no canon representation.*  The console can print out a comment or show them in a different color, but to talk about them having a representation doesn&#39;t make much sense as you&#39;ll never see them in source.
+
+    &gt;&gt; ~[d e]~
+    == ~[d e]~  ; isotope
+
+I also asked:
+
+&gt; &quot;How would you write WRAP and UNWRAP such that at the end of the code above, you&#39;d get:&quot;
+&gt;
+&gt;     &gt;&gt; data
+&gt;     == [[0 1] 1 2 [2 3] 3 4]
+
+With isotopic blocks representing splices, you don&#39;t need to write WRAP and UNWRAP... because these operations are built in operations called META and UNMETA.  And the pending array would look like:
+
+    &gt;&gt; pending
+    == [&#39;[0 1] ~[1 2]~ &#39;[2 3] ~[3 4]~]
+
+When the QUOTED! blocks are UNMETA&#39;d, they become regular blocks and then are appended as-is.  When the QUASI! blocks are UNMETA&#39;d they become isotopes and give the splice intent.  This produces the desired &quot;suspended animation&quot; to preserve the intent.
+
+*That suspended animation is also used in the ^META parameter convention, which indicates a function argument can accept isotopes... and the add-quoting-or-quasi behavior brings those isotopic variables into a reified state so they can be safely handled.*
+
+## The Proof Is In The Capabilities
+
+I&#39;ve explained about splices, and mentioned how it crosses needs with unset variable states.
+
+But isotopes are also a cornerstone of [how function and FRAME! specialization works](https://forum.rebol.info/t/default-values-and-make-frame/1412).
+
+The ERROR! isotope is used to have a sneaky out-of-band way to return [definitional errors](https://forum.rebol.info/t/fail-vs-return-fail-the-new-age-of-definitional-failures/1852)
+
+As their applications expand, they are slated to allow us to have non-literal modes to ask something like FIND that you want to look for *instances* of a datatype by passing that type isotopically... vs. looking for the datatype&#39;s appearance concretely in the target.  Concepts of making only isotopic ACTION!s run through WORD! references could make it completely safe to work with arguments passed as variables, saving you from needing GET-WORD!s to handle them.
+
+It&#39;s natural for there to be some confusion with the new idea--especially given all its churn through the course of design.  But the design is becoming clearer, and I think people are going to find this gives solidity to writing complicated but coherent code...vastly outpacing historical Redbol.</description>
+    
+    <lastBuildDate>Tue, 16 Aug 2022 13:59:01 +0000</lastBuildDate>
+    <category>Philosophy</category>
+    <atom:link href="https://forum.rebol.info/t/a-justification-of-generalized-isotopes/1918.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>A Justification of Generalized Isotopes</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="rgchris" data-post="3" data-topic="1918">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/rgchris/40/14_2.png" class="avatar"> rgchris:</div>
+<blockquote>
+<p>Does SPREAD here apply the isotope to that value in place or does it create something new?</p>
+</blockquote>
+</aside>
+<p>It creates something new.</p>
+<aside class="quote no-group" data-username="rgchris" data-post="3" data-topic="1918">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/rgchris/40/14_2.png" class="avatar"> rgchris:</div>
+<blockquote>
+<p>is it reasonable to expect the above behaviour?</p>
+</blockquote>
+</aside>
+<p>It's reasonable to ask if it works that way.  But it does not.  <img src="https://forum.rebol.info/images/emoji/twitter/slight_smile.png?v=9" title=":slight_smile:" class="emoji" alt=":slight_smile:"></p>
+<p>The quoting level of a BLOCK! (or any other value) lives in its cell, not in the series pointed to that contains the contents.  It's a property like whether a slot in a block has the NEW-LINE flag.</p>
+<p>Remember that the same underlying array storage can be imaged multiple times:</p>
+<pre><code>&gt;&gt; block: [a b]
+
+&gt;&gt; four: reduce [block, quote block, quote quote block, quasi block]
+== [[a b] '[a b] ''[a b] ~[a b]~]
+
+&gt;&gt; append block 'c
+
+&gt;&gt; four
+== [[a b c] '[a b c] ''[a b c] ~[a b c]~]
+</code></pre>
+<p>The quoting (and/or quasi) level lives resident in the bits of FOUR's array holding the cells.  The cells point at the array storage for BLOCK.</p>
+<p>The only way to change the quoting levels is to manipulate the actual contents of FOUR.  You can't do it by modifying the BLOCK variable to change its quote level--that's only relevant to the cell stored in the context where block's value is looked up:</p>
+<pre><code>&gt;&gt; block: spread block
+== ~[a b c]~  ; isotope
+
+&gt;&gt; four
+== [[a b c] '[a b c] ''[a b c] ~[a b c]~]  ; unchanged
+</code></pre>
+<p>Hence there's no means to subversively create the situation of an isotope inside a block remotely.  You have to go through a function like CHANGE.  They can spread the values, or error, or have some other reaction--but they'll never be allowed to put the isotope in the block.</p>
+          <p><a href="https://forum.rebol.info/t/a-justification-of-generalized-isotopes/1918/4">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/a-justification-of-generalized-isotopes/1918/4</link>
+        <pubDate>Tue, 16 Aug 2022 13:18:31 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1918-4</guid>
+        <source url="https://forum.rebol.info/t/a-justification-of-generalized-isotopes/1918.rss">A Justification of Generalized Isotopes</source>
+      </item>
+      <item>
+        <title>A Justification of Generalized Isotopes</title>
+        <dc:creator><![CDATA[rgchris]]></dc:creator>
+        <description><![CDATA[
+            <p>A small thought for now:</p>
+<pre><code>a: 'a b: 'b c: 'c
+; for infinite reduction of 'a 'b and 'c
+
+block: [a b c [a b c]]
+
+reduce block
+=&gt; [a b c [a b c]]
+; ok
+
+find block spread pick block 4
+=&gt; [a b c [a b c]]
+; ok
+
+spread pick block 4
+=&gt; isotope value
+; ok, or 'isotoped value' or 'isotopic value' or just 'isotope'?
+
+reduce block
+=&gt; [a b c a b c]
+; ??
+</code></pre>
+<p>Does SPREAD here apply the isotope to that value in place or does it create something new? I kind of suspect the latter, but is it reasonable to expect the above behaviour?</p>
+          <p><a href="https://forum.rebol.info/t/a-justification-of-generalized-isotopes/1918/3">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/a-justification-of-generalized-isotopes/1918/3</link>
+        <pubDate>Tue, 16 Aug 2022 12:57:52 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1918-3</guid>
+        <source url="https://forum.rebol.info/t/a-justification-of-generalized-isotopes/1918.rss">A Justification of Generalized Isotopes</source>
+      </item>
+      <item>
+        <title>A Justification of Generalized Isotopes</title>
+        <dc:creator><![CDATA[BlackATTR]]></dc:creator>
+        <description><![CDATA[
+            <p>Great writeup and congrats on this foundational feature. It looks like a winner!<br>
+<img src="https://forum.rebol.info/images/emoji/twitter/clap.png?v=9" title=":clap:" class="emoji only-emoji" alt=":clap:"> <img src="https://forum.rebol.info/images/emoji/twitter/clap.png?v=9" title=":clap:" class="emoji only-emoji" alt=":clap:"> <img src="https://forum.rebol.info/images/emoji/twitter/clap.png?v=9" title=":clap:" class="emoji only-emoji" alt=":clap:"></p>
+          <p><a href="https://forum.rebol.info/t/a-justification-of-generalized-isotopes/1918/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/a-justification-of-generalized-isotopes/1918/2</link>
+        <pubDate>Tue, 16 Aug 2022 12:37:13 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1918-2</guid>
+        <source url="https://forum.rebol.info/t/a-justification-of-generalized-isotopes/1918.rss">A Justification of Generalized Isotopes</source>
+      </item>
+      <item>
+        <title>A Justification of Generalized Isotopes</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p><em>Here is a train of thought to help people realize why isotopes are needed, and why unifying their behaviors and mechanisms under a common umbrella makes sense.  It starts from the issue of solving /ONLY and then explains the generalization.</em></p>
+<p><em>As time permits, I'll come back and try to improve this...</em></p>
+<hr>
+<p>Years of fretting over the /ONLY debacle converged on a somewhat inescapable conclusion:</p>
+<p><em><strong>It's better to carry the intent of whether a value needs to be spliced on that value...as opposed to having subtle variants of core operations that modulate the splicing.</strong></em></p>
+<p>I'd worked up to a point where I was implementing the "mark of intent" by adding a quoting level to <em>suppress</em> splicing.  Yet this faced likely accidents when someone had a quoted value in a variable...and really meant to use it somewhere as-is, with the quote--vs. thinking of the quote as a splice-suppression signal which the operation should remove.</p>
+<p>Then <a href="https://forum.rebol.info/t/putting-splicing-intent-on-appended-value/1873/9">@rgchris made this remark</a>:</p>
+<aside class="quote no-group quote-modified" data-username="rgchris" data-post="9" data-topic="1873" data-full="true">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/rgchris/40/14_2.png" class="avatar"><a href="https://forum.rebol.info/t/putting-splicing-intent-on-appended-value/1873/9">Putting Splicing Intent On APPEND'ed Value</a>
+</div>
+<blockquote>
+<p>The issue I have with doing the opposite of ONLY—let's call it SPREAD—is what is the interim value?</p>
+<pre><code>&gt;&gt; block: [a b c [a b c]]
+
+&gt;&gt; find block pick block 4
+[[a b c]]
+
+&gt;&gt; find block spread pick block 4
+[a b c [a b c]]
+
+&gt;&gt; spread pick block 4
+???
+</code></pre>
+<p>It would seem to have virtue over ONLY and is a better word.</p>
+</blockquote>
+</aside>
+<h2>If Trying This In Historical Redbol, What Might One Do?</h2>
+<p>As a rough first cut, let's represent splices with a specially recognizable 2-element wrapper block.  We'll signal it's a splice with a series in the first slot--checking for the unique identity of that series.  Then put the block itself as the second element:</p>
+<pre><code>splice-cue: "!!!splice!!!"
+
+spread: func [block [block!]] [
+    return reduce [splice-cue block]
+]
+
+splice?: func [value] [
+    if not block? :value [return false]
+    return same? splice-cue first value
+]
+</code></pre>
+<p>Then we can write our new versions of things like APPEND that are specifically aware of this construct.</p>
+<pre><code>append*: func [series [series!] value] [
+    return either splice? :value [
+        append series second value
+    ][
+        append/only series :value
+    ]
+ ]
+</code></pre>
+<p>It works more or less in your average Redbol, e.g. in Red:</p>
+<pre><code>red&gt;&gt; append* [a b c] spread [d e]
+== [a b c d e]
+
+red&gt;&gt; append* [a b c] [d e]
+== [a b c [d e]]
+
+red&gt;&gt; append* [a b c] 'd
+== [a b c d]
+
+red&gt;&gt; append* [a b c] first ['d]
+== [a b c 'd]
+</code></pre>
+<p><em>In fact, this is essentially how the bootstrap executable for Ren-C simulates the SPREAD behavior.</em></p>
+<p>But the weaknesses are <em>immediately</em> apparent!!!  <img src="https://forum.rebol.info/images/emoji/twitter/pouting_cat.png?v=9" title=":pouting_cat:" class="emoji" alt=":pouting_cat:"></p>
+<h2>Not A Distinct Type: Too Easy To Overlook Handling</h2>
+<p>There's no special type for the spliced block...it's just a BLOCK!.  This means any routine that hasn't been written to handle it, will just let it leak through.</p>
+<pre><code>red&gt;&gt; reduce [spread [a b c] [a b c]]
+== [["!!!splice!!!" [a b c]] [a b c]]  ; not [a b c [a b c]]
+</code></pre>
+<p>Changing to some other generic type that can contain a block...such as an OBJECT!...doesn't help matters.  You are kind of in trouble any time an operation willfully lets you put these into an array.</p>
+<p><strong>The first instinct might be to introduce a new SPLICE! datatype, with a system-wide rule that splices can't be put into arrays.</strong>  <em>(Enforcing such a rule across all array-manipulating code is challenging...so let's sort of make a note of that fact, but continue.)</em></p>
+<p>Because of the peculiar nature of not being able to be put in a block, there'd have to be a decision made about function arguments as to whether or not they took this type.  Many functions designed to handle generic values would not be able to handle them, so there'd presumably need to be some typeset like ANY-NOTSPLICE! or ANY-NORMAL!.</p>
+<h2>How To Represent A Type That Can't Be Put In A Block?</h2>
+<p>Now we've got several things to ponder about our new type.  For instance: what you should see here?</p>
+<pre><code>&gt;&gt; obj: make object! [foo: spread [d e]]
+== make object! [
+    foo: ???
+]
+</code></pre>
+<p>We just said that a defining feature of SPLICE! is that you can't accidentally put them in blocks.  But the argument to MAKE OBJECT!, namely <strong><code>[foo: ???]</code></strong>, is a block.  If <code>???</code> can't itself be a splice!, then what is it?</p>
+<p>This brings up a possibly-related question: what if you want a way to put the intent of whether to splice or not into "suspended animation?"... in a way that you could collect it?</p>
+<p>Here's a sort of contrived example of the puzzle:</p>
+<pre><code>generate: func [n [integer!]] [
+   if even? n [return reduce [n n + 1]]
+   return spread reduce [n n + 1]
+]
+
+wrap: func [
+    return: [...]
+    in [splice! block!]
+][
+    ...
+]
+
+unwrap: func [
+    return: [splice! block!]
+    wrapped [...]
+][
+    ...
+]
+
+n: 0
+pending: collect [while [n &lt; 4] [keep wrap generate n]]
+
+data: copy []
+for-each item pending [append data unwrap item]
+</code></pre>
+<p>How would you write WRAP and UNWRAP such that at the end of the code above, you'd get:</p>
+<pre><code>&gt;&gt; data
+== [[0 1] 1 2 [2 3] 3 4]
+</code></pre>
+<p>If the system didn't provide some answer to this, you'd end up needing to re-invent something kind of equivalent to the primitive <code>["!!!splice!!!" [...]]</code> mechanic as a means of persistence:</p>
+<pre><code>&gt;&gt; pending
+== [[0 1] ["!!!splice!!!" [1 2]] [2 3] ["!!!splice!!!" [3 4]]]
+</code></pre>
+<h1>Isotopes Were Designed For This!</h1>
+<p>Isotopes are a set of curated answers for these problems.  Originally they were introduced to address issues like what an UNSET! was...which has some of the same class of problems as SPLICE! (such as not wanting to be put in BLOCK!s, and not accepted by default or by most routines).</p>
+<p>Isotopes are:</p>
+<ul>
+<li>
+<p><strong>general</strong> - all base value types (e.g. unquoted things that can be put into blocks, so not NULL or VOID or QUOTED!) have isotopic forms</p>
+</li>
+<li>
+<p><strong>efficient</strong> - isotopes do not require allocations, and merely are a different state of a byte in the value cell (the same byte that encodes quoting levels)</p>
+</li>
+<li>
+<p><strong>"meta-representable"</strong> - all isotopes have a corresponding single-value form known as a "quasi-form", which when evaluated (or run through a more narrow UNQUASI operation) will yield the isotopic form</p>
+</li>
+</ul>
+<p>I mentioned at the outset that it would be somewhat costly to bulletproof all of native code against the ability to do something like append a specific data type like "SPLICE!" to a block.  But with isotopes this problem has been solved once for all the forms...so the same code that prevents a so-called "UNSET!" from winding up in arrays works for splices.  <em>That's because a splice is actually an isotopic block!, and an unset is actually an isotopic blank!</em></p>
+<p>Above I asked:</p>
+<blockquote>
+<p>What you should see here?</p>
+<pre><code>&gt;&gt; obj: make object! [foo: spread [d e]]
+== make object! [
+    foo: ???
+]
+</code></pre>
+</blockquote>
+<p>Isotopes give us the answer, that it's <strong><code>foo: ~[d e]~</code></strong>.  This is the previously mentioned "QUASI!" form of BLOCK!, which when evaluated produces an isotope.</p>
+<p><em>But isotopes themselves have no canon representation.</em>  The console can print out a comment or show them in a different color, but to talk about them having a representation doesn't make much sense as you'll never see them in source.</p>
+<pre><code>&gt;&gt; ~[d e]~
+== ~[d e]~  ; isotope
+</code></pre>
+<p>I also asked:</p>
+<blockquote>
+<p>"How would you write WRAP and UNWRAP such that at the end of the code above, you'd get:"</p>
+<pre><code>&gt;&gt; data
+== [[0 1] 1 2 [2 3] 3 4]
+</code></pre>
+</blockquote>
+<p>With isotopic blocks representing splices, you don't need to write WRAP and UNWRAP... because these operations are built in operations called META and UNMETA.  And the pending array would look like:</p>
+<pre><code>&gt;&gt; pending
+== ['[0 1] ~[1 2]~ '[2 3] ~[3 4]~]
+</code></pre>
+<p>When the QUOTED! blocks are UNMETA'd, they become regular blocks and then are appended as-is.  When the QUASI! blocks are UNMETA'd they become isotopes and give the splice intent.  This produces the desired "suspended animation" to preserve the intent.</p>
+<p><em>That suspended animation is also used in the ^META parameter convention, which indicates a function argument can accept isotopes... and the add-quoting-or-quasi behavior brings those isotopic variables into a reified state so they can be safely handled.</em></p>
+<h2>The Proof Is In The Capabilities</h2>
+<p>I've explained about splices, and mentioned how it crosses needs with unset variable states.</p>
+<p>But isotopes are also a cornerstone of <a href="https://forum.rebol.info/t/default-values-and-make-frame/1412">how function and FRAME! specialization works</a>.</p>
+<p>The ERROR! isotope is used to have a sneaky out-of-band way to return <a href="https://forum.rebol.info/t/fail-vs-return-fail-the-new-age-of-definitional-failures/1852">definitional errors</a></p>
+<p>As their applications expand, they are slated to allow us to have non-literal modes to ask something like FIND that you want to look for <em>instances</em> of a datatype by passing that type isotopically... vs. looking for the datatype's appearance concretely in the target.  Concepts of making only isotopic ACTION!s run through WORD! references could make it completely safe to work with arguments passed as variables, saving you from needing GET-WORD!s to handle them.</p>
+<p>It's natural for there to be some confusion with the new idea--especially given all its churn through the course of design.  But the design is becoming clearer, and I think people are going to find this gives solidity to writing complicated but coherent code...vastly outpacing historical Redbol.</p>
+          <p><a href="https://forum.rebol.info/t/a-justification-of-generalized-isotopes/1918/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/a-justification-of-generalized-isotopes/1918/1</link>
+        <pubDate>Tue, 16 Aug 2022 10:23:16 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1918-1</guid>
+        <source url="https://forum.rebol.info/t/a-justification-of-generalized-isotopes/1918.rss">A Justification of Generalized Isotopes</source>
+      </item>
+  </channel>
+</rss>

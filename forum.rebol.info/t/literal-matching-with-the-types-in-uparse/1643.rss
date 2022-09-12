@@ -60,9 +60,116 @@ In other words your rule can match *and* provide an answer for the thing to matc
 
 So this all looks pretty good.  But back to the drawing board for types.</description>
     
-    <lastBuildDate>Mon, 29 Nov 2021 14:12:09 +0000</lastBuildDate>
+    <lastBuildDate>Mon, 11 Jul 2022 19:01:53 +0000</lastBuildDate>
     <category>Parsing</category>
     <atom:link href="https://forum.rebol.info/t/literal-matching-with-the-types-in-uparse/1643.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Literal Matching with the @ Types In UPARSE</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="1643">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/40/26_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>I realized I actually do not know how to write the above two cases in Red or Rebol2.</p>
+</blockquote>
+</aside>
+<h3>We need an answer to matching literal content</h3>
+<p>I've been punting on this bug in SPLIT:</p>
+<pre><code>&gt;&gt; split [a &lt;t&gt; b c &lt;t&gt;] &lt;t&gt;  ; expecting [[a] [b c] []]
+** Error: TAG! combinator must be &lt;here&gt; or &lt;end&gt; ATM
+** Near: [to dlm ** | to &lt;end&gt;]
+</code></pre>
+<p>That error is coming from PARSE3, not PARSE <em>(which is now what UPARSE is called, as it is decidedly superior semantics, and I don't want to teach any new users PARSE3/PARSE2)</em>.</p>
+<p>Even though PARSE3 doesn't have much in the way of TAG! combinators (just <code>&lt;here&gt;</code> and <code>&lt;end&gt;</code>) it's aware of the PARSE state-of-the-art, and letting us know that using <code>&lt;t&gt;</code> as a rule will not match a literal <code>&lt;t&gt;</code> tag.  <em>(Unless you rewire your parse combinators and say that's what you want.)</em></p>
+<p><strong>With @ for literal, this could be solved in SPLIT by saying <code>[to @dlm | to &lt;end&gt;]</code></strong></p>
+<p>This doesn't solve the case of wanting to match spliced blocks:</p>
+<pre><code>&gt;&gt; data: [a b]
+
+&gt;&gt; parse [a b a b] [tally ???data???]  ; solve for ???
+== 2
+</code></pre>
+<p>I suggested one possibility, as:</p>
+<pre><code>&gt;&gt; parse [a b a b] [tally @((data))]
+== 2
+</code></pre>
+<p>That's creative.  Anyway, this interpretation of @ is contentious with the other interpretation, which was "be inert"... so that combinators could decide what to do with the item.</p>
+<p>However, some of the cases for that aren't really interesting anymore.  I had theorized that as being a way to pull blocks out of the "BLOCK! combinator interpretation"</p>
+<pre><code>parse data [... any @[integer! text!] ...]
+</code></pre>
+<p>The idea that usually, <code>[integer! text!]</code> would mean <em>integer followed by text</em>...but the @ would tell us that the block was being passed literally to ANY, as if you'd said:</p>
+<pre><code>parse data [... any ([integer! text!]) ...]
+</code></pre>
+<p><strong>But I ruled that ANY is perfectly allowed to decide its parameter will not be interpreted as a combinator, but taken as a literal BLOCK!</strong>  This is to say that combinators have parameter conventions just like ordinary functions do... which is why you don't have to write <strong><code>for-each 'var</code></strong> but can say <strong><code>for-each var</code></strong>.</p>
+<p>This is just how the cookie bounces in this language, where context is everything.  I've had similar verdicts on the way <a href="https://forum.rebol.info/t/plain-group-branching-only-run-if-branch-taken/1373/2">things like GROUP! work, in branching</a>:</p>
+<pre><code>&gt;&gt; if true (print "in group" [print "in block"])
+in group
+in block
+
+&gt;&gt; if false (print "in group" [print "in block"])
+; void
+</code></pre>
+<p>So in the vein of "how I learned to stop worrying and love the BLOCK!", this feels fine:</p>
+<pre><code>parse data [... any [integer! text!] ...]
+</code></pre>
+<h3>What About Keeping Literal Data?</h3>
+<p>I'd argued that this was important:</p>
+<pre><code>parse data [collect [... keep @word ...]]
+; vs
+parse data [collect [... keep ^('word) ...]]
+; or
+parse data [collect [... keep ([word]) ...]]
+; etc.
+</code></pre>
+<p>I had a particularly irritating use case of synthesizing parse rules with COMPOSE, where the "simple" desire to synthesize a rule that kept literal content got annoyingly complex... and letting @ serve the purpose of a signal to KEEP to literalize seemed like the way out.</p>
+<p><strong>But generally, I've soured on the @-word KEEP technique.</strong></p>
+<pre><code>&gt;&gt; append [a b c] @d
+== [a b c d]   ; I've developed no great love for this handling of @d
+</code></pre>
+<p>I know it's been a while since this has been at the forefront of discussion, but...I think I've decided this sucks.</p>
+<p>We've dug the hole that APPEND and KEEP and all their friends splice by default.  That's the call that was made, and we should live with it.  Use a BLOCK!.</p>
+<pre><code>&gt;&gt; append [a b c] [d]
+== [a b c d] 
+</code></pre>
+<p>But this does put us in a bind with generative rules.  We're saying if you have a simple WORD! in a variable that you want to generate a KEEP for, you have to somehow get that word inside a block (to suppress evaluation and avoid splice warnings), and then get that inside a GROUP! (to avoid parse trying to interpret it as something matched).</p>
+<p>There is a keyword which was proposed for this purpose, it was the proposal known as JUST.</p>
+<pre><code> &gt;&gt; append [a b c] just d
+ == [a b c d]
+</code></pre>
+<p>So JUST takes its argument literally, and then quotes it.  It's a shorthand for QUOTE THE</p>
+<pre><code> &gt;&gt; append [a b c] quote the d
+ == [a b c d]
+</code></pre>
+<p>If PARSE had JUST, it would be assumed that you were outside of the domain of matching by using it.</p>
+<pre><code> &gt;&gt; parse [1 2] [collect some [keep just negate, keep integer!]]
+ == [negate 1 negate 2]
+</code></pre>
+<p>What nags at me is that the "naked" negate...just in there inline like it's a keyword...feels more uncomfortable than the block-in-group.</p>
+<p>When you say <strong>keep ([negate])</strong> you can conceptually break down why it works:</p>
+<ul>
+<li>
+<p>It's in a GROUP!, so there's no matching going on</p>
+<ul>
+<li>Users have to know that all GROUP!s evaluate to synthesize a product, and don't advance the parse position in the process of doing so.</li>
+</ul>
+</li>
+<li>
+<p>Inside the group, it's in a BLOCK!, so you know it's not acting as a keyword or function.</p>
+</li>
+</ul>
+<p>You can look at that and use your general knowledge to get it: <em>yes, I see why this works, in two clear steps</em>.</p>
+<h2>But... it's time to JUST do it  <img src="https://forum.rebol.info/images/emoji/twitter/athletic_shoe.png?v=9" title=":athletic_shoe:" class="emoji" alt=":athletic_shoe:"> ...and add JUST</h2>
+<p><strong>The way to think about this is probably to say that the casual user goes with the BLOCK!-in-GROUP because it's clear and it's easy to make at source level...then JUST is targeted at the power users in generative code scenarios.</strong></p>
+<p>Someone working with generated code will prioritize ease-of-generation vs. source-level-obviousness.  After all, the code is being generated, so you're not going to read it unless you're sophisticated enough to not be thrown off by JUST and a naked NEGATE.</p>
+<p>And with this change, we can absorb the <span class="mention">@XXX</span> for the application of the missing functionality...the literal match.  (I'll retrofit PARSE3 so it works there as well.)</p>
+          <p><a href="https://forum.rebol.info/t/literal-matching-with-the-types-in-uparse/1643/5">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/literal-matching-with-the-types-in-uparse/1643/5</link>
+        <pubDate>Mon, 11 Jul 2022 19:01:53 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1643-5</guid>
+        <source url="https://forum.rebol.info/t/literal-matching-with-the-types-in-uparse/1643.rss">Literal Matching with the @ Types In UPARSE</source>
+      </item>
       <item>
         <title>Literal Matching with the @ Types In UPARSE</title>
         <dc:creator><![CDATA[hostilefork]]></dc:creator>

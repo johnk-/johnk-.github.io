@@ -5,8 +5,489 @@
     <link>https://forum.rebol.info/c/development/optimization/53</link>
     <description>Topics in the &#39;Optimization&#39; category This is a category for discussing performance and optimization ideas.</description>
     
-      <lastBuildDate>Mon, 18 Oct 2021 06:45:29 +0000</lastBuildDate>
+      <lastBuildDate>Mon, 22 Aug 2022 15:09:13 +0000</lastBuildDate>
       <atom:link href="https://forum.rebol.info/c/development/optimization/53.rss" rel="self" type="application/rss+xml" />
+        <item>
+          <title>Incomplete TRANSCODEs: Actually an Optimization Problem</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Optimization</category>
+          <description><![CDATA[
+            <p><strong>Ren-C has a very slick multi-return interface for TRANSCODE.</strong>  The mere request of a "remainder" of data left indicates you're not trying to do a full scan.</p>
+<p>Without the request, you get the whole thing:</p>
+<pre><code>&gt;&gt; transcode "abc def"
+== [abc def]
+
+; ...or...
+
+&gt;&gt; value: transcode "abc def"
+== [abc def]
+
+; ...or...
+
+&gt;&gt; [value]: transcode "abc def"
+== [abc def]
+</code></pre>
+<p>With the next position request, just one item and a remainder:</p>
+<pre><code>&gt;&gt; [value pos]: transcode "abc def"
+== abc
+
+&gt;&gt; pos
+== " def"
+
+; ...or...
+
+&gt;&gt; transcode/next "abc def" 'pos
+== abc
+
+&gt;&gt; pos
+== " def"
+</code></pre>
+<p>You also know that you're at the end of the input when it returns null, with all the benefits of easy reactions to NULL with IF and ELSE and friends:</p>
+<pre><code>&gt;&gt; [value pos]: transcode ""
+; null
+</code></pre>
+<p>Writing foolproof loops to process items are a breeze:</p>
+<pre><code>while [true]
+    [item utf8]: transcode utf8 else [break]
+    print mold item
+ ]
+
+; or for the THEN/ELSE haters out there (you know who you are :-P)
+
+while [true]
+    if null? [item utf8]: transcode utf8 [
+        break
+    ]
+    print mold item
+ ]
+</code></pre>
+<p><img src="https://forum.rebol.info/images/emoji/twitter/+1.png?v=9" title=":+1:" class="emoji only-emoji" alt=":+1:"></p>
+<h2>This Runs Circles Around Red and R3-Alpha</h2>
+<p>For starters: neither support strings as input--because the scanner is built for reading UTF-8 files...and both R3-Alpha and Red unpack strings into fixed-width encodings.  So if you have string input, you have to pay for a copy encoded as UTF-8 via TO BINARY!.  (<a href="https://forum.rebol.info/t/realistically-migrating-rebol-to-utf8-everywhere/374">Ren-C's UTF-8 Everywhere</a> wins again!)</p>
+<p>R3-Alpha unconditionally returns a block with the last element as a remainder, whether you ask for one item via /NEXT or not:</p>
+<pre><code>r3-alpha&gt;&gt; transcode to binary! "abc def"
+== [abc def #{}]
+
+r3-alpha&gt;&gt; transcode/next to binary! "abc def"
+== [abc #{20646566}]
+
+r3-alpha&gt;&gt; transcode/next to binary! ""
+== [#{}]
+</code></pre>
+<p>So if you were transcoding an entire input, you have to TAKE/LAST an always-empty binary off of the result.</p>
+<p>But you are using /NEXT you have to PICK out the element from the start of the array and the remainder from the end.  But you need to notice the exception of no-value-produced where the block is length 1 instead of 2.</p>
+<p>That's awkward, but as usual... <em>Red somehow manages to make an incompatible interface that is as much worse as it is better:</em></p>
+<p>The better part is that if you don't ask for /NEXT you just get the block back, like in Ren-C:</p>
+<pre><code>red&gt;&gt; transcode to binary! "abc def"
+== [abc def]
+</code></pre>
+<p>But the /NEXT interface is outright broken:</p>
+<pre><code>red&gt;&gt; transcode/next to binary! "abc def"
+== [abc #{20646566}]
+
+red&gt;&gt; transcode/next to binary! ""
+== [[] #{}]
+</code></pre>
+<p>It might look better because you don't have to guess about which position to find the remainder in--it's always in the second slot.  But it has a fatal flaw: you can't distinguish the result state of scanning <code>"[]"</code> and any string with nothing but comments and whitespace.</p>
+<p>Consider this very basic loop to scan one item at a time and print it:</p>
+<pre><code>red&gt;&gt; utf8: to binary! "abc def"
+
+red&gt;&gt; while [not tail? utf8] [
+     set [item utf8] transcode/next utf8
+     print mold item
+]
+abc
+def
+</code></pre>
+<p>You get two items.  But what if you had something that was--say--a comment:</p>
+<pre><code>red&gt;&gt; utf8: to binary! "; I'm just a comment"
+
+red&gt;&gt; while [not tail? utf8] [
+     set [item utf8] transcode/next utf8
+     print mold item
+]
+[]
+</code></pre>
+<p>You get one spurious item.  (They chose BLOCK! for the item, but it wouldn't matter what it was--a NONE! would be just as bad, you're just losing the distinction between empty strings and <code>"#[none]"</code> then.)</p>
+<p>If I were prescribing a solution for Red I'd say:</p>
+<ul>
+<li>
+<p>Make /NEXT take a variable to write the next position into</p>
+</li>
+<li>
+<p>Error on <code>#{}</code> input, so anyone doing a TRANSCODE/NEXT knows they are responsible for testing for TAIL? before they call (if they're not sure their input is non-empty)</p>
+<ul>
+<li>This way an empty remainder returned in the /NEXT variable will uniquely signal the reached-end state</li>
+</ul>
+</li>
+<li>
+<p>Make the synthesized product at the tail something ugly but assignable (so not an unset!)</p>
+<ul>
+<li>an ERROR! saying "end of input" is at least informative in case it winds up getting treated as an actual value somewhere</li>
+</ul>
+</li>
+</ul>
+<p>That would at least give them patterns like:</p>
+<pre><code>if not tail? utf8 [  ; needed if you're not sure it's non-empty
+    while [true] [
+        item: transcode/next utf8 'utf8
+        if tail? utf8 [break]
+        print mold item
+    ]
+]
+</code></pre>
+<p><em>(Having NULL is clearly better as a non-valued state (with isotope states fleshing out the picture)...and my <a href="https://forum.rebol.info/t/why-or-why-not-have-unset-in-rebol-like-languages/113/2">bafflement at Nenad's blindness</a> when confronted with what should be clear as day is as relevant as it was 6-plus-years ago.  And of course we see they'd actually need SET/ANY to do this right if you were allowing #[unset!]...but Ren-C's design has no need of that.)</em></p>
+<h2>Ren-C Also <em>Thrashes</em> R3-Alpha and Red In Error Handling</h2>
+<p>Ren-C TRANSCODE has these potential behaviors:</p>
+<ul>
+<li>
+<p>RETURN a BLOCK! (if plain TRANSCODE)</p>
+</li>
+<li>
+<p>RETURN an ANY-VALUE! or NULL (if TRANSCODE/NEXT)</p>
+</li>
+<li>
+<p>It can do a "hard FAIL"</p>
+<ul>
+<li>
+<p>This would happen if you asked something fundamentally incoherent...like asking to TRANSCODE a with input that was non-UTF-8...like a GOB!, or something like that</p>
+</li>
+<li>
+<p>Such errors are only interceptible by a special SYS.UTIL.ENTRAP method--they are not supposed to be easy to gloss over and unlikely to have meaningful mitigation.  So only special sandboxing situations (like writing consoles that print out the error) are supposed to trap them.</p>
+</li>
+</ul>
+</li>
+<li>
+<p>It can RETURN an <em>isotopic ERROR!</em> ("raised error") if something went wrong in the transcoding process itself</p>
+<ul>
+<li>
+<p>This would be something like a syntax error, like  if you asked <strong>transcode "a bc 1&amp;x def"</strong></p>
+</li>
+<li>
+<p>These will be promoted to a hard FAIL if the immediate caller doesn't do something to specially process them.</p>
+</li>
+<li>
+<p>You can casually ignore or intercept these, because you can be confident that it was a formal return result of the thing you just called--not some deeper problem like a random typo or other issue.</p>
+</li>
+</ul>
+</li>
+</ul>
+<p>I won't rehash the entire <a href="https://forum.rebol.info/t/fail-vs-return-raise-the-new-age-of-definitional-failures/1852">"why definitional errors are foundational"</a> post, but TRANSCODE was one of the first functions that had to be retrofitted to use them.</p>
+<pre><code>&gt;&gt; transcode "a bc 1&amp;x def" except e -&gt; [print ["Error:" e.id]]
+Error: scan-invalid
+</code></pre>
+<p><strong>The definitionality is extremely important!</strong>  I spent a long time today because in the bootstrap shim I had a variation of transcode...parallel to this in R3-Alpha:</p>
+<pre><code>r3-alpha&gt;&gt; transcode: func [input] [
+               prnit "My Transcode Wrapper"  ; oops, typo
+               return transcode input
+           ]
+
+r3-alpha&gt;&gt; if not attempt [transcode to binary! "abc def"] [print "Bad input"]
+Bad input
+</code></pre>
+<p><em><strong>But the input isn't bad!!!</strong></em>  This leads to a nightmare of trying to figure out what was going wrong.  I had just one of those nightmares today in the bootstrap executable when tinkering with the shim implementation of TRANSCODE.  A bug in the shim was leading to silently skipping work that should have been done, because the caller wanted to be tolerant of bad transcode input.</p>
+<p>There's simply no practical way of working on code of any complexity without something like definitional failures, and experience has proven this day after day.</p>
+<h2>Getting Incomplete Results Via R3-Alpha's /ERROR</h2>
+<p>R3-Alpha offered this feature:</p>
+<pre><code>/error -- Do not cause errors - return error object as value in place
+</code></pre>
+<p>The intended use is that you might want the partial input of what had been successfully scanned so far.  If the code went and raised an error, you could trap that error.  But you wouldn't have any of the scanned items.</p>
+<p>It would put it any ERROR! as the next-to-last item in the block, with the remainder after that:</p>
+<pre><code>&gt;&gt; transcode/error to binary! "a bc 1&amp;x def"
+== [abc make error! [
+    code: 200
+    type: 'Syntax
+    id: 'invalid
+    arg1: "pair"
+    arg2: "1&amp;x"
+    arg3: none
+    near: "(line 1) a bc 1&amp;x def"
+    where: [transcode]
+] #{20646566}]
+
+&gt;&gt; to string! #{20646566}
+== " def"  ; wait...why isn't 1&amp;x part of the "remainder"
+</code></pre>
+<p>It's clumsy to write the calling code (or to read it...testing to see if the next-to-last-item is an ERROR! and reacting to that.</p>
+<p><em>(Also: What if there was some way to represent ERROR! values literally in source?  This would conflate with such a block that was valid...but just incidentally had an ERROR! and then a BINARY! in the last positions.)</em></p>
+<p>But the thing that had me most confused about it was the remainder.  Notice above you don't get  <code>1&amp;x</code> as the start of the stuff it couldn't understand.</p>
+<p>Was it trying to implement some kind of recoverable scan?  What would that even mean?  <img src="https://forum.rebol.info/images/emoji/twitter/thinking.png?v=9" title=":thinking:" class="emoji" alt=":thinking:"></p>
+<p><strong>Ultimately I think this was just a leaking of an implementation detail as opposed to any reasonable attempt at recoverable scanner.</strong>  It only didn't tell you where the exact tail of the successfully scanned material was because it did not know.</p>
+<p>The scanning position is based on token consumptions, and so if you started something like a block scan and it saw a <strong>[</strong> then it forgets where it was before that.  Then if something inside the block goes bad, it will just give you a remainder position somewhere inside that--<em>completely forgetting about how many nesting levels it was in</em>.</p>
+<p>So what you were getting was a crappier implementation of scanning one by one, and remembering where you were before the last bad scan:</p>
+<pre><code>pos: input
+error: null
+block: collect [
+   while [true] [
+       keep [# pos]: transcode pos else [
+           break
+       ] except e -&gt; [
+           error: e
+           break
+       ]
+   ]
+]
+</code></pre>
+<p>That gives you a proper version, setting error if something happened and giving you the block intact.</p>
+<h2>So Finally... We See It's An Optimization Problem</h2>
+<p>Question is if there's some way of folding this into TRANSCODE, so it's doing the looping and collecting efficiently for you.</p>
+<p>But this interface wants to get back a "remainder".  And I kind of hate to sacrifice the property that TRANSCODE's asking for a remainder means scan one element.  :-/</p>
+<p>I guess we <em>could</em> say that there's a logical process you follow:</p>
+<ul>
+<li>
+<p>The output parameter is called REST (instead of NEXT)</p>
+</li>
+<li>
+<p>An additional output parameter is added for ERROR</p>
+</li>
+<li>
+<p>If you ask for the REST and <em>don't</em> ask for an ERROR, that suggests you want to encode a single item</p>
+<ul>
+<li>
+<p>You could have just intercepted the error if you wanted it</p>
+</li>
+<li>
+<p>Nothing is lost because there wouldn't be any partial results to miss (if you're only doing one item, there will always be zero items completed before it)</p>
+</li>
+</ul>
+</li>
+<li>
+<p>If you ask for the REST and <em>do</em> ask for an error, then it assumes you must not want the one-item-only semantics after all.</p>
+</li>
+</ul>
+<p>It's a little bit awkward because it conflates partial output with fully successful output</p>
+<pre><code>&gt;&gt; [block rest error]: transcode "a bc"
+== [a bc]
+
+&gt;&gt; error
+; null
+
+&gt;&gt; [block rest error]: transcode "a bc 1&amp;x def"
+== [a bc]  ; no indication something failed
+
+&gt;&gt; error? error  ; you'd have to remember to check this
+== #[true]
+</code></pre>
+<p>That's not a deal breaker, and Ren-C makes it easy to work with, using <a href="https://forum.rebol.info/t/circling-multi-returns-choose-which-is-expression-result/1587">circling an output in multi-return</a> to make it the primary return result:</p>
+<pre><code>&gt;&gt; [block rest @error]: transcode "a bc"
+; null
+
+&gt;&gt; [block rest @error]: transcode "a bc 1&amp;x def"
+== make error! [...]
+</code></pre>
+<p><strong>What's much more jarring to me is the flipping back and forth of whether you're asking for a full transcode or not.</strong></p>
+<pre><code>&gt;&gt; x: transcode "abc def"
+== [abc def]
+
+&gt;&gt; [x y]: transcode "abc def"
+== abc
+
+&gt;&gt; [x y z]: transcode "abc def"
+== [abc def]
+</code></pre>
+<p>Ick.  Should I be willing to bend on the transcode "requested parameter" behavior in this case, by adding a /ONE refinement?</p>
+<pre><code>&gt;&gt; [block rest]: transcode "abc def"
+== [abc def]
+
+&gt;&gt; rest
+== #{}  ; kind of useless, but honest
+
+&gt;&gt; [block rest]: transcode/one "abc def"
+== abc
+
+&gt;&gt; rest
+== " def"
+</code></pre>
+<p>That would make me feel grief, as it loses one of the first showcases of return value sensitivity.  <em>And it irks me to think that the beauty is ultimately being given up for the sake of what amounts to an optimization.</em></p>
+<h2>Answer For Now: Kill Off /ERROR</h2>
+<ul>
+<li>
+<p>The answer /ERROR has been giving back in error cases for the remainder is sketchy, and I don't want to figure out how to fix it.</p>
+</li>
+<li>
+<p>You can get the behavior reliably just by intercepting errors going one transcode item at a time.</p>
+</li>
+<li>
+<p>This is a good opportunity to write tests of item-by-item scanning with error handling</p>
+</li>
+<li>
+<p>Red added a bunch of refinements on transcode [/next /one /prescan /scan /part /into /trace], and they didn't pick up /error themselves</p>
+</li>
+</ul>
+<p>Speaking of adding lots of refinements: I also want to get away in general from investments in weird C scanner code and hooks (<em>especially</em> if it's just an optimization).</p>
+<p>What we should be investing in is more fluid mixture of PARSE of strings/binary with the scanner.  e.g. we should have ways of knowing what line number you're at during the parse for any combinator, and just generally pushing on that.  Adding TRANSCODE parameters up the wazoo isn't a winning strategy.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/incomplete-transcodes-actually-an-optimization-problem/1940">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/incomplete-transcodes-actually-an-optimization-problem/1940</link>
+          <pubDate>Mon, 22 Aug 2022 15:09:13 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-1940</guid>
+          <source url="https://forum.rebol.info/t/incomplete-transcodes-actually-an-optimization-problem/1940.rss">Incomplete TRANSCODEs: Actually an Optimization Problem</source>
+        </item>
+        <item>
+          <title>Optimizing TRANSCODE Usage in String/Binary PARSE</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Optimization</category>
+          <description><![CDATA[
+            <p>As written, the DATATYPE! combinator in UPARSE may do wasteful value loading when operating on string input.</p>
+<p>Consider this case.</p>
+<pre><code>&gt;&gt; parse "[some big block ...] 10" [collect some [keep integer! | block!]]
+== [10]
+</code></pre>
+<p><em>Pretty impressive that it works.</em>  (Red will only do this on BINARY! input, but Ren-C's UTF-8 everywhere allows it to do it on strings too!)</p>
+<p>But at the combinator level, it's wasteful.  What happens is:</p>
+<ul>
+<li>
+<p>Hitting the INTEGER! combinator, causing it to scan the next element, loading <strong><code>[some big block ...]</code></strong> as a series into memory.</p>
+<ul>
+<li>It then checks the type, notices it's not an integer, and the INTEGER! combinator gives back a rejection...so the BLOCK! combinator goes to the next alternate.</li>
+</ul>
+</li>
+<li>
+<p>It hits the BLOCK! combinator and scans the block again.</p>
+<ul>
+<li>
+<p>This time it matches, so the parser returns success and the synthesized block</p>
+</li>
+<li>
+<p><em>But the block isn't actually desired</em>, so it is thrown away</p>
+</li>
+</ul>
+</li>
+<li>
+<p>The next iteration scans the INTEGER! and keeps it.</p>
+</li>
+</ul>
+<h2>Why Does It Work This Way?</h2>
+<p>It's based on TRANSCODE, and does basically exactly what I said:</p>
+<pre><code>[item remainder]: transcode input except e -&gt; [return raise e]
+
+if datatype != type of item [
+    return raise ["Could not TRANSCODE" datatype "from input"]
+]
+return item
+</code></pre>
+<p>If we could pass in a datatype to TRANSCODE when using the /NEXT option (e.g. requesting a remainder, as we are above) then it could short-circuit and we wouldn't need that test.</p>
+<h2>Red Has Looked At This Kind of Problem</h2>
+<p>There are a bunch of new arguments to Red's TRANSCODE function:</p>
+<pre><code>USAGE:
+     TRANSCODE src
+
+DESCRIPTION: 
+     Translates UTF-8 binary source to values.
+     Returns one or several values in a block. 
+
+ARGUMENTS:
+     src          [binary! string!]
+     {UTF-8 input buffer; string argument will be UTF-8 encoded.}
+
+REFINEMENTS:
+     /next        =&gt; Translate next complete value (blocks as single value).
+     /one         =&gt; Translate next complete value, returns the value only.
+     /prescan     =&gt; Prescans only, do not load values. Returns guessed type.
+     /scan        =&gt; Scans only, do not load values. Returns recognized type.
+     /part        =&gt; Translates only part of the input buffer.
+         length       [integer! binary!] "Length in bytes or tail position."
+     /into        =&gt; Optionally provides an output block.
+        dst          [block!] 
+     /trace       =&gt; 
+        callback     [function! [
+                        event [word!]
+                        input [binary! string!]
+                        type [word! datatype!]
+                        line [integer!]
+                        token
+                        return: [logic!]
+                      ]] 
+
+RETURNS:
+    [block!]
+</code></pre>
+<p>I'm not sure exactly how useful the /PRESCAN option is (what good is a "guess" of the type?)  But the /SCAN option would offer some bit of efficiency.</p>
+<p>It would mean instead of one call to TRANSCODE followed by a datatype test, there'd be two calls</p>
+<ul>
+<li>
+<p>The first as TRANSCODE/SCAN to get the datatype (but not synthesize a value from it)</p>
+</li>
+<li>
+<p>A second call to scan again and get the value</p>
+</li>
+</ul>
+<p>We assume the idle mode of scanning without producing anything can be fast.</p>
+<p>I would suggest the scan feature be <strong>transcode/types</strong> so it worked more generally, not just with /NEXT.</p>
+<pre><code>&gt;&gt; transcode/types [1 a [b]]
+== [#[datatype! integer!] #[datatype! word!] #[datatype! block!]]
+</code></pre>
+<p><sub><em>(When I figure out the story of datatypes, there are going to be a lot of forum posts fixing up the above ugly notation.)</em></sub></p>
+<h2>But What About The Synthesis Of Unused Values?</h2>
+<p>This is a bit of a pickle.  <em>We don't know if you're going to use the product or not.</em></p>
+<p>UPARSE's design has values bubbling out the top, and no line of communication to be aware of whether what it produces will be used:</p>
+<pre><code>&gt;&gt; uparse "[a] (b)" [block! group!] 
+== (b)
+</code></pre>
+<p>You might think that when the block! rule is going to be run, UPARSE could notice it wasn't at the end and send some kind of signal to the BLOCK! combinator that it doesn't have to synthesize an output.  But there's no a-priori psychic power saying that GROUP! hasn't been configured to evaluate to void.  Until the combinator gets looked up and run, it's potentially the same situation as this:</p>
+<pre><code>&gt;&gt; uparse "[a] (b)" [block! void] 
+== [a]
+</code></pre>
+<h2>It Seems We Have Two Choices</h2>
+<ol>
+<li>
+<p>We can assume that a plain DATATYPE! intends to synthesize a value, and use a different combinator to say you only want to match the type:</p>
+<pre><code>&gt;&gt; uparse "[a b c]" [scan block!]
+== #[datatype! block!]  ; cheap (but useful) return value, no series synthesis
+
+&gt;&gt; uparse "[a b c]" [block!]
+== [a b c]
+</code></pre>
+</li>
+<li>
+<p>We can reverse it and say that by default it does the cheap thing, and you have to explicitly ask to get the expensive thing:</p>
+<pre><code>&gt;&gt; uparse "[a b c]" [block!]
+== #[datatype! block!]
+
+&gt;&gt; uparse "[a b c]" [scan block!]
+== [a b c]
+</code></pre>
+</li>
+</ol>
+<p>Looked at in isolation, it might seem like (2) would be the obvious winner.</p>
+<p>The thorn is that this would be a pretty notable divergence from how array parsing works, which I would basically call non-negotiable:</p>
+<pre><code>&gt;&gt; uparse [[a b c]] [x: block!]
+
+&gt;&gt; x
+== [a b c]
+</code></pre>
+<p>So is there actually an option 3?</p>
+<ol start="3">
+<li>
+<p>Make lone datatype! an error, and have two distinct operations for transcoding:</p>
+<pre><code>&gt;&gt; uparse "[a b c]" [block!]
+** Error: On string input, use either TRANSCODE BLOCK! or SCAN BLOCK!
+
+&gt;&gt; uparse "[a b c]" [transcode block!]
+== [a b c]
+
+&gt;&gt; uparse "[a b c]" [scan block!]
+== [a b c]
+</code></pre>
+</li>
+</ol>
+<p>Urg.  That kind of sucks.</p>
+<p><strong>I think the answer is to accept option (1) being suboptimal performance, allowing those who are performance-minded to tune it.</strong>  There's no overt harm by scanning things you throw away, it's just wasteful.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/optimizing-transcode-usage-in-string-binary-parse/1939">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/optimizing-transcode-usage-in-string-binary-parse/1939</link>
+          <pubDate>Sun, 21 Aug 2022 19:10:10 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-1939</guid>
+          <source url="https://forum.rebol.info/t/optimizing-transcode-usage-in-string-binary-parse/1939.rss">Optimizing TRANSCODE Usage in String/Binary PARSE</source>
+        </item>
         <item>
           <title>Simple Objects vs. What The People Want</title>
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
@@ -633,15 +1114,117 @@ for (; item != tail; ++item) {
           <source url="https://forum.rebol.info/t/moving-away-from-null-termination-end-of-block-s/1445.rss">Moving Away From &quot;NULL termination&quot; (END!) of BLOCK!s</source>
         </item>
         <item>
-          <title>&quot;HEART BYTES&quot;, Explained</title>
+          <title>Idea: Agreed Upon Symbol Number for Extensions</title>
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
           <category>Optimization</category>
           <description><![CDATA[
-            <p>For those who've looked at Rebol sources, you know that a Rebol cell is the size of <em>four platform pointers</em>.</p>
+            <p>A concept in the R3-Alpha codebase is that there are a certain number of built-in words...which come from a file called %words.r</p>
+<p><a href="https://github.com/rebol/rebol/blob/master/src/boot/words.r">https://github.com/rebol/rebol/blob/master/src/boot/words.r</a></p>
+<p>This is done so you can switch on a numeric code for these words, and not bother with needing to do a string comparison in C.  Some words (like PARSE keywords) are strategically chosen to be in a sequential range, to make testing for them faster.</p>
+<p>If you write an extension in C that operates at the internal level API and want the performance of a native, you might want to talk about a word that's not in that list.  You can get a bit close to the performance for a single test by caching a pointer to the canonized version of that word, and comparing to that canon pointer.  But it won't be quite as fast, and since that won't be a constant...C can't use it in switch statements.</p>
+<p>To be more concrete, imagine you have some words not in %words.r like OVERLOAD, MULTIPLE, INHERITANCE.  You couldn't write:</p>
+<pre><code> switch (VAL_WORD_SYM(some_word)) {  ; small 16-bit # can be cached in word
+     case SYM_OVERLOAD: ...  ; ...but these weren't in %words.r!
+     case SYM_MULTIPLE: ...
+     case SYM_INHERITANCE: ...
+     default: ...
+}
+</code></pre>
+<p>Can't do that for those new terms.  You'd have to do case-insensitive string comparisons, or something like this pseudocode:</p>
+<pre><code> REBSTR *canon_overload;
+ REBSTR *canon_multiple;
+ REBSTR *canon_inheritance;
+
+ void On_Module_Load() {
+      canon_overload = Register_Word("overload");
+      canon_multiple = Register_Word("multiple");
+      canon_inheritance = Register_Word("inheritance");
+ }
+
+ void On_Module_Shutdown() {
+     Unregister_Word(canon_overload);
+     Unregister_Word(canon_multiple);
+     Unregister_Word(canon_inheritance);
+ }
+</code></pre>
+<p>So imagine this gives you word series pointers that are guarded from GC for as long as your module is loaded.  Then you could say:</p>
+<pre><code> REBSTR *canon = VAL_WORD_CANON(some_word);
+ if (canon == canon_overload) { ... }
+ else if (canon == canon_multiple) { ... }
+ else if (canon == canon_inheritance) { ... }
+ else { ... }
+</code></pre>
+<p>It's less elegant than the switch(), and since the numbers are runtime pointers and not fixed at compile-time, there's no way to optimize as in a switch() by repeatedly bisecting the range of values...if you have N words, you will do N comparisons.</p>
+<h2>Weird idea: Agree on a list of words and numbers, commit on Internet</h2>
+<p>It would be pretty heinous to make a much bigger %words.r and ship it in every executable...inflating the size of Rebol to include a dictionary.</p>
+<p>But there's a possibility that doesn't go that far yet still gets the benefit.  Make the word list and commit it somewhere on the internet that developers can look.  Give every common word a number.  Then, the extension ships with just the spellings and numbers it needs.  All extensions agree to use the same numbers:</p>
+<pre><code> #define SYM_OVERLOAD 15092
+ #define SYM_MULTIPLE 32091
+ #define SYM_INHERITANCE 63029
+
+ void On_Module_Load() {
+      Register_Word("overload", SYM_OVERLOAD);
+      Register_Word("multiple", SYM_MULTIPLE);
+      Register_Word("inheritance", SYM_INHERITANCE);
+ }
+
+ void On_Module_Shutdown() {
+     Unregister_Word(SYM_OVERLOAD);
+     Unregister_Word(SYM_MULTIPLE);
+     Unregister_Word(SYM_INHERITANCE);
+ }
+</code></pre>
+<p>Your switch() statements can work just fine, and you're only out of luck if you use a sequence of characters that wasn't committed to in the database.  But the database can grow, so long as it grows centrally and not inconsistently.  (In fact, it's probably better to do it that way, where extension authors ask for the words they want and get them approved before shipping the extension.)</p>
+<p>The worst that can happen is you load two extensions that disagree, and it refuses to load them.  It could print out the disagreeing numbers and you could consult the internet to decide who was the culprit using the wrong number.</p>
+<p>It's a weird idea but kind of interesting--not in particular because of the performance aspect, but because of enabling the C switch()es.  Since there's only 16 bits of space in the word available for the symbol trick, it's an exhaustible resource.  But maybe still worth doing.  This really isn't difficult, outside of the administrative headache of deciding the policy on giving out <span class="hashtag">#s</span></p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/idea-agreed-upon-symbol-number-for-extensions/1188">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/idea-agreed-upon-symbol-number-for-extensions/1188</link>
+          <pubDate>Thu, 25 Jul 2019 18:44:16 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-1188</guid>
+          <source url="https://forum.rebol.info/t/idea-agreed-upon-symbol-number-for-extensions/1188.rss">Idea: Agreed Upon Symbol Number for Extensions</source>
+        </item>
+        <item>
+          <title>PATH! and TUPLE! compression, explained</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Optimization</category>
+          <description><![CDATA[
+            <p>Since I ever saw them, <strong>I wanted to unify PATH! and REFINEMENT!</strong></p>
+<ul>
+<li>
+<p>It did not make sense to me that there was <strong>foo/bar</strong> and <strong>/bar</strong> but not <strong>/foo/bar</strong> or <strong>bar/</strong></p>
+</li>
+<li>
+<p>I pretty quickly landed on the idea that if you saw something like <strong>/bar</strong> it would be a 2-element PATH!, where the first element was simply BLANK!.</p>
+</li>
+</ul>
+<p>As simple as that sounds, changing to this design the way R3-Alpha was written would make the PATH! form of <strong>/bar</strong> cost <em>SEVEN TIMES</em> as much!!!</p>
+<ul>
+<li>
+<p>When REFINEMENT! was an ANY-WORD! class it cost 4 pointers resident in a block</p>
+<ul>
+<li>That's 16 bytes on 32-bit platforms, 32 bytes on 64-bit platforms</li>
+</ul>
+</li>
+<li>
+<p>The initial implementation in NewPath cost those pointers <em>plus</em> 8 pointers for a series node <em>plus</em> a pool element that was 4 units long of 4 pointers each...to be big enough for 2 elements and a terminator.</p>
+<ul>
+<li>That's 112 bytes on 32-bit platforms, 224 bytes on 64-bit platforms</li>
+</ul>
+</li>
+</ul>
+<p>Not only do you get a factor of 7 cost increase, you now have 3 separate locations in memory to jump around at to process what you have (in addition to the locality issue of having to go find the symbol itself, which WORD!s had to do as well).</p>
+<p>In the "keeping it Amish" spirit, it felt like too much when the difference between <strong>/FOO</strong> and <strong>FOO</strong> jumped like that.  It only takes a few factors of 10 to get to the kinds of software situations we see today.  :-/</p>
+<h2>Before Going Further: Let's Recap CELLs and NODEs</h2>
+<p>For those who've looked at Rebol sources, you know that a Rebol cell is the size of <em>four platform pointers</em>.</p>
 <p>Ren-C keeps the general gist, with some important adjustments.  It breaks down as:</p>
 <ul>
 <li>
-<p><strong>header:</strong> one pointer-sized integer (uintptr_t).  This tells you the cell's type (e.g. REB_BLOCK, REB_INTEGER), among other things.  Only 32 bits are used of this (operated on through <code>uint_fast32_t</code> alias field, in case 32-bit masking operations are faster on 64-bit platforms than a 64-bit <code>uintptr_t</code>).  This allows the system to function identically on 32 and 64 bit systems...though the extra 32 bits could be applied to some kind of 64-bit optimization purpose.  <em>{This post is regarding a proposal about how to use one of the 4 critical bytes in this header, differently from how it has been used so far.}</em></p>
+<p><strong>header:</strong> one pointer-sized integer (uintptr_t).  This tells you the cell's type (e.g. REB_BLOCK, REB_INTEGER), among other things.  Only 32 bits are used of this (operated on through <code>uint_fast32_t</code> alias field, in case 32-bit masking operations are faster on 64-bit platforms than a 64-bit <code>uintptr_t</code>).  This allows the system to function identically on 32 and 64 bit systems...though the extra 32 bits could be applied to some kind of 64-bit optimization purpose.</p>
 </li>
 <li>
 <p><strong>"extra"</strong>: one pointer or pointer-sized integer.  It's a union, and which of the union fields is active depends on the type of the cell.  For "bindable" types, this holds a <em>binding</em>...and that's a fairly deep topic.  But if a type isn't bindable--let's say a MONEY! or a DATE!, then it can just use this for some spare bits to help put more data in the cell without needing to do a dynamic allocation.</p>
@@ -657,47 +1240,34 @@ for (; item != tail; ++item) {
 <p>When we try to understand the difference between <strong>[1 2 3]</strong> and <strong>[[1] [2] [3]]</strong>, just how much of cost is that in bytes or processing overhead?  If you're designing a dialect, should you fear BLOCK!s, GROUP!s, and PATH!s?</p>
 <p>Well, when you've got that cell and the header says it's a REB_BLOCK, the "extra" field is used for stuff I'm not going to explain here.  But the Reb_Block_Payload union contains to two things: a <em>series node</em> pointer and the index that series value has in the block.</p>
 <p>Series nodes are fixed-size tracking entities.  Though they're pretty small, they're still <em>eight platform pointers</em>.  To get to the node from the cell you have to hop through the pointer to another memory location, and so that's going to affect caching.</p>
-<p>If you have a block of length 1 or 0, then Ren-C has a very neat optimization called "singular arrays".  The payload for the array lives <em>directly in the series node</em>.  Careful mechanics allow this to work, not breaking any alignment or aliasing rules, and even managing to wedge an array terminator into control bits used for other purposes.</p>
+<p>If you have a block of length 1 or 0, then Ren-C has a very neat optimization called "singular arrays".  The payload for the array lives <em>directly in the series node</em>.  Careful mechanics allow this to work, not breaking any alignment or aliasing rules, and even building some safety in via bit patterns to help catch attempts to wander off the edge of the data into neighboring node stubs.</p>
 <p>So in this case--if you're lucky--you've gone from taking 4 platform pointers for just the REB_INTEGER cell, to a REB_BLOCK cell of 4 platform pointers...and a series node of 8 pointers.  3x the size for <strong>[1]</strong> vs. just <strong>1</strong>.</p>
 <p>But let's say instead of a block, you were doing a PATH!, like the proposed 2-element path for <strong>/refinement</strong> (a BLANK! that's not rendered, and then the WORD! "refinement").  What would a 2-element array cost?</p>
 <p>You've still got the 4 pointer cell and the 8 pointer series node.  But now you need a dynamic allocation to hold the 2 cells, so that would be 8 more platform pointers.</p>
 <blockquote>
-<p>Note: It would have needed to be 4 cells when a terminator was needed...but <a href="https://forum.rebol.info/t/moving-away-from-null-termination-end-of-block-s/1445">the terminator no longer applies</a>!  So arrays of length 2 can really just use 8 cells in their allocation now.  <img src="https://forum.rebol.info/images/emoji/twitter/partying_face.png?v=9" title=":partying_face:" class="emoji" alt=":partying_face:"></p>
+<p>Note: It would have needed to be 4 cells when a terminator was needed...but <a href="https://forum.rebol.info/t/moving-away-from-null-termination-end-of-block-s/1445">the terminator no longer applies</a>!  So arrays of length 2 can really just use 8 pointers in their allocation now.  <img src="https://forum.rebol.info/images/emoji/twitter/partying_face.png?v=9" title=":partying_face:" class="emoji" alt=":partying_face:"></p>
 </blockquote>
 <p><em>Grand Total:</em> 4 + 8 + 8 =&gt; <strong>20 platform pointers</strong>...for something that took only 4 before!  So <strong>[1 1]</strong> is 5x as big as <strong>1</strong>, and on a 64-bit platform we're talking 160 bytes.  For a refinement like <strong>[_ refine]</strong> that's not even counting the storage for the UTF-8 name of the refinement and overhead for that...this is how much it costs just to <em>point</em> to it!</p>
 <p>I'm neglecting all the overhead that dynamic allocation systems have to keep for their internal bookkeeping.  Plus, remember that locality...spreading this data out is about more than just how many bytes you use, it's <em>where</em> the bytes are.</p>
-<h2>My Solution: "Heart Bytes"</h2>
-<p>There's clearly no generic way to contain an arbitrary cell-sized thing inside a cell without adding cost.  It would be like zipping a zip file and guaranteeing it would always be smaller.  :-/</p>
-<p>But if cells were willing to sacrifice some of their header bits, those bits might hold a key to allowing <strong>a</strong> and <strong>[a]</strong> to both fit into a single cell...as long as that cell wasn't <em>also</em> trying to be a 1-element array (e.g. [[a]]).  The extra and payload bits would line up with the the WORD!, but the same cell bits could be seen in one light as a BLOCK!, and in another light as a WORD!.</p>
-<p>This sounds like a paradox.  How can it have an answer to VAL_TYPE(...) which is both REB_BLOCK and REB_WORD (!)  It would seem to have to be one thing or the other.</p>
-<p><em><strong>Answer: Use the type system.</strong></em>  If you're holding the pointer via a plain REBVAL* to the cell, have it say this is a REB_BLOCK.  But if you're holding another pointer type (call it a REBCEL for now), then a REBCEL* would refuse to answer VAL_TYPE()...you'd get a compiler error if you tried.  Instead you'd have to ask for the HEART_BYTE().  Then the game becomes figuring out how and when to flip your pointers back and forth between REBVAL and REBCEL.</p>
-<h2>Stating The Obvious (?): Only Works for Immutable Arrays</h2>
-<p>You can't dodge the allocation of a separate entity outside the cell if you want multiple cell references to be able to make shared changes, or see changes made through one reference via another one.</p>
-<p>If you try to apply this optimization on plain code, it couldn't do what you'd expect:</p>
-<pre><code> &gt;&gt; block: [a]  ; one element, right on, optimize it right into that cell!
- &gt;&gt; ref: block  ; now both referring to the "same block"
- &gt;&gt; append block 'b
- ** Script Error: series is const ;-- oops, oh yeah, I'll just use MUTABLE
-
- &gt;&gt; append mutable block 'b
- ??? ;-- how could ref ever see a change, if only cells are exchanged?
-</code></pre>
-<p>The LOCK process could go through and do some compression, and there could be primitives for making these immutable blocks if you wanted them.  But they shouldn't be the default.</p>
-<p><em>Unless...</em> they are loaded into a PATH!.  If we got people on board with the expectation that not only are paths immutable, but embedded groups and arrays are immutable <em>at least at the top level</em>, then this could work.</p>
-<p>I discuss how this could really tie down <a href="http://forum.rebol.info/t/taming-the-pathology-of-path/1006">some of the more egregious ambiguities in PATH!</a>, making it a solid and reliable part for dialecting--something it has certainly not been in the past.  If we can kill off things like <strong><code>a/:b:</code></strong> in favor of <strong><code>a/(b):</code></strong> and pay no more for it, we very well may should.</p>
-<blockquote>
-<p>Update: Not only are we on board, but immutable paths and tuples and such are working fine!</p>
-</blockquote>
-            <p><small>2 posts - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/heart-bytes-explained/1008">Read full topic</a></p>
+<h2>Major Realization: PATH!s and TUPLE!s Should Be Immutable</h2>
+<p>Once I realized paths and tuples could be immutable, it began to make sense that they could avoid the problem of being like arrays.</p>
+<p>I called them "sequences", and dropped the assumption that every sequence had an array backing it.  Instead, some would...and some would not.</p>
+<p>So you wouldn't ask for a pointer to the head cell of a sequence directly.  Instead, you would ask for the Nth element of a sequence...and <em>maybe</em> you would get a pointer to a cell that was part of an array.  Or you could get a pointer back to a temporary cell you passed in where the item would be written.</p>
+<p>Then, something like a refinement-type PATH! would not point at an array node, but to a word spelling node.  It's possible to tell the difference because in Ren-C all Nodes have "flavor bytes" (which are a parallel to the heart byte in a Cell that tells you if it's a BLOCK! or WORD! etc.)</p>
+<p>Since 1-element paths are illegal, we can assume that if a path points to a word spelling it must represent either <strong>/a</strong> or <strong>a/</strong>.  The distinction is encoded with a single bit in the cell.</p>
+<h2>It's All Been Working Great</h2>
+<p>Immutable PATH! and TUPLE! are clearly good, and they permit this optimization.</p>
+<p>This has tied down <a href="http://forum.rebol.info/t/taming-the-pathology-of-path/1006">some of the more egregious ambiguities in PATH!</a>, making it a solid and reliable part for dialecting--something it has certainly not been in the past.  If we can kill off things like <strong><code>a/:b:</code></strong> in favor of <strong><code>a/(b):</code></strong> and pay no more for it, we very well may should.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/path-and-tuple-compression-explained/1008">Read full topic</a></p>
           ]]></description>
-          <link>https://forum.rebol.info/t/heart-bytes-explained/1008</link>
+          <link>https://forum.rebol.info/t/path-and-tuple-compression-explained/1008</link>
           <pubDate>Fri, 11 Jan 2019 05:13:22 +0000</pubDate>
           <discourse:topicPinned>No</discourse:topicPinned>
           <discourse:topicClosed>No</discourse:topicClosed>
           <discourse:topicArchived>No</discourse:topicArchived>
           <guid isPermaLink="false">forum.rebol.info-topic-1008</guid>
-          <source url="https://forum.rebol.info/t/heart-bytes-explained/1008.rss">&quot;HEART BYTES&quot;, Explained</source>
+          <source url="https://forum.rebol.info/t/path-and-tuple-compression-explained/1008.rss">PATH! and TUPLE! compression, explained</source>
         </item>
   </channel>
 </rss>

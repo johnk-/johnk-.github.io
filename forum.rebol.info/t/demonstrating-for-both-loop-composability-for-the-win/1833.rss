@@ -1,0 +1,290 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Demonstrating FOR-BOTH: Loop Composability For The Win :exclamation:</title>
+    <link>https://forum.rebol.info/t/demonstrating-for-both-loop-composability-for-the-win/1833</link>
+    <description>FOR-BOTH was an early talking point for an extremely simple usermode loop construct that would be built out of two FOR-EACH loops:
+
+     &gt;&gt; for-both x [1 2] [3 4] [print [x], x = 5]
+     1
+     2
+     3
+     4
+     == #[false]
+
+A naive implementation of this in Rebol2 might look like:
+
+     for-both-naive: func [&#39;var blk1 blk2 body] [
+         foreach :var blk1 body
+         foreach :var blk2 body
+     ]
+
+...but...
+
+* **It will not honor BREAK correctly**
+
+      &gt;&gt; for-both-naive x [1 2] [3 4] [if x = 2 [break], print [x], x = 5]
+      1
+      3  ; the BREAK only broke the first FOREACH
+      4
+      == #[none]
+
+    There&#39;s no way from the outside of Rebol2 or Red&#39;s FOREACH to know for sure that a BREAK was requested.  BREAK returns NONE!, but a loop body can (and often does) evaluate to NONE! as well.  Red made it even worse by adding BREAK/RETURN--so a breaking loop can return *anything*.
+
+     So you&#39;d need some kind of complex binding to search the loop bodies and bind the BREAK word to something that throws and gets caught...even for this simple goal.
+
+* **The loop won&#39;t evaluate to the last result of the body**.  
+
+      &gt;&gt; for-both-naive x [1 2] [] [print [x], x * 10]
+      1  ; evaluated to 10
+      2  ; evaluated to 20
+      == #[none!]
+
+    If the second series is empty, the fallout from the first loop is forgotten.
+
+## Behold Ren-C&#39;s Elegant Solution to FOR-BOTH
+
+*Underneath its apparent simplicity lies quite a lot of deep thought.*  And the mechanisms it uses apply far beyond just loops!
+
+        for-both: func [&#39;var blk1 blk2 body] [
+            return unmeta all [
+                meta for-each (var) blk1 body
+                meta for-each (var) blk2 body
+            ]
+        ]
+
+*(Note: see followup for why RETURN is necessary with FUNC, and how to avoid it with LAMBDA.)*
+
+### It solves the BREAK case
+
+Below we see a situation where the first FOR-EACH returns NULL (and **meta null** is just **null**).  So it short-circuits the ALL, and propagates the null as a signal that it broke:
+
+    &gt;&gt; for-both x [1 2] [3 4] [if x = &#39;2 [break], print [x], x = 5]
+    1
+    ; null
+
+Note that the first pass through the loop did not terminate the ALL, just because the body evaluated to false.  That&#39;s because meta of ordinary values produces QUOTED!, which is truthy even if the quoted thing is falsey.
+
+     &gt;&gt; metafalse: meta #[false]
+     == &#39;#[false]
+
+     &gt;&gt; type of metafalse
+     == #[datatype! quoted!]
+
+    &gt;&gt; if metafalse [print &quot;All QUOTED! are truthy!&quot;]
+    All QUOTED! are truthy!
+
+This means the loop can gracefully recover the QUOTED! as the ALL result if the loop completes, and remove the quoting level:
+
+    &gt;&gt; for-both x [1 2] [3 4] [print [x], x = 5]
+    1
+    2
+    3
+    4
+    == #[false]
+
+### It Solves the Fallout From The Last Loop Body
+
+This takes advantage of a new invariant: ***loops which never run their bodies return void***.
+
+    &gt;&gt; for-each x [] [fail &quot;This body never runs&quot;]
+    ; void (decays to none)
+
+Voids act invisibly in constructs like ALL.  So we get the result we want:
+
+    &gt;&gt; for-both x [1 2] [] [print [x], x * 10]
+    1  ; evaluated to 10
+    2  ; evaluated to 20
+    == 20
+
+There&#39;s a slight fib here, that META of the void did not produce a &quot;meta-void&quot; (@void)...but passed it through as it would a NULL.  That&#39;s a &quot;user-friendly&quot; property of the META-as-a-word form:
+
+    &gt;&gt; meta comment &quot;META-the-word passes through the vanishing void isotopes&quot;
+    ; void (decays to none)
+
+    &gt;&gt; ^ comment &quot;The ^ operator is more exact, gives the meta signal&quot;
+    == @void
+
+But in situations like this, passing through the void state is what we wanted.
+
+### You Can Even Return NULL From the Body!
+
+Thanks to isotopes, the following is possible:
+
+    &gt;&gt; x: for-both x [1 2] [] [print [x], if x = 2 [null]]
+    1
+    2
+    == ~null~  ; isotope (decays to null)
+
+    &gt;&gt; x
+    ; null
+
+How cool is that?  Even though NULL is being reserved as the unique signal for loops breaking, there&#39;s a backchannel for it to escape...out of the FOR-EACH, and up out of the FOR-BOTH wrapping it!
+
+## It Holds Up Under Scrutiny!
+
+I&#39;m really pleased with it, and here are some tests:
+
+  https://github.com/metaeducation/ren-c/blob/master/tests/loops/examples/for-both.loops.test.reb
+
+I invite you to test it some more...ask questions...and perhaps come up with your own loop compositions!
+
+:atom_symbol:</description>
+    
+    <lastBuildDate>Wed, 15 Jun 2022 09:35:59 +0000</lastBuildDate>
+    <category>Show &amp; Tell</category>
+    <atom:link href="https://forum.rebol.info/t/demonstrating-for-both-loop-composability-for-the-win/1833.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Demonstrating FOR-BOTH: Loop Composability For The Win :exclamation:</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group quote-modified" data-username="hostilefork" data-post="1" data-topic="1833">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/40/26_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p><em>Underneath its apparent simplicity lies quite a lot of deep thought.</em> And the mechanisms it uses apply far beyond just loops!</p>
+<pre><code>for-both: func ['var blk1 blk2 body] [
+    return unmeta all [
+        meta for-each (var) blk1 body
+        meta for-each (var) blk2 body
+    ]
+]
+</code></pre>
+</blockquote>
+</aside>
+<p>Pursuant <a href="https://forum.rebol.info/t/implicit-execution-of-return-in-functions-bad/1656/2">to the new rules for having a return from FUNC[TION]</a>, this either needed to RETURN the result or be changed to a lambda.</p>
+<p>I chose to add a RETURN just so that it didn't look too "foreign".  (Or at least so that this talking-point example can focus its foreignness on the explanation of META and UNMETA).</p>
+<p>But it could be written without a RETURN as:</p>
+<pre><code>for-both: lambda ['var blk1 blk2 body] [
+    unmeta all [
+        meta for-each (var) blk1 body
+        meta for-each (var) blk2 body
+    ]
+]</code></pre>
+          <p><a href="https://forum.rebol.info/t/demonstrating-for-both-loop-composability-for-the-win/1833/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/demonstrating-for-both-loop-composability-for-the-win/1833/2</link>
+        <pubDate>Wed, 15 Jun 2022 09:35:59 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1833-2</guid>
+        <source url="https://forum.rebol.info/t/demonstrating-for-both-loop-composability-for-the-win/1833.rss">Demonstrating FOR-BOTH: Loop Composability For The Win :exclamation:</source>
+      </item>
+      <item>
+        <title>Demonstrating FOR-BOTH: Loop Composability For The Win :exclamation:</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>FOR-BOTH was an early talking point for an extremely simple usermode loop construct that would be built out of two FOR-EACH loops:</p>
+<pre><code> &gt;&gt; for-both x [1 2] [3 4] [print [x], x = 5]
+ 1
+ 2
+ 3
+ 4
+ == #[false]
+</code></pre>
+<p>A naive implementation of this in Rebol2 might look like:</p>
+<pre><code> for-both-naive: func ['var blk1 blk2 body] [
+     foreach :var blk1 body
+     foreach :var blk2 body
+ ]
+</code></pre>
+<p>...but...</p>
+<ul>
+<li>
+<p><strong>It will not honor BREAK correctly</strong></p>
+<pre><code>&gt;&gt; for-both-naive x [1 2] [3 4] [if x = 2 [break], print [x], x = 5]
+1
+3  ; the BREAK only broke the first FOREACH
+4
+== #[none]
+</code></pre>
+<p>There's no way from the outside of Rebol2 or Red's FOREACH to know for sure that a BREAK was requested.  BREAK returns NONE!, but a loop body can (and often does) evaluate to NONE! as well.  Red made it even worse by adding BREAK/RETURN--so a breaking loop can return <em>anything</em>.</p>
+<p>So you'd need some kind of complex binding to search the loop bodies and bind the BREAK word to something that throws and gets caught...even for this simple goal.</p>
+</li>
+<li>
+<p><strong>The loop won't evaluate to the last result of the body</strong>.</p>
+<pre><code>&gt;&gt; for-both-naive x [1 2] [] [print [x], x * 10]
+1  ; evaluated to 10
+2  ; evaluated to 20
+== #[none!]
+</code></pre>
+<p>If the second series is empty, the fallout from the first loop is forgotten.</p>
+</li>
+</ul>
+<h2>Behold Ren-C's Elegant Solution to FOR-BOTH</h2>
+<p><em>Underneath its apparent simplicity lies quite a lot of deep thought.</em>  And the mechanisms it uses apply far beyond just loops!</p>
+<pre><code>    for-both: func ['var blk1 blk2 body] [
+        return unmeta all [
+            meta for-each (var) blk1 body
+            meta for-each (var) blk2 body
+        ]
+    ]
+</code></pre>
+<p><em>(Note: see followup for why RETURN is necessary with FUNC, and how to avoid it with LAMBDA.)</em></p>
+<h3>It solves the BREAK case</h3>
+<p>Below we see a situation where the first FOR-EACH returns NULL (and <strong>meta null</strong> is just <strong>null</strong>).  So it short-circuits the ALL, and propagates the null as a signal that it broke:</p>
+<pre><code>&gt;&gt; for-both x [1 2] [3 4] [if x = '2 [break], print [x], x = 5]
+1
+; null
+</code></pre>
+<p>Note that the first pass through the loop did not terminate the ALL, just because the body evaluated to false.  That's because meta of ordinary values produces QUOTED!, which is truthy even if the quoted thing is falsey.</p>
+<pre><code> &gt;&gt; metafalse: meta #[false]
+ == '#[false]
+
+ &gt;&gt; type of metafalse
+ == #[datatype! quoted!]
+
+&gt;&gt; if metafalse [print "All QUOTED! are truthy!"]
+All QUOTED! are truthy!
+</code></pre>
+<p>This means the loop can gracefully recover the QUOTED! as the ALL result if the loop completes, and remove the quoting level:</p>
+<pre><code>&gt;&gt; for-both x [1 2] [3 4] [print [x], x = 5]
+1
+2
+3
+4
+== #[false]
+</code></pre>
+<h3>It Solves the Fallout From The Last Loop Body</h3>
+<p>This takes advantage of a new invariant: <em><strong>loops which never run their bodies return void</strong></em>.</p>
+<pre><code>&gt;&gt; for-each x [] [fail "This body never runs"]
+; void (decays to none)
+</code></pre>
+<p>Voids act invisibly in constructs like ALL.  So we get the result we want:</p>
+<pre><code>&gt;&gt; for-both x [1 2] [] [print [x], x * 10]
+1  ; evaluated to 10
+2  ; evaluated to 20
+== 20
+</code></pre>
+<p>There's a slight fib here, that META of the void did not produce a "meta-void" (<span class="mention">@void</span>)...but passed it through as it would a NULL.  That's a "user-friendly" property of the META-as-a-word form:</p>
+<pre><code>&gt;&gt; meta comment "META-the-word passes through the vanishing void isotopes"
+; void (decays to none)
+
+&gt;&gt; ^ comment "The ^ operator is more exact, gives the meta signal"
+== @void
+</code></pre>
+<p>But in situations like this, passing through the void state is what we wanted.</p>
+<h3>You Can Even Return NULL From the Body!</h3>
+<p>Thanks to isotopes, the following is possible:</p>
+<pre><code>&gt;&gt; x: for-both x [1 2] [] [print [x], if x = 2 [null]]
+1
+2
+== ~null~  ; isotope (decays to null)
+
+&gt;&gt; x
+; null
+</code></pre>
+<p>How cool is that?  Even though NULL is being reserved as the unique signal for loops breaking, there's a backchannel for it to escape...out of the FOR-EACH, and up out of the FOR-BOTH wrapping it!</p>
+<h2>It Holds Up Under Scrutiny!</h2>
+<p>I'm really pleased with it, and here are some tests:</p>
+<p><a href="https://github.com/metaeducation/ren-c/blob/master/tests/loops/examples/for-both.loops.test.reb">https://github.com/metaeducation/ren-c/blob/master/tests/loops/examples/for-both.loops.test.reb</a></p>
+<p>I invite you to test it some more...ask questions...and perhaps come up with your own loop compositions!</p>
+<p><img src="https://forum.rebol.info/images/emoji/twitter/atom_symbol.png?v=9" title=":atom_symbol:" class="emoji only-emoji" alt=":atom_symbol:"></p>
+          <p><a href="https://forum.rebol.info/t/demonstrating-for-both-loop-composability-for-the-win/1833/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/demonstrating-for-both-loop-composability-for-the-win/1833/1</link>
+        <pubDate>Tue, 31 May 2022 16:02:09 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1833-1</guid>
+        <source url="https://forum.rebol.info/t/demonstrating-for-both-loop-composability-for-the-win/1833.rss">Demonstrating FOR-BOTH: Loop Composability For The Win :exclamation:</source>
+      </item>
+  </channel>
+</rss>

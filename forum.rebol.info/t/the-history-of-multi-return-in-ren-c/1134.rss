@@ -1,0 +1,326 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>The History of Multi-Return in Ren-C</title>
+    <link>https://forum.rebol.info/t/the-history-of-multi-return-in-ren-c/1134</link>
+    <description>*This thread merges discussions of history across several threads to cover the key points, starting with material from the post announcing the addition of the SET-BLOCK! and GET-BLOCK!...and then folding in important points from later posts in the relative chronology of when they happened.  So it&#39;s broken up into sections by approximate date.*
+
+---
+# March 2019: SET-BLOCK! and GET-BLOCK! Added
+
+These were generic parts which you could use in dialects however you wanted...just like other types.
+
+**But a key motivation was the concept that the evaluator would use them for some kind of multiple-return-value strategy.**  Users of languages with the feature seemed to rave about it. And if you don&#39;t have it, they will complain and constantly try to find ways to work around it.
+
+I had inklings that Rebol could do them in a way that is mindbending and original. But a dirt simple implementation of the idea in 2019 looked roughly like what people were used to with SET of BLOCK! from Rebol2, without needing to write the word SET:
+
+    early-multi-concept: function [a b] [
+        return :[(a * 3) (b - 16)]  ; e.g. :[...] would act like REDUCE [...]
+    ]
+
+    &gt;&gt; [x y]: early-multi-concept 10 20
+    == [30 4]
+
+    &gt;&gt; x
+    == 30
+    
+    &gt;&gt; y
+    == 4
+
+So **`([x y]: foo)`** would act like **`(set [x y] foo)`**, including allowances to let you take fewer than one value:
+
+    &gt;&gt; [x]: [10 20]
+    == [10 20]
+
+    &gt;&gt; x
+    == 10
+
+## But the simplicity had obvious drawbacks
+
+First of all, Ren-C had NULL states that by design could not be put into blocks.  This approach wouldn&#39;t be able to return those without distorting them into some different reified value  than the intended NULL.
+
+    &gt;&gt; [x y]: function-returning-null-and-30
+    == [&lt;null&gt; 30]  ; can&#39;t put null, so... &quot;something else&quot; in first slot?
+
+    &gt;&gt; x
+    == null  ; not the same thing as what the block said...seems bad, yes?
+
+    &gt;&gt; y
+    == 30
+
+Also, you would have to know that what you were calling returned multiple values.  If you missed that and used a plain SET-WORD!, you&#39;d just wind up with the block:
+
+    &gt;&gt; x: some-function-i-didnt-know-was-multi-return ...
+    == [ret1 ret2 ret3]  ; the block! could easily be mistaken for single return
+
+## I had one of those ideas that just wouldn&#39;t go away...
+
+It seemed clearly preferable that rather than choose between **[x]:** and **[x y]:** and knowing in advance how many values you&#39;re taking or throwing away... someone who only asked for one value should be able to be blissfully ignorant.  So the choice would be between:
+
+    &gt;&gt; x: multi-return ...
+    &gt;&gt; [x y]: multi-return ...
+
+Even though the first case is a multiple return, you wouldn&#39;t set x to a block of values, *but just get the first value*.  An interface like this would also solve the issue of returning NULL.
+
+Not being forced to return a BLOCK! also made great sense... *because since BLOCK! is always truthy, you&#39;d not really be able to make useful conditional behavior be based on a BLOCK! return anyway!*
+
+    &gt;&gt; [x y]: function-returning-null-and-30
+    == null  ; so you could meaningfully say `if [x y]: whatever [...]`
+
+    &gt;&gt; x
+    == null
+
+    &gt;&gt; y
+    == 30
+
+Going even further, I suggested *&quot;it would be important that if a function wanted to do multiple returns that it could know how many results it was assigning.  This could save calculation on things that aren&#39;t needed.&quot;*
+
+### ***...but all this would require some kind of magic...*** :mage:</description>
+    
+    <lastBuildDate>Sat, 20 Aug 2022 10:06:31 +0000</lastBuildDate>
+    <category>Functions</category>
+    <atom:link href="https://forum.rebol.info/t/the-history-of-multi-return-in-ren-c/1134.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>The History of Multi-Return in Ren-C</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>The multi-returns were WORD!s of the variables...while usually being named as the variables they represent.  <strong>This made them misleading if you tried to assign them.</strong></p>
+<p>Here's an example of a very common mistake:</p>
+<pre><code>remove-tags: func [  ; version that looks like it *should* be right but wasn't
+    {Return block with all tags removed}
+
+    return: [block!]
+    num-removed: [integer!]
+
+    block [block!]
+][
+    num-removed: 0
+    while [not tail? block] [
+        if tag? block.1 [
+             take block
+             removals: me + 1
+        ]
+    ]
+    return block
+]
+</code></pre>
+<p>That doesn't work because it's overwriting the WORD! that NUM-REMOVES may-or-may-not hold.</p>
+<p>Here's how you had to do it instead:</p>
+<pre><code>remove-tags: func [  ; ugly working version, but that's easy to get wrong
+    {Return block with all tags removed}
+
+    return: [block!]
+    num-removed: [integer!]
+
+    block [block!]
+][
+    let removals: 0
+    while [not tail? block] [
+        if tag? block.1 [
+             take block
+             removals: me + 1
+        ]
+    ]
+    if num-removed [set num-removed removals]
+    return block
+]
+</code></pre>
+<h1>July 2022: Proxying Multi-Return Was Invented</h1>
+<p>Each output variable was given its own local variable as the output.  Then when the function finishes, the multi-return mechanics proxied the contents of that local variable to whatever you passed in as the variable to assign.</p>
+<p>This was desirable for other reasons:</p>
+<ul>
+<li>
+<p>It meant that if a function errored, then no changes to the variables you used on the left hand side of a multi-return would be made.</p>
+</li>
+<li>
+<p>It prevents unwanted dependencies: you don't want a multi-return to intentionally--or accidentally--have variant behavior based on the name of the variable it is returning.  (<em>that</em> is a feature that should be restricted to refinements that pass WORD!, because you're getting the word...)</p>
+</li>
+<li>
+<p>Having a local variable to store a result in whether there was a multi-return request for it or not means that if you do a calculation that has a by-product you use during the body of your function, you don't need a separate name for that.</p>
+</li>
+</ul>
+<p>But there would have to be some other means to know if a variable was requested by the callsite.  With some amount of hand-waving, I called that <strong>WANTED?</strong>... where you'd pass in the WORD! of the multi-return argument and be told whether it was being assigned to an output variable or not.</p>
+<h2>How Proxying Worked</h2>
+<p>Functions would have two cells in the frame for each output parameter: one refinement with the output name, and one hidden local slot to store the writeback variable (if any)</p>
+<ul>
+<li>
+<p>A prelude would run before the function body, where whatever is in the refinement slots for the outputs would be shifted into their associated local slot.</p>
+<ul>
+<li>
+<p>If no variable is given, then the refinement slot would be overwritten with a ~ isotope, indicating an unset variable state.  The hidden writeback slot would be set to null.</p>
+</li>
+<li>
+<p>If a variable was given, the the refinement slot would again be written to indicate unset.  But the variable would be moved into the writeback slot</p>
+</li>
+<li>
+<p>The WANTED? function is implemented by having the implementation peek into the hidden writeback slot and report if anything is there</p>
+</li>
+</ul>
+</li>
+<li>
+<p>During the body of the function they use the named interface slot normally...assigning and reading with ordinary SET-WORD! and variable access (instead of needing SET and GET)</p>
+</li>
+<li>
+<p>When the body is finished, an epilogue writes the value of the output cells for any that had saved variables</p>
+<ul>
+<li>
+<p>This is also a good time to do typechecking</p>
+</li>
+<li>
+<p>Internally, the parameter slot for the output variable can keep the types to check, as it can never be specialized</p>
+</li>
+</ul>
+</li>
+</ul>
+<p>The epilogue runs at the moment of RETURN if a function has a return...because that's when the stack still has information of which return path has the problem (if there's more than one such path).  This is consistent with the historical concept that it's RETURN that does the typechecking.</p>
+<h2>In November 2020, I Had Actually Mused About Proxying</h2>
+<blockquote>
+<p>"We could imagine a different setup which tried to let you just do <strong>multi: 10</strong> directly, and then when the operation was over would proxy that value into the target variable.  And it could use some similar rules about how when the frame started, it could be either NULL if it wasn't wanted or <code>#</code> if it was wanted.  But that seems a lot more error-prone.  And the variable exists anyway to make the request...so why not go ahead and set it where it is, instead of going through a middleman anyway?"*</p>
+</blockquote>
+<p>So I seem to have talked myself out of it because it would cost an extra slot for each variable, and people might not remember to check the state and lose it.</p>
+<p><strong>But that was wrong thinking...it's much, much better and worth it.</strong>  Things quickly got more comprehensible in UPARSE (it was a large diff, so linking directly to it doesn't seem to work):</p>
+<p><a href="https://github.com/metaeducation/ren-c/commit/3b0d9ba37bc03f7a8033b93180fb5f4d59913185#diff-dd8fb57db4500bffad0a67b376380db3c4b259ab95683d09e577850bf19f2299" class="inline-onebox">Inefficient first-cut at multi-return proxying · metaeducation/ren-c@3b0d9ba · GitHub</a></p>
+<p>But lingering issues regarding wrapping and composing multi-returns remained...</p>
+          <p><a href="https://forum.rebol.info/t/the-history-of-multi-return-in-ren-c/1134/9">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/the-history-of-multi-return-in-ren-c/1134/9</link>
+        <pubDate>Mon, 04 Jul 2022 19:10:11 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1134-9</guid>
+        <source url="https://forum.rebol.info/t/the-history-of-multi-return-in-ren-c/1134.rss">The History of Multi-Return in Ren-C</source>
+      </item>
+      <item>
+        <title>The History of Multi-Return in Ren-C</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <h1>February 2020: Fake It (with Enfix) Until We Make It</h1>
+<p>It occurred to me to work up a prototype completely in usermode using a skippable enfix parameter:</p>
+<p><a href="https://forum.rebol.info/t/multiple-return-values-via-enfix/1257" class="inline-onebox">Multiple Return Values Via Enfix</a></p>
+<p>So a function could act as having multi-returns by peeking to its left... and seeing if there was a SET-BLOCK! there.  If there was, then it would do the SET-ing of the variables  that were needed (and could choose to only do calculations if variables were requested).  If no SET-BLOCK! was on the left, it could just return a value as usual.</p>
+<p>But this was not generalized in a way that functions could share.</p>
+<h1>April 2020: Unify With The Historical Refinement Model</h1>
+<p>The old school "multiple return" method was to pass in WORD!s to set as variables.  Such as DO/NEXT:</p>
+<pre><code> r3-alpha&gt;&gt; value: do/next [1 + 2 10 + 20] 'pos
+ == 3
+
+ r3-alpha&gt;&gt; pos
+ == [10 + 20]
+</code></pre>
+<p>You see that DO could check for the presence of the /NEXT refinement and behave differently.  <em>It knows whether it has one return value or two.</em>  Based on that knowledge, many routines might have more optimized implementations when not all the possible return results they could give are wanted.</p>
+<p>But since this mechanism existed, why couldn't the evaluator build a bridge so that the variables in the SET-BLOCK! would be passed in to specially marked refinement slots?</p>
+<p>In April 2020, I implemented that.  It made variables passed from a SET-BLOCK! on the left compatible with the historical method of passing WORD!s via refinements...to be SET by the function as additional outputs....</p>
+<p>This comment <a href="https://github.com/metaeducation/ren-c/commit/3a6fe97a419cdbd61304ee63f7129164af95e5b4">from the C code commit</a> explains how that prototype was approached.</p>
+<pre><code>//==//// SET-BLOCK! //////////////////////////////////////////////////////==//
+//
+// The evaluator treats SET-BLOCK! specially as a means for implementing
+// multiple return values.  The trick is that it does so by pre-loading
+// arguments in the frame with variables to update, in a way that could have
+// historically been achieved with passing a WORD! or PATH! to a refinement.
+// So if there was a function that updates a variable you pass in by name:
+//
+//     result: updating-function/update arg1 arg2 'var
+//
+// The /UPDATE parameter is marked as being effectively a "return value", so
+// that equivalent behavior can be achieved with:
+//
+//     [result var]: updating-function arg1 arg2
+</code></pre>
+<p>So all you needed to do to get the feature was mark a refinement as an output parameter.  Then check to see if it's null or not, and assign it if it's a WORD! or PATH!...the same way you ever would have.</p>
+<p>You can use it in the old style (like a TRANSCODE/NEXT being passed a position to update) or you can use the SET-BLOCK! syntax and let the evaluator do the magic.</p>
+<p>That meant these two calls would appear equivalent to the insides of TRANSCODE:</p>
+<pre><code>&gt;&gt; value: transcode/next/relax "1 [2] &lt;3&gt;" 'next-pos 'error
+
+&gt;&gt; [value next-pos error]: transcode "1 [2] &lt;3&gt;"
+</code></pre>
+<p>We're also given the feature of being able to check for if a return is requested, and vary the behavior based on it. This is fantastic:</p>
+<pre><code> &gt;&gt; transcode "abc def ghi"
+ == [abc def ghi]
+
+ &gt;&gt; [value rest]: transcode "abc def ghi"
+ == abc
+
+ &gt;&gt; rest
+ == [def ghi]
+</code></pre>
+<p><strong><a href="https://forum.rebol.info/t/transcode-and-load-multi-return-improvements/1925">TRANSCODE and LOAD showed great results immediately.</a></strong></p>
+<p>And this was tried going along for the next year...</p>
+          <p><a href="https://forum.rebol.info/t/the-history-of-multi-return-in-ren-c/1134/6">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/the-history-of-multi-return-in-ren-c/1134/6</link>
+        <pubDate>Wed, 08 Apr 2020 15:39:01 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1134-6</guid>
+        <source url="https://forum.rebol.info/t/the-history-of-multi-return-in-ren-c/1134.rss">The History of Multi-Return in Ren-C</source>
+      </item>
+      <item>
+        <title>The History of Multi-Return in Ren-C</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p><em>This thread merges discussions of history across several threads to cover the key points, starting with material from the post announcing the addition of the SET-BLOCK! and GET-BLOCK!...and then folding in important points from later posts in the relative chronology of when they happened.  So it's broken up into sections by approximate date.</em></p>
+<hr>
+<h1>March 2019: SET-BLOCK! and GET-BLOCK! Added</h1>
+<p>These were generic parts which you could use in dialects however you wanted...just like other types.</p>
+<p><strong>But a key motivation was the concept that the evaluator would use them for some kind of multiple-return-value strategy.</strong>  Users of languages with the feature seemed to rave about it. And if you don't have it, they will complain and constantly try to find ways to work around it.</p>
+<p>I had inklings that Rebol could do them in a way that is mindbending and original. But a dirt simple implementation of the idea in 2019 looked roughly like what people were used to with SET of BLOCK! from Rebol2, without needing to write the word SET:</p>
+<pre><code>early-multi-concept: function [a b] [
+    return :[(a * 3) (b - 16)]  ; e.g. :[...] would act like REDUCE [...]
+]
+
+&gt;&gt; [x y]: early-multi-concept 10 20
+== [30 4]
+
+&gt;&gt; x
+== 30
+
+&gt;&gt; y
+== 4
+</code></pre>
+<p>So <strong><code>([x y]: foo)</code></strong> would act like <strong><code>(set [x y] foo)</code></strong>, including allowances to let you take fewer than one value:</p>
+<pre><code>&gt;&gt; [x]: [10 20]
+== [10 20]
+
+&gt;&gt; x
+== 10
+</code></pre>
+<h2>But the simplicity had obvious drawbacks</h2>
+<p>First of all, Ren-C had NULL states that by design could not be put into blocks.  This approach wouldn't be able to return those without distorting them into some different reified value  than the intended NULL.</p>
+<pre><code>&gt;&gt; [x y]: function-returning-null-and-30
+== [&lt;null&gt; 30]  ; can't put null, so... "something else" in first slot?
+
+&gt;&gt; x
+== null  ; not the same thing as what the block said...seems bad, yes?
+
+&gt;&gt; y
+== 30
+</code></pre>
+<p>Also, you would have to know that what you were calling returned multiple values.  If you missed that and used a plain SET-WORD!, you'd just wind up with the block:</p>
+<pre><code>&gt;&gt; x: some-function-i-didnt-know-was-multi-return ...
+== [ret1 ret2 ret3]  ; the block! could easily be mistaken for single return
+</code></pre>
+<h2>I had one of those ideas that just wouldn't go away...</h2>
+<p>It seemed clearly preferable that rather than choose between <strong>[x]:</strong> and <strong>[x y]:</strong> and knowing in advance how many values you're taking or throwing away... someone who only asked for one value should be able to be blissfully ignorant.  So the choice would be between:</p>
+<pre><code>&gt;&gt; x: multi-return ...
+&gt;&gt; [x y]: multi-return ...
+</code></pre>
+<p>Even though the first case is a multiple return, you wouldn't set x to a block of values, <em>but just get the first value</em>.  An interface like this would also solve the issue of returning NULL.</p>
+<p>Not being forced to return a BLOCK! also made great sense... <em>because since BLOCK! is always truthy, you'd not really be able to make useful conditional behavior be based on a BLOCK! return anyway!</em></p>
+<pre><code>&gt;&gt; [x y]: function-returning-null-and-30
+== null  ; so you could meaningfully say `if [x y]: whatever [...]`
+
+&gt;&gt; x
+== null
+
+&gt;&gt; y
+== 30
+</code></pre>
+<p>Going even further, I suggested <em>"it would be important that if a function wanted to do multiple returns that it could know how many results it was assigning.  This could save calculation on things that aren't needed."</em></p>
+<h3>
+<em><strong>...but all this would require some kind of magic...</strong></em> <img src="https://forum.rebol.info/images/emoji/twitter/mage.png?v=9" title=":mage:" class="emoji" alt=":mage:">
+</h3>
+          <p><a href="https://forum.rebol.info/t/the-history-of-multi-return-in-ren-c/1134/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/the-history-of-multi-return-in-ren-c/1134/1</link>
+        <pubDate>Thu, 28 Mar 2019 01:56:31 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1134-1</guid>
+        <source url="https://forum.rebol.info/t/the-history-of-multi-return-in-ren-c/1134.rss">The History of Multi-Return in Ren-C</source>
+      </item>
+  </channel>
+</rss>

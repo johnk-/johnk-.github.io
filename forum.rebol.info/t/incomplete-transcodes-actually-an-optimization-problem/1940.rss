@@ -1,0 +1,642 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Incomplete TRANSCODEs: Actually an Optimization Problem</title>
+    <link>https://forum.rebol.info/t/incomplete-transcodes-actually-an-optimization-problem/1940</link>
+    <description>**Ren-C has a very slick multi-return interface for TRANSCODE.**  The mere request of a &quot;remainder&quot; of data left indicates you&#39;re not trying to do a full scan.
+
+Without the request, you get the whole thing:
+
+    &gt;&gt; transcode &quot;abc def&quot;
+    == [abc def]
+
+    ; ...or...
+
+    &gt;&gt; value: transcode &quot;abc def&quot;
+    == [abc def]
+
+    ; ...or...
+
+    &gt;&gt; [value]: transcode &quot;abc def&quot;
+    == [abc def]
+
+With the next position request, just one item and a remainder:
+
+    &gt;&gt; [value pos]: transcode &quot;abc def&quot;
+    == abc
+
+    &gt;&gt; pos
+    == &quot; def&quot;
+
+    ; ...or...
+
+    &gt;&gt; transcode/next &quot;abc def&quot; &#39;pos
+    == abc
+
+    &gt;&gt; pos
+    == &quot; def&quot;
+
+You also know that you&#39;re at the end of the input when it returns null, with all the benefits of easy reactions to NULL with IF and ELSE and friends:
+
+    &gt;&gt; [value pos]: transcode &quot;&quot;
+    ; null
+
+Writing foolproof loops to process items are a breeze:
+
+    while [true]
+        [item utf8]: transcode utf8 else [break]
+        print mold item
+     ]
+
+    ; or for the THEN/ELSE haters out there (you know who you are :-P)
+
+    while [true]
+        if null? [item utf8]: transcode utf8 [
+            break
+        ]
+        print mold item
+     ]
+
+:+1: 
+
+## This Runs Circles Around Red and R3-Alpha
+
+For starters: neither support strings as input--because the scanner is built for reading UTF-8 files...and both R3-Alpha and Red unpack strings into fixed-width encodings.  So if you have string input, you have to pay for a copy encoded as UTF-8 via TO BINARY!.  ([Ren-C&#39;s UTF-8 Everywhere](https://forum.rebol.info/t/realistically-migrating-rebol-to-utf8-everywhere/374) wins again!)
+
+R3-Alpha unconditionally returns a block with the last element as a remainder, whether you ask for one item via /NEXT or not:
+
+    r3-alpha&gt;&gt; transcode to binary! &quot;abc def&quot;
+    == [abc def #{}]
+
+    r3-alpha&gt;&gt; transcode/next to binary! &quot;abc def&quot;
+    == [abc #{20646566}]
+
+    r3-alpha&gt;&gt; transcode/next to binary! &quot;&quot;
+    == [#{}]
+
+So if you were transcoding an entire input, you have to TAKE/LAST an always-empty binary off of the result.
+
+But you are using /NEXT you have to PICK out the element from the start of the array and the remainder from the end.  But you need to notice the exception of no-value-produced where the block is length 1 instead of 2.
+
+That&#39;s awkward, but as usual... *Red somehow manages to make an incompatible interface that is as much worse as it is better:*
+
+The better part is that if you don&#39;t ask for /NEXT you just get the block back, like in Ren-C:
+
+    red&gt;&gt; transcode to binary! &quot;abc def&quot;
+    == [abc def]
+
+But the /NEXT interface is outright broken:
+
+    red&gt;&gt; transcode/next to binary! &quot;abc def&quot;
+    == [abc #{20646566}]
+
+    red&gt;&gt; transcode/next to binary! &quot;&quot;
+    == [[] #{}]
+
+It might look better because you don&#39;t have to guess about which position to find the remainder in--it&#39;s always in the second slot.  But it has a fatal flaw: you can&#39;t distinguish the result state of scanning `&quot;[]&quot;` and any string with nothing but comments and whitespace.
+
+Consider this very basic loop to scan one item at a time and print it:
+
+    red&gt;&gt; utf8: to binary! &quot;abc def&quot;
+
+    red&gt;&gt; while [not tail? utf8] [
+         set [item utf8] transcode/next utf8
+         print mold item
+    ]
+    abc
+    def
+
+You get two items.  But what if you had something that was--say--a comment:
+
+    red&gt;&gt; utf8: to binary! &quot;; I&#39;m just a comment&quot;
+
+    red&gt;&gt; while [not tail? utf8] [
+         set [item utf8] transcode/next utf8
+         print mold item
+    ]
+    []
+
+You get one spurious item.  (They chose BLOCK! for the item, but it wouldn&#39;t matter what it was--a NONE! would be just as bad, you&#39;re just losing the distinction between empty strings and `&quot;#[none]&quot;` then.)
+
+If I were prescribing a solution for Red I&#39;d say:
+
+* Make /NEXT take a variable to write the next position into
+
+* Error on `#{}` input, so anyone doing a TRANSCODE/NEXT knows they are responsible for testing for TAIL? before they call (if they&#39;re not sure their input is non-empty)
+
+    * This way an empty remainder returned in the /NEXT variable will uniquely signal the reached-end state
+
+* Make the synthesized product at the tail something ugly but assignable (so not an unset!)
+
+   * an ERROR! saying &quot;end of input&quot; is at least informative in case it winds up getting treated as an actual value somewhere
+
+That would at least give them patterns like:
+
+    if not tail? utf8 [  ; needed if you&#39;re not sure it&#39;s non-empty
+        while [true] [
+            item: transcode/next utf8 &#39;utf8
+            if tail? utf8 [break]
+            print mold item
+        ]
+    ]
+
+*(Having NULL is clearly better as a non-valued state (with isotope states fleshing out the picture)...and my [bafflement at Nenad&#39;s blindness](https://forum.rebol.info/t/why-or-why-not-have-unset-in-rebol-like-languages/113/2?u=hostilefork) when confronted with what should be clear as day is as relevant as it was 6-plus-years ago.  And of course we see they&#39;d actually need SET/ANY to do this right if you were allowing #[unset!]...but Ren-C&#39;s design has no need of that.)*
+
+## Ren-C Also *Thrashes* R3-Alpha and Red In Error Handling
+
+Ren-C TRANSCODE has these potential behaviors:
+
+   * RETURN a BLOCK! (if plain TRANSCODE)
+
+   * RETURN an ANY-VALUE! or NULL (if TRANSCODE/NEXT)
+
+   * It can do a &quot;hard FAIL&quot;
+
+     *  This would happen if you asked something fundamentally incoherent...like asking to TRANSCODE a with input that was non-UTF-8...like a GOB!, or something like that
+
+     * Such errors are only interceptible by a special SYS.UTIL.ENTRAP method--they are not supposed to be easy to gloss over and unlikely to have meaningful mitigation.  So only special sandboxing situations (like writing consoles that print out the error) are supposed to trap them.
+
+   * It can RETURN an *isotopic ERROR!* (&quot;raised error&quot;) if something went wrong in the transcoding process itself
+
+      * This would be something like a syntax error, like  if you asked **transcode &quot;a bc 1&amp;x def&quot;**
+
+      * These will be promoted to a hard FAIL if the immediate caller doesn&#39;t do something to specially process them.
+
+      * You can casually ignore or intercept these, because you can be confident that it was a formal return result of the thing you just called--not some deeper problem like a random typo or other issue.
+
+I won&#39;t rehash the entire [&quot;why definitional errors are foundational&quot;](https://forum.rebol.info/t/fail-vs-return-raise-the-new-age-of-definitional-failures/1852) post, but TRANSCODE was one of the first functions that had to be retrofitted to use them.
+
+    &gt;&gt; transcode &quot;a bc 1&amp;x def&quot; except e -&gt; [print [&quot;Error:&quot; e.id]]
+    Error: scan-invalid
+
+**The definitionality is extremely important!**  I spent a long time today because in the bootstrap shim I had a variation of transcode...parallel to this in R3-Alpha:
+
+    r3-alpha&gt;&gt; transcode: func [input] [
+                   prnit &quot;My Transcode Wrapper&quot;  ; oops, typo
+                   return transcode input
+               ]
+
+    r3-alpha&gt;&gt; if not attempt [transcode to binary! &quot;abc def&quot;] [print &quot;Bad input&quot;]
+    Bad input
+
+***But the input isn&#39;t bad!!!***  This leads to a nightmare of trying to figure out what was going wrong.  I had just one of those nightmares today in the bootstrap executable when tinkering with the shim implementation of TRANSCODE.  A bug in the shim was leading to silently skipping work that should have been done, because the caller wanted to be tolerant of bad transcode input.
+
+There&#39;s simply no practical way of working on code of any complexity without something like definitional failures, and experience has proven this day after day.
+
+## Getting Incomplete Results Via R3-Alpha&#39;s /ERROR
+
+R3-Alpha offered this feature:
+
+    /error -- Do not cause errors - return error object as value in place
+
+The intended use is that you might want the partial input of what had been successfully scanned so far.  If the code went and raised an error, you could trap that error.  But you wouldn&#39;t have any of the scanned items.
+
+It would put it any ERROR! as the next-to-last item in the block, with the remainder after that:
+
+    &gt;&gt; transcode/error to binary! &quot;a bc 1&amp;x def&quot;
+    == [abc make error! [
+        code: 200
+        type: &#39;Syntax
+        id: &#39;invalid
+        arg1: &quot;pair&quot;
+        arg2: &quot;1&amp;x&quot;
+        arg3: none
+        near: &quot;(line 1) a bc 1&amp;x def&quot;
+        where: [transcode]
+    ] #{20646566}]
+
+    &gt;&gt; to string! #{20646566}
+    == &quot; def&quot;  ; wait...why isn&#39;t 1&amp;x part of the &quot;remainder&quot;
+
+It&#39;s clumsy to write the calling code (or to read it...testing to see if the next-to-last-item is an ERROR! and reacting to that.
+
+*(Also: What if there was some way to represent ERROR! values literally in source?  This would conflate with such a block that was valid...but just incidentally had an ERROR! and then a BINARY! in the last positions.)*
+
+But the thing that had me most confused about it was the remainder.  Notice above you don&#39;t get  `1&amp;x` as the start of the stuff it couldn&#39;t understand.
+
+Was it trying to implement some kind of recoverable scan?  What would that even mean?  :thinking: 
+
+**Ultimately I think this was just a leaking of an implementation detail as opposed to any reasonable attempt at recoverable scanner.**  It only didn&#39;t tell you where the exact tail of the successfully scanned material was because it did not know. 
+
+The scanning position is based on token consumptions, and so if you started something like a block scan and it saw a **[** then it forgets where it was before that.  Then if something inside the block goes bad, it will just give you a remainder position somewhere inside that--*completely forgetting about how many nesting levels it was in*.
+
+So what you were getting was a crappier implementation of scanning one by one, and remembering where you were before the last bad scan:
+
+    pos: input
+    error: null
+    block: collect [
+       while [true] [
+           keep [# pos]: transcode pos else [
+               break
+           ] except e -&gt; [
+               error: e
+               break
+           ]
+       ]
+    ]
+
+That gives you a proper version, setting error if something happened and giving you the block intact.
+
+## So Finally... We See It&#39;s An Optimization Problem
+
+Question is if there&#39;s some way of folding this into TRANSCODE, so it&#39;s doing the looping and collecting efficiently for you.
+
+But this interface wants to get back a &quot;remainder&quot;.  And I kind of hate to sacrifice the property that TRANSCODE&#39;s asking for a remainder means scan one element.  :-/
+
+I guess we *could* say that there&#39;s a logical process you follow:
+
+   * The output parameter is called REST (instead of NEXT)
+
+   * An additional output parameter is added for ERROR
+
+   * If you ask for the REST and *don&#39;t* ask for an ERROR, that suggests you want to encode a single item
+
+       * You could have just intercepted the error if you wanted it
+
+       * Nothing is lost because there wouldn&#39;t be any partial results to miss (if you&#39;re only doing one item, there will always be zero items completed before it)
+
+   * If you ask for the REST and *do* ask for an error, then it assumes you must not want the one-item-only semantics after all.
+
+It&#39;s a little bit awkward because it conflates partial output with fully successful output
+
+    &gt;&gt; [block rest error]: transcode &quot;a bc&quot;
+    == [a bc]
+
+    &gt;&gt; error
+    ; null
+
+    &gt;&gt; [block rest error]: transcode &quot;a bc 1&amp;x def&quot;
+    == [a bc]  ; no indication something failed
+
+    &gt;&gt; error? error  ; you&#39;d have to remember to check this
+    == #[true]
+
+That&#39;s not a deal breaker, and Ren-C makes it easy to work with, using [circling an output in multi-return](https://forum.rebol.info/t/circling-multi-returns-choose-which-is-expression-result/1587) to make it the primary return result:
+
+    &gt;&gt; [block rest @error]: transcode &quot;a bc&quot;
+    ; null
+
+    &gt;&gt; [block rest @error]: transcode &quot;a bc 1&amp;x def&quot;
+    == make error! [...]
+
+**What&#39;s much more jarring to me is the flipping back and forth of whether you&#39;re asking for a full transcode or not.**
+
+    &gt;&gt; x: transcode &quot;abc def&quot;
+    == [abc def]
+
+    &gt;&gt; [x y]: transcode &quot;abc def&quot;
+    == abc
+
+    &gt;&gt; [x y z]: transcode &quot;abc def&quot;
+    == [abc def]
+
+Ick.  Should I be willing to bend on the transcode &quot;requested parameter&quot; behavior in this case, by adding a /ONE refinement?
+
+    &gt;&gt; [block rest]: transcode &quot;abc def&quot;
+    == [abc def]
+
+    &gt;&gt; rest
+    == #{}  ; kind of useless, but honest
+
+    &gt;&gt; [block rest]: transcode/one &quot;abc def&quot;
+    == abc
+
+    &gt;&gt; rest
+    == &quot; def&quot;
+
+That would make me feel grief, as it loses one of the first showcases of return value sensitivity.  *And it irks me to think that the beauty is ultimately being given up for the sake of what amounts to an optimization.*
+
+## Answer For Now: Kill Off /ERROR
+
+* The answer /ERROR has been giving back in error cases for the remainder is sketchy, and I don&#39;t want to figure out how to fix it.
+
+* You can get the behavior reliably just by intercepting errors going one transcode item at a time.
+
+* This is a good opportunity to write tests of item-by-item scanning with error handling
+
+* Red added a bunch of refinements on transcode [/next /one /prescan /scan /part /into /trace], and they didn&#39;t pick up /error themselves
+
+Speaking of adding lots of refinements: I also want to get away in general from investments in weird C scanner code and hooks (*especially* if it&#39;s just an optimization).
+
+What we should be investing in is more fluid mixture of PARSE of strings/binary with the scanner.  e.g. we should have ways of knowing what line number you&#39;re at during the parse for any combinator, and just generally pushing on that.  Adding TRANSCODE parameters up the wazoo isn&#39;t a winning strategy.</description>
+    
+    <lastBuildDate>Tue, 23 Aug 2022 04:27:12 +0000</lastBuildDate>
+    <category>Optimization</category>
+    <atom:link href="https://forum.rebol.info/t/incomplete-transcodes-actually-an-optimization-problem/1940.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Incomplete TRANSCODEs: Actually an Optimization Problem</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p><strong>Ren-C has a very slick multi-return interface for TRANSCODE.</strong>  The mere request of a "remainder" of data left indicates you're not trying to do a full scan.</p>
+<p>Without the request, you get the whole thing:</p>
+<pre><code>&gt;&gt; transcode "abc def"
+== [abc def]
+
+; ...or...
+
+&gt;&gt; value: transcode "abc def"
+== [abc def]
+
+; ...or...
+
+&gt;&gt; [value]: transcode "abc def"
+== [abc def]
+</code></pre>
+<p>With the next position request, just one item and a remainder:</p>
+<pre><code>&gt;&gt; [value pos]: transcode "abc def"
+== abc
+
+&gt;&gt; pos
+== " def"
+
+; ...or...
+
+&gt;&gt; transcode/next "abc def" 'pos
+== abc
+
+&gt;&gt; pos
+== " def"
+</code></pre>
+<p>You also know that you're at the end of the input when it returns null, with all the benefits of easy reactions to NULL with IF and ELSE and friends:</p>
+<pre><code>&gt;&gt; [value pos]: transcode ""
+; null
+</code></pre>
+<p>Writing foolproof loops to process items are a breeze:</p>
+<pre><code>while [true]
+    [item utf8]: transcode utf8 else [break]
+    print mold item
+ ]
+
+; or for the THEN/ELSE haters out there (you know who you are :-P)
+
+while [true]
+    if null? [item utf8]: transcode utf8 [
+        break
+    ]
+    print mold item
+ ]
+</code></pre>
+<p><img src="https://forum.rebol.info/images/emoji/twitter/+1.png?v=9" title=":+1:" class="emoji only-emoji" alt=":+1:"></p>
+<h2>This Runs Circles Around Red and R3-Alpha</h2>
+<p>For starters: neither support strings as input--because the scanner is built for reading UTF-8 files...and both R3-Alpha and Red unpack strings into fixed-width encodings.  So if you have string input, you have to pay for a copy encoded as UTF-8 via TO BINARY!.  (<a href="https://forum.rebol.info/t/realistically-migrating-rebol-to-utf8-everywhere/374">Ren-C's UTF-8 Everywhere</a> wins again!)</p>
+<p>R3-Alpha unconditionally returns a block with the last element as a remainder, whether you ask for one item via /NEXT or not:</p>
+<pre><code>r3-alpha&gt;&gt; transcode to binary! "abc def"
+== [abc def #{}]
+
+r3-alpha&gt;&gt; transcode/next to binary! "abc def"
+== [abc #{20646566}]
+
+r3-alpha&gt;&gt; transcode/next to binary! ""
+== [#{}]
+</code></pre>
+<p>So if you were transcoding an entire input, you have to TAKE/LAST an always-empty binary off of the result.</p>
+<p>But you are using /NEXT you have to PICK out the element from the start of the array and the remainder from the end.  But you need to notice the exception of no-value-produced where the block is length 1 instead of 2.</p>
+<p>That's awkward, but as usual... <em>Red somehow manages to make an incompatible interface that is as much worse as it is better:</em></p>
+<p>The better part is that if you don't ask for /NEXT you just get the block back, like in Ren-C:</p>
+<pre><code>red&gt;&gt; transcode to binary! "abc def"
+== [abc def]
+</code></pre>
+<p>But the /NEXT interface is outright broken:</p>
+<pre><code>red&gt;&gt; transcode/next to binary! "abc def"
+== [abc #{20646566}]
+
+red&gt;&gt; transcode/next to binary! ""
+== [[] #{}]
+</code></pre>
+<p>It might look better because you don't have to guess about which position to find the remainder in--it's always in the second slot.  But it has a fatal flaw: you can't distinguish the result state of scanning <code>"[]"</code> and any string with nothing but comments and whitespace.</p>
+<p>Consider this very basic loop to scan one item at a time and print it:</p>
+<pre><code>red&gt;&gt; utf8: to binary! "abc def"
+
+red&gt;&gt; while [not tail? utf8] [
+     set [item utf8] transcode/next utf8
+     print mold item
+]
+abc
+def
+</code></pre>
+<p>You get two items.  But what if you had something that was--say--a comment:</p>
+<pre><code>red&gt;&gt; utf8: to binary! "; I'm just a comment"
+
+red&gt;&gt; while [not tail? utf8] [
+     set [item utf8] transcode/next utf8
+     print mold item
+]
+[]
+</code></pre>
+<p>You get one spurious item.  (They chose BLOCK! for the item, but it wouldn't matter what it was--a NONE! would be just as bad, you're just losing the distinction between empty strings and <code>"#[none]"</code> then.)</p>
+<p>If I were prescribing a solution for Red I'd say:</p>
+<ul>
+<li>
+<p>Make /NEXT take a variable to write the next position into</p>
+</li>
+<li>
+<p>Error on <code>#{}</code> input, so anyone doing a TRANSCODE/NEXT knows they are responsible for testing for TAIL? before they call (if they're not sure their input is non-empty)</p>
+<ul>
+<li>This way an empty remainder returned in the /NEXT variable will uniquely signal the reached-end state</li>
+</ul>
+</li>
+<li>
+<p>Make the synthesized product at the tail something ugly but assignable (so not an unset!)</p>
+<ul>
+<li>an ERROR! saying "end of input" is at least informative in case it winds up getting treated as an actual value somewhere</li>
+</ul>
+</li>
+</ul>
+<p>That would at least give them patterns like:</p>
+<pre><code>if not tail? utf8 [  ; needed if you're not sure it's non-empty
+    while [true] [
+        item: transcode/next utf8 'utf8
+        if tail? utf8 [break]
+        print mold item
+    ]
+]
+</code></pre>
+<p><em>(Having NULL is clearly better as a non-valued state (with isotope states fleshing out the picture)...and my <a href="https://forum.rebol.info/t/why-or-why-not-have-unset-in-rebol-like-languages/113/2">bafflement at Nenad's blindness</a> when confronted with what should be clear as day is as relevant as it was 6-plus-years ago.  And of course we see they'd actually need SET/ANY to do this right if you were allowing #[unset!]...but Ren-C's design has no need of that.)</em></p>
+<h2>Ren-C Also <em>Thrashes</em> R3-Alpha and Red In Error Handling</h2>
+<p>Ren-C TRANSCODE has these potential behaviors:</p>
+<ul>
+<li>
+<p>RETURN a BLOCK! (if plain TRANSCODE)</p>
+</li>
+<li>
+<p>RETURN an ANY-VALUE! or NULL (if TRANSCODE/NEXT)</p>
+</li>
+<li>
+<p>It can do a "hard FAIL"</p>
+<ul>
+<li>
+<p>This would happen if you asked something fundamentally incoherent...like asking to TRANSCODE a with input that was non-UTF-8...like a GOB!, or something like that</p>
+</li>
+<li>
+<p>Such errors are only interceptible by a special SYS.UTIL.ENTRAP method--they are not supposed to be easy to gloss over and unlikely to have meaningful mitigation.  So only special sandboxing situations (like writing consoles that print out the error) are supposed to trap them.</p>
+</li>
+</ul>
+</li>
+<li>
+<p>It can RETURN an <em>isotopic ERROR!</em> ("raised error") if something went wrong in the transcoding process itself</p>
+<ul>
+<li>
+<p>This would be something like a syntax error, like  if you asked <strong>transcode "a bc 1&amp;x def"</strong></p>
+</li>
+<li>
+<p>These will be promoted to a hard FAIL if the immediate caller doesn't do something to specially process them.</p>
+</li>
+<li>
+<p>You can casually ignore or intercept these, because you can be confident that it was a formal return result of the thing you just called--not some deeper problem like a random typo or other issue.</p>
+</li>
+</ul>
+</li>
+</ul>
+<p>I won't rehash the entire <a href="https://forum.rebol.info/t/fail-vs-return-raise-the-new-age-of-definitional-failures/1852">"why definitional errors are foundational"</a> post, but TRANSCODE was one of the first functions that had to be retrofitted to use them.</p>
+<pre><code>&gt;&gt; transcode "a bc 1&amp;x def" except e -&gt; [print ["Error:" e.id]]
+Error: scan-invalid
+</code></pre>
+<p><strong>The definitionality is extremely important!</strong>  I spent a long time today because in the bootstrap shim I had a variation of transcode...parallel to this in R3-Alpha:</p>
+<pre><code>r3-alpha&gt;&gt; transcode: func [input] [
+               prnit "My Transcode Wrapper"  ; oops, typo
+               return transcode input
+           ]
+
+r3-alpha&gt;&gt; if not attempt [transcode to binary! "abc def"] [print "Bad input"]
+Bad input
+</code></pre>
+<p><em><strong>But the input isn't bad!!!</strong></em>  This leads to a nightmare of trying to figure out what was going wrong.  I had just one of those nightmares today in the bootstrap executable when tinkering with the shim implementation of TRANSCODE.  A bug in the shim was leading to silently skipping work that should have been done, because the caller wanted to be tolerant of bad transcode input.</p>
+<p>There's simply no practical way of working on code of any complexity without something like definitional failures, and experience has proven this day after day.</p>
+<h2>Getting Incomplete Results Via R3-Alpha's /ERROR</h2>
+<p>R3-Alpha offered this feature:</p>
+<pre><code>/error -- Do not cause errors - return error object as value in place
+</code></pre>
+<p>The intended use is that you might want the partial input of what had been successfully scanned so far.  If the code went and raised an error, you could trap that error.  But you wouldn't have any of the scanned items.</p>
+<p>It would put it any ERROR! as the next-to-last item in the block, with the remainder after that:</p>
+<pre><code>&gt;&gt; transcode/error to binary! "a bc 1&amp;x def"
+== [abc make error! [
+    code: 200
+    type: 'Syntax
+    id: 'invalid
+    arg1: "pair"
+    arg2: "1&amp;x"
+    arg3: none
+    near: "(line 1) a bc 1&amp;x def"
+    where: [transcode]
+] #{20646566}]
+
+&gt;&gt; to string! #{20646566}
+== " def"  ; wait...why isn't 1&amp;x part of the "remainder"
+</code></pre>
+<p>It's clumsy to write the calling code (or to read it...testing to see if the next-to-last-item is an ERROR! and reacting to that.</p>
+<p><em>(Also: What if there was some way to represent ERROR! values literally in source?  This would conflate with such a block that was valid...but just incidentally had an ERROR! and then a BINARY! in the last positions.)</em></p>
+<p>But the thing that had me most confused about it was the remainder.  Notice above you don't get  <code>1&amp;x</code> as the start of the stuff it couldn't understand.</p>
+<p>Was it trying to implement some kind of recoverable scan?  What would that even mean?  <img src="https://forum.rebol.info/images/emoji/twitter/thinking.png?v=9" title=":thinking:" class="emoji" alt=":thinking:"></p>
+<p><strong>Ultimately I think this was just a leaking of an implementation detail as opposed to any reasonable attempt at recoverable scanner.</strong>  It only didn't tell you where the exact tail of the successfully scanned material was because it did not know.</p>
+<p>The scanning position is based on token consumptions, and so if you started something like a block scan and it saw a <strong>[</strong> then it forgets where it was before that.  Then if something inside the block goes bad, it will just give you a remainder position somewhere inside that--<em>completely forgetting about how many nesting levels it was in</em>.</p>
+<p>So what you were getting was a crappier implementation of scanning one by one, and remembering where you were before the last bad scan:</p>
+<pre><code>pos: input
+error: null
+block: collect [
+   while [true] [
+       keep [# pos]: transcode pos else [
+           break
+       ] except e -&gt; [
+           error: e
+           break
+       ]
+   ]
+]
+</code></pre>
+<p>That gives you a proper version, setting error if something happened and giving you the block intact.</p>
+<h2>So Finally... We See It's An Optimization Problem</h2>
+<p>Question is if there's some way of folding this into TRANSCODE, so it's doing the looping and collecting efficiently for you.</p>
+<p>But this interface wants to get back a "remainder".  And I kind of hate to sacrifice the property that TRANSCODE's asking for a remainder means scan one element.  :-/</p>
+<p>I guess we <em>could</em> say that there's a logical process you follow:</p>
+<ul>
+<li>
+<p>The output parameter is called REST (instead of NEXT)</p>
+</li>
+<li>
+<p>An additional output parameter is added for ERROR</p>
+</li>
+<li>
+<p>If you ask for the REST and <em>don't</em> ask for an ERROR, that suggests you want to encode a single item</p>
+<ul>
+<li>
+<p>You could have just intercepted the error if you wanted it</p>
+</li>
+<li>
+<p>Nothing is lost because there wouldn't be any partial results to miss (if you're only doing one item, there will always be zero items completed before it)</p>
+</li>
+</ul>
+</li>
+<li>
+<p>If you ask for the REST and <em>do</em> ask for an error, then it assumes you must not want the one-item-only semantics after all.</p>
+</li>
+</ul>
+<p>It's a little bit awkward because it conflates partial output with fully successful output</p>
+<pre><code>&gt;&gt; [block rest error]: transcode "a bc"
+== [a bc]
+
+&gt;&gt; error
+; null
+
+&gt;&gt; [block rest error]: transcode "a bc 1&amp;x def"
+== [a bc]  ; no indication something failed
+
+&gt;&gt; error? error  ; you'd have to remember to check this
+== #[true]
+</code></pre>
+<p>That's not a deal breaker, and Ren-C makes it easy to work with, using <a href="https://forum.rebol.info/t/circling-multi-returns-choose-which-is-expression-result/1587">circling an output in multi-return</a> to make it the primary return result:</p>
+<pre><code>&gt;&gt; [block rest @error]: transcode "a bc"
+; null
+
+&gt;&gt; [block rest @error]: transcode "a bc 1&amp;x def"
+== make error! [...]
+</code></pre>
+<p><strong>What's much more jarring to me is the flipping back and forth of whether you're asking for a full transcode or not.</strong></p>
+<pre><code>&gt;&gt; x: transcode "abc def"
+== [abc def]
+
+&gt;&gt; [x y]: transcode "abc def"
+== abc
+
+&gt;&gt; [x y z]: transcode "abc def"
+== [abc def]
+</code></pre>
+<p>Ick.  Should I be willing to bend on the transcode "requested parameter" behavior in this case, by adding a /ONE refinement?</p>
+<pre><code>&gt;&gt; [block rest]: transcode "abc def"
+== [abc def]
+
+&gt;&gt; rest
+== #{}  ; kind of useless, but honest
+
+&gt;&gt; [block rest]: transcode/one "abc def"
+== abc
+
+&gt;&gt; rest
+== " def"
+</code></pre>
+<p>That would make me feel grief, as it loses one of the first showcases of return value sensitivity.  <em>And it irks me to think that the beauty is ultimately being given up for the sake of what amounts to an optimization.</em></p>
+<h2>Answer For Now: Kill Off /ERROR</h2>
+<ul>
+<li>
+<p>The answer /ERROR has been giving back in error cases for the remainder is sketchy, and I don't want to figure out how to fix it.</p>
+</li>
+<li>
+<p>You can get the behavior reliably just by intercepting errors going one transcode item at a time.</p>
+</li>
+<li>
+<p>This is a good opportunity to write tests of item-by-item scanning with error handling</p>
+</li>
+<li>
+<p>Red added a bunch of refinements on transcode [/next /one /prescan /scan /part /into /trace], and they didn't pick up /error themselves</p>
+</li>
+</ul>
+<p>Speaking of adding lots of refinements: I also want to get away in general from investments in weird C scanner code and hooks (<em>especially</em> if it's just an optimization).</p>
+<p>What we should be investing in is more fluid mixture of PARSE of strings/binary with the scanner.  e.g. we should have ways of knowing what line number you're at during the parse for any combinator, and just generally pushing on that.  Adding TRANSCODE parameters up the wazoo isn't a winning strategy.</p>
+          <p><a href="https://forum.rebol.info/t/incomplete-transcodes-actually-an-optimization-problem/1940/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/incomplete-transcodes-actually-an-optimization-problem/1940/1</link>
+        <pubDate>Mon, 22 Aug 2022 15:09:13 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1940-1</guid>
+        <source url="https://forum.rebol.info/t/incomplete-transcodes-actually-an-optimization-problem/1940.rss">Incomplete TRANSCODEs: Actually an Optimization Problem</source>
+      </item>
+  </channel>
+</rss>

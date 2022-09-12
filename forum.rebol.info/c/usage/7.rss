@@ -5,8 +5,554 @@
     <link>https://forum.rebol.info/c/usage/7</link>
     <description>Topics in the &#39;Usage&#39; category Questions and discussion about using Rebol.</description>
     
-      <lastBuildDate>Sat, 14 May 2022 05:39:18 +0000</lastBuildDate>
+      <lastBuildDate>Sat, 27 Aug 2022 17:38:07 +0000</lastBuildDate>
       <atom:link href="https://forum.rebol.info/c/usage/7.rss" rel="self" type="application/rss+xml" />
+        <item>
+          <title>Minor (but nice!) %prot-http.r parsing improvements</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Show &amp; Tell</category>
+          <description><![CDATA[
+            <p>Here's is R3-Alpha's <a href="https://github.com/rebol/rebol/blob/25033f897b2bd466068d7663563cd3ff64740b94/src/mezz/prot-http.r">PARSE-WRITE-DIALECT</a> from %prot-http.r</p>
+<pre><code>parse-write-dialect: func [port block /local spec] [
+    spec: port/spec
+    parse block [
+        [set block word! (spec/method: block) | (spec/method: 'post)]
+        opt [set block [file! | url!] (spec/path: block)]
+        [set block block! (spec/headers: block) | (spec/headers: [])]
+        [set block [any-string! | binary!] (spec/content: block) | (spec/content: none)]
+    ]
+]
+</code></pre>
+<p>You couldn't set paths in R3-Alpha parse, which is weird.  So things had to be captured into a temporary variable (it reused the input block for some reason).</p>
+<p>Let's imagine that setting paths were legal:</p>
+<pre><code>parse-write-dialect: func [port block /local spec] [
+    spec: port/spec
+    parse block [
+        [set spec/method word! | (spec/method: 'post)]
+        opt [set spec/path [file! | url!]]
+        [set spec/headers block! | (spec/headers: [])]
+        [set spec/content [any-string! | binary!] | (spec/content: none)]
+    ]
+]
+</code></pre>
+<p>Let's do a quick transformation of this to PARSE3 in Ren-C:</p>
+<pre><code>parse-write-dialect: func [port block &lt;local&gt; spec] [
+    spec: port.spec
+    parse3 block [  ; PARSE3 is R3-Alpha-compatible parse
+        [set spec.method word! | (spec.method: 'post)]
+        opt [set spec.path [file! | url!]]
+        [set spec.headers block! | (spec.headers: [])]
+        [set spec.content [any-string! | binary!] | (spec.content: _)]
+    ]
+]
+</code></pre>
+<ul>
+<li>
+<p>The TUPLE!s help us see we're not making function calls, which is nice</p>
+</li>
+<li>
+<p>We have BLANK! which gives a nicer semiotic "we're nulling out this variable" look.</p>
+</li>
+<li>
+<p>/LOCAL is a legitimate normal refinement, and <code>&lt;local&gt;</code> variables are truly local--you can't slip them in from the caller.  Because they are invisible, you can build function compositions that don't have to worry about colliding with their names.</p>
+<ul>
+<li>It also frees up /LOCAL to just be a typical refinement, like TIME/LOCAL</li>
+</ul>
+</li>
+</ul>
+<p>Now let's throw in some UPARSE, with the SET-WORD!s for assignment...</p>
+<pre><code>parse-write-dialect: func [port block &lt;local&gt; spec] [
+    spec: port.spec
+    parse block [  ; PARSE is now UPARSE
+        [spec.method: word! | (spec.method: 'post)]
+        opt [spec.path: [file! | url!]]
+        [spec.headers: block! | (spec.headers: [])]
+        [spec.content: [any-string! | binary!] | (spec.content: _)]
+    ]
+]
+</code></pre>
+<p>It looks a little tighter...but then we also have the ability to factor the assignments out...</p>
+<pre><code>parse-write-dialect: func [port block &lt;local&gt; spec] [
+    spec: port.spec
+    parse block [
+        spec.method: [word! | ('post)]
+        spec.path: opt [file! | url!]
+        spec.headers: [block! | ([])]
+        spec.content: [any-string! | binary! | (_)]
+    ]
+]
+</code></pre>
+<p>As it happens, that last line could just be <strong>opt [any-string! binary!]</strong>, because it would assign the result to NULL.</p>
+<h2>But... That Raises a Question...</h2>
+<p>What if the PARSE behavior for BLANK! was the same as in the evaluator, and it just produced NULL out of thin air but didn't match it?  Hence <code>_</code> would be a synonym for <code>(_)</code>.</p>
+<p>Then these would be equivalent:</p>
+<pre><code>spec.content: [any-string! | binary! | _]
+
+spec.content: opt [any-string! | binary!]
+</code></pre>
+<p>You'd also be able to easily zero variables without entering a GROUP!.</p>
+<pre><code>&gt;&gt; data: &lt;before&gt;
+
+&gt;&gt; parse [x x x] [data: _ [some "y" (data: "Found some Y!")]]
+; null
+
+&gt;&gt; data
+; null
+</code></pre>
+<p>I think the literal INTEGER! behavior has turned out to be a winner, where <code>3</code> is the same as <code>(3)</code>.  So maybe that would be good for blank too, given its new useful null-making behavior?  Dunno.</p>
+            <p><small>2 posts - 2 participants</small></p>
+            <p><a href="https://forum.rebol.info/t/minor-but-nice-prot-http-r-parsing-improvements/1945">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/minor-but-nice-prot-http-r-parsing-improvements/1945</link>
+          <pubDate>Sat, 27 Aug 2022 17:38:07 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-1945</guid>
+          <source url="https://forum.rebol.info/t/minor-but-nice-prot-http-r-parsing-improvements/1945.rss">Minor (but nice!) %prot-http.r parsing improvements</source>
+        </item>
+        <item>
+          <title>Weird Little Function: STEAL a Variable&#39;s Prior Value</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Show &amp; Tell</category>
+          <description><![CDATA[
+            <p>I don't know if it has the best name (suggestions?), but it's kind of interesting...</p>
+<pre><code>&gt;&gt; x: 304
+== 304
+
+&gt;&gt; steal x: 1000 + 20
+== 304
+
+&gt;&gt; x
+== 1020
+</code></pre>
+<p>I wrote it as a variadic function for some reason (as a test, maybe?) but you could write it in Redbol.  You could even use their lame ALSO.</p>
+<pre><code>steal: func [
+    {Red version}
+    'var [set-word! set-path!]
+    value [any-type!]
+][
+    also get var set var value
+]
+</code></pre>
+<p>The Ren-C version of that reads a lot better:</p>
+<pre><code>steal: lambda [
+    {Ren-C version}
+    'var [set-word! set-path!]
+    value [any-value!]
+][
+    get var
+    elide set var value
+]
+</code></pre>
+<p>It naturally has the benefit of letting you break things across lines.  I feel like it's better to point out "this is the thing being erased".  And of course the mechanic is far more general.</p>
+<p>I definitely like ANY-VALUE! better than ANY-TYPE!.</p>
+<p>Anyway, I'm sure I've seen places I could have used it if I thought of it.  I'll keep my eyes open.</p>
+            <p><small>2 posts - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/weird-little-function-steal-a-variables-prior-value/1943">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/weird-little-function-steal-a-variables-prior-value/1943</link>
+          <pubDate>Thu, 25 Aug 2022 16:27:06 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-1943</guid>
+          <source url="https://forum.rebol.info/t/weird-little-function-steal-a-variables-prior-value/1943.rss">Weird Little Function: STEAL a Variable&#39;s Prior Value</source>
+        </item>
+        <item>
+          <title>A Justification of Generalized Isotopes</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Philosophy</category>
+          <description><![CDATA[
+            <p><em>Here is a train of thought to help people realize why isotopes are needed, and why unifying their behaviors and mechanisms under a common umbrella makes sense.  It starts from the issue of solving /ONLY and then explains the generalization.</em></p>
+<p><em>As time permits, I'll come back and try to improve this...</em></p>
+<hr>
+<p>Years of fretting over the /ONLY debacle converged on a somewhat inescapable conclusion:</p>
+<p><em><strong>It's better to carry the intent of whether a value needs to be spliced on that value...as opposed to having subtle variants of core operations that modulate the splicing.</strong></em></p>
+<p>I'd worked up to a point where I was implementing the "mark of intent" by adding a quoting level to <em>suppress</em> splicing.  Yet this faced likely accidents when someone had a quoted value in a variable...and really meant to use it somewhere as-is, with the quote--vs. thinking of the quote as a splice-suppression signal which the operation should remove.</p>
+<p>Then <a href="https://forum.rebol.info/t/putting-splicing-intent-on-appended-value/1873/9">@rgchris made this remark</a>:</p>
+<aside class="quote no-group quote-modified" data-username="rgchris" data-post="9" data-topic="1873" data-full="true">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/rgchris/40/14_2.png" class="avatar"><a href="https://forum.rebol.info/t/putting-splicing-intent-on-appended-value/1873/9">Putting Splicing Intent On APPEND'ed Value</a>
+</div>
+<blockquote>
+<p>The issue I have with doing the opposite of ONLY—let's call it SPREAD—is what is the interim value?</p>
+<pre><code>&gt;&gt; block: [a b c [a b c]]
+
+&gt;&gt; find block pick block 4
+[[a b c]]
+
+&gt;&gt; find block spread pick block 4
+[a b c [a b c]]
+
+&gt;&gt; spread pick block 4
+???
+</code></pre>
+<p>It would seem to have virtue over ONLY and is a better word.</p>
+</blockquote>
+</aside>
+<h2>If Trying This In Historical Redbol, What Might One Do?</h2>
+<p>As a rough first cut, let's represent splices with a specially recognizable 2-element wrapper block.  We'll signal it's a splice with a series in the first slot--checking for the unique identity of that series.  Then put the block itself as the second element:</p>
+<pre><code>splice-cue: "!!!splice!!!"
+
+spread: func [block [block!]] [
+    return reduce [splice-cue block]
+]
+
+splice?: func [value] [
+    if not block? :value [return false]
+    return same? splice-cue first value
+]
+</code></pre>
+<p>Then we can write our new versions of things like APPEND that are specifically aware of this construct.</p>
+<pre><code>append*: func [series [series!] value] [
+    return either splice? :value [
+        append series second value
+    ][
+        append/only series :value
+    ]
+ ]
+</code></pre>
+<p>It works more or less in your average Redbol, e.g. in Red:</p>
+<pre><code>red&gt;&gt; append* [a b c] spread [d e]
+== [a b c d e]
+
+red&gt;&gt; append* [a b c] [d e]
+== [a b c [d e]]
+
+red&gt;&gt; append* [a b c] 'd
+== [a b c d]
+
+red&gt;&gt; append* [a b c] first ['d]
+== [a b c 'd]
+</code></pre>
+<p><em>In fact, this is essentially how the bootstrap executable for Ren-C simulates the SPREAD behavior.</em></p>
+<p>But the weaknesses are <em>immediately</em> apparent!!!  <img src="https://forum.rebol.info/images/emoji/twitter/pouting_cat.png?v=9" title=":pouting_cat:" class="emoji" alt=":pouting_cat:"></p>
+<h2>Not A Distinct Type: Too Easy To Overlook Handling</h2>
+<p>There's no special type for the spliced block...it's just a BLOCK!.  This means any routine that hasn't been written to handle it, will just let it leak through.</p>
+<pre><code>red&gt;&gt; reduce [spread [a b c] [a b c]]
+== [["!!!splice!!!" [a b c]] [a b c]]  ; not [a b c [a b c]]
+</code></pre>
+<p>Changing to some other generic type that can contain a block...such as an OBJECT!...doesn't help matters.  You are kind of in trouble any time an operation willfully lets you put these into an array.</p>
+<p><strong>The first instinct might be to introduce a new SPLICE! datatype, with a system-wide rule that splices can't be put into arrays.</strong>  <em>(Enforcing such a rule across all array-manipulating code is challenging...so let's sort of make a note of that fact, but continue.)</em></p>
+<p>Because of the peculiar nature of not being able to be put in a block, there'd have to be a decision made about function arguments as to whether or not they took this type.  Many functions designed to handle generic values would not be able to handle them, so there'd presumably need to be some typeset like ANY-NOTSPLICE! or ANY-NORMAL!.</p>
+<h2>How To Represent A Type That Can't Be Put In A Block?</h2>
+<p>Now we've got several things to ponder about our new type.  For instance: what you should see here?</p>
+<pre><code>&gt;&gt; obj: make object! [foo: spread [d e]]
+== make object! [
+    foo: ???
+]
+</code></pre>
+<p>We just said that a defining feature of SPLICE! is that you can't accidentally put them in blocks.  But the argument to MAKE OBJECT!, namely <strong><code>[foo: ???]</code></strong>, is a block.  If <code>???</code> can't itself be a splice!, then what is it?</p>
+<p>This brings up a possibly-related question: what if you want a way to put the intent of whether to splice or not into "suspended animation?"... in a way that you could collect it?</p>
+<p>Here's a sort of contrived example of the puzzle:</p>
+<pre><code>generate: func [n [integer!]] [
+   if even? n [return reduce [n n + 1]]
+   return spread reduce [n n + 1]
+]
+
+wrap: func [
+    return: [...]
+    in [splice! block!]
+][
+    ...
+]
+
+unwrap: func [
+    return: [splice! block!]
+    wrapped [...]
+][
+    ...
+]
+
+n: 0
+pending: collect [while [n &lt; 4] [keep wrap generate n]]
+
+data: copy []
+for-each item pending [append data unwrap item]
+</code></pre>
+<p>How would you write WRAP and UNWRAP such that at the end of the code above, you'd get:</p>
+<pre><code>&gt;&gt; data
+== [[0 1] 1 2 [2 3] 3 4]
+</code></pre>
+<p>If the system didn't provide some answer to this, you'd end up needing to re-invent something kind of equivalent to the primitive <code>["!!!splice!!!" [...]]</code> mechanic as a means of persistence:</p>
+<pre><code>&gt;&gt; pending
+== [[0 1] ["!!!splice!!!" [1 2]] [2 3] ["!!!splice!!!" [3 4]]]
+</code></pre>
+<h1>Isotopes Were Designed For This!</h1>
+<p>Isotopes are a set of curated answers for these problems.  Originally they were introduced to address issues like what an UNSET! was...which has some of the same class of problems as SPLICE! (such as not wanting to be put in BLOCK!s, and not accepted by default or by most routines).</p>
+<p>Isotopes are:</p>
+<ul>
+<li>
+<p><strong>general</strong> - all base value types (e.g. unquoted things that can be put into blocks, so not NULL or VOID or QUOTED!) have isotopic forms</p>
+</li>
+<li>
+<p><strong>efficient</strong> - isotopes do not require allocations, and merely are a different state of a byte in the value cell (the same byte that encodes quoting levels)</p>
+</li>
+<li>
+<p><strong>"meta-representable"</strong> - all isotopes have a corresponding single-value form known as a "quasi-form", which when evaluated (or run through a more narrow UNQUASI operation) will yield the isotopic form</p>
+</li>
+</ul>
+<p>I mentioned at the outset that it would be somewhat costly to bulletproof all of native code against the ability to do something like append a specific data type like "SPLICE!" to a block.  But with isotopes this problem has been solved once for all the forms...so the same code that prevents a so-called "UNSET!" from winding up in arrays works for splices.  <em>That's because a splice is actually an isotopic block!, and an unset is actually an isotopic blank!</em></p>
+<p>Above I asked:</p>
+<blockquote>
+<p>What you should see here?</p>
+<pre><code>&gt;&gt; obj: make object! [foo: spread [d e]]
+== make object! [
+    foo: ???
+]
+</code></pre>
+</blockquote>
+<p>Isotopes give us the answer, that it's <strong><code>foo: ~[d e]~</code></strong>.  This is the previously mentioned "QUASI!" form of BLOCK!, which when evaluated produces an isotope.</p>
+<p><em>But isotopes themselves have no canon representation.</em>  The console can print out a comment or show them in a different color, but to talk about them having a representation doesn't make much sense as you'll never see them in source.</p>
+<pre><code>&gt;&gt; ~[d e]~
+== ~[d e]~  ; isotope
+</code></pre>
+<p>I also asked:</p>
+<blockquote>
+<p>"How would you write WRAP and UNWRAP such that at the end of the code above, you'd get:"</p>
+<pre><code>&gt;&gt; data
+== [[0 1] 1 2 [2 3] 3 4]
+</code></pre>
+</blockquote>
+<p>With isotopic blocks representing splices, you don't need to write WRAP and UNWRAP... because these operations are built in operations called META and UNMETA.  And the pending array would look like:</p>
+<pre><code>&gt;&gt; pending
+== ['[0 1] ~[1 2]~ '[2 3] ~[3 4]~]
+</code></pre>
+<p>When the QUOTED! blocks are UNMETA'd, they become regular blocks and then are appended as-is.  When the QUASI! blocks are UNMETA'd they become isotopes and give the splice intent.  This produces the desired "suspended animation" to preserve the intent.</p>
+<p><em>That suspended animation is also used in the ^META parameter convention, which indicates a function argument can accept isotopes... and the add-quoting-or-quasi behavior brings those isotopic variables into a reified state so they can be safely handled.</em></p>
+<h2>The Proof Is In The Capabilities</h2>
+<p>I've explained about splices, and mentioned how it crosses needs with unset variable states.</p>
+<p>But isotopes are also a cornerstone of <a href="https://forum.rebol.info/t/default-values-and-make-frame/1412">how function and FRAME! specialization works</a>.</p>
+<p>The ERROR! isotope is used to have a sneaky out-of-band way to return <a href="https://forum.rebol.info/t/fail-vs-return-fail-the-new-age-of-definitional-failures/1852">definitional errors</a></p>
+<p>As their applications expand, they are slated to allow us to have non-literal modes to ask something like FIND that you want to look for <em>instances</em> of a datatype by passing that type isotopically... vs. looking for the datatype's appearance concretely in the target.  Concepts of making only isotopic ACTION!s run through WORD! references could make it completely safe to work with arguments passed as variables, saving you from needing GET-WORD!s to handle them.</p>
+<p>It's natural for there to be some confusion with the new idea--especially given all its churn through the course of design.  But the design is becoming clearer, and I think people are going to find this gives solidity to writing complicated but coherent code...vastly outpacing historical Redbol.</p>
+            <p><small>4 posts - 3 participants</small></p>
+            <p><a href="https://forum.rebol.info/t/a-justification-of-generalized-isotopes/1918">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/a-justification-of-generalized-isotopes/1918</link>
+          <pubDate>Tue, 16 Aug 2022 10:23:16 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-1918</guid>
+          <source url="https://forum.rebol.info/t/a-justification-of-generalized-isotopes/1918.rss">A Justification of Generalized Isotopes</source>
+        </item>
+        <item>
+          <title>Enter the Dungeon 💀 ...if You Dare!</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Show &amp; Tell</category>
+          <description><![CDATA[
+            <h2>The Imaginary 3-D Dungeon Simulator of the Year, 1983...</h2>
+<p>NOW ON THE WEB!!</p>
+<p><strong><a href="http://hostilefork.com/media/shared/replpad-js/?do=dungeon">http://hostilefork.com/media/shared/replpad-js/?do=dungeon</a></strong></p>
+<p>Source code:</p>
+<p><a href="https://github.com/hostilefork/teenage-coding/blob/master/DUNGEON/dungeon.reb">https://github.com/hostilefork/teenage-coding/blob/master/DUNGEON/dungeon.reb</a></p>
+<h2>Backstory</h2>
+<p>When I was a kid (circa 1983, I'd be about 8 or 9), I played the Intellivision game <a href="http://en.wikipedia.org/wiki/Advanced_Dungeons_&amp;_Dragons:_Treasure_of_Tarmin">Advanced Dungeons and Dragons: Treasure of Tarmin</a>. The 3-D graphics put you in a first-person-perspective point of view with shocking realism:</p>
+<p><img src="https://i.stack.imgur.com/X4aGT.png" alt="Shockingly Realistic 3-D Graphics" width="320" height="200"></p>
+<p>But a year or two later, I got a C-64. And I was able to draw on the 40x25 character grid by cursoring around the screen, setting the color with the Ctrl key and a digit, and putting symbols anywhere I wanted <em>(why doesn't <code>bash</code> let me do that?)</em>. The character set had triangular components and solid block components.</p>
+<p><div class="lightbox-wrapper"><a class="lightbox" href="https://forum.rebol.info/uploads/default/original/1X/0d0d338da02ccf2e47f3427a3ffc08fddfbfb7a4.jpeg" data-download-href="https://forum.rebol.info/uploads/default/0d0d338da02ccf2e47f3427a3ffc08fddfbfb7a4" title="image"><img src="https://forum.rebol.info/uploads/default/optimized/1X/0d0d338da02ccf2e47f3427a3ffc08fddfbfb7a4_2_252x250.jpeg" alt="image" data-base62-sha1="1Rsurb7Q0aQ1IugNlN0VbFjgToE" width="252" height="250" srcset="https://forum.rebol.info/uploads/default/optimized/1X/0d0d338da02ccf2e47f3427a3ffc08fddfbfb7a4_2_252x250.jpeg, https://forum.rebol.info/uploads/default/optimized/1X/0d0d338da02ccf2e47f3427a3ffc08fddfbfb7a4_2_378x375.jpeg 1.5x, https://forum.rebol.info/uploads/default/optimized/1X/0d0d338da02ccf2e47f3427a3ffc08fddfbfb7a4_2_504x500.jpeg 2x" data-small-upload="https://forum.rebol.info/uploads/default/optimized/1X/0d0d338da02ccf2e47f3427a3ffc08fddfbfb7a4_2_10x10.png"><div class="meta">
+<svg class="fa d-icon d-icon-far-image svg-icon" aria-hidden="true"><use xlink:href="#far-image"></use></svg><span class="filename">image</span><span class="informations">600×593 128 KB</span><svg class="fa d-icon d-icon-discourse-expand svg-icon" aria-hidden="true"><use xlink:href="#discourse-expand"></use></svg>
+</div></a></div></p>
+<p>So I was able to reason through how one might generate a rendering of one's perspective in a grid through that medium.</p>
+<p>In 2013, I found the nearly-three-decades-old spec, in spiral-bound notebook paper, about "Dungeon Construction Set":</p>
+<p><img src="https://i.stack.imgur.com/WHYpo.jpg" alt="enter image description here" width="320" height="320"></p>
+<p><em>(Careful readers will notice that while it's almost right, this doesn't quite hold together on the slanted parts...)</em></p>
+<p>Though Treasure of Tarmin was played on a grid, the walls existed only on the <em>edges</em> of grid squares. Having learned what bytes were, I realized that if I made the map out of bytes...then each square on the map could have four possible states for each of its edges:</p>
+<ol>
+<li>Unobstructed</li>
+<li>Wall</li>
+<li>Door</li>
+<li>Something Else?</li>
+</ol>
+<p>The design allows for the opportunity that adjacent cells would "disagree"...e.g. have a wall on one side and a door on the other.  I considered this a feature; these situations would give rise to one-way doors and walls that didn't appear until you passed through them and then turned around.</p>
+<p>My idea was that a position on the map and a direction you were facing could "light up" regions on the screen...a bit like lighting up segments of a digit on an LCD.</p>
+<p>But an implementation of the ideas eluded me.  It was a trickier program than I had written at the time, made even trickier because I was trying to implement it in a "machine language monitor".  I had no assembler, and the book I read didn't discuss them...just the instruction set and workings of the 6502 chip.</p>
+<p>(The machine-language-monitor programs could encode single instructions into specific memory locations.  But unlike an assembler, it had no labels or other abstractions...all addresses had to be kept track of on paper.)</p>
+<p>By the time I knew enough about programming that I could do something like this in an evening, I no longer cared much about the idea.  But better late than never, right?</p>
+<p>Although Unicode/ASCII don't have good "seamless drawing" characters to do this like the C-64 could, it can still get the idea across.</p>
+<h2><a href="https://github.com/red/red/pull/612">Originally Wrote this in Red (2013)</a></h2>
+<p>I decided I'd use this relatively simple task as something where I would use Red the whole time--as opposed to writing it in Rebol2 or R3-Alpha and then porting the differences.  So that let me get a sense of where the pain points were regarding things like syntax error reporting, that sort of stuff.</p>
+<p>Anyway, about a decade later, it's now a Ren-C sample.  Minor modifications were made, including taking advantage of the ReplPad's CLEAR-SCREEN ability (if running on the web).</p>
+            <p><small>2 posts - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/enter-the-dungeon-if-you-dare/1865">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/enter-the-dungeon-if-you-dare/1865</link>
+          <pubDate>Wed, 06 Jul 2022 04:59:54 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-1865</guid>
+          <source url="https://forum.rebol.info/t/enter-the-dungeon-if-you-dare/1865.rss">Enter the Dungeon 💀 ...if You Dare!</source>
+        </item>
+        <item>
+          <title>Parsing a README.md File To Fill A Folder</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Show &amp; Tell</category>
+          <description><![CDATA[
+            <p>I've integrated <a class="mention" href="/u/gchiu">@gchiu</a>'s <a href="https://forum.rebol.info/t/js-testing-with-cypress-io/1778/3">Cypress Tests</a> to the GitHub workflow.</p>
+<p>There's a certain number of things we want to have work before we "greenlight" a new libr3.wasm file.  Things like Graham's prescription writing app or chess demo are examples of this.</p>
+<p>But we don't want the test scripts for those things to live in the Ren-C repository.  Because they need to change as the apps change--and they should also be running whenever those apps get a new commit pushed.</p>
+<p>At first I just did a <strong>wget</strong> of the scripts:</p>
+<pre><code>cd tests/cypress/e2e
+wget https://gitlab.com/Zhaoshirong/rebol-chess/-/raw/master/cypress/e2e/chess.cy.js
+wget https://raw.githubusercontent.com/gchiu/midcentral/main/cypress/e2e/rx-app.cy.js
+</code></pre>
+<p>But this encountered an error, because when git has a directory with no files in it...it doesn't exist.  So there was no e2e directory.</p>
+<p>I could have just said <strong>mkdir tests/cypress/e2e</strong> as part of the workflow.  But I figured making a README.md file and putting it in the directory to explain what it was would be easier.</p>
+<p>This gave me an idea: <em>What if I put the URLs in the README.md, and then parsed them out and fetched them?</em>  So that's what I did instead!</p>
+<p><strong><a href="https://raw.githubusercontent.com/metaeducation/ren-c/master/tests/cypress/e2e/README.md">Here's the README.md</a></strong>, which has <strong><code>* https://whatever</code></strong> lines in it.</p>
+<p>Then here's the script that uses the Ren-C GitHub Action:</p>
+<pre><code>- name: Collect Cypress Tests from Repositories We Want to Keep Working
+  uses: metaeducation/ren-c-action@release
+  with:
+    script: |
+      cd %tests/cypress/e2e/
+      list: uparse (as text! read %README.md) [
+          collect some [
+              '* space [keep url!] newline
+            | thru newline
+          ]
+      ]
+      for-each url list [
+          filename: second split-path url
+          write filename (read url)
+      ]</code></pre>
+            <p><small>3 posts - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/parsing-a-readme-md-file-to-fill-a-folder/1840">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/parsing-a-readme-md-file-to-fill-a-folder/1840</link>
+          <pubDate>Tue, 14 Jun 2022 11:41:40 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-1840</guid>
+          <source url="https://forum.rebol.info/t/parsing-a-readme-md-file-to-fill-a-folder/1840.rss">Parsing a README.md File To Fill A Folder</source>
+        </item>
+        <item>
+          <title>Demonstrating FOR-BOTH: Loop Composability For The Win :exclamation:</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Show &amp; Tell</category>
+          <description><![CDATA[
+            <p>FOR-BOTH was an early talking point for an extremely simple usermode loop construct that would be built out of two FOR-EACH loops:</p>
+<pre><code> &gt;&gt; for-both x [1 2] [3 4] [print [x], x = 5]
+ 1
+ 2
+ 3
+ 4
+ == #[false]
+</code></pre>
+<p>A naive implementation of this in Rebol2 might look like:</p>
+<pre><code> for-both-naive: func ['var blk1 blk2 body] [
+     foreach :var blk1 body
+     foreach :var blk2 body
+ ]
+</code></pre>
+<p>...but...</p>
+<ul>
+<li>
+<p><strong>It will not honor BREAK correctly</strong></p>
+<pre><code>&gt;&gt; for-both-naive x [1 2] [3 4] [if x = 2 [break], print [x], x = 5]
+1
+3  ; the BREAK only broke the first FOREACH
+4
+== #[none]
+</code></pre>
+<p>There's no way from the outside of Rebol2 or Red's FOREACH to know for sure that a BREAK was requested.  BREAK returns NONE!, but a loop body can (and often does) evaluate to NONE! as well.  Red made it even worse by adding BREAK/RETURN--so a breaking loop can return <em>anything</em>.</p>
+<p>So you'd need some kind of complex binding to search the loop bodies and bind the BREAK word to something that throws and gets caught...even for this simple goal.</p>
+</li>
+<li>
+<p><strong>The loop won't evaluate to the last result of the body</strong>.</p>
+<pre><code>&gt;&gt; for-both-naive x [1 2] [] [print [x], x * 10]
+1  ; evaluated to 10
+2  ; evaluated to 20
+== #[none!]
+</code></pre>
+<p>If the second series is empty, the fallout from the first loop is forgotten.</p>
+</li>
+</ul>
+<h2>Behold Ren-C's Elegant Solution to FOR-BOTH</h2>
+<p><em>Underneath its apparent simplicity lies quite a lot of deep thought.</em>  And the mechanisms it uses apply far beyond just loops!</p>
+<pre><code>    for-both: func ['var blk1 blk2 body] [
+        return unmeta all [
+            meta for-each (var) blk1 body
+            meta for-each (var) blk2 body
+        ]
+    ]
+</code></pre>
+<p><em>(Note: see followup for why RETURN is necessary with FUNC, and how to avoid it with LAMBDA.)</em></p>
+<h3>It solves the BREAK case</h3>
+<p>Below we see a situation where the first FOR-EACH returns NULL (and <strong>meta null</strong> is just <strong>null</strong>).  So it short-circuits the ALL, and propagates the null as a signal that it broke:</p>
+<pre><code>&gt;&gt; for-both x [1 2] [3 4] [if x = '2 [break], print [x], x = 5]
+1
+; null
+</code></pre>
+<p>Note that the first pass through the loop did not terminate the ALL, just because the body evaluated to false.  That's because meta of ordinary values produces QUOTED!, which is truthy even if the quoted thing is falsey.</p>
+<pre><code> &gt;&gt; metafalse: meta #[false]
+ == '#[false]
+
+ &gt;&gt; type of metafalse
+ == #[datatype! quoted!]
+
+&gt;&gt; if metafalse [print "All QUOTED! are truthy!"]
+All QUOTED! are truthy!
+</code></pre>
+<p>This means the loop can gracefully recover the QUOTED! as the ALL result if the loop completes, and remove the quoting level:</p>
+<pre><code>&gt;&gt; for-both x [1 2] [3 4] [print [x], x = 5]
+1
+2
+3
+4
+== #[false]
+</code></pre>
+<h3>It Solves the Fallout From The Last Loop Body</h3>
+<p>This takes advantage of a new invariant: <em><strong>loops which never run their bodies return void</strong></em>.</p>
+<pre><code>&gt;&gt; for-each x [] [fail "This body never runs"]
+; void (decays to none)
+</code></pre>
+<p>Voids act invisibly in constructs like ALL.  So we get the result we want:</p>
+<pre><code>&gt;&gt; for-both x [1 2] [] [print [x], x * 10]
+1  ; evaluated to 10
+2  ; evaluated to 20
+== 20
+</code></pre>
+<p>There's a slight fib here, that META of the void did not produce a "meta-void" (<span class="mention">@void</span>)...but passed it through as it would a NULL.  That's a "user-friendly" property of the META-as-a-word form:</p>
+<pre><code>&gt;&gt; meta comment "META-the-word passes through the vanishing void isotopes"
+; void (decays to none)
+
+&gt;&gt; ^ comment "The ^ operator is more exact, gives the meta signal"
+== @void
+</code></pre>
+<p>But in situations like this, passing through the void state is what we wanted.</p>
+<h3>You Can Even Return NULL From the Body!</h3>
+<p>Thanks to isotopes, the following is possible:</p>
+<pre><code>&gt;&gt; x: for-both x [1 2] [] [print [x], if x = 2 [null]]
+1
+2
+== ~null~  ; isotope (decays to null)
+
+&gt;&gt; x
+; null
+</code></pre>
+<p>How cool is that?  Even though NULL is being reserved as the unique signal for loops breaking, there's a backchannel for it to escape...out of the FOR-EACH, and up out of the FOR-BOTH wrapping it!</p>
+<h2>It Holds Up Under Scrutiny!</h2>
+<p>I'm really pleased with it, and here are some tests:</p>
+<p><a href="https://github.com/metaeducation/ren-c/blob/master/tests/loops/examples/for-both.loops.test.reb">https://github.com/metaeducation/ren-c/blob/master/tests/loops/examples/for-both.loops.test.reb</a></p>
+<p>I invite you to test it some more...ask questions...and perhaps come up with your own loop compositions!</p>
+<p><img src="https://forum.rebol.info/images/emoji/twitter/atom_symbol.png?v=9" title=":atom_symbol:" class="emoji only-emoji" alt=":atom_symbol:"></p>
+            <p><small>2 posts - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/demonstrating-for-both-loop-composability-for-the-win/1833">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/demonstrating-for-both-loop-composability-for-the-win/1833</link>
+          <pubDate>Tue, 31 May 2022 16:02:09 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-1833</guid>
+          <source url="https://forum.rebol.info/t/demonstrating-for-both-loop-composability-for-the-win/1833.rss">Demonstrating FOR-BOTH: Loop Composability For The Win :exclamation:</source>
+        </item>
         <item>
           <title>The Rebellion Against Style Guides</title>
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
@@ -82,7 +628,7 @@
 <p>(2) is chosen by people like Red and <a href="https://github.com/Oldes/Rebol3">Oldes's branch of R3-Alpha</a>, as well as some clones that have popped up over the years.</p>
 <p>(3) is probably the most sensible choice, but if I didn't think there was some promise in the language I wouldn't be pursuing (1).</p>
 </blockquote>
-            <p><small>5 posts - 3 participants</small></p>
+            <p><small>4 posts - 3 participants</small></p>
             <p><a href="https://forum.rebol.info/t/my-summary-of-the-big-picture/1792">Read full topic</a></p>
           ]]></description>
           <link>https://forum.rebol.info/t/my-summary-of-the-big-picture/1792</link>
@@ -527,6 +1073,177 @@ for-each item data [
           <source url="https://forum.rebol.info/t/taking-advantage-of-delimits-block-behavior-and-get-block/1679.rss">Taking Advantage of DELIMIT&#39;s BLOCK! Behavior and GET-BLOCK!</source>
         </item>
         <item>
+          <title>APPLY II: The Revenge!</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Feature Discover</category>
+          <description><![CDATA[
+            <aside class="quote no-group quote-modified" data-username="hostilefork" data-post="1" data-topic="1406">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/40/26_2.png" class="avatar"><a href="https://forum.rebol.info/t/design-issues-for-new-apply/1406/1">Design Issues for New APPLY</a>
+</div>
+<blockquote>
+<p>It's time to bring back APPLY</p>
+</blockquote>
+</aside>
+<p>...and by *"it's time" I apparently meant <em>"within the next year, maybe"</em>...</p>
+<p>But better late than never, right?  It's in!</p>
+<h2>Refinements Can be Provided In Any Order</h2>
+<pre><code>[a b c d e d e] = apply :append [[a b c] [d e] /dup 2]
+[a b c d e d e] = apply :append [/dup 2 [a b c] [d e]]
+[a b c d e d e] = apply :append [[a b c] /dup 2 [d e]]
+
+[a b c d d] = apply :append [/dup 2 [a b c] [d e] /part 1]
+[a b c d d] = apply :append [[a b c] [d e] /part 1 /dup 2]
+</code></pre>
+<h2>Any Parameter (Not Just Refinements) Can Be Used By Name</h2>
+<p>Once a parameter has been supplied by name, it is no longer considered for consuming positionally.</p>
+<pre><code>[a b c d e] = apply :append [/series [a b c] /value [d e]]
+[a b c d e] = apply :append [/value [d e] /series [a b c]]
+
+[a b c d e] = apply :append [/series [a b c] [d e]]
+[a b c d e] = apply :append [/value [d e] [a b c]]
+</code></pre>
+<h2>Commas Are Ok So Long As They Are Interstitial</h2>
+<pre><code>[a b c d e d e] = apply :append [[a b c], [d e], /dup 2]
+[a b c d e d e] = apply :append [/dup 2, [a b c] [d e]]
+
+&gt;&gt; apply :append [/dup, 2 [a b c] [d e]]
+** Script Error: end was reached while trying to set /dup
+</code></pre>
+<h2>Giving Too Many Arguments Is An Error</h2>
+<pre><code>&gt;&gt; apply :append [[a b c] [d e] [f g]]
+** Script Error: Too many values in processed argument block of APPLY.
+</code></pre>
+<h2>Refinements Must Be Followed By A Non-Refinement</h2>
+<pre><code>&gt;&gt; apply :append [/dup /part 1 [a b c] [d e]]
+** Script Error: end was reached while trying to set /dup
+</code></pre>
+<p>But you can pass refinements as arguments to refinements...just use a quote!</p>
+<pre><code>&gt;&gt; tester: func [/refine [any-value!]] [refine]
+
+&gt;&gt; apply :tester [/refine '/ta-da!]
+== /ta-da!
+</code></pre>
+<h2>No-Arg Refinements Permit LOGIC! But Set NULL or <code>#</code>
+</h2>
+<p>Remember: <em>the DO FRAME! mechanics do not change anything, besides ~unset~ isotopes being turned to NULLs.</em>  So if a refinement doesn't take an argument, <a href="https://forum.rebol.info/t/why-no-argument-refinements-are-blackhole-or-null/735">the only legal values for that refinement in the frame are # and NULL</a>.</p>
+<p>But APPLY isn't DO FRAME!.  It's a higher level thing that builds a frame from the values you supply, and then has an opportunity to look over them before running DO FRAME!.  So if it sees you gave a #[true] or a #[false] to a refinement with no argument, it will adjust it appropriately.</p>
+<pre><code>&gt;&gt; testme: func [/refine] [refine]
+
+# = apply :testme [/refine #]
+null = apply :testme [/refine null]
+
+# = apply :testme [/refine true]
+null = apply :testme [/refine false]
+</code></pre>
+<h2>^META Arguments Are Also Accounted For</h2>
+<p>For those following <a href="https://forum.rebol.info/t/default-values-and-make-frame/1412">the profound design points</a>, the DO FRAME! mechanic does not allow you to have isotopes in frame slots.  The way you get isotopes through to a function is through meta parameters, and by convention those parameters are quoted or otherwise "leveled up" into non-isotope status.</p>
+<p>But as another convenience, APPLY detects when a parameter is meta and will level it up...because the low-level frame mechanics aren't allowed to editorialize:</p>
+<pre><code>&gt;&gt; non-detector: func [arg] [arg]  ; not a meta argument, isotopes illegal
+
+&gt;&gt; apply :non-detector [~baddie~]
+** Script Error: non-detector needs arg as ^META for ~baddie~ isotope
+
+&gt;&gt; detector: func [^arg] [arg]
+
+&gt;&gt; apply :detector [~baddie~]
+== ~baddie~
+</code></pre>
+<p><strong>I know not everyone has gotten their heads around isotopes yet, but they are critical... this stuff was the missing link to making it all gel.</strong></p>
+<p><img src="https://forum.rebol.info/images/emoji/twitter/dizzy.png?v=9" title=":dizzy:" class="emoji only-emoji" alt=":dizzy:"> <img src="https://forum.rebol.info/images/emoji/twitter/dizzy.png?v=9" title=":dizzy:" class="emoji only-emoji" alt=":dizzy:"> <img src="https://forum.rebol.info/images/emoji/twitter/dizzy.png?v=9" title=":dizzy:" class="emoji only-emoji" alt=":dizzy:"></p>
+<h1>What's Next?!  Making It Easier To Use!</h1>
+<p>Imagine if we let <strong><code>&lt;-</code></strong> be an infix operator...taking the name of the function to apply on the left, and a block on the right:</p>
+<pre><code>&lt;-: enfix func [
+    'action [word! tuple! path! group!]
+    args [block]
+][
+    apply (if group? action [do action] else [get action]) args
+]
+</code></pre>
+<p>It's rather slick!</p>
+<pre><code>&gt;&gt; append &lt;- [[a b c] &lt;d&gt; /dup 2]
+== [a b c &lt;d&gt; &lt;d&gt;]
+
+&gt;&gt; append/only &lt;- [[a b c] [e f] /dup 2]
+== [a b c [e f] [e f]]
+</code></pre>
+<p>Of course, you can mix it up with your own freaky ideas, even variadic ones!</p>
+<pre><code>&gt;&gt; $: enfixed func ['name [word!] 'args [&lt;variadic&gt; &lt;end&gt; any-value!]] [
+    args: make block! args
+    apply :(get name) args
+]
+
+&gt;&gt; data: [a b c]
+
+&gt;&gt; (append $ /dup 2, data [d e])
+
+&gt;&gt; print ["data is" mold data]
+data is [a b c d e d e]
+</code></pre>
+<p>The choice is up to you.  Which is what all this is about!</p>
+            <p><small>5 posts - 2 participants</small></p>
+            <p><a href="https://forum.rebol.info/t/apply-ii-the-revenge/1834">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/apply-ii-the-revenge/1834</link>
+          <pubDate>Tue, 17 Aug 2021 07:58:34 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-1834</guid>
+          <source url="https://forum.rebol.info/t/apply-ii-the-revenge/1834.rss">APPLY II: The Revenge!</source>
+        </item>
+        <item>
+          <title>Isotopic WORD!s For More Informative States in TLS</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Show &amp; Tell</category>
+          <description><![CDATA[
+            <p>When introducing isotopic WORD!s, I wrote:</p>
+<aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="1383">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/40/26_2.png" class="avatar"><a href="https://forum.rebol.info/t/lingering-idea-labeled-ornery-word-s/1383/1">Lingering Idea: Labeled "Ornery" WORD!s</a>
+</div>
+<blockquote>
+<p>Since these can be used as a kind of deferred error--a bad result that's only there to be bad if you actually use it--the text in these words could help guide you to what happened.</p>
+</blockquote>
+</aside>
+<p>Today I hit a good example.  I was going over some stuff in the TLS code, and found this:</p>
+<pre><code>; Each encrypted message in TLS 1.1 and above carry a plaintext
+; initialization vector, so the ctx does not use one for the whole
+; session.  Unset it to make sure.
+;
+unset in ctx 'client-iv
+unset in ctx 'server-iv
+</code></pre>
+<p>So in TLS 1.0 mode, there is a single "iv" (initialization vector) reused for the client and server over the whole session.  But you don't want to use those fields in TLS 1.1 and above, because you're supposed to be using the data from each message.</p>
+<p>The historical trick to catch unwanted reads of these fields was to unset them.</p>
+<ul>
+<li>
+<p>It was awkward to do so...since UNSET!s couldn't be assigned via SET-WORD!</p>
+</li>
+<li>
+<p>Also, it didn't communicate any information besides "unset"</p>
+</li>
+</ul>
+<p>Today, you can painlessly get the effect...with a more meaningful error on access!</p>
+<pre><code>ctx.client-iv: ctx.server-iv: ~per-message~
+</code></pre>
+<p>So if you get an error on trying to access these variables, it will tell you its the isotopic WORD! of <strong>~per-message~</strong>.  You can look that up in the source or get the gist of what it means.</p>
+<p><em>(I'm still thinking about how we might put the file and line number into the value itself, so you could find this assignment and get at the origin of the value!)</em></p>
+<p>Using isotopes effectively is a lot of bang for the buck.  Neat stuff!</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/isotopic-word-s-for-more-informative-states-in-tls/1933">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/isotopic-word-s-for-more-informative-states-in-tls/1933</link>
+          <pubDate>Sun, 15 Aug 2021 12:44:17 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-1933</guid>
+          <source url="https://forum.rebol.info/t/isotopic-word-s-for-more-informative-states-in-tls/1933.rss">Isotopic WORD!s For More Informative States in TLS</source>
+        </item>
+        <item>
           <title>A Lot To UNPACK: (Replacing the SET of REDUCE BLOCK! Idiom)</title>
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
           <category>Show &amp; Tell</category>
@@ -652,7 +1369,7 @@ for-each item data [
 </code></pre>
 <p>If the ^ and UNMETA seem confusing, the only thing you need to think about is that the META protocol helps you out when you're trying to deal with a situation of storing a value that can be anything...and you need to differentiate a state.  I'm making the result "meta" so that I can use plain unset to signal that it hasn't been assigned yet.  I could make a separate boolean variable instead, but then I'd have another variable and I'd have to GET/ANY the result...</p>
 <p>I'm sure people will start getting the hang of it!  <img src="https://forum.rebol.info/images/emoji/twitter/slight_smile.png?v=9" title=":slight_smile:" class="emoji" alt=":slight_smile:"></p>
-            <p><small>8 posts - 2 participants</small></p>
+            <p><small>9 posts - 2 participants</small></p>
             <p><a href="https://forum.rebol.info/t/a-lot-to-unpack-replacing-the-set-of-reduce-block-idiom/1634">Read full topic</a></p>
           ]]></description>
           <link>https://forum.rebol.info/t/a-lot-to-unpack-replacing-the-set-of-reduce-block-idiom/1634</link>
@@ -965,9 +1682,8 @@ func: funco [
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
           <category>Feature Discover</category>
           <description><![CDATA[
-            <p>I'm still evaluating how well the idea behind multiple-returns works...but by and large, they seem to be working pretty well.</p>
-<p>So I've gone ahead and moved them from the "usermode prototype" to natively implementing them as part of the evaluator, which speeds them up by a factor of... a lot.</p>
-<p>While doing so, I added a new feature of being able to "circle" which result will be the value of the overall expression.  Previously this was always the "main" return value, but now you can pick another via a SYM-WORD!.</p>
+            <p>Multi-Returns have a feature of being able to "circle" which result will be the value of the overall expression.  You do the circling with an <strong><code>@word</code></strong> or an <strong><code>@tu.p.le</code></strong>... or an <strong><code>@(gr o up)</code></strong> that evaluates to what you want to assign.</p>
+<h3>Demo!</h3>
 <p>Here's a function with a secondary return value to demonstrate with:</p>
 <pre><code>multi: func [
     return: "Main return value"
@@ -975,15 +1691,15 @@ func: funco [
     secondary: "Secondary return value"
         [integer!]
 ][
-    if secondary [  ; NULL if not asked for via multi-return (or refinement)
-        set secondary 20  ; reminder: `set # ...` is a no-op
+    if wanted? 'secondary [  ; multi-return may not be requested at callsite
+        secondary: 10 + 10  ; so we can choose to avoid this calculation
     ]
     return 10
 ]
 </code></pre>
 <p>Traditionally you could ask for both results, and the overall result would be the first return:</p>
 <pre><code>&gt;&gt; [a b]: multi
-== 10  ; defaults to same value as first result, e.g. a
+== 10  ; defaults to same value as first result, e.g. A
 
 &gt;&gt; a
 == 10
@@ -991,7 +1707,7 @@ func: funco [
 &gt;&gt; b
 == 20
 </code></pre>
-<p>But now you can use a SYM-WORD! instead to ask for a different result, e.g. the second:</p>
+<p>But now you can "circle" to ask for a different result, e.g. the second:</p>
 <pre><code>&gt;&gt; [a @b]: multi
 == 20  ; same value as b
 
@@ -1009,6 +1725,7 @@ func: funco [
 == 10
 </code></pre>
 <p>There are some places where this comes in handy, although you generally want to pick the main return to be the thing people are most interested in responding to (e.g. determining success or failure of an operation).</p>
+<p>There's also a characteristic that only the main return can return pure voids without having to contort the value convention itself to encode the void state (e.g. by ^META quoting the results).  So that should be weighed as well when thinking about how to plan the results.</p>
             <p><small>1 post - 1 participant</small></p>
             <p><a href="https://forum.rebol.info/t/circling-multi-returns-choose-which-is-expression-result/1587">Read full topic</a></p>
           ]]></description>
@@ -1021,15 +1738,15 @@ func: funco [
           <source url="https://forum.rebol.info/t/circling-multi-returns-choose-which-is-expression-result/1587.rss">Circling Multi-Returns: Choose Which Is Expression Result</source>
         </item>
         <item>
-          <title>Weird WORD!s - Allow, But Backtick Escape Them?</title>
+          <title>Weird WORD!s - Allow, But Escape Them?</title>
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
           <category>Philosophy</category>
           <description><![CDATA[
-            <p>I suggested the idea of using <strong><code>&lt;.&gt;</code></strong> as a weird TAG! in PARSE... then I remembered... that's a TUPLE!.</p>
-<p>My feeling is you should be able to build paths and tuples out of anything that's a valid WORD!.  But is it time we had an escaping mode for "weird words"?  If you want to make the above TUPLE!, what if you had to write:</p>
+            <p>My feeling is you should be able to build paths and tuples out of anything that's a valid WORD!.  But is it time we had an escaping mode for "weird words"?</p>
+<p>Let's say you didn't want <strong><code>&lt;.&gt;</code></strong> to be a  TAG!, but rather a TUPLE! where the first element was <strong><code>&lt;</code></strong> and the second was <strong><code>&gt;</code></strong>.</p>
+<p>We could do something like backquotes:</p>
 <pre><code>`&lt;`.`&gt;`
 </code></pre>
-<p>Otherwise, <code>&lt;.&gt;</code> would be a TAG!</p>
 <p>Having an escaping mode for words would open up more lexical space.  For instance,  I like the idea of allowing $FOO, $(FOO), $FOO/BAR, $[FOO BAR] etc. as another type...</p>
 <p>But this would seem to kill off the idea of being able to have <code>$</code> and <code>$$</code> etc. as WORD!s, because you get into ambiguous situations... is $/foo a PATH! with the $ word in the first slot, or an ENV-PATH! with an empty first slot?</p>
 <p>These ambiguities create problems for other things that might stand alone all right, because we don't want to have "second-class-citizen" WORD!s that can't appear in paths.</p>
@@ -1049,469 +1766,16 @@ I am colon!
 <p>It could work for other standalone characters, like <strong><code>@</code></strong> and perhaps <strong><code>&amp;</code></strong>.  <strong>%</strong> could be the same (with %"" or %{} used for empty file)</p>
 <p>I feel like # and / may not be good candidates for this treatment, it would need more thought.</p>
 <p><strong>The point wouldn't be that you'd likely be going crazy with paths involving these characters, but rather that you might want to do interesting things with them standalone.</strong>  It's just to put them on the map as legitimate words.</p>
-            <p><small>2 posts - 2 participants</small></p>
-            <p><a href="https://forum.rebol.info/t/weird-word-s-allow-but-backtick-escape-them/1560">Read full topic</a></p>
+            <p><small>5 posts - 2 participants</small></p>
+            <p><a href="https://forum.rebol.info/t/weird-word-s-allow-but-escape-them/1560">Read full topic</a></p>
           ]]></description>
-          <link>https://forum.rebol.info/t/weird-word-s-allow-but-backtick-escape-them/1560</link>
+          <link>https://forum.rebol.info/t/weird-word-s-allow-but-escape-them/1560</link>
           <pubDate>Mon, 15 Mar 2021 03:30:50 +0000</pubDate>
           <discourse:topicPinned>No</discourse:topicPinned>
           <discourse:topicClosed>No</discourse:topicClosed>
           <discourse:topicArchived>No</discourse:topicArchived>
           <guid isPermaLink="false">forum.rebol.info-topic-1560</guid>
-          <source url="https://forum.rebol.info/t/weird-word-s-allow-but-backtick-escape-them/1560.rss">Weird WORD!s - Allow, But Backtick Escape Them?</source>
-        </item>
-        <item>
-          <title>Don&#39;t Fear The WORD!</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Philosophy</category>
-          <description><![CDATA[
-            <p>Something Rebol touts as a big advantage is that it hasn't pinned a meaning to any words, so you can use them to mean what you want.</p>
-<p>But I frequently have stressed over this, because words have associated costs that are non-trivial.</p>
-<h2>Example: The Section Divider: <strong><code>===</code></strong>
-</h2>
-<p>I thought it would be neat if we could use this to have a Markdown-Like split of headers which just used plain words:</p>
-<pre><code>all [
-    === STEP WITH JUST WORDS ===
-
-    step1 arg1
-
-    === {STEP WITH STRING, NOT AS PLEASING} ===
-
-    step2 arg2
-]
-then [
-    print "=== is invisible, so it doesn't interfere with things like ALL!"
-]
-</code></pre>
-<p>The idea is that it could be hooked in ways a comment couldn't...to print out messages to know you've reached the step (for instance).</p>
-<p>Because I thought it was more pleasing, I designed it to permit words.  === was as a variadic function which would keep looking across its input until it found a === to terminate.</p>
-<p><em>(Note: Wanting to reclaim <strong>==</strong> for using as an even briefer way of saying "section" is one of several motivators for cleaning up the use of it for equality)</em></p>
-<p>But there are issues that come up from trying to write strings without string delimiters in Redbol.</p>
-<p><strong>You have to write LOAD-able syntax.</strong>  Having COMMA! makes it a bit more tolerable, but you can still get in trouble with unusual uses of other characters.</p>
-<pre><code>=== Here's a 3rd example; broken! ===
-</code></pre>
-<p>That's going to not be able to handle <code>3rd</code> in the current system (though <a href="https://forum.rebol.info/t/pack-sequence-type/1503">the PACK! proposal</a> could help here).  Then the semicolon will wind out commenting stuff out.</p>
-<p><strong>Meaning of GROUP! is contentious.</strong>  I use a lot of parentheses when I write text, and not mean running code.  But we presumably want a way to get expressions in there:</p>
-<p>That might not be a problem if we limit that to GET-GROUP!.</p>
-<pre><code>=== DEMO OF VARIATIONS (GROUP EXAMPLE) ===
-
-count-up n 100 [
-    === Running Step :(n) ===
-    print "This might be a way of doing it?"
-]
-</code></pre>
-<p>Another alternative could be to use blocks for any evaluated portions, since square brackets don't often come up in English writing.</p>
-<p><strong>Plenty of Other Questions</strong>... I don't want to tackle them all here, because I'd like to move to the big issue.</p>
-<h2>Biggest Issue: Creating Tons Of Stray Bindings</h2>
-<p>On the happy side, with LET we are moving into an idea of dynamism in binding so that using a SET-WORD! doesn't get you a local.  That keeps this from throwing in a local definition of PARSE:</p>
-<pre><code>foo: function [data] [
-    === BEGIN PARSE: It would suck if this overwrote PARSE! ===
-    parse data [...]  ; if PARSE: was gathered as local, parse would be unset
-]
-</code></pre>
-<p>Things like this are why I was so adamant against locals gathering.  It's good that it's gone from standard use, and relegated to being a weird feature for code golfing.  LET may be slow right now, but better to be slow than absolutely wrong.  Slow features can be sped up.  Wrong features can only be deleted.</p>
-<p>The storage and loading of words themselves is actually pretty efficient.  The system is geared around it.  I'm not terribly concerned about the storage overhead difference between strings and a bunch of words.</p>
-<p><strong>What's more troubling is all the bindings made in the user context.</strong>  These words don't know their binding isn't going to be used.  So the user context gets expanded and expanded.</p>
-<p>I won't rewrite the explanation of this here.  But see <strong><a href="https://forum.rebol.info/t/the-real-story-about-user-and-lib-contexts/764">The Real Story About User and Lib Contexts</a></strong></p>
-<h2>I Think Supporting Words This Way Is Mission Critical</h2>
-<p>There are a lot of kneejerk responses which would dislike <strong>===</strong> in the form that I suggest.</p>
-<p>Some people wouldn't like that it's variadic.  They might believe the principle of Rebol is based on blocks...so variadic functions shouldn't even be in the language to begin with.  I think they're wrong, and we now depend on variadicness quite a lot.</p>
-<p>Others might worry about the overhead caused by bloating up the symbol space...or the length of the code block.  Or the CPU cycles consumed by having to run a variadic loop across the content of the line...one value at a time.</p>
-<p><strong>But I think my leaning is that being able to choose to work this way is the distinguishing factor of the language.</strong></p>
-<p>You can still use <strong><code>=== {Text} ===</code></strong> if you really want to.  Or you can avoid using === altogether and just use a comment like <strong><code>;===</code></strong> or <strong><code>;;</code></strong> and it won't have any runtime aspects at all...though then you won't get a log when it reaches that line if you want it.</p>
-<p>Using bash is making me realize that even as light as Rebol can be a lot of the time, it's still too heavy sometimes.  Having to put things in quotes adds up 2 characters at a time, over time.  We should keep an eye on bending the mechanics to make it possible to use LOAD-ed "Rebol sentences" literally, and find places where that makes sense.</p>
-<h2>This Means Binding Has To Be Rethought... More...</h2>
-<p>We're just pinning down more of the requirements.  So as those requirements get locked, then hopefully that will make a design "emerge".</p>
-            <p><small>5 posts - 2 participants</small></p>
-            <p><a href="https://forum.rebol.info/t/dont-fear-the-word/1549">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/dont-fear-the-word/1549</link>
-          <pubDate>Wed, 10 Mar 2021 03:17:22 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-1549</guid>
-          <source url="https://forum.rebol.info/t/dont-fear-the-word/1549.rss">Don&#39;t Fear The WORD!</source>
-        </item>
-        <item>
-          <title>`call` asynchronously?</title>
-          <dc:creator><![CDATA[okram]]></dc:creator>
-          <category>Usage</category>
-          <description><![CDATA[
-            <p>On Atronix R3 when I run <code>call "zathura"</code> the program runs asynchronously. When I do the same in Ren-C it waits for the program to terminate. The available refinements do not seem to help.</p>
-            <p><small>6 posts - 2 participants</small></p>
-            <p><a href="https://forum.rebol.info/t/call-asynchronously/1509">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/call-asynchronously/1509</link>
-          <pubDate>Mon, 15 Feb 2021 17:19:03 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-1509</guid>
-          <source url="https://forum.rebol.info/t/call-asynchronously/1509.rss">`call` asynchronously?</source>
-        </item>
-        <item>
-          <title>Weird Idiom: Labeling Values?</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Show &amp; Tell</category>
-          <description><![CDATA[
-            <p>I'm going through and changing a lot of FUNCTION uses to FUNC + LET.  The long term goal will be to eliminate the locals-gathering functionality...and you either use LET/USE or you go explicit with <code>&lt;local&gt;</code> in the function spec.</p>
-<p>I came across this:</p>
-<pre><code>    size-as-binary: enbin [be + 8] length of embedding
-    append executable size-as-binary
-</code></pre>
-<p>This was the only use of the variable.  Changing it to a LET works, but it's kind of a waste:</p>
-<pre><code>    let size-as-binary: enbin [be + 8] length of embedding
-    append executable size-as-binary
-</code></pre>
-<p>LET's assignment form does run the right hand side...because the LET word itself vaporizes, so it's like the bound new SET-WORD! just runs as normal:</p>
-<pre><code>    append executable let size-as-binary: enbin [be + 8] length of embedding
-</code></pre>
-<p>But a LET isn't really necessary here.  I had a weird thought, what if a TAG! or ISSUE! or something was used in a way that was "obviously" throwing it away?</p>
-<pre><code>    append executable (&lt;size-as-binary&gt; enbin [be + 8] length of embedding)
-</code></pre>
-<p>Maybe a little confusing.  But it saves on a variable declaration.</p>
-<p>A comment is zero overhead, so I'm doing that...</p>
-<pre><code>    append executable enbin [be + 8] length of embedding  ; size of binary
-</code></pre>
-<p>But I just thought the idea of a deliberately discarded leading value was kind of interesting.</p>
-            <p><small>3 posts - 2 participants</small></p>
-            <p><a href="https://forum.rebol.info/t/weird-idiom-labeling-values/1500">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/weird-idiom-labeling-values/1500</link>
-          <pubDate>Wed, 10 Feb 2021 19:21:13 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-1500</guid>
-          <source url="https://forum.rebol.info/t/weird-idiom-labeling-values/1500.rss">Weird Idiom: Labeling Values?</source>
-        </item>
-        <item>
-          <title>Pivotal Design Question: Is Evaluator State Just A Block?</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Philosophy</category>
-          <description><![CDATA[
-            <p>I ran into a hitch with LET and EVALUATE in single-stepping.</p>
-<p>It raises a pretty big question about how much we want to tie the hands of the evaluator in favor of "simplicity".</p>
-<h2>The Problem</h2>
-<p>On the surface a LET statement might seem impossible for step by step evaluation:</p>
-<pre><code>&gt;&gt; block: evaluate [let x: 10 print ["X is" x]]
-== [print ["X is" x]]
-</code></pre>
-<p>That LET statement declared a variable, but where did it go?  It only lives until the block is over.  It would seem that the PRINT is out of luck.</p>
-<p><em>But...</em> I could make it work since a BLOCK! can carry along virtual binding state.  So, at each step you just get a little more state added on.  The <strong>[print ["X is x]]</strong> is <em>different</em> from the block you'd have gotten from saying SKIP 3 on the full block, due to this binding.</p>
-<p><strong>But what if you reposition the block?</strong></p>
-<pre><code>&gt;&gt; block: head block
-== [let x: 10 print ["X is" x]]
-</code></pre>
-<p>Now you have a block that has X defined in its bindings, and if you step through it you'll define it again.</p>
-<h2>Can This Be Solved?</h2>
-<p>I think the cleanest and clearest way to solve it is to rethink EVALUATE so that it operates on a FRAME!...not a BLOCK!.  This would match the internal model better.</p>
-<p>Today, we have to tear down a frame and build up a new one each time you do a step.  This would say that you'd be keeping it alive.</p>
-<p>You'd be limited in terms of being able to look back over past values you had already evaluated.  That limitation would keep you from rewinding... if you wanted to go back and do things over, you'd have to do that by working with your original block that started the whole process.</p>
-<p>What you'd be able to do in terms of looking ahead would be more like what a variadic is able to do today.</p>
-<h2>The Big Philosophical Question</h2>
-<p>I guess the big philosophical question is not necessarily so much about LET itself, but <strong>should we rule out the existence of things like LET in general</strong>.</p>
-<p>In other words: is it imperative to step the evaluator across a block and <em>not</em> accrue any state particular to that evaluation?</p>
-<p>I've been kind of looking for a convergence between things like the evaluator and PARSE, and so asking what the restrictions on the evaluator are may be asking what the restrictions are on anything that tries to leverage the FRAME!-based processing of blocks...for tracking positions, giving errors, etc.  If we require them all to be amnesiacs after every step, this would make it hard to write things like the COLLECT/KEEP feature in parse with the rollback feature...because it would have to record its state in some external thing.</p>
-<p><a class="mention" href="/u/rgchris">@rgchris</a> --^ please see that and think about it.  If EVALUATE returned a FRAME! representing the block and not a new position of a block, what kind of disruption would it be?  Do you see the accrual of state in the evaluator to be something that should be ruled out--thus killing off LET or anything like LET--to be worth it to have the feature of a memoryless evaluator?</p>
-<hr>
-<p><strong>My leaning on this is to say that we would be crippling the language by ruling out LET-like things in the design.</strong></p>
-<p>Right now, I have this test code working.  Note it's three evaluation steps, because the LET is actually invisible (1 unit lookahead to see x and add the binding, then leaves <code>x: 10</code> to run normally)</p>
-<pre><code>x: &lt;in-user-context&gt;
-output: '~unset~
-block: evaluate evaluate evaluate [let x: 10 output: x]
-did all [
-    block = []
-    output = 10
-    x = &lt;in-user-context&gt;
-]
-</code></pre>
-<p>And when you look at some of the other designs of how this is plugging together, I don't think we should turn back.  It's simply too hard to build abstractions on top of FUNC if the bodies cannot dynamically declare new variables, and I think forcing everyone in those situations to deal with USE is ergonomically just too awkward to feel like the language is living up to its promises.</p>
-<p>I don't want to give up on virtual binding and LET when it has come this far.  It may be broken, but its brokenness is already a better kind of broken than what was there before...and there's no proof yet that it can't be made better.</p>
-<p>Rebol's M.O. has been throwing imaginative <em>but I want the code to look like THIS</em> at a data structure and see how far that can go...without proof that it can or should work well.  Every now and again I think I should have the right to throw my own bad idea that looks good in there.  And maybe some poor sucker in the future can figure out the limits of how it can be made to seem like it works more.   <img src="https://forum.rebol.info/images/emoji/twitter/slight_smile.png?v=9" title=":slight_smile:" class="emoji" alt=":slight_smile:"></p>
-            <p><small>4 posts - 2 participants</small></p>
-            <p><a href="https://forum.rebol.info/t/pivotal-design-question-is-evaluator-state-just-a-block/1496">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/pivotal-design-question-is-evaluator-state-just-a-block/1496</link>
-          <pubDate>Tue, 09 Feb 2021 21:25:35 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-1496</guid>
-          <source url="https://forum.rebol.info/t/pivotal-design-question-is-evaluator-state-just-a-block/1496.rss">Pivotal Design Question: Is Evaluator State Just A Block?</source>
-        </item>
-        <item>
-          <title>On Wasted Bits</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Philosophy</category>
-          <description><![CDATA[
-            <p>In one of my Philadelphia talks, I cited a quote from Paul Graham in <a>The 1,000 Year Language</a></p>
-<blockquote>
-<p><em>"I learned to program when computer power was scarce. I can remember taking all the spaces out of my Basic programs so they would fit into the memory of a 4K TRS-80. The thought of all this stupendously inefficient software burning up cycles doing the same thing over and over seems kind of gross to me. But I think my intuitions here are wrong. I'm like someone who grew up poor, and can't bear to spend money even for something important, like going to the doctor."</em></p>
-<p>...</p>
-<p><em>"The desire for speed is so deeply engrained in us, with our puny computers, that it will take a conscious effort to overcome it. In language design, we should be consciously seeking out situations where we can trade efficiency for even the smallest increase in convenience."</em></p>
-</blockquote>
-<p>I've been struggling some with this fight.  For instance, the scenario of:</p>
-<pre><code>count-up x 1000000 [
-    let y: x + 1
-    print [y]
-]
-</code></pre>
-<p>What I have explored is the question of making LET a dynamic construct.  This dynamism would mean it wouldn't be scanned for in advance (like "FUNCT" looked for SET-WORD!).  It would actually bring a new variable and binding into existence... basically just syntax sugar for if you had written:</p>
-<pre><code>count-up x 1000000 [
-    use [y] [
-        y: x + 1
-        print [y]
-    ]
-]
-</code></pre>
-<p>It's uncomfortable to induce the thought that you'd be making a new object each time through the loop...an object with one field (y).  That's a million objects being made, that the GC will have to grapple with.</p>
-<p>I'm working on making these as small as possible...and the GC will sweep them up.  But people who have seen LET or LET-like constructs from other languages would not generally assume that it would cause so much pain to the GC.  It feels so much more catastrophically worse than creating a single object:</p>
-<pre><code>let y
-count-up x 1000000 [
-    y: x + 1
-    print [y]
-]
-</code></pre>
-<p>And if you were using <strong><code>func [... &lt;local&gt; y]</code></strong> that's even more efficient.  It doesn't create a separate object identity at all, but piggy-backs on the frame (where the arguments are already stored).</p>
-<p>Of course, we're dealing with an incredibly dumb "mark and sweep the world" GC right now, that only starts cleaning up when it hits a wall.  If we were more clever, I'm sure there could be ways that the GC could localize most LETs and do zoning cleverness...doing light pick-ups of GC objects.</p>
-<h2>I May Be Worrying Too Much</h2>
-<p>The size of the variable is smaller than the size of the frame created by an addition, e.g. by the <strong>+</strong>.  If someone is at the level of optimizing for the LETs, they'd make a much bigger difference by eliminating the block:</p>
-<pre><code>count-up x 1000000 [
-    let y: x + 1
-    print x
-]
-</code></pre>
-<p><em>(Note: PRINT requires blocks on non-strings, non-newline characters <a href="https://forum.rebol.info/t/limiting-print-to-block-text-perhaps-blank-to-opt-out/855">for a pretty good reason</a>, but I'm just trying to make the point about the relative costs of things.)</em></p>
-<p>The creation of FRAME! (e.g. for a BLOCK!) has been optimized to reduce the GC load to just about the minimum that it can, but that minimum is the same minimum as what we're looking at for a LET.  So when the cost of a LET is more or less on the same level as the cost for a GROUP!, how much should we really be asking people to worry about it?</p>
-<p>When you think about the forces in play here--the ability to do rearrangements to optimize it if you need to, and Paul Graham's remarks about expressivity being the long tail--I think making LET dynamic is probably the winning bet.</p>
-<p>Luddites who don't like it can use <strong><code>&lt;local&gt;</code></strong> and be no worse off.</p>
-            <p><small>1 post - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/on-wasted-bits/1492">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/on-wasted-bits/1492</link>
-          <pubDate>Sat, 06 Feb 2021 06:54:49 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-1492</guid>
-          <source url="https://forum.rebol.info/t/on-wasted-bits/1492.rss">On Wasted Bits</source>
-        </item>
-        <item>
-          <title>&#39;Enum&#39; Handling</title>
-          <dc:creator><![CDATA[rgchris]]></dc:creator>
-          <category>Usage</category>
-          <description><![CDATA[
-            <p>I'm curious what the current best practice is for handling 'enum'-like scenarios.</p>
-<p>For my contrived example, I have an ORDER-FOOD function where you pick your dish, and that dish comes with onions.</p>
-<pre><code class="lang-nohighlight">order: func [
-    'dish [word!]
-    /sub 'veggie [word!]
-][
-    ...
-]
-</code></pre>
-<p>You can substitute onions for one other vegetable, but obviously I only have so many vegetables at a given time, so I'd like to be sure that you either get onions or another available vegetable.</p>
-<pre><code class="lang-nohighlight">order enchiladas
-order/sub burrito mushrooms
-</code></pre>
-<p>First thought is using <code>'default</code>:</p>
-<pre><code class="lang-nohighlight">veggie: default ['onions]
-</code></pre>
-<p>That's fine so long as I have what the given vegetable is. What if I only have <code>[onions zucchini artichoke carrot]</code>?</p>
-<p>There is the FIND approach:</p>
-<pre><code class="lang-nohighlight">if not find veggie-box veggie [
-    veggie: onions
-]
-</code></pre>
-<p>Then again, I'm always mindful of CSS's: <em>if it doesn't exist, ignore it</em>. This approach has allowed CSS to adapt as new methodologies exist. How <code>display</code> that has been around for as long as I can recall gains a <code>grid</code> value that permits all kinds of heretofore layout possibilities. Any browser out there that doesn't know what <code>grid</code> means will happily display content as if it was whatever the call to <code>grid</code> replaced. Similarly, all the properties associated with grid layout are just ignored by older browsers.</p>
-<p>Not quite sure how that maps to my function, but it'd be interesting to say:</p>
-<pre><code class="lang-nohighlight">any [
-    order/sub bibimbap bok-choy
-    order/sub bibimbap carrot
-    order burger
-]
-</code></pre>
-<p>In the event of its availability one day, that I may have that fresh crunchy cabbage.</p>
-            <p><small>3 posts - 2 participants</small></p>
-            <p><a href="https://forum.rebol.info/t/enum-handling/1489">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/enum-handling/1489</link>
-          <pubDate>Fri, 05 Feb 2021 23:35:07 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-1489</guid>
-          <source url="https://forum.rebol.info/t/enum-handling/1489.rss">&#39;Enum&#39; Handling</source>
-        </item>
-        <item>
-          <title>Resurrecting REDBOL-APPLY via Type Exposure</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Show &amp; Tell</category>
-          <description><![CDATA[
-            <p>At one point, I had a simulation of the Rebol2/R3-Alpha APPLY working...all written in usermode code.</p>
-<p>As a refresher: this concept of APPLY required you to line up things positionally--even refinements.  You had to look at the parameter order on the interface, and put "truthy" things in the refinement slots you wanted to enable.  Then if the refinement took argument(s), you would have to put that in the next slot.</p>
-<p>So for R3-Alpha's APPEND, the ordered spec is:</p>
-<pre><code>APPEND series value /part length /only /dup count
-</code></pre>
-<p>Let's say you wanted to do something equivalent to <strong>append/part/dup [a b c] [d e f] 2 3</strong>.  You would write:</p>
-<pre><code>r3-alpha&gt;&gt; apply :append [[a b c] [d e f] true 2 false true 3]
-== [a b c d e d e d e]
-</code></pre>
-<p>Here the first TRUE is to say we want to use the /PART...then the length of 2.  Then a FALSE to say we don't want /ONLY.  And then another TRUE to say we want /DUP, with the count as 3.</p>
-<p>It's fairly convoluted, and brittle with respect to rearrangement.  But it offers you the benefit of being able to calculate whether you want to provide a refinement or not.  The block is reduced by default (with an /ONLY option to ask that it not be).</p>
-<p>In the early days of frames, I thought it would be a good test to see if this exact function could be emulated by processing the block... building a FRAME!, and then DO'ing it.  So REDBOL-APPLY was written and added to the tests.</p>
-<h2>Then Ren-C Became <a href="https://forum.rebol.info/t/pure-and-refined-simplifying-refinements-to-one-or-zero-args/1120">Pure and Refined</a>...</h2>
-<p>With the great improvement of refinements becoming their own arguments, came a new puzzle from an interface perspective.  Where it had used to say things like:</p>
-<pre><code>ren-c-before&gt;&gt; parameters of :append
-== [series value /part length /only /dup count]
-</code></pre>
-<p>It would now say:</p>
-<pre><code>ren-c-after&gt;&gt; parameters of :append
-== [series value /part /only /dup]
-</code></pre>
-<p>You might notice a piece of information gets lost there: <strong>which refinements take arguments at the callsite, vs. which ones don't</strong>.  Here the /ONLY looks just like the /PART and /DUP.  If you're going to have a REDBOL-APPLY that splits out the refinement on/off from the argument, you have to know if there is an argument to fill in.</p>
-<p>I'll emphasize here that <strong>whether or not this particular APPLY primitive is desirable or not isn't the point.</strong>  It's a question of whether there's enough information.  And you have to have more than the parameter list above.</p>
-<p>So one place people might have looked to would be the TYPESETS OF reflector, and maybe check to see if the typeset was empty (?)  But the typeset code was never all that good.</p>
-<h2>Enter The New AS FRAME! Aliasing Ability</h2>
-<p>I only just pushed this a bit forward, so it's not stable yet.  But it was enough to get REDBOL-APPLY working.  Here's what the frame alias of APPEND looks like:</p>
-<pre><code>&gt;&gt; as frame! :append
-== #[frame! {append} [
-    return : [any-series! port! map! object! module! bitset!]:
-    series : [any-series! port! map! object! module! bitset!]
-    value : [&lt;opt&gt; any-value!]
-    part : /[any-number! any-series! pair!]
-    only : /[]
-    dup : /[any-number! pair!]
-    line : /[]
-]]
-</code></pre>
-<p>The keys can't hold the information about whether something is a refinement or quoted or not.  So those attributes are moved onto the BLOCK!.  Here we see that PART, ONLY, DUP, and LINE are refinements...while ONLY and LINE have no specified types.</p>
-<h2>And Here's The First Try That Gets The Tests Passing Again</h2>
-<p>It's big and pokey.  And it trips over the weird parameter compaction a little bit... there's still a lot of questions about how you would take something that could either be <strong>':foo</strong> or <strong>/foo</strong> and extract plain <strong>foo</strong> out of it.  (It's not as obvious as you might think that "to word! should just do that".)</p>
-<p>There's plenty of room for improvement.  But clumsy though it is, it shows some of the non-trivial meta-language behavior that I think can be put in the hands of mere mortals...in that Minecraft-of-programming way.  This really is letting people get intimately involved in the design of their own function generators and control structures...</p>
-<pre><code>redbol-apply: func [
-    return: [&lt;opt&gt; any-value!]
-    action [action!]
-    block [block!]
-    /only
-    &lt;local&gt; types arg key frame params mode
-][
-    types: as frame! :action  ; exemplar of types
-    frame: make frame! :action  ; frame we are building
-    params: parameters of :action  ; ordered list of parameters
-    mode: &lt;normal&gt;
-
-    ; Rebol2 and R3-Alpha APPLY would fill in NONE for any parameters that
-    ; were not provided in the apply block:
-    ;
-    ;     rebol2/r3-alpha&gt;&gt; apply func [a b c] [reduce [a b c]] []
-    ;     == [none none none]
-    ;
-    ; This means we need to enumerate and fill in the frame as long as there
-    ; are parameters--not as long as there are block values.
-    ;
-    while [not tail? params] [
-        case [
-            not block [
-                arg: null  ; could also do BLANK! if no more block data
-            ]
-            only [  ; /ONLY means do not evaluate arguments
-                arg: get/any 'block/1
-                block: next block
-            ]
-            true [  ; evaluate (skipping comments and other invisibles)
-                until .not.quoted? [[block arg]: evaluate block]
-            ]
-        ]
-
-        key: to word! dequote params/1
-        all [
-            refinement? params/1
-            elide if not block [break]  ; done if refinements w/no more block
-            mode = &lt;normal&gt;
-        ] then [
-            mode: if arg [#]  ; set mode to either use or don't use next arg
-            if empty? second pick types key [  ; no-arg refine...
-                set (in frame key) mode  ; ...must be # or NULL
-            ] else [
-                continue  ; keep param on the refinement, get next arg
-            ]
-        ] else [
-            if mode [  ; normal or # case will set
-                set (in frame key) get/any 'arg
-            ]
-        ]
-
-        mode: &lt;normal&gt;
-        params: next params
-    ]
-
-    ; Too many arguments was not a problem for R3-alpha's APPLY, it would
-    ; evaluate them all even if not used by the function.  It may or may not
-    ; be better to have it be an error.
-    ;
-    ; https://github.com/metaeducation/rebol-issues/issues/2237
-    ;
-    comment [
-        all [block, not tail? block] then [
-            fail "Too many arguments passed in REDBOL-APPLY block."
-        ]
-    ]
-
-    do frame
-]</code></pre>
-            <p><small>1 post - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/resurrecting-redbol-apply-via-type-exposure/1474">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/resurrecting-redbol-apply-via-type-exposure/1474</link>
-          <pubDate>Mon, 25 Jan 2021 11:50:41 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-1474</guid>
-          <source url="https://forum.rebol.info/t/resurrecting-redbol-apply-via-type-exposure/1474.rss">Resurrecting REDBOL-APPLY via Type Exposure</source>
-        </item>
-        <item>
-          <title>Case Study of Case Behavior: The AN Function</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Feature Discover</category>
-          <description><![CDATA[
-            <p>In thinking about weird applications of case, I was reminded of the little trick of the AN function:</p>
-<pre><code>&gt;&gt; an "integer"
-== "an integer"
-
-&gt;&gt; an "text"
-== "a text"
-</code></pre>
-<p>It simply checks the letters of the start of the rendering of what comes after it, and resolves to either "a" or "an".  I came up with it during the automatic generation of help strings for typecheckers, something along the lines of:</p>
-<pre><code>for-each type data-types [
-    help-string: spaced ["Checks to see if value is" an mold type]
-    ...
-]
-</code></pre>
-<p>But what if the A or An is at the start of a sentence?  Wouldn't the case of the operator matter?</p>
-<pre><code>&gt;&gt; An "integer"
-== "An integer"
-</code></pre>
-<p>Or how about all-caps?</p>
-<pre><code>&gt;&gt; AN "INTEGER"
-== "AN INTEGER"
-</code></pre>
-<p>In a case-insensitive world, all of these calls are to the same function.  So what it had to do was consult the stack to see what the label was it was invoked with, and go by the case of that.</p>
-<p>But in a case-sensitive world, these would be three different functions (most likely, specializations of a core <code>AN*</code> that took what casing you wanted).</p>
-<p>I'm not sure where this fits in the <a class="mention" href="/u/mark-hi">@Mark-hi</a> taxonomy of rightness or wrongness.  But it does point to an axis of flexibility where someone can use stack reflection to force case-sensitive behavior in a case-insensitive system.</p>
-            <p><small>4 posts - 3 participants</small></p>
-            <p><a href="https://forum.rebol.info/t/case-study-of-case-behavior-the-an-function/1469">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/case-study-of-case-behavior-the-an-function/1469</link>
-          <pubDate>Mon, 18 Jan 2021 21:37:34 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-1469</guid>
-          <source url="https://forum.rebol.info/t/case-study-of-case-behavior-the-an-function/1469.rss">Case Study of Case Behavior: The AN Function</source>
+          <source url="https://forum.rebol.info/t/weird-word-s-allow-but-escape-them/1560.rss">Weird WORD!s - Allow, But Escape Them?</source>
         </item>
   </channel>
 </rss>

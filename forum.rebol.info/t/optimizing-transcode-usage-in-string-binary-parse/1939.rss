@@ -1,0 +1,314 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Optimizing TRANSCODE Usage in String/Binary PARSE</title>
+    <link>https://forum.rebol.info/t/optimizing-transcode-usage-in-string-binary-parse/1939</link>
+    <description>As written, the DATATYPE! combinator in UPARSE may do wasteful value loading when operating on string input.
+
+Consider this case.
+
+    &gt;&gt; parse &quot;[some big block ...] 10&quot; [collect some [keep integer! | block!]]
+    == [10]
+
+*Pretty impressive that it works.*  (Red will only do this on BINARY! input, but Ren-C&#39;s UTF-8 everywhere allows it to do it on strings too!)
+
+But at the combinator level, it&#39;s wasteful.  What happens is:
+
+   * Hitting the INTEGER! combinator, causing it to scan the next element, loading **`[some big block ...]`** as a series into memory.
+
+       * It then checks the type, notices it&#39;s not an integer, and the INTEGER! combinator gives back a rejection...so the BLOCK! combinator goes to the next alternate.
+
+   * It hits the BLOCK! combinator and scans the block again.
+
+      * This time it matches, so the parser returns success and the synthesized block
+
+      *  *But the block isn&#39;t actually desired*, so it is thrown away
+
+  * The next iteration scans the INTEGER! and keeps it.
+
+## Why Does It Work This Way?
+
+It&#39;s based on TRANSCODE, and does basically exactly what I said:
+
+    [item remainder]: transcode input except e -&gt; [return raise e]
+
+    if datatype != type of item [
+        return raise [&quot;Could not TRANSCODE&quot; datatype &quot;from input&quot;]
+    ]
+    return item
+
+If we could pass in a datatype to TRANSCODE when using the /NEXT option (e.g. requesting a remainder, as we are above) then it could short-circuit and we wouldn&#39;t need that test.
+
+## Red Has Looked At This Kind of Problem
+
+There are a bunch of new arguments to Red&#39;s TRANSCODE function:
+
+    USAGE:
+         TRANSCODE src
+
+    DESCRIPTION: 
+         Translates UTF-8 binary source to values.
+         Returns one or several values in a block. 
+
+    ARGUMENTS:
+         src          [binary! string!]
+         {UTF-8 input buffer; string argument will be UTF-8 encoded.}
+
+    REFINEMENTS:
+         /next        =&gt; Translate next complete value (blocks as single value).
+         /one         =&gt; Translate next complete value, returns the value only.
+         /prescan     =&gt; Prescans only, do not load values. Returns guessed type.
+         /scan        =&gt; Scans only, do not load values. Returns recognized type.
+         /part        =&gt; Translates only part of the input buffer.
+             length       [integer! binary!] &quot;Length in bytes or tail position.&quot;
+         /into        =&gt; Optionally provides an output block.
+            dst          [block!] 
+         /trace       =&gt; 
+            callback     [function! [
+                            event [word!]
+                            input [binary! string!]
+                            type [word! datatype!]
+                            line [integer!]
+                            token
+                            return: [logic!]
+                          ]] 
+
+    RETURNS:
+        [block!]
+
+I&#39;m not sure exactly how useful the /PRESCAN option is (what good is a &quot;guess&quot; of the type?)  But the /SCAN option would offer some bit of efficiency.
+
+It would mean instead of one call to TRANSCODE followed by a datatype test, there&#39;d be two calls
+
+* The first as TRANSCODE/SCAN to get the datatype (but not synthesize a value from it)
+
+* A second call to scan again and get the value
+
+We assume the idle mode of scanning without producing anything can be fast.
+
+I would suggest the scan feature be **transcode/types** so it worked more generally, not just with /NEXT.
+
+    &gt;&gt; transcode/types [1 a [b]]
+    == [#[datatype! integer!] #[datatype! word!] #[datatype! block!]]
+
+&lt;sub&gt;*(When I figure out the story of datatypes, there are going to be a lot of forum posts fixing up the above ugly notation.)*&lt;/sub&gt;
+
+## But What About The Synthesis Of Unused Values?
+
+This is a bit of a pickle.  *We don&#39;t know if you&#39;re going to use the product or not.*
+
+UPARSE&#39;s design has values bubbling out the top, and no line of communication to be aware of whether what it produces will be used:
+
+    &gt;&gt; uparse &quot;[a] (b)&quot; [block! group!] 
+    == (b)
+
+You might think that when the block! rule is going to be run, UPARSE could notice it wasn&#39;t at the end and send some kind of signal to the BLOCK! combinator that it doesn&#39;t have to synthesize an output.  But there&#39;s no a-priori psychic power saying that GROUP! hasn&#39;t been configured to evaluate to void.  Until the combinator gets looked up and run, it&#39;s potentially the same situation as this:
+
+    &gt;&gt; uparse &quot;[a] (b)&quot; [block! void] 
+    == [a]
+
+## It Seems We Have Two Choices
+
+ 1. We can assume that a plain DATATYPE! intends to synthesize a value, and use a different combinator to say you only want to match the type:
+
+        &gt;&gt; uparse &quot;[a b c]&quot; [scan block!]
+        == #[datatype! block!]  ; cheap (but useful) return value, no series synthesis
+
+        &gt;&gt; uparse &quot;[a b c]&quot; [block!]
+        == [a b c]
+
+2.  We can reverse it and say that by default it does the cheap thing, and you have to explicitly ask to get the expensive thing:
+
+        &gt;&gt; uparse &quot;[a b c]&quot; [block!]
+        == #[datatype! block!]
+
+        &gt;&gt; uparse &quot;[a b c]&quot; [scan block!]
+        == [a b c]
+
+Looked at in isolation, it might seem like (2) would be the obvious winner.
+
+The thorn is that this would be a pretty notable divergence from how array parsing works, which I would basically call non-negotiable:
+
+    &gt;&gt; uparse [[a b c]] [x: block!]
+
+    &gt;&gt; x
+    == [a b c]
+
+So is there actually an option 3?
+
+  3. Make lone datatype! an error, and have two distinct operations for transcoding:
+
+         &gt;&gt; uparse &quot;[a b c]&quot; [block!]
+         ** Error: On string input, use either TRANSCODE BLOCK! or SCAN BLOCK!
+
+         &gt;&gt; uparse &quot;[a b c]&quot; [transcode block!]
+         == [a b c]
+
+         &gt;&gt; uparse &quot;[a b c]&quot; [scan block!]
+         == [a b c]
+
+Urg.  That kind of sucks.
+
+**I think the answer is to accept option (1) being suboptimal performance, allowing those who are performance-minded to tune it.**  There&#39;s no overt harm by scanning things you throw away, it&#39;s just wasteful.</description>
+    
+    <lastBuildDate>Mon, 22 Aug 2022 09:19:47 +0000</lastBuildDate>
+    <category>Optimization</category>
+    <atom:link href="https://forum.rebol.info/t/optimizing-transcode-usage-in-string-binary-parse/1939.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Optimizing TRANSCODE Usage in String/Binary PARSE</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>As written, the DATATYPE! combinator in UPARSE may do wasteful value loading when operating on string input.</p>
+<p>Consider this case.</p>
+<pre><code>&gt;&gt; parse "[some big block ...] 10" [collect some [keep integer! | block!]]
+== [10]
+</code></pre>
+<p><em>Pretty impressive that it works.</em>  (Red will only do this on BINARY! input, but Ren-C's UTF-8 everywhere allows it to do it on strings too!)</p>
+<p>But at the combinator level, it's wasteful.  What happens is:</p>
+<ul>
+<li>
+<p>Hitting the INTEGER! combinator, causing it to scan the next element, loading <strong><code>[some big block ...]</code></strong> as a series into memory.</p>
+<ul>
+<li>It then checks the type, notices it's not an integer, and the INTEGER! combinator gives back a rejection...so the BLOCK! combinator goes to the next alternate.</li>
+</ul>
+</li>
+<li>
+<p>It hits the BLOCK! combinator and scans the block again.</p>
+<ul>
+<li>
+<p>This time it matches, so the parser returns success and the synthesized block</p>
+</li>
+<li>
+<p><em>But the block isn't actually desired</em>, so it is thrown away</p>
+</li>
+</ul>
+</li>
+<li>
+<p>The next iteration scans the INTEGER! and keeps it.</p>
+</li>
+</ul>
+<h2>Why Does It Work This Way?</h2>
+<p>It's based on TRANSCODE, and does basically exactly what I said:</p>
+<pre><code>[item remainder]: transcode input except e -&gt; [return raise e]
+
+if datatype != type of item [
+    return raise ["Could not TRANSCODE" datatype "from input"]
+]
+return item
+</code></pre>
+<p>If we could pass in a datatype to TRANSCODE when using the /NEXT option (e.g. requesting a remainder, as we are above) then it could short-circuit and we wouldn't need that test.</p>
+<h2>Red Has Looked At This Kind of Problem</h2>
+<p>There are a bunch of new arguments to Red's TRANSCODE function:</p>
+<pre><code>USAGE:
+     TRANSCODE src
+
+DESCRIPTION: 
+     Translates UTF-8 binary source to values.
+     Returns one or several values in a block. 
+
+ARGUMENTS:
+     src          [binary! string!]
+     {UTF-8 input buffer; string argument will be UTF-8 encoded.}
+
+REFINEMENTS:
+     /next        =&gt; Translate next complete value (blocks as single value).
+     /one         =&gt; Translate next complete value, returns the value only.
+     /prescan     =&gt; Prescans only, do not load values. Returns guessed type.
+     /scan        =&gt; Scans only, do not load values. Returns recognized type.
+     /part        =&gt; Translates only part of the input buffer.
+         length       [integer! binary!] "Length in bytes or tail position."
+     /into        =&gt; Optionally provides an output block.
+        dst          [block!] 
+     /trace       =&gt; 
+        callback     [function! [
+                        event [word!]
+                        input [binary! string!]
+                        type [word! datatype!]
+                        line [integer!]
+                        token
+                        return: [logic!]
+                      ]] 
+
+RETURNS:
+    [block!]
+</code></pre>
+<p>I'm not sure exactly how useful the /PRESCAN option is (what good is a "guess" of the type?)  But the /SCAN option would offer some bit of efficiency.</p>
+<p>It would mean instead of one call to TRANSCODE followed by a datatype test, there'd be two calls</p>
+<ul>
+<li>
+<p>The first as TRANSCODE/SCAN to get the datatype (but not synthesize a value from it)</p>
+</li>
+<li>
+<p>A second call to scan again and get the value</p>
+</li>
+</ul>
+<p>We assume the idle mode of scanning without producing anything can be fast.</p>
+<p>I would suggest the scan feature be <strong>transcode/types</strong> so it worked more generally, not just with /NEXT.</p>
+<pre><code>&gt;&gt; transcode/types [1 a [b]]
+== [#[datatype! integer!] #[datatype! word!] #[datatype! block!]]
+</code></pre>
+<p><sub><em>(When I figure out the story of datatypes, there are going to be a lot of forum posts fixing up the above ugly notation.)</em></sub></p>
+<h2>But What About The Synthesis Of Unused Values?</h2>
+<p>This is a bit of a pickle.  <em>We don't know if you're going to use the product or not.</em></p>
+<p>UPARSE's design has values bubbling out the top, and no line of communication to be aware of whether what it produces will be used:</p>
+<pre><code>&gt;&gt; uparse "[a] (b)" [block! group!] 
+== (b)
+</code></pre>
+<p>You might think that when the block! rule is going to be run, UPARSE could notice it wasn't at the end and send some kind of signal to the BLOCK! combinator that it doesn't have to synthesize an output.  But there's no a-priori psychic power saying that GROUP! hasn't been configured to evaluate to void.  Until the combinator gets looked up and run, it's potentially the same situation as this:</p>
+<pre><code>&gt;&gt; uparse "[a] (b)" [block! void] 
+== [a]
+</code></pre>
+<h2>It Seems We Have Two Choices</h2>
+<ol>
+<li>
+<p>We can assume that a plain DATATYPE! intends to synthesize a value, and use a different combinator to say you only want to match the type:</p>
+<pre><code>&gt;&gt; uparse "[a b c]" [scan block!]
+== #[datatype! block!]  ; cheap (but useful) return value, no series synthesis
+
+&gt;&gt; uparse "[a b c]" [block!]
+== [a b c]
+</code></pre>
+</li>
+<li>
+<p>We can reverse it and say that by default it does the cheap thing, and you have to explicitly ask to get the expensive thing:</p>
+<pre><code>&gt;&gt; uparse "[a b c]" [block!]
+== #[datatype! block!]
+
+&gt;&gt; uparse "[a b c]" [scan block!]
+== [a b c]
+</code></pre>
+</li>
+</ol>
+<p>Looked at in isolation, it might seem like (2) would be the obvious winner.</p>
+<p>The thorn is that this would be a pretty notable divergence from how array parsing works, which I would basically call non-negotiable:</p>
+<pre><code>&gt;&gt; uparse [[a b c]] [x: block!]
+
+&gt;&gt; x
+== [a b c]
+</code></pre>
+<p>So is there actually an option 3?</p>
+<ol start="3">
+<li>
+<p>Make lone datatype! an error, and have two distinct operations for transcoding:</p>
+<pre><code>&gt;&gt; uparse "[a b c]" [block!]
+** Error: On string input, use either TRANSCODE BLOCK! or SCAN BLOCK!
+
+&gt;&gt; uparse "[a b c]" [transcode block!]
+== [a b c]
+
+&gt;&gt; uparse "[a b c]" [scan block!]
+== [a b c]
+</code></pre>
+</li>
+</ol>
+<p>Urg.  That kind of sucks.</p>
+<p><strong>I think the answer is to accept option (1) being suboptimal performance, allowing those who are performance-minded to tune it.</strong>  There's no overt harm by scanning things you throw away, it's just wasteful.</p>
+          <p><a href="https://forum.rebol.info/t/optimizing-transcode-usage-in-string-binary-parse/1939/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/optimizing-transcode-usage-in-string-binary-parse/1939/1</link>
+        <pubDate>Sun, 21 Aug 2022 19:10:10 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1939-1</guid>
+        <source url="https://forum.rebol.info/t/optimizing-transcode-usage-in-string-binary-parse/1939.rss">Optimizing TRANSCODE Usage in String/Binary PARSE</source>
+      </item>
+  </channel>
+</rss>

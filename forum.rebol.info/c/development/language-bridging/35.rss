@@ -5,8 +5,47 @@
     <link>https://forum.rebol.info/c/development/language-bridging/35</link>
     <description>Topics in the &#39;Language Bridging&#39; category Interfacing Rebol with other languages discussed here.</description>
     
-      <lastBuildDate>Sun, 23 May 2021 09:51:12 +0000</lastBuildDate>
+      <lastBuildDate>Sat, 16 Jul 2022 14:01:23 +0000</lastBuildDate>
       <atom:link href="https://forum.rebol.info/c/development/language-bridging/35.rss" rel="self" type="application/rss+xml" />
+        <item>
+          <title>rebSpell() or rebBytes() of NULL in the API</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Language Bridging</category>
+          <description><![CDATA[
+            <p>For safety reasons, extraction APIs like rebSpell() and rebBytes() would raise errors if the evaluative product was NULL:</p>
+<pre><code>char* my_c_string = rebSpell("third [a b]");  // !!! fail/panic/crash
+</code></pre>
+<p>To get around this, the old way of thinking was you would use TRY and it would produce a BLANK!.  The blank would be interpreted as an intentional nothing, and suppress an error:</p>
+<pre><code>char* my_c_string = rebSpell("try third [a b]");  // was like rebSpell("_")
+assert(my_c_string == nullptr);  // this is what you'd get
+</code></pre>
+<p>But now we're in the era of <strong>NULL-in-TRY-out</strong>.  Nothing gets converted to blank anymore...a TRY just gives back NULL.  So it won't work this way.</p>
+<h2>What Was Safer About The Old Way?</h2>
+<p>You might ask what the difference is.  Like if you're writing JavaScript and get a null back you don't expect, the JavaScript will raise an error when you try to use it where you shouldn't.  Why's it better to make reb.Spell() itself raise the error?</p>
+<p>Okay, yes, in JavaScript there's not really all that strong an argument.  But in C if you use a null incorrectly, you get a crash.  Intercepting it in rebSpell() gives a chance to throw (via longjmp, or now maybe C++ throw) to the error handler of the console...and have it be a non-fatal error.</p>
+<p><em>(...though in WebAssembly, it's different... (!)  I noticed something started to happen once we switched to the new C++ throw builds for the web console, and it's actually recovering from access violations in the native code and the console stays running!  Probably not great to rely on this, but I do find it interesting.)</em></p>
+<h2>I Was Always On The Fence on This...</h2>
+<p>If you look at the design ethos of C, it really does kind of try to make it easy to sweep nulls under the rug.</p>
+<p>For instance, if you call <strong>free()</strong> on a null pointer, it is a no-op.</p>
+<p>Whether you agree with that decision or not, it's there...and so when you ask for a memory backing buffer (e.g. one that can be used to build a BINARY!) the rebMalloc()/rebFree() pairs are such that rebFree() accepts null.  If it didn't do so, you couldn't pass it in as your memory allocator to things like zlib that expect you to obey the malloc()/free() behavior.</p>
+<p>So I often wondered if rebSpell() and rebBytes() should be null tolerant, and let the chips fall where they may.</p>
+<p>But...hrm.  I don't know.  I like the error emerging from inside the call.</p>
+<h2>What About rebTrySpell() and rebTryBytes() ?</h2>
+<p>With the new meaning of TRY, this actually makes sense!</p>
+<p>It's a better way to bias it than to say that rebSpell() can give back NULL, where you'd use rebMustSpell() if you want to ensure it isn't null.</p>
+<p>Very well, then.  I'm glad we had this talk.</p>
+<p><img src="https://forum.rebol.info/images/emoji/twitter/no_mouth.png?v=9" title=":no_mouth:" class="emoji only-emoji" alt=":no_mouth:"></p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/rebspell-or-rebbytes-of-null-in-the-api/1887">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/rebspell-or-rebbytes-of-null-in-the-api/1887</link>
+          <pubDate>Sat, 16 Jul 2022 14:01:23 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-1887</guid>
+          <source url="https://forum.rebol.info/t/rebspell-or-rebbytes-of-null-in-the-api/1887.rss">rebSpell() or rebBytes() of NULL in the API</source>
+        </item>
         <item>
           <title>Returning a Rebol void value</title>
           <dc:creator><![CDATA[iArnold]]></dc:creator>
@@ -1084,7 +1123,7 @@ rebElide("trap [",
           <description><![CDATA[
             <p>It seems modest to imagine adding a function to a browser's JavaScript, which looped through two strings, printed both, and gave you back the second to display in a browser <code>&lt;div&gt;</code>:</p>
 <pre><code>var second = rebSpell(
-    "loop 2 [data: ask text! | print [{You typed:} data]] data"
+    "repeat 2 [data: ask text!, echo [You typed: @data]] data"
 )
 console.log("Second string entered was" + second)
 </code></pre>
@@ -1092,19 +1131,19 @@ console.log("Second string entered was" + second)
 <p>What could be simpler than that?!</p>
 <h2>Web browsers aren't designed to work this way <img src="https://forum.rebol.info/images/emoji/twitter/frowning.png?v=9" title=":frowning:" class="emoji" alt=":frowning:">
 </h2>
-<p>Nothing about <em>"JavaScript-the-language"</em> particularly prohibits it from doing things synchronously.  You find various synchronous APIs here and there... <code>console.log()</code> will write synchronously to the console, and <code>alert()</code> famously (and irritatingly) gives you a modal popup that will freeze everything until it's dismissed.  Historically, you could even ask that an <code>XMLHttpRequest</code> be synchronous (a feature <a href="https://developer.mozilla.org/en-US/docs/Web/API/XMLHttpRequest/Synchronous_and_Asynchronous_Requests#Synchronous_request" rel="nofollow noopener">now disabled on the main thread</a> and thus restricted to web workers).</p>
+<p>Nothing about <em>"JavaScript-the-language"</em> particularly prohibits it from doing things synchronously.  You find various synchronous APIs here and there... <code>console.log()</code> will write synchronously to the console, and <code>alert()</code> famously (and irritatingly) gives you a modal popup that will freeze everything until it's dismissed.  Historically, you could even ask that an <code>XMLHttpRequest</code> be synchronous (a feature <a href="https://developer.mozilla.org/en-US/docs/Web/API/XMLHttpRequest/Synchronous_and_Asynchronous_Requests#Synchronous_request">now disabled on the main thread</a> and thus restricted to web workers).</p>
 <p>So it isn't JavaScript with the limit--any more than C or anything else.  It's the browser.  While a JavaScript function is running on the main thread, the painting and mouse events and who-knows-what-else won't happen.</p>
-<p>This isn't particularly new in the GUI app world...but it is particularly strict.  Even Windows offered things like <a href="https://msdn.microsoft.com/en-us/library/ms910649.aspx" rel="nofollow noopener">PeekMessage()</a> to let you sneakily look through and process mouse messages without giving up control.</p>
+<p>This isn't particularly new in the GUI app world...but it is particularly strict.  Even Windows offered things like <a href="https://msdn.microsoft.com/en-us/library/ms910649.aspx">PeekMessage()</a> to let you sneakily look through and process mouse messages without giving up control.</p>
 <p>The tightening grip of the browser makers is speaking loud and clear:</p>
 <ul>
 <li><strong>there are some things only the GUI thread will ever be able to do</strong></li>
 <li><strong>none of those things will be synchronous on the GUI thread--you can ask for work to be done, but will always be called back later with any result</strong></li>
 </ul>
 <h2>So the code above is actually impossible?</h2>
-<p>Well, it's <em>almost</em> impossible.  If you use <a href="https://developer.mozilla.org/en-US/docs/Web/API/Window/prompt" rel="nofollow noopener">Window.prompt()</a> you can get input in an alert-box style modal dialog.  And if you use <code>console.log</code> or <code>Window.alert()</code> for PRINT, it could "work"...but no one wants that.</p>
+<p>Well, it's <em>almost</em> impossible.  If you use <a href="https://developer.mozilla.org/en-US/docs/Web/API/Window/prompt">Window.prompt()</a> you can get input in an alert-box style modal dialog.  And if you use <code>console.log</code> or <code>Window.alert()</code> for PRINT, it could "work"...but no one wants that.</p>
 <p>Note what the "impossible" part of it is--the expectation that it runs and can output the result synchronously.  If you were willing to instead write something like:</p>
 <pre><code>rebSpellCallback(
-    "loop 2 [data: ask text! | print [{You typed:} data]] data",
+    "repeat 2 [data: ask text!, echo [You typed: @data]] data",
     function (second) {
         console.log("Second string entered was" + second)
     }
@@ -1114,7 +1153,7 @@ console.log("Second string entered was" + second)
 <p>Then that could be made to work.  And since JavaScript programmers noticed over time that their language was a callback-reductio-ad-absurdum, they tried to address it with something called ASYNC/AWAIT:</p>
 <pre><code>async function whatever() {
    var second = await rebSpellPromise(
-        "loop 2 [data: ask text! | print [{You typed:} data]] data"
+        "repeat 2 [data: ask text!, echo [You typed: @data]] data"
    )
    console.log("Second string entered was" + second)
    // any residual code here happens *after* the console.log output
@@ -1145,7 +1184,7 @@ rebRelease(value);
 </code></pre>
 <p>So if you're using modern JavaScript and async functions, you could probably just inject <code>await rebP( )</code> into the existing API set of operations, if it turned out what you were doing required it.</p>
 <blockquote>
-<p>I'll quickly point out that if it seems having to do results with callbacks seems onerous, that the more modern an API in JavaScript is, the more of them they have.  If you look at something like the fetch() API, not only do they have to "wait on" the server to return a response, the response itself then breaks down into more pieces you have to wait on!  From <a href="https://mdn.github.io/fetch-examples/fetch-array-buffer/" rel="nofollow noopener">a fetch example</a></p>
+<p>I'll quickly point out that if it seems having to do results with callbacks seems onerous, that the more modern an API in JavaScript is, the more of them they have.  If you look at something like the fetch() API, not only do they have to "wait on" the server to return a response, the response itself then breaks down into more pieces you have to wait on!  From <a href="https://mdn.github.io/fetch-examples/fetch-array-buffer/">a fetch example</a></p>
 <pre><code>fetch('viper.ogg')
   .then(function(response) { return response.arrayBuffer(); })
   .then(function(buffer) {
@@ -1557,37 +1596,6 @@ REBVAL *datetime = rebValue("use [date] [",
           <discourse:topicArchived>No</discourse:topicArchived>
           <guid isPermaLink="false">forum.rebol.info-topic-535</guid>
           <source url="https://forum.rebol.info/t/taming-handle-tracking-with-a-uniform-variadic-api/535.rss">Taming Handle Tracking with a Uniform Variadic API</source>
-        </item>
-        <item>
-          <title>Some questions about FFI (libuv)</title>
-          <dc:creator><![CDATA[middayc]]></dc:creator>
-          <category>Language Bridging</category>
-          <description><![CDATA[
-            <p>I have two questions. I'm trying to make a test binding to libuv ... I don't quite understand few things on the rebol and on c side.</p>
-<ol>
-<li>
-<p>When c creates a struct and passes its address to a function that then sets its fields.</p>
-<p>static struct sockaddr_in addr4;<br>
-uv_ip4_addr(address_ip4, port, &amp;addr4);</p>
-</li>
-</ol>
-<p>What should I do on FFI side to achieve the same? I tried to just allocate some memory (via malloc) and pass a pointer to that instead but it doesn't seem to work. I also tried to create hopefully correct struct! and pass addr-of to func but it doesn't seem to get set. In first case I can't know for sure, since I can't see what the address holds after the call, but the later c function that uses the addr behaves as if it weren't correctly set.</p>
-<ol start="2">
-<li>
-<p>... I have a function that you give pointer to char and it sets the string to it. Is there a way to get to the containing c-string on that address from rebol side after it sets it?</p>
-<p>int uv_ip4_name(const struct sockaddr_in* src, char* dst, size_t size)</p>
-</li>
-</ol>
-            <p><small>6 posts - 3 participants</small></p>
-            <p><a href="https://forum.rebol.info/t/some-questions-about-ffi-libuv/440">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/some-questions-about-ffi-libuv/440</link>
-          <pubDate>Fri, 29 Dec 2017 21:58:02 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-440</guid>
-          <source url="https://forum.rebol.info/t/some-questions-about-ffi-libuv/440.rss">Some questions about FFI (libuv)</source>
         </item>
   </channel>
 </rss>

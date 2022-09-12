@@ -1,0 +1,430 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>FAIL vs. RETURN RAISE: The New Age of Definitional Failures!</title>
+    <link>https://forum.rebol.info/t/fail-vs-return-raise-the-new-age-of-definitional-failures/1852</link>
+    <description>The latest groundbreaking concept of Ren-C is... ***the definitional failure***
+
+## But First, We Have To Define Failure...
+
+Failure is an isotopic state.  It&#39;s what you would get if you UNMETA a QUASI! ERROR!
+
+    &gt;&gt; quasi &#39;foo
+    == ~foo~
+
+    &gt;&gt; unmeta quasi &#39;foo
+    == ~foo~  ; isotope
+
+    &gt;&gt; unmeta quasi make error! &quot;foo&quot;
+    ** Error: foo
+    ** Near: [*** make error! &quot;foo&quot; **]
+
+Being an isotope, you can&#39;t store failures in variables easily.  But unlike other isotopes, the error you receive is not a generic &quot;could not assign isotope&quot; message... *it reports the error! as it is in the isotope itself*.
+
+    &gt;&gt; var: unmeta quasi &#39;foo
+    ** Error: Cannot store isotopic WORD! in VAR
+
+    &gt;&gt; var: unmeta quasi 1020
+    ** Error: Cannot store isotopic INTEGER! in VAR
+
+    &gt;&gt; var: unmeta quasi make error! &quot;foo&quot;
+    ** Error: foo
+    ** Near: [*** make error! &quot;foo&quot; **]
+
+There&#39;s also a special behavior that they cannot occur in generic midstream evaluations:
+
+    &gt;&gt; (1 + 2 unmeta quasi make error! &quot;foo&quot; 3 + 4)
+    ** Error: foo
+    ** Near: [*** make error! &quot;foo&quot; ** 3 + 4]
+
+So far this doesn&#39;t seem so profound.  Rebol2 and Red can DO an ERROR! and get a failure, which you also can&#39;t store in a variable or keep going in the middle of an expression.
+
+BUT here&#39;s the twist:
+
+    &gt;&gt; ^ unmeta quasi make error! &quot;foo&quot;
+    == ~make error! [
+        type: &#39;
+        id: &#39;
+        message: &quot;foo&quot;
+        near: [*** make error! &quot;foo&quot; **]
+        where: [unmeta args]
+        file: &#39;
+        line: 1
+    ]~
+
+* The UNMETA did not raise an irrecoverable error.
+
+* It created an isotopic error state, and then waited to see if something would ^META it or not.
+
+* There was a ^META and so it gave you back the QUASI! error state
+
+This is a crucial difference, as we will see.  But first...
+
+**NOTE: I will be using the operation RAISE in the remaining text, instead of UNMETA QUASI! on ERROR!**  So approximately this:
+
+    raise: lambda [e [text! block! error!]] [unmeta quasi make error! e]
+
+## Let&#39;s Address the &quot;Definitional&quot; Part
+
+What I mean when I say &quot;definitional&quot; is that there&#39;s a difference between these two cases:
+
+    bigtest: func [n] [
+       if n &lt; 1020 [raise [n &quot;is not big&quot;]]
+       print [n &quot;sure is a big number&quot;]
+    ] 
+
+    definitional-bigtest: func [n] [
+       if n &lt; 1020 [return raise [n &quot;is not big&quot;]]
+       print [n &quot;sure is a big number&quot;]
+    ] 
+
+You won&#39;t notice a difference if you call them directly
+
+    &gt;&gt; bigtest 304
+    ** Error: 304 is not big
+    ** Where: raise if bigtest args
+    ** Near: [raise [n &quot;is not big&quot;] **]
+
+    &gt;&gt; definitional-bigtest 304
+    ** Error: 304 is not big
+    ** Where: raise if definitional-bigtest args
+    ** Near: [return raise [n &quot;is not big&quot;] **]
+
+But try using ^META and you&#39;ll see they are different:
+
+    &gt;&gt; ^ bigtest 304
+    ** Error: 304 is not big
+    ** Where: raise if bigtest args
+    ** Near: [raise [n &quot;is not big&quot;] **]
+
+    &gt;&gt; ^ definitional-bigtest 304
+    == ~make error! [
+        type: &#39;
+        id: &#39;
+        message: &quot;304 is not big&quot;
+        near: [return raise [n &quot;is not big&quot;] **]
+        where: [raise if definitional-bigtest args]
+        file: &#39;
+        line: 1
+    ]~
+
+**Functions can now choose to tell us when an error was something *they* knew about and engaged, vs. something incidental that could have come from any call beneath them in the stack.**
+
+Sound important?  *It should.*
+
+## NOW BLAST SOME MUSIC FOR THIS WATERSHED MOMENT
+
+https://www.youtube.com/watch?v=YGP0nsnSlg4
+
+I&#39;ve added EXCEPT, which is an enfix operation that reacts to failures...while THEN and ELSE just pass them on.
+
+    &gt;&gt; raise &quot;foo&quot; then [print &quot;THEN&quot;] else [print &quot;ELSE&quot;] except [print &quot;EXCEPT&quot;]
+    EXCEPT
+
+As we saw in the beginning, if *someone* doesn&#39;t handle the failure it gets raised eventually:
+
+    &gt;&gt; raise &quot;foo&quot; then [print &quot;THEN&quot;] else [print &quot;ELSE&quot;]
+    ** Error: foo
+    ** Near: [raise &quot;foo&quot; ** then [print &quot;THEN&quot;] else [print &quot;ELSE&quot;]]
+
+Now let&#39;s use it in a simple [REFRAMER](https://forum.rebol.info/t/introducing-reframer-close-cousin-to-enclose/1395) called CURTAIL:
+
+    curtail: reframer function [frame [frame!]] [
+        return do frame except e -&gt; [
+            if e.id == &#39;need-non-null [return void]
+            raise e
+        ]
+    ]
+
+If you don&#39;t remember what reframers do, they just have access to a function call before you run it.  Here we are looking for the function we&#39;re running to give us a NEED-NON-NULL error.
+
+*But we&#39;re not looking for just any NEED-NON-NULL error that might go by.*  We&#39;re only interested in ones that are coming out of the call we&#39;re processing.  If that happens, we just vaporize the expression.
+
+    &gt;&gt; compose [(null)]
+    ** Script Error: non-NULL value required (see MAYBE, TRY, REIFY)
+
+    &gt;&gt; curtail compose [(null)]
+    ; void (decays to none)
+
+You can see something like this simplifying null checks:
+
+    &gt;&gt; ver: 1.2.3
+    &gt;&gt; date: null
+
+    &gt;&gt; print [curtail spaced [&quot;Version:&quot; ver] curtail spaced [&quot;Date:&quot; date]]
+    Version: 1.2.3
+
+*But like I said, it&#39;s not just any NEED-NON-NULL...*
+
+    &gt;&gt; a: 1 b: null c: 3
+    &gt;&gt; get-ver: func [] [to tuple! reduce [a b c]]
+
+    &gt;&gt; print [curtail spaced [&quot;Version:&quot; get-ver] curtail spaced [&quot;Date:&quot; date]]
+    ** Script Error: non-NULL value required (see MAYBE, TRY, REIFY)
+
+# Still Need Proof This is Good?  *Try Definitional ATTEMPT*
+
+Remember the old, bad ATTEMPT?
+
+    &gt;&gt; attempt [print &quot;Attempting to read file&quot; read %nonexistent-file.txt]
+    Attempting to read file
+    ; null
+
+    &gt;&gt; attempt [print &quot;Attempting but made typos&quot; rread %nonexistent-file.txt]
+    ; null
+
+It was too dangerous to use.  With READ upgraded to turn its file-not-found error to be definitional, and a new ATTEMPT that&#39;s based on ^META and not TRAP, we get safety!
+
+    attempt: lambda [
+        {Evaluate a block and returns result or NULL if an expression fails}
+        code [block!]
+    ][
+        reduce-each ^result code [
+            if (quasi? result) and (error? unquasi result) [
+                break  ; BREAK will mean overall result is NULL
+            ]
+            unmeta result
+        ]
+    ]
+
+    &gt;&gt; attempt [print &quot;Attempting to read file&quot; read %nonexistent-file.txt]
+    Attempting to read file
+    ; null
+
+    &gt;&gt; attempt [print &quot;Attempting but made typos&quot; rread %nonexistent-file.txt]
+    Attempting but made typos
+    ** Script Error: rread word is attached to a context, but unassigned
+    ** Near: [rread ** %nonexistent-file.txt]
+
+It will take time for natives to be audited and have their random fail()s turned to be definitional-RAISE-when-applicable.  Until then, most won&#39;t have errors that can be intercepted like this.  I added the error for file not found and the NEED-NON-NULL for COMPOSE and DELIMIT and REDUCE, but it will take a while.
+
+But other than that...
+
+# It&#39;s Here.  It&#39;s Now.  It&#39;s Committed!
+
+:boom:
+
+## Note That Non-Definitional Fail Still Exists...
+
+If you want to immediately go to the failure state, use FAIL as you historically would.
+
+That&#39;s clearer than calling RAISE with no RETURN, where a reader can&#39;t tell if it&#39;s going to be piped along and eventually RETURN&#39;d or ^META&#39;d somewhere.
+
+    return case [
+        ... many pages of code ...
+        ... [raise &quot;Some error&quot;]  ; need to be able to choose FAIL here if you meant that
+        ... many pages of code ...
+     ]
+
+When writing a function and deciding if an error should be RETURN RAISE or FAIL, think about the use case.  Do you feel that the call is fundamentally malformed (in the way a type checking error on a parameter would be thought of as a mistake), or did you understand what was asked clearly...but just couldn&#39;t do it?
+
+It&#39;s subtle, but I think the pattern is emerging pretty clearly of when you should FAIL vs. RETURN RAISE.</description>
+    
+    <lastBuildDate>Mon, 22 Aug 2022 13:10:56 +0000</lastBuildDate>
+    <category>Errors</category>
+    <atom:link href="https://forum.rebol.info/t/fail-vs-return-raise-the-new-age-of-definitional-failures/1852.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>FAIL vs. RETURN RAISE: The New Age of Definitional Failures!</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>The latest groundbreaking concept of Ren-C is... <em><strong>the definitional failure</strong></em></p>
+<h2>But First, We Have To Define Failure...</h2>
+<p>Failure is an isotopic state.  It's what you would get if you UNMETA a QUASI! ERROR!</p>
+<pre><code>&gt;&gt; quasi 'foo
+== ~foo~
+
+&gt;&gt; unmeta quasi 'foo
+== ~foo~  ; isotope
+
+&gt;&gt; unmeta quasi make error! "foo"
+** Error: foo
+** Near: [*** make error! "foo" **]
+</code></pre>
+<p>Being an isotope, you can't store failures in variables easily.  But unlike other isotopes, the error you receive is not a generic "could not assign isotope" message... <em>it reports the error! as it is in the isotope itself</em>.</p>
+<pre><code>&gt;&gt; var: unmeta quasi 'foo
+** Error: Cannot store isotopic WORD! in VAR
+
+&gt;&gt; var: unmeta quasi 1020
+** Error: Cannot store isotopic INTEGER! in VAR
+
+&gt;&gt; var: unmeta quasi make error! "foo"
+** Error: foo
+** Near: [*** make error! "foo" **]
+</code></pre>
+<p>There's also a special behavior that they cannot occur in generic midstream evaluations:</p>
+<pre><code>&gt;&gt; (1 + 2 unmeta quasi make error! "foo" 3 + 4)
+** Error: foo
+** Near: [*** make error! "foo" ** 3 + 4]
+</code></pre>
+<p>So far this doesn't seem so profound.  Rebol2 and Red can DO an ERROR! and get a failure, which you also can't store in a variable or keep going in the middle of an expression.</p>
+<p>BUT here's the twist:</p>
+<pre><code>&gt;&gt; ^ unmeta quasi make error! "foo"
+== ~make error! [
+    type: '
+    id: '
+    message: "foo"
+    near: [*** make error! "foo" **]
+    where: [unmeta args]
+    file: '
+    line: 1
+]~
+</code></pre>
+<ul>
+<li>
+<p>The UNMETA did not raise an irrecoverable error.</p>
+</li>
+<li>
+<p>It created an isotopic error state, and then waited to see if something would ^META it or not.</p>
+</li>
+<li>
+<p>There was a ^META and so it gave you back the QUASI! error state</p>
+</li>
+</ul>
+<p>This is a crucial difference, as we will see.  But first...</p>
+<p><strong>NOTE: I will be using the operation RAISE in the remaining text, instead of UNMETA QUASI! on ERROR!</strong>  So approximately this:</p>
+<pre><code>raise: lambda [e [text! block! error!]] [unmeta quasi make error! e]
+</code></pre>
+<h2>Let's Address the "Definitional" Part</h2>
+<p>What I mean when I say "definitional" is that there's a difference between these two cases:</p>
+<pre><code>bigtest: func [n] [
+   if n &lt; 1020 [raise [n "is not big"]]
+   print [n "sure is a big number"]
+] 
+
+definitional-bigtest: func [n] [
+   if n &lt; 1020 [return raise [n "is not big"]]
+   print [n "sure is a big number"]
+] 
+</code></pre>
+<p>You won't notice a difference if you call them directly</p>
+<pre><code>&gt;&gt; bigtest 304
+** Error: 304 is not big
+** Where: raise if bigtest args
+** Near: [raise [n "is not big"] **]
+
+&gt;&gt; definitional-bigtest 304
+** Error: 304 is not big
+** Where: raise if definitional-bigtest args
+** Near: [return raise [n "is not big"] **]
+</code></pre>
+<p>But try using ^META and you'll see they are different:</p>
+<pre><code>&gt;&gt; ^ bigtest 304
+** Error: 304 is not big
+** Where: raise if bigtest args
+** Near: [raise [n "is not big"] **]
+
+&gt;&gt; ^ definitional-bigtest 304
+== ~make error! [
+    type: '
+    id: '
+    message: "304 is not big"
+    near: [return raise [n "is not big"] **]
+    where: [raise if definitional-bigtest args]
+    file: '
+    line: 1
+]~
+</code></pre>
+<p><strong>Functions can now choose to tell us when an error was something <em>they</em> knew about and engaged, vs. something incidental that could have come from any call beneath them in the stack.</strong></p>
+<p>Sound important?  <em>It should.</em></p>
+<h2>NOW BLAST SOME MUSIC FOR THIS WATERSHED MOMENT</h2>
+<div class="onebox lazyYT lazyYT-container" data-youtube-id="YGP0nsnSlg4" data-youtube-title="Vogel - Hologram" data-parameters="feature=oembed&amp;wmode=opaque">
+  <a href="https://www.youtube.com/watch?v=YGP0nsnSlg4" target="_blank" rel="noopener">
+    <img class="ytp-thumbnail-image" src="https://i.ytimg.com/vi/YGP0nsnSlg4/maxresdefault.jpg" title="Vogel - Hologram" width="690" height="388">
+  </a>
+</div>
+
+<p>I've added EXCEPT, which is an enfix operation that reacts to failures...while THEN and ELSE just pass them on.</p>
+<pre><code>&gt;&gt; raise "foo" then [print "THEN"] else [print "ELSE"] except [print "EXCEPT"]
+EXCEPT
+</code></pre>
+<p>As we saw in the beginning, if <em>someone</em> doesn't handle the failure it gets raised eventually:</p>
+<pre><code>&gt;&gt; raise "foo" then [print "THEN"] else [print "ELSE"]
+** Error: foo
+** Near: [raise "foo" ** then [print "THEN"] else [print "ELSE"]]
+</code></pre>
+<p>Now let's use it in a simple <a href="https://forum.rebol.info/t/introducing-reframer-close-cousin-to-enclose/1395">REFRAMER</a> called CURTAIL:</p>
+<pre><code>curtail: reframer function [frame [frame!]] [
+    return do frame except e -&gt; [
+        if e.id == 'need-non-null [return void]
+        raise e
+    ]
+]
+</code></pre>
+<p>If you don't remember what reframers do, they just have access to a function call before you run it.  Here we are looking for the function we're running to give us a NEED-NON-NULL error.</p>
+<p><em>But we're not looking for just any NEED-NON-NULL error that might go by.</em>  We're only interested in ones that are coming out of the call we're processing.  If that happens, we just vaporize the expression.</p>
+<pre><code>&gt;&gt; compose [(null)]
+** Script Error: non-NULL value required (see MAYBE, TRY, REIFY)
+
+&gt;&gt; curtail compose [(null)]
+; void (decays to none)
+</code></pre>
+<p>You can see something like this simplifying null checks:</p>
+<pre><code>&gt;&gt; ver: 1.2.3
+&gt;&gt; date: null
+
+&gt;&gt; print [curtail spaced ["Version:" ver] curtail spaced ["Date:" date]]
+Version: 1.2.3
+</code></pre>
+<p><em>But like I said, it's not just any NEED-NON-NULL...</em></p>
+<pre><code>&gt;&gt; a: 1 b: null c: 3
+&gt;&gt; get-ver: func [] [to tuple! reduce [a b c]]
+
+&gt;&gt; print [curtail spaced ["Version:" get-ver] curtail spaced ["Date:" date]]
+** Script Error: non-NULL value required (see MAYBE, TRY, REIFY)
+</code></pre>
+<h1>Still Need Proof This is Good?  <em>Try Definitional ATTEMPT</em>
+</h1>
+<p>Remember the old, bad ATTEMPT?</p>
+<pre><code>&gt;&gt; attempt [print "Attempting to read file" read %nonexistent-file.txt]
+Attempting to read file
+; null
+
+&gt;&gt; attempt [print "Attempting but made typos" rread %nonexistent-file.txt]
+; null
+</code></pre>
+<p>It was too dangerous to use.  With READ upgraded to turn its file-not-found error to be definitional, and a new ATTEMPT that's based on ^META and not TRAP, we get safety!</p>
+<pre><code>attempt: lambda [
+    {Evaluate a block and returns result or NULL if an expression fails}
+    code [block!]
+][
+    reduce-each ^result code [
+        if (quasi? result) and (error? unquasi result) [
+            break  ; BREAK will mean overall result is NULL
+        ]
+        unmeta result
+    ]
+]
+
+&gt;&gt; attempt [print "Attempting to read file" read %nonexistent-file.txt]
+Attempting to read file
+; null
+
+&gt;&gt; attempt [print "Attempting but made typos" rread %nonexistent-file.txt]
+Attempting but made typos
+** Script Error: rread word is attached to a context, but unassigned
+** Near: [rread ** %nonexistent-file.txt]
+</code></pre>
+<p>It will take time for natives to be audited and have their random fail()s turned to be definitional-RAISE-when-applicable.  Until then, most won't have errors that can be intercepted like this.  I added the error for file not found and the NEED-NON-NULL for COMPOSE and DELIMIT and REDUCE, but it will take a while.</p>
+<p>But other than that...</p>
+<h1>It's Here.  It's Now.  It's Committed!</h1>
+<p><img src="https://forum.rebol.info/images/emoji/twitter/boom.png?v=9" title=":boom:" class="emoji only-emoji" alt=":boom:"></p>
+<h2>Note That Non-Definitional Fail Still Exists...</h2>
+<p>If you want to immediately go to the failure state, use FAIL as you historically would.</p>
+<p>That's clearer than calling RAISE with no RETURN, where a reader can't tell if it's going to be piped along and eventually RETURN'd or ^META'd somewhere.</p>
+<pre><code>return case [
+    ... many pages of code ...
+    ... [raise "Some error"]  ; need to be able to choose FAIL here if you meant that
+    ... many pages of code ...
+ ]
+</code></pre>
+<p>When writing a function and deciding if an error should be RETURN RAISE or FAIL, think about the use case.  Do you feel that the call is fundamentally malformed (in the way a type checking error on a parameter would be thought of as a mistake), or did you understand what was asked clearly...but just couldn't do it?</p>
+<p>It's subtle, but I think the pattern is emerging pretty clearly of when you should FAIL vs. RETURN RAISE.</p>
+          <p><a href="https://forum.rebol.info/t/fail-vs-return-raise-the-new-age-of-definitional-failures/1852/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/fail-vs-return-raise-the-new-age-of-definitional-failures/1852/1</link>
+        <pubDate>Tue, 28 Jun 2022 02:17:23 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1852-1</guid>
+        <source url="https://forum.rebol.info/t/fail-vs-return-raise-the-new-age-of-definitional-failures/1852.rss">FAIL vs. RETURN RAISE: The New Age of Definitional Failures!</source>
+      </item>
+  </channel>
+</rss>

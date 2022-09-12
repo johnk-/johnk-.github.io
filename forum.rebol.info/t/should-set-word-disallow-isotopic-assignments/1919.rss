@@ -1,0 +1,370 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Should SET-WORD! Disallow Isotopic Assignments?</title>
+    <link>https://forum.rebol.info/t/should-set-word-disallow-isotopic-assignments/1919</link>
+    <description>Historically, Rebol2 and R3-Alpha wouldn&#39;t let you assign UNSET! via a SET-WORD!, regardless of whether it was provided literally or through an evaluation.  You had to use SET/ANY:
+
+    rebol2&gt;&gt; x: #[unset!]
+    ** Script error: x: needs a value
+
+    rebol2&gt;&gt; x: print &quot;hi&quot;
+    hi
+    ** Script error: x: needs a value
+
+    rebol2&gt;&gt; set/any &#39;x #[unset!]
+
+    rebol2&gt;&gt; x
+    ** Script Error: x has no value
+
+At first, I thought Red made a concession in the direct assignment case:
+
+    red&gt;&gt; x: #[unset!]
+    == unset!
+
+    red&gt;&gt; x: print &quot;hi&quot;
+    hi
+    *** Script Error: x: needs a value
+
+However, that&#39;s not what&#39;s happening...it&#39;s an incompatible interpretation...where Red considers #[unset!] to be the datatype for unset!, and #[unset] (no exclamation point, illegal in Rebol2) is an actual unset value:
+
+    red&gt;&gt; type? #[unset!]
+    == datatype!
+
+    red&gt;&gt; type? #[unset]
+    == unset!
+ 
+    red&gt;&gt; x: #[unset]
+    *** Script Error: x: needs a value
+  
+**But I bring it up because at one point in time, Ren-C actually had a specific behavior that it would only allow a SET-WORD! to assign an unset to a variable if it was *not* the product of a function call.**  Today this would look something like:
+
+    &gt;&gt; x: ~
+
+    &gt;&gt; x: print &quot;hi&quot;
+    ** Error: Cannot assign evaluative isotopes to X
+
+    &gt;&gt; set/any &#39;x ~
+
+    &gt;&gt; x
+    ** Error: X is ~ isotope (e.g. isotopic BLANK!, represents an unset state)
+
+**I&#39;ve wondered if this rule strikes the right balance.**  If you really want to deal with isotopic values that are the result of an evaluation, you would use ^META, and get the non-isotopic (QUASI!) form.  There&#39;d be several ways of saying it:
+
+    &gt;&gt; x: ^ print &quot;hi&quot;
+    == ~
+
+    &gt;&gt; x: ^(print &quot;hi&quot;)
+    == ~
+
+    &gt;&gt; x: meta print &quot;hi&quot;
+    == ~
+
+    &gt;&gt; [^x]: print &quot;hi&quot;
+    == ~
+
+This makes much more sense now than when NULL and &quot;unset&quot; were the same state.  And it would help keep isotopes under control.
+
+## Implications for the &quot;Only Isotopic ACTION! Runs&quot; Idea
+
+This would mess with my current experimental branch where [isotopic actions stored in variables are the WORD!-triggered kind](https://forum.rebol.info/t/attack-of-the-activated-actions/1900) (while regular actions would be inert).
+
+It has FUNC returning isotopic actions, and you&#39;d get an error:
+
+    &gt;&gt; foo: func [/refine] [...]
+    ** Error: Cannot assign isotope to FOO with SET-WORD! (see SET/ANY)
+
+Making an exception for action isotopes, and saying they could be assigned without an annotation really feels like it undermines the entire proposal and the safety you&#39;d get from it.
+
+I will note that I really did get a warm fuzzy feeling when the generators produced plain ACTION!, and something had to tip it into being isotopic.  But I had to pan **`/foo: func [... /refine] [...]`** in no small part due to leading-slash being &quot;taken&quot; by refinements in function spec and apply.
+
+This made me take a more serious look at the concept of retaking something like **`-&gt;`**.  Under the new rules that wouldn&#39;t have to finesse the assignment as well:
+
+    foo: -&gt; func [/refine] [...]
+
+    foo: runs func [/refine] [...]  ; for those who dislike symbols
+
+So either of these would act like **`set/any &#39;foo isotopic func [/refine] [...]`**.
+
+Wait... *UNLESS...* :thinking: 
+
+I just had a rather compelling thought, that such a tool could *only accept isotopic ACTION!*, and that this would provide natural guidance not to screw it up... because a plain assignment would error:
+
+    &gt;&gt; foo: func [/refine] [...]
+    ** Error: Can&#39;t assign isotope ACTION! via SET-WORD!, use -&gt; or INERT
+
+*So if all the function generators were committed to returning isotopes, it would be self-correcting.*  You wouldn&#39;t be able to forget to triage the assignment.
+
+    &gt;&gt; foo: inert func [x] [print [&quot;x is&quot; x]]
+    == #[action! [x]]
+
+    &gt;&gt; foo
+    == #[action! [x]]
+
+    &gt;&gt; foo: -&gt; func [x] [print [&quot;x is&quot; x]]
+    == ~#[action! [x]]~  ; isotope
+
+    &gt;&gt; foo 10
+    x is 10
+
+Now THAT is clever.  You&#39;re forced into triage, and can&#39;t forget to do one or the other!  Forgetting the annotation was one of the big Achilles heels of making generator products inert by default (hard to find bugs) but this ties that up.
+
+Very promising premise!  But there are tricky issues, like how today&#39;s METHOD needs to look back to quote what it&#39;s being assigned to, in order to know how to bind the value.  Maybe it wouldn&#39;t need to... if **`-&gt;`** also made that binding connection...and maybe there&#39;d be no such thing as METHOD.  :exploding_head: 
+
+## Related Question: What About VOID ?
+
+A corollary to this question is **&quot;Should SET-WORD! Stop Treating VOID Assignments as Unsetting Variables&quot;**
+
+It might seem obvious to say &quot;yes, that should be an error too&quot;.  In fact...since I&#39;ve vetoed the idea of variables actually being able to hold &quot;voidness&quot; it might seem like an *even worse sin* that should be prohibited... because you&#39;re not actually preserving the &quot;integrity&quot; of the assignment.
+
+*BUT*... when I tried to rule it out I noticed that it was used in frames for things like setting refinements, like:
+
+    &gt;&gt; series [a b c]
+    &gt;&gt; value: 3
+
+    &gt;&gt; f: make frame! :append
+    &gt;&gt; f.series: series
+    &gt;&gt; f.value: value
+    &gt;&gt; f.dup: if integer? value [value]
+
+    &gt;&gt; do f
+    == [a b c 3 3 3]
+
+But should the IF evaluate to void...the /DUP would not be set.  That not-set state was leading the default behavior for the refinement being not set (to coerce it to NULL in the call).
+
+This is an interesting use case, and it arguably isn&#39;t &quot;doing an isotopic assignment&quot; (void is not an isotope, and it has no QUASI! form).  It&#39;s making a subtle judgment call, and it might be a good one.  I&#39;ll keep this as-is for now.
+
+## Ultimate Goal: Freedom Of Choice  :statue_of_liberty: 
+
+It&#39;s still definitely want to make it possible to override these behaviors if you find they get in your way.  Certainly we&#39;d need it for Redbol...but it should work at other granularities.
+
+Why shouldn&#39;t you be able to say *&quot;hey, for just this function&#39;s body I want all the SET-WORD!s to assign isotopes without complaint&quot;*?</description>
+    
+    <lastBuildDate>Sat, 27 Aug 2022 10:55:52 +0000</lastBuildDate>
+    <category>Internals</category>
+    <atom:link href="https://forum.rebol.info/t/should-set-word-disallow-isotopic-assignments/1919.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Should SET-WORD! Disallow Isotopic Assignments?</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="1919">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/40/26_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>Historically, Rebol2 and R3-Alpha wouldn't let you assign UNSET! via a SET-WORD!, regardless of whether it was provided literally or through an evaluation. You had to use SET/ANY:</p>
+</blockquote>
+</aside>
+<p>Something kind of interesting comes up with the nature of a void assignment, which is that it's fundamentally different from other "isotopic assignments".  Because there kind of "isn't any such thing as a void isotope":</p>
+<pre><code>&gt;&gt; (1 + 2, ~something~)
+== ~something~  ; isotope
+
+&gt;&gt; (1 + 2, ~)
+== 3
+</code></pre>
+<p>So really, these put the evaluator in different situations:</p>
+<pre><code>&gt;&gt; 1 + 2 x: ~
+== 3
+
+&gt;&gt; 1 + 2 x: ~something~
+; would be ~something~ isotope if we allowed it
+</code></pre>
+<p>I think it's pretty clear that assigning a variable voidness should not result in the variable being whatever was before it, e.g.</p>
+<pre><code>&gt;&gt; 1 + 2 x: ~
+== 3
+
+&gt;&gt; x
+== 3  ; this would be nonsense.
+</code></pre>
+<p>So what's actually being assigned in an evaluator sense is <em>staleness</em>.  And we can distinguish staleness, and tolerate it as something entirely different from trying to assign a "real isotope".</p>
+<h2>Another Thought: Isotopic Assignment Syntax</h2>
+<p>I had an idea for a syntax in SET-BLOCK!...including multi-returns...that would allow assigning isotopes.</p>
+<pre><code>&gt;&gt; x: spread [1 2 3]
+** Error: Cannot assign isotope BLOCK! using SET-WORD!
+
+&gt;&gt; [~x~]: spread [1 2 3]
+== ~[1 2 3]~  isotope
+</code></pre>
+<p>A bit weird, yes.  But it's less wordy than SET/ANY (I still don't know if I like /ANY as the name for that refinement):</p>
+<pre><code>&gt;&gt; set/any 'x spread [1 2 3]
+== ~[1 2 3]~  ; isotope
+</code></pre>
+<p>And now that the QUASI! and isotopic representations are generic you can use this with GROUP!s:</p>
+<pre><code>&gt;&gt; [~(second [y x])~]: spread [1 2 3]
+== ~[1 2 3]~  ; isotope
+</code></pre>
+<p><em>I really do think people should avoid putting isotopes in variables like this</em>--it's a fringe requirement, by design.  So if you're going to do it, I don't have a problem with it looking a bit dicey.</p>
+<p>I definitely prefer it to other ideas like <strong><code>x.: spread [1 2 3]</code></strong>, for a number of reasons--but the visibility of what you are doing is certainly one of those reasons.</p>
+<p>This could also allow you to permit isotopes in things like FOR-EACH over OBJECT!s that had isotopic states.</p>
+          <p><a href="https://forum.rebol.info/t/should-set-word-disallow-isotopic-assignments/1919/4">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/should-set-word-disallow-isotopic-assignments/1919/4</link>
+        <pubDate>Sat, 27 Aug 2022 10:30:36 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1919-4</guid>
+        <source url="https://forum.rebol.info/t/should-set-word-disallow-isotopic-assignments/1919.rss">Should SET-WORD! Disallow Isotopic Assignments?</source>
+      </item>
+      <item>
+        <title>Should SET-WORD! Disallow Isotopic Assignments?</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="IngoHohmann" data-post="2" data-topic="1919">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/ingohohmann/40/195_2.png" class="avatar"> IngoHohmann:</div>
+<blockquote>
+<p>if it is possible to use the annotation inside the generator on the return value, that would make it easy to build your own auto-annotating generators.</p>
+</blockquote>
+</aside>
+<p>This would imply that things like FUNC and ADAPT would become enfix functions with a <code>&lt;skip&gt;</code>-able SET-WORD! or SET-TUPLE! on the left...and if they saw something there they <em>could</em> fold the behavior in for you... otherwise they'd just return the isotope.</p>
+<p>Though if any code or branching separated the generator from the SET-XXX!, it wouldn't work.  They'd even be foiled by just a GROUP!:</p>
+<pre><code>&gt;&gt; foo: func [...] [...]
+== ~#[action! [...]]~  ; isotope
+
+&gt;&gt; foo: (func [...] [...])
+** Error: Can't assign isotope ACTION! via SET-WORD!, use -&gt; or INERT 
+</code></pre>
+<p>So it would be possible, but kinda dodgy...making things more confusing.</p>
+<p>It would probably better serve people who object to -&gt; to have some module level setting that says <em>"allow ACTION! isotope assignment without complaint"</em>.</p>
+          <p><a href="https://forum.rebol.info/t/should-set-word-disallow-isotopic-assignments/1919/3">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/should-set-word-disallow-isotopic-assignments/1919/3</link>
+        <pubDate>Wed, 17 Aug 2022 09:58:23 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1919-3</guid>
+        <source url="https://forum.rebol.info/t/should-set-word-disallow-isotopic-assignments/1919.rss">Should SET-WORD! Disallow Isotopic Assignments?</source>
+      </item>
+      <item>
+        <title>Should SET-WORD! Disallow Isotopic Assignments?</title>
+        <dc:creator><![CDATA[IngoHohmann]]></dc:creator>
+        <description><![CDATA[
+            <p>Just a thought ... if it is possible to use the annotation inside the generator on the return value, that would make it easy to build your own auto-annotating generators.</p>
+          <p><a href="https://forum.rebol.info/t/should-set-word-disallow-isotopic-assignments/1919/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/should-set-word-disallow-isotopic-assignments/1919/2</link>
+        <pubDate>Wed, 17 Aug 2022 09:33:54 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1919-2</guid>
+        <source url="https://forum.rebol.info/t/should-set-word-disallow-isotopic-assignments/1919.rss">Should SET-WORD! Disallow Isotopic Assignments?</source>
+      </item>
+      <item>
+        <title>Should SET-WORD! Disallow Isotopic Assignments?</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>Historically, Rebol2 and R3-Alpha wouldn't let you assign UNSET! via a SET-WORD!, regardless of whether it was provided literally or through an evaluation.  You had to use SET/ANY:</p>
+<pre><code>rebol2&gt;&gt; x: #[unset!]
+** Script error: x: needs a value
+
+rebol2&gt;&gt; x: print "hi"
+hi
+** Script error: x: needs a value
+
+rebol2&gt;&gt; set/any 'x #[unset!]
+
+rebol2&gt;&gt; x
+** Script Error: x has no value
+</code></pre>
+<p>At first, I thought Red made a concession in the direct assignment case:</p>
+<pre><code>red&gt;&gt; x: #[unset!]
+== unset!
+
+red&gt;&gt; x: print "hi"
+hi
+*** Script Error: x: needs a value
+</code></pre>
+<p>However, that's not what's happening...it's an incompatible interpretation...where Red considers #[unset!] to be the datatype for unset!, and #[unset] (no exclamation point, illegal in Rebol2) is an actual unset value:</p>
+<pre><code>red&gt;&gt; type? #[unset!]
+== datatype!
+
+red&gt;&gt; type? #[unset]
+== unset!
+
+red&gt;&gt; x: #[unset]
+*** Script Error: x: needs a value
+</code></pre>
+<p><strong>But I bring it up because at one point in time, Ren-C actually had a specific behavior that it would only allow a SET-WORD! to assign an unset to a variable if it was <em>not</em> the product of a function call.</strong>  Today this would look something like:</p>
+<pre><code>&gt;&gt; x: ~
+
+&gt;&gt; x: print "hi"
+** Error: Cannot assign evaluative isotopes to X
+
+&gt;&gt; set/any 'x ~
+
+&gt;&gt; x
+** Error: X is ~ isotope (e.g. isotopic BLANK!, represents an unset state)
+</code></pre>
+<p><strong>I've wondered if this rule strikes the right balance.</strong>  If you really want to deal with isotopic values that are the result of an evaluation, you would use ^META, and get the non-isotopic (QUASI!) form.  There'd be several ways of saying it:</p>
+<pre><code>&gt;&gt; x: ^ print "hi"
+== ~
+
+&gt;&gt; x: ^(print "hi")
+== ~
+
+&gt;&gt; x: meta print "hi"
+== ~
+
+&gt;&gt; [^x]: print "hi"
+== ~
+</code></pre>
+<p>This makes much more sense now than when NULL and "unset" were the same state.  And it would help keep isotopes under control.</p>
+<h2>Implications for the "Only Isotopic ACTION! Runs" Idea</h2>
+<p>This would mess with my current experimental branch where <a href="https://forum.rebol.info/t/attack-of-the-activated-actions/1900">isotopic actions stored in variables are the WORD!-triggered kind</a> (while regular actions would be inert).</p>
+<p>It has FUNC returning isotopic actions, and you'd get an error:</p>
+<pre><code>&gt;&gt; foo: func [/refine] [...]
+** Error: Cannot assign isotope to FOO with SET-WORD! (see SET/ANY)
+</code></pre>
+<p>Making an exception for action isotopes, and saying they could be assigned without an annotation really feels like it undermines the entire proposal and the safety you'd get from it.</p>
+<p>I will note that I really did get a warm fuzzy feeling when the generators produced plain ACTION!, and something had to tip it into being isotopic.  But I had to pan <strong><code>/foo: func [... /refine] [...]</code></strong> in no small part due to leading-slash being "taken" by refinements in function spec and apply.</p>
+<p>This made me take a more serious look at the concept of retaking something like <strong><code>-&gt;</code></strong>.  Under the new rules that wouldn't have to finesse the assignment as well:</p>
+<pre><code>foo: -&gt; func [/refine] [...]
+
+foo: runs func [/refine] [...]  ; for those who dislike symbols
+</code></pre>
+<p>So either of these would act like <strong><code>set/any 'foo isotopic func [/refine] [...]</code></strong>.</p>
+<p>Wait... <em>UNLESS...</em> <img src="https://forum.rebol.info/images/emoji/twitter/thinking.png?v=9" title=":thinking:" class="emoji" alt=":thinking:"></p>
+<p>I just had a rather compelling thought, that such a tool could <em>only accept isotopic ACTION!</em>, and that this would provide natural guidance not to screw it up... because a plain assignment would error:</p>
+<pre><code>&gt;&gt; foo: func [/refine] [...]
+** Error: Can't assign isotope ACTION! via SET-WORD!, use -&gt; or INERT
+</code></pre>
+<p><em>So if all the function generators were committed to returning isotopes, it would be self-correcting.</em>  You wouldn't be able to forget to triage the assignment.</p>
+<pre><code>&gt;&gt; foo: inert func [x] [print ["x is" x]]
+== #[action! [x]]
+
+&gt;&gt; foo
+== #[action! [x]]
+
+&gt;&gt; foo: -&gt; func [x] [print ["x is" x]]
+== ~#[action! [x]]~  ; isotope
+
+&gt;&gt; foo 10
+x is 10
+</code></pre>
+<p>Now THAT is clever.  You're forced into triage, and can't forget to do one or the other!  Forgetting the annotation was one of the big Achilles heels of making generator products inert by default (hard to find bugs) but this ties that up.</p>
+<p>Very promising premise!  But there are tricky issues, like how today's METHOD needs to look back to quote what it's being assigned to, in order to know how to bind the value.  Maybe it wouldn't need to... if <strong><code>-&gt;</code></strong> also made that binding connection...and maybe there'd be no such thing as METHOD.  <img src="https://forum.rebol.info/images/emoji/twitter/exploding_head.png?v=9" title=":exploding_head:" class="emoji" alt=":exploding_head:"></p>
+<h2>Related Question: What About VOID ?</h2>
+<p>A corollary to this question is <strong>"Should SET-WORD! Stop Treating VOID Assignments as Unsetting Variables"</strong></p>
+<p>It might seem obvious to say "yes, that should be an error too".  In fact...since I've vetoed the idea of variables actually being able to hold "voidness" it might seem like an <em>even worse sin</em> that should be prohibited... because you're not actually preserving the "integrity" of the assignment.</p>
+<p><em>BUT</em>... when I tried to rule it out I noticed that it was used in frames for things like setting refinements, like:</p>
+<pre><code>&gt;&gt; series [a b c]
+&gt;&gt; value: 3
+
+&gt;&gt; f: make frame! :append
+&gt;&gt; f.series: series
+&gt;&gt; f.value: value
+&gt;&gt; f.dup: if integer? value [value]
+
+&gt;&gt; do f
+== [a b c 3 3 3]
+</code></pre>
+<p>But should the IF evaluate to void...the /DUP would not be set.  That not-set state was leading the default behavior for the refinement being not set (to coerce it to NULL in the call).</p>
+<p>This is an interesting use case, and it arguably isn't "doing an isotopic assignment" (void is not an isotope, and it has no QUASI! form).  It's making a subtle judgment call, and it might be a good one.  I'll keep this as-is for now.</p>
+<h2>Ultimate Goal: Freedom Of Choice  <img src="https://forum.rebol.info/images/emoji/twitter/statue_of_liberty.png?v=9" title=":statue_of_liberty:" class="emoji" alt=":statue_of_liberty:">
+</h2>
+<p>It's still definitely want to make it possible to override these behaviors if you find they get in your way.  Certainly we'd need it for Redbol...but it should work at other granularities.</p>
+<p>Why shouldn't you be able to say <em>"hey, for just this function's body I want all the SET-WORD!s to assign isotopes without complaint"</em>?</p>
+          <p><a href="https://forum.rebol.info/t/should-set-word-disallow-isotopic-assignments/1919/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/should-set-word-disallow-isotopic-assignments/1919/1</link>
+        <pubDate>Wed, 17 Aug 2022 08:32:28 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1919-1</guid>
+        <source url="https://forum.rebol.info/t/should-set-word-disallow-isotopic-assignments/1919.rss">Should SET-WORD! Disallow Isotopic Assignments?</source>
+      </item>
+  </channel>
+</rss>
