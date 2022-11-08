@@ -86,9 +86,149 @@ This is something a bit hidden, because you don&#39;t see the locals when you ar
 
 But from an implementation standpoint, it&#39;s nice to have all the locals start out as unset, which is what you want them to be when the function runs.</description>
     
-    <lastBuildDate>Sat, 27 Aug 2022 11:48:26 +0000</lastBuildDate>
+    <lastBuildDate>Tue, 18 Oct 2022 19:40:36 +0000</lastBuildDate>
     <category>Internals</category>
     <atom:link href="https://forum.rebol.info/t/default-values-and-make-frame/1412.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Default Values And MAKE FRAME!</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="6" data-topic="1412">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/40/26_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p><strong>Anyway, long story short, I think the baseline mechanics of FRAME! has to be as-is.</strong> Whatever else is an exception and should be handled specially. If you want a ^META parameter, that should be something that happens after the function starts running. This improves matters greatly.</p>
+</blockquote>
+</aside>
+<p>As is often the case... the old way had right parts, the new way had right parts, and the answer is going to need... nuance.  <img src="https://forum.rebol.info/images/emoji/twitter/roll_eyes.png?v=9" title=":roll_eyes:" class="emoji" alt=":roll_eyes:"></p>
+<p>The way it works today, frames are initialized to "nihil" (the isotope of void), because <strong><code>~</code></strong> is what denotes the unset state.  For I-believe-to-be-good-reasons, it's no longer a synonym for void itself (the meta/quoted form of void is a single <strong><code>'</code></strong> apostrophe):</p>
+<pre><code>&gt;&gt; f: make frame! :append
+== make frame! [
+    series: ~
+    value: ~
+    part: ~
+    dup: ~
+    line: ~
+]
+</code></pre>
+<p>While fetching such variables should be an error by default, I've also said that I like the idea of this being an easy, legal assignment... so you can say <strong><code>(var: ~)</code></strong> to unset it.</p>
+<p>I've also become attached to saying that true and false are actually WORD! isotopes, and although you can't put isotopes in blocks...you can freely assign these to variables, and retrieve them from variables.</p>
+<pre><code>&gt;&gt; flag: true
+== ~true~  ; isotope
+
+&gt;&gt; flag
+== ~true~  ; isotope
+
+&gt;&gt; reify flag
+== true
+
+&gt;&gt; meta flag
+== ~true~
+</code></pre>
+<p><em>It would be annoying if you could not directly assign a ~true~ or ~false~ isotope to a variable in a frame, and had to use some kind of ^META parameter convention to process it.</em></p>
+<p>Yet I'm suspicious of being able to put parameter packs (isotopic blocks) or isotopic errors into a variable... <em>ever</em>:</p>
+<pre><code>&gt;&gt; ~['10 '20]~
+== ~['10 '20]~  ; isotope
+
+&gt;&gt; value: ~['10 '20]~
+== 10
+
+&gt;&gt; set/any 'value ~['10 '20]~
+== ~['10 '20]~  ; isotope (sketchy!)
+
+&gt;&gt; :value
+== ~['10 '20]~  ; isotope (sketchy!)
+</code></pre>
+<p>It is likely the case that isotopes fit into categories of things that can be assigned to variables literally, and things that cannot.  Keeping with the terminology, these might be called <strong>stable isotopes</strong> and <strong>unstable isotopes</strong>.  And the only way you can capture an unstable isotope is to transform it into some stable form, e.g. with META or REIFY:</p>
+<pre><code>&gt;&gt; value: meta ~['10 '20]~
+== ~['10 '20]~
+</code></pre>
+<p>Yet recall that with <strong><code>~</code></strong> and <strong><code>~true~</code></strong> and <strong><code>~false~</code></strong> (and <strong><code>~_~</code></strong> for null), it would seem we have a proof case that stable isotopes <em>exist</em>.</p>
+<p>But there are other stable isotopes.  e.g. now ACTION! isotopes are used to be the form of action that runs from a variable reference.  Hence by definition you need to be able to store these in variables, and they are stable also.</p>
+<p>How about splices?  Is there any great reason to make them unstable?  The following seems useful...</p>
+<pre><code>&gt;&gt; data: spread [d e]
+== ~(d e)~  ; isotope
+
+&gt;&gt; append [a b c] data
+== [a b c d e]
+</code></pre>
+<p>And if you're going to specialize a function like APPEND, shouldn't you be able to just write:</p>
+<pre><code>apde: specialize :append [value: spread [d e]]
+</code></pre>
+<p>And this is where I was talking about the hassle of forcing these isotopes to be communicated by the ^META protocol, because if it meant you would sometimes take splices, you would <em>always</em> need to quote values you were appending... that was a headache.  So we want as few of these ^META functions as we can possibly have.</p>
+<p>Yet fetching without complaint makes it very easy to unintentionally get effects you weren't intending, like if you didn't realize DATA was a splice isotope and expect exactly two items here:</p>
+<pre><code>&gt;&gt; reduce [1 data]
+== [1 d e]
+</code></pre>
+<p>We might say that the table stakes for showing you are aware that something "weird" is going on is on the access side, to use a GET-WORD!</p>
+<pre><code>&gt;&gt; reduce [1 :data]
+== [1 d e]
+</code></pre>
+<p>Yet do note that if DATA were bound to a function, that function could return an isotope like SPREAD does, putting you back at the point of being unable to tell from the callsite how many elements will be resolved to.</p>
+<p>Hm.  Well, needing to use a GET-WORD! doesn't feel all that oppressive, and it offers some light protection that historical precedent has also offered (if a function in R3-Alpha/Red returns an UNSET! that's not an erroring condition, but if you get an unset out of a variable it will error without a GET-WORD!)</p>
+<h2>This Means ^META Arguments Must Be Special</h2>
+<p>I suggested this:</p>
+<aside class="quote no-group" data-username="hostilefork" data-post="6" data-topic="1412">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/40/26_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>Anyway, long story short, I think the baseline mechanics of FRAME! has to be as-is. Whatever else is an exception and should be handled specially. If you want a ^META parameter, that should be something that happens after the function starts running. This improves matters greatly.</p>
+</blockquote>
+</aside>
+<p>But now I'm saying that really there are just more isotopes in the stable family, communicated "as-is" to functions.</p>
+<p>Yet when unstable isotopes are needed to be considered as parameters, the inability to encode them in variables "as is" would necessitate passing them via ^META conventions.</p>
+<p>Consider RETURN.  There is a RETURN/FORWARD that if you are returning a pack (isotopic block) actually returns the entire isotopic block, not just the first value.  So this falls under the "can't do it without meta" category.</p>
+<p>What about SET?  At first it would seem to not have the problem, because it's setting a variable and everything it can take is representable in a variable (by definition).</p>
+<p>But... if we leave <strong><code>~</code></strong> isotopes as the "I didn't specialize that" state of frames, and if <strong>SET</strong> doesn't take its argument as a <strong>^META</strong> parameter, then there's no way to SET something to an unset state... without some mitigation.</p>
+<p>Possible mitigations:</p>
+<ol>
+<li>
+<p>just make UNSET a distinct native that's a completely distinct entry point, and argue you don't use SET to unset variables with a function</p>
+</li>
+<li>
+<p>during typechecking, nihil arguments are left as nihil if they're not refinements, vs. being set to null</p>
+<ul>
+<li>
+<p>this means if you're trying to set a variable's state from a refinement instead of a normal argument, you would not get full coverage of all possible variable states</p>
+</li>
+<li>
+<p>this also means that if a normal argument is marked as being optional/nullable, then not acting on it when doing a MAKE FRAME! would not wind up with it being null as default</p>
+</li>
+</ul>
+</li>
+<li>
+<p>make the parameter ^META...then let SPECIALIZE compensate for it normally.  But when you want to write an UNSET function that is implemented as a specialization over SET, you build the frame directly and pass the value via ^META conventions</p>
+<p>3a. Have a more foundational SET* that takes a ^META argument and lets you unset things, but the plain SET takes a normal argument and does not</p>
+</li>
+</ol>
+<p>I'm rather attached to <strong>(var: ~)</strong> to unset things, so I feel (1) would be inconsistent with that mechanic.</p>
+<p>With (3a), having SET* feels like a bad precedent.  It may seem like it's making life a little easier for some people who are writing ADAPT...but I don't think the net benefit outweighs making it a ^META argument.</p>
+<p>(2) sounds good in theory, if we're just making a frame and DO'ing it:</p>
+<pre><code>&gt;&gt; f: make frame! :set
+== make frame! [
+    target: ~
+    value: ~
+    groups: ~
+]
+
+&gt;&gt; x: 10
+&gt;&gt; f.target: 'x
+&gt;&gt; do f
+&gt;&gt; x
+** Error: x is ~ isotope (unset)
+</code></pre>
+<p>But if you try to turn a frame into an ACTION! and leave fields as <strong>~</strong>, it treats them as unspecialized.  This is designed to make it easier to write custom specialization functions, built on top of frame mechanics.</p>
+<p><strong>It's annoying that this is in the vein of exact problems ^META exists to solve...but you're having to shift to the meta convention to get coverage for <em>just one</em> isotopic state, which almost no one will be specializing functions to use!</strong>  <img src="https://forum.rebol.info/images/emoji/twitter/frowning.png?v=9" title=":frowning:" class="emoji" alt=":frowning:"></p>
+<p>Annoying though it may be, I think it's going to have to be how it's done.  If this is the biggest problem the whole thing has, then it's not really that bad!</p>
+          <p><a href="https://forum.rebol.info/t/default-values-and-make-frame/1412/7">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/default-values-and-make-frame/1412/7</link>
+        <pubDate>Tue, 18 Oct 2022 19:01:07 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1412-7</guid>
+        <source url="https://forum.rebol.info/t/default-values-and-make-frame/1412.rss">Default Values And MAKE FRAME!</source>
+      </item>
       <item>
         <title>Default Values And MAKE FRAME!</title>
         <dc:creator><![CDATA[hostilefork]]></dc:creator>

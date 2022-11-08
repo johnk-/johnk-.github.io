@@ -1,0 +1,264 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Series Switching in PARSE</title>
+    <link>https://forum.rebol.info/t/series-switching-in-parse/1974</link>
+    <description>**Rebol2 Prohibited Series Switching During a PARSE**
+
+    &gt;&gt; series1: [a a a]
+    == [a a a]
+   
+    &gt;&gt; series2: [b b b]
+    == [b b b]
+
+    &gt;&gt; parse series1 [&#39;a :series2 some &#39;b]
+    ** Script Error: Invalid argument: b b b
+
+The error wasn&#39;t particularly informative.  But it was trying to tell you that you couldn&#39;t do that.
+
+**Red Chose to Follow Suit, and Prohibits Series Switching During a PARSE**
+
+red&gt;&gt; series1: [a a a]
+== [a a a]
+
+red&gt;&gt; series2: [b b b]
+== [b b b]
+
+red&gt;&gt; parse series1 [&#39;a :series2 some &#39;b]
+*** Script Error: PARSE - get-word refers to a different series! :series2
+
+**R3-Alpha Decided To Make It Legal**
+
+    r3-alpha&gt;&gt; series1: [a a a]
+    == [a a a]
+
+    r3-alpha&gt;&gt; series2: [b b b]
+    == [b b b]
+
+    r3-alpha&gt;&gt; parse series1 [&#39;a :series2 some &#39;b]
+    == true
+
+I wasn&#39;t aware the feature was used, but @rgchris used it in the Rebol3 version of altjson:
+
+  https://github.com/rgchris/Scripts/blob/6fa69eabe11fe78b9fd0a7bd6bb17a923cee0b2b/r3-alpha/altjson.r3#L48
+
+## The Feature Was Added to R3-Alpha Circa 2009
+
+Carl&#39;s blog entry:
+
+[http://www.rebol.net/r3blogs/0265.html](http://www.rebol.net/r3blogs/0265.html)
+
+He points out one fairly clear reason why this is sketchy:
+
+&gt; The problem is this: if you change the series but the rule fails, forcing a recovery to a prior index, *it&#39;s still the new series*. That is, we do not recover to the old series.
+&gt;
+&gt; If advanced users are willing to live with that restriction, then this change can be made.
+
+Another comment says the opposite of what I would think:
+
+&gt; Input switching would make parsing of big (or streaming) files more easy, as we wouldn&#39;t have to keep the whole data in memory, and could read it as needed, without losing the current parse state.
+
+Doing streaming parsing *correctly* requires *tighter* control over the process... not less.
+
+## Can The Desire Be Met Other Ways?
+
+Since you&#39;re basically destroying the ability to meaningfully backtrack, I don&#39;t know how this is that different from starting a new parse.
+
+I&#39;d like it to be easy to return results out of a parse (see the [RETURN/ACCEPT post](https://forum.rebol.info/t/uparses-spin-on-return/1589))
+
+So why wouldn&#39;t you have some kind of driving loop on the outside of your parse that looks for a continuation signal, and then starts a new parse with what it&#39;s given?
+
+I want to take a look at the cases and see if they could be done some other way.  So maybe @rgchris can explain the rational behind the choice in altjson, and if there&#39;s some feature that would be a better fit.</description>
+    
+    <lastBuildDate>Tue, 20 Sep 2022 18:45:23 +0000</lastBuildDate>
+    <category>Parsing</category>
+    <atom:link href="https://forum.rebol.info/t/series-switching-in-parse/1974.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Series Switching in PARSE</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>It was hacked up, because I was trying to bridge past the BODY-OF bit...where objects were being converted to blocks...but you can't convert Ren-C's NULL to block values.</p>
+<p>So I changed it to a MAP-EACH instead that created SET-WORD!s and reified elements (e.g. the word <code>null</code>).</p>
+<p>But some intermediate point of that had the problem I describe, where I forgot to splice the blocks or something.  I thought I was exercising a code path for serializing some type that depended on series switching by introducing new things in the structure.  I may have just thrown it all out of whack.</p>
+          <p><a href="https://forum.rebol.info/t/series-switching-in-parse/1974/7">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/series-switching-in-parse/1974/7</link>
+        <pubDate>Tue, 20 Sep 2022 18:45:23 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1974-7</guid>
+        <source url="https://forum.rebol.info/t/series-switching-in-parse/1974.rss">Series Switching in PARSE</source>
+      </item>
+      <item>
+        <title>Series Switching in PARSE</title>
+        <dc:creator><![CDATA[rgchris]]></dc:creator>
+        <description><![CDATA[
+            <p>If that's what was happening, then yikes! I'd need to check, but I don't think this code is radically different from the Rebol 2 version.</p>
+<aside class="quote no-group" data-username="hostilefork" data-post="5" data-topic="1974">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/40/26_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>e.g. there's code that says <strong>here: make block! 10</strong> and by definition, if that series ever makes it to <strong>:here</strong> in mid-parse then it can't be the series that was being parsed already.</p>
+</blockquote>
+</aside>
+<p>This shouldn't happen with this code though. The <code>here: make block! 10</code> is in LOAD-JSON in which HERE only refers to the insertion point in the output value. In TO-JSON :HERE is only used in place of AND where HERE tracks the current position traversing the block to be serialized. To reuse the same example:</p>
+<pre><code class="lang-nohighlight">parse reduce [
+    make object! [a: 1]
+][
+    mark: object! :mark
+    (change/only mark body-of mark/1)
+    into [
+        set-word! integer!
+    ]
+]
+</code></pre>
+<p>(works in Rebol 2)</p>
+          <p><a href="https://forum.rebol.info/t/series-switching-in-parse/1974/6">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/series-switching-in-parse/1974/6</link>
+        <pubDate>Tue, 20 Sep 2022 18:40:52 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1974-6</guid>
+        <source url="https://forum.rebol.info/t/series-switching-in-parse/1974.rss">Series Switching in PARSE</source>
+      </item>
+      <item>
+        <title>Series Switching in PARSE</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>What I encountered was actually input switching, e.g. it was PARSE-ing one series and then being seeked to a new series that had been created.</p>
+<p>e.g. there's code that says <strong>here: make block! 10</strong> and by definition, if that series ever makes it to <strong>:here</strong> in mid-parse then it can't be the series that was being parsed already.</p>
+<p>If that wasn't supposed to be possible I may well have just gotten things into a bad state.   Or a Ren-C bug.  Or a bug in the Ren-C port of the script.  It happened when I gave it some bad input in Graham's PatientDB app...and when I fixed the input it stopped happening.</p>
+<p>Given other priorities, I'm happy to accept you saying that you weren't actually trying to create new series and switch to them in mid parse...that was my main concern, that using the feature was by design.</p>
+          <p><a href="https://forum.rebol.info/t/series-switching-in-parse/1974/5">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/series-switching-in-parse/1974/5</link>
+        <pubDate>Tue, 20 Sep 2022 18:33:12 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1974-5</guid>
+        <source url="https://forum.rebol.info/t/series-switching-in-parse/1974.rss">Series Switching in PARSE</source>
+      </item>
+      <item>
+        <title>Series Switching in PARSE</title>
+        <dc:creator><![CDATA[rgchris]]></dc:creator>
+        <description><![CDATA[
+            <p>Ah, I don't know if that strictly counts as input switching, rather it's modifying the input series ahead of the point where it's currently parsing. e.g.</p>
+<pre><code class="lang-nohighlight">parse reduce [
+    make object! [a: 1]
+][
+    and object!
+    mark:
+    (change/only mark body-of mark/1)
+    into [
+        set-word! integer!
+    ]
+]
+</code></pre>
+<aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="1974">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/40/26_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>So maybe <a class="mention" href="/u/rgchris">@rgchris</a> can explain the rational behind the choice in altjson, and if there's some feature that would be a better fit.</p>
+</blockquote>
+</aside>
+<p>I likely wouldn't do it this way again, it was just using the INTO as shorter way to recurse into a tree structure. A bit too hackish in retrospect.</p>
+          <p><a href="https://forum.rebol.info/t/series-switching-in-parse/1974/4">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/series-switching-in-parse/1974/4</link>
+        <pubDate>Tue, 20 Sep 2022 18:26:01 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1974-4</guid>
+        <source url="https://forum.rebol.info/t/series-switching-in-parse/1974.rss">Series Switching in PARSE</source>
+      </item>
+      <item>
+        <title>Series Switching in PARSE</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>Well perhaps I caused a bug, but I had these series created and then they were seeked to with the <strong>:here</strong></p>
+<p><a href="https://github.com/rgchris/Scripts/blob/6fa69eabe11fe78b9fd0a7bd6bb17a923cee0b2b/r3-alpha/altjson.r3#L306">https://github.com/rgchris/Scripts/blob/6fa69eabe11fe78b9fd0a7bd6bb17a923cee0b2b/r3-alpha/altjson.r3#L306</a></p>
+<p>Ren-C raised an error due to the different series.</p>
+          <p><a href="https://forum.rebol.info/t/series-switching-in-parse/1974/3">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/series-switching-in-parse/1974/3</link>
+        <pubDate>Tue, 20 Sep 2022 18:11:53 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1974-3</guid>
+        <source url="https://forum.rebol.info/t/series-switching-in-parse/1974.rss">Series Switching in PARSE</source>
+      </item>
+      <item>
+        <title>Series Switching in PARSE</title>
+        <dc:creator><![CDATA[rgchris]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="1974">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/40/26_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>I wasn't aware the feature was used, but <a class="mention" href="/u/rgchris">@rgchris</a> used it in the Rebol3 version of altjson:</p>
+<p><a href="https://github.com/rgchris/Scripts/blob/6fa69eabe11fe78b9fd0a7bd6bb17a923cee0b2b/r3-alpha/altjson.r3#L48">https://github.com/rgchris/Scripts/blob/6fa69eabe11fe78b9fd0a7bd6bb17a923cee0b2b/r3-alpha/altjson.r3#L48 </a></p>
+</blockquote>
+</aside>
+<p>I don't believe that's the case: <code>'here</code> is the point of insertion for the output value. As far as I'm aware, I haven't used input switching.</p>
+          <p><a href="https://forum.rebol.info/t/series-switching-in-parse/1974/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/series-switching-in-parse/1974/2</link>
+        <pubDate>Tue, 20 Sep 2022 18:09:04 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1974-2</guid>
+        <source url="https://forum.rebol.info/t/series-switching-in-parse/1974.rss">Series Switching in PARSE</source>
+      </item>
+      <item>
+        <title>Series Switching in PARSE</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p><strong>Rebol2 Prohibited Series Switching During a PARSE</strong></p>
+<pre><code>&gt;&gt; series1: [a a a]
+== [a a a]
+
+&gt;&gt; series2: [b b b]
+== [b b b]
+
+&gt;&gt; parse series1 ['a :series2 some 'b]
+** Script Error: Invalid argument: b b b
+</code></pre>
+<p>The error wasn't particularly informative.  But it was trying to tell you that you couldn't do that.</p>
+<p><strong>Red Chose to Follow Suit, and Prohibits Series Switching During a PARSE</strong></p>
+<p>red&gt;&gt; series1: [a a a]<br>
+== [a a a]</p>
+<p>red&gt;&gt; series2: [b b b]<br>
+== [b b b]</p>
+<p>red&gt;&gt; parse series1 ['a :series2 some 'b]<br>
+*** Script Error: PARSE - get-word refers to a different series! :series2</p>
+<p><strong>R3-Alpha Decided To Make It Legal</strong></p>
+<pre><code>r3-alpha&gt;&gt; series1: [a a a]
+== [a a a]
+
+r3-alpha&gt;&gt; series2: [b b b]
+== [b b b]
+
+r3-alpha&gt;&gt; parse series1 ['a :series2 some 'b]
+== true
+</code></pre>
+<p>I wasn't aware the feature was used, but <a class="mention" href="/u/rgchris">@rgchris</a> used it in the Rebol3 version of altjson:</p>
+<p><a href="https://github.com/rgchris/Scripts/blob/6fa69eabe11fe78b9fd0a7bd6bb17a923cee0b2b/r3-alpha/altjson.r3#L48">https://github.com/rgchris/Scripts/blob/6fa69eabe11fe78b9fd0a7bd6bb17a923cee0b2b/r3-alpha/altjson.r3#L48</a></p>
+<h2>The Feature Was Added to R3-Alpha Circa 2009</h2>
+<p>Carl's blog entry:</p>
+<p><a href="http://www.rebol.net/r3blogs/0265.html">http://www.rebol.net/r3blogs/0265.html</a></p>
+<p>He points out one fairly clear reason why this is sketchy:</p>
+<blockquote>
+<p>The problem is this: if you change the series but the rule fails, forcing a recovery to a prior index, <em>it's still the new series</em>. That is, we do not recover to the old series.</p>
+<p>If advanced users are willing to live with that restriction, then this change can be made.</p>
+</blockquote>
+<p>Another comment says the opposite of what I would think:</p>
+<blockquote>
+<p>Input switching would make parsing of big (or streaming) files more easy, as we wouldn't have to keep the whole data in memory, and could read it as needed, without losing the current parse state.</p>
+</blockquote>
+<p>Doing streaming parsing <em>correctly</em> requires <em>tighter</em> control over the process... not less.</p>
+<h2>Can The Desire Be Met Other Ways?</h2>
+<p>Since you're basically destroying the ability to meaningfully backtrack, I don't know how this is that different from starting a new parse.</p>
+<p>I'd like it to be easy to return results out of a parse (see the <a href="https://forum.rebol.info/t/uparses-spin-on-return/1589">RETURN/ACCEPT post</a>)</p>
+<p>So why wouldn't you have some kind of driving loop on the outside of your parse that looks for a continuation signal, and then starts a new parse with what it's given?</p>
+<p>I want to take a look at the cases and see if they could be done some other way.  So maybe <a class="mention" href="/u/rgchris">@rgchris</a> can explain the rational behind the choice in altjson, and if there's some feature that would be a better fit.</p>
+          <p><a href="https://forum.rebol.info/t/series-switching-in-parse/1974/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/series-switching-in-parse/1974/1</link>
+        <pubDate>Tue, 20 Sep 2022 02:03:00 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1974-1</guid>
+        <source url="https://forum.rebol.info/t/series-switching-in-parse/1974.rss">Series Switching in PARSE</source>
+      </item>
+  </channel>
+</rss>

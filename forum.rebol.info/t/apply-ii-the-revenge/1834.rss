@@ -124,50 +124,112 @@ Of course, you can mix it up with your own freaky ideas, even variadic ones!
 
 The choice is up to you.  Which is what all this is about!</description>
     
-    <lastBuildDate>Sun, 05 Jun 2022 08:20:19 +0000</lastBuildDate>
+    <lastBuildDate>Wed, 31 Aug 2022 02:06:54 +0000</lastBuildDate>
     <category>Feature Discover</category>
     <atom:link href="https://forum.rebol.info/t/apply-ii-the-revenge/1834.rss" rel="self" type="application/rss+xml" />
       <item>
         <title>APPLY II: The Revenge!</title>
         <dc:creator><![CDATA[hostilefork]]></dc:creator>
         <description><![CDATA[
-            <aside class="quote no-group" data-username="hostilefork" data-post="5" data-topic="1834">
-<div class="title">
-<div class="quote-controls"></div>
-<img alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/40/26_2.png" class="avatar"> hostilefork:</div>
-<blockquote>
-<p>For most anything you'd put in that position, it struggles with the question of "why would it mean APPLY". Even if &amp; wasn't hideous (and it is), there's no real tie-in that it has to other uses of &amp; we might imagine...so having it do function application just looks random:</p>
-<pre><code>thing: append &amp; [series :value]
+            <p>Mulling this has led me to a kind of seemingly inevitable conclusion...</p>
+<p><strong>I think this should be the behavior of terminal slash</strong></p>
+<p>Here it is demonstrated with one of rebmake's <em>"that-sure-is-a-lot-of-refinements"</em> functions:</p>
+<pre><code>add-project-flags/ [
+    ext-objlib
+    /I app-config.includes
+    /D compose [
+        (either ext.mode = &lt;builtin&gt; ["REB_API"] ["REB_EXT"])
+        (spread app-config.definitions)
+    ]
+    /c app-config.cflags
+    /O app-config.optimization
+    /g app-config.debug
+]
 </code></pre>
-</blockquote>
-</aside>
-<p>So one possibility that's growing on me is <strong><code>//</code></strong></p>
-<pre><code>thing: append // [[a b c] &lt;d&gt; /dup 2]
-</code></pre>
-<p>It's no longer going to be a PATH!, just because <strong><code>//x</code></strong> and <strong><code>x//</code></strong> are paths.  <em>(It will be a WORD! that has some inter-convertibility to paths for operations like JOIN, e.g. <strong><code>join 'a/b as path! '//</code></strong> would get you the path <strong><code>a/b//</code></strong>)</em></p>
-<p>It has a couple of things going for it:</p>
+<p><strong>The slash marks a kind of barrier between the function and its block argument.</strong>   It's like it's saying <em>"whoa, hold up now, you're not actually taking that BLOCK! as a parameter!"</em></p>
 <ul>
 <li>
-<p>Slashes are now intimately entwined with function application in the core evaluator, so having a slashy thing be APPLY makes some sense</p>
+<p>This avoids what's upsetting about a quoting <strong>apply add-project-flags [...]</strong> syntax.  It may "look" nice on the surface, but you have to scan backwards to see "oh, there's an APPLY back there"</p>
 </li>
 <li>
-<p>It's easy to type...doesn't require hitting shift, flows very naturally.</p>
-</li>
-<li>
-<p>Visually non-disruptive; it's sort of "shapeless"</p>
+<p>Non-quoting <strong>apply :add-project-flags [...]</strong> has the reverse problem: you think application is being <em>suppressed</em> and have to scan backwards to the APPLY and see "oh, no it's not, it's actually running".</p>
 </li>
 </ul>
-<p>It's used for comments in JavaScript and C++, but the syntaxes are 99% incompatible anyway.  I've made peace with semicolon as the comment character years ago, so desiring // for comments isn't an issue for me anymore.</p>
-<p>If we wanted to bake the behavior into path dispatch, we could glue it onto the APPEND:</p>
-<pre><code>thing: append// [[a b c] &lt;d&gt; /dup 2]
+<p>Terminal slash kills two birds with one stone: it keeps things in the range of function application (e.g. APPLY/ONLY has a slash and that's connoted with application), and gives the visual separation we want at the location we want it.</p>
+<p>This bakes it into the evaluator a bit more (though I'm proposing evaluator hooks that parallel UPARSE's combinator MAP! to permit varying it).</p>
+<p>But the proof of concept that you could write a function doing it has been done.  You can write this form of APPLY yourself with FRAME!, and design other APPLY-like operators.  Just because you <em>can</em> write an apply operator doesn't mean that the evaluator has to avoid giving a foundational notation to this very critical behavior.</p>
+<p>This will mean rethinking the other applications for terminal slash that are in the mix right now...</p>
+<h2>In The Evaluator, FOO/ Has Been A "This is a Function" Annotation</h2>
+<p>I had it so that if you terminated something with a slash it would run it...but warn you if it wasn't an action:</p>
+<pre><code> &gt;&gt; print/ "Hello"
+ Hello
+
+ &gt;&gt; mystery: 10
+
+ &gt;&gt; mystery/ "Hello"
+ ** Error: MYSTERY is not an action!, can't run with terminal /
 </code></pre>
-<p>But, that makes it more built in to path dispatch (which is undesirable) and I don't think it looks as good.</p>
-<p>I'm leaning a little more to liking this than the left arrow, because the arrow is kind of "noisy" as symbols go...and the idea that it's a meaningful "direction of flow" is a bit forced.</p>
-          <p><a href="https://forum.rebol.info/t/apply-ii-the-revenge/1834/6">Read full topic</a></p>
+<p>That's been mostly a means of commenting.  A parallel concept I had was that you could ensure things where actions by assigning to paths with terminal slash:</p>
+<pre><code>&gt;&gt; x: 10
+
+&gt;&gt; foo/: :print
+== #[action! [line]]
+
+&gt;&gt; bar/: x
+** Error: Can't assign non-ACTION! using terminal slash
+</code></pre>
+<h2>Terminal Slash Has Also Retriggered ACTION! Values</h2>
+<p>Today, this behavior is useful with GROUP!</p>
+<pre><code> &gt;&gt; (either true [:print] [:elide])
+ == #[action! [line]]
+
+ &gt;&gt; (either true [:print] [:elide])/ "Hello"
+ Hello
+</code></pre>
+<p>This becomes more useful with the ACTION!-vs-isotopic-ACTION! distinction.  That's because plain WORD!s referring to actions wouldn't run in the evaluator.  So <strong>foo/</strong> could be a shorthand for <strong>run foo</strong> when FOO contained a plain  inert action.</p>
+<p>But...here's a thought: you probably really should be enclosing things in some kind of array anyway, if you're getting a function value somewhere:</p>
+<pre><code> dump-block: func [block [block!] dumper [action!]] [
+     for-each item block [
+         print "Dumping item..."
+         dumper item  ; what if dumper doesn't take exactly 1 argument?
+         print "Item was dumped."
+     ]
+ ]
+</code></pre>
+<p>When reading some of BrianH's code when first looking at Rebol, I'd notice in cases like this the calls would be in GROUP!s, e.g. <strong><code>(dumper item)</code></strong>.  It would quarantine the function.. and sometimes it would take advantage of the fact that if the function took fewer parameters, that would be tolerated (saying it just wasn't interested in those).</p>
+<p>But using <strong><code>dumper/ [item]</code></strong> instead of <strong><code>(dumper item)</code></strong> has advantages, such as that you won't be impacted by parameter conventions like quoting.  So there's no way for the function you are calling to get the name of the variable you're passing--for instance.</p>
+<h2>In UPARSE, a FOO/ Has Been Running the <a href="https://forum.rebol.info/t/if-action-combinators-dont-impress-i-dont-know-what-will/1608">ACTION! combinator</a>
+</h2>
+<p>The implementation is a bit convoluted at the moment.  But that it works at all as a usermode-implemented construct is pretty impressive:</p>
+<pre><code>  &gt;&gt; parse [1 2 3] [collect some [
+       keep negate/ integer!
+  ]]
+   == [-1 -2 -3]
+</code></pre>
+<p>This is not necessarily contentious--given that you are free to kick over into a GROUP! if you want a function invocation that doesn't draw arguments out of the parse stream.  But it could also be done by a RUN combinator that just picked up whatever came next.</p>
+<pre><code>  &gt;&gt; parse [1 2 3] [collect some [
+       keep run negate integer!
+  ]]
+   == [-1 -2 -3]
+</code></pre>
+<p>And we could carry over the apply behavior in case you wanted a midstream application:</p>
+<pre><code>  &gt;&gt; parse [[a b] 2 "hello"] [
+         series: &lt;any&gt;, n: integer!, append/ [series [c d] /dup n]]  text!
+     ]
+  == "hello"
+
+  &gt;&gt; series
+  == [a b [c d] [c d]]
+</code></pre>
+<h2>At Time Of Writing, Terminal-Slash-APPLY Looks Like a Winner</h2>
+<p>I found that <strong><code>&lt;-</code></strong> was no good for me, nor was <strong><code>//</code></strong>.</p>
+<p>I think the other purposes terminal slash has been used for can be rethought, certainly for such a big payoff.</p>
+<p>There'd still be the option of APPLY if you want it, but I'm now pretty firm that it shouldn't quote.</p>
+          <p><a href="https://forum.rebol.info/t/apply-ii-the-revenge/1834/7">Read full topic</a></p>
         ]]></description>
-        <link>https://forum.rebol.info/t/apply-ii-the-revenge/1834/6</link>
-        <pubDate>Sun, 05 Jun 2022 07:38:28 +0000</pubDate>
-        <guid isPermaLink="false">forum.rebol.info-post-1834-6</guid>
+        <link>https://forum.rebol.info/t/apply-ii-the-revenge/1834/7</link>
+        <pubDate>Tue, 30 Aug 2022 23:12:04 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1834-7</guid>
         <source url="https://forum.rebol.info/t/apply-ii-the-revenge/1834.rss">APPLY II: The Revenge!</source>
       </item>
       <item>

@@ -3,137 +3,114 @@
   <channel>
     <title>The Long-Awaited Death of /ONLY</title>
     <link>https://forum.rebol.info/t/the-long-awaited-death-of-only/1607</link>
-    <description>**It is looking 99% certain that I will be killing off /ONLY, and that the only things you can append to BLOCK! (and GROUP!, etc.) will be ANY-ARRAY!, QUOTED!, and BLANK! (no op).**
+    <description>**As of July 2022, /ONLY is no longer a refinement available on APPEND, INSERT, CHANGE, FIND, SELECT, COMPOSE, or similar functions.**  It only appears in the Redbol module [through emulation](https://forum.rebol.info/t/agree-to-disagree-points-places-i-see-both-sides/1862/3?u=hostilefork).
 
-So let&#39;s talk about that...
+## &quot;AS-IS&quot; Semantics Are Default
 
-## Key Point Up Front: You Can Have /ONLY If You Want It
+It&#39;s easy to sympathize with the historical Rebol idea of &quot;splice blocks by default&quot;, if you only look at examples where the code is fully literal:
 
-*Ren-C&#39;s flexibility means you can get /ONLY back if you want it, and not break a sweat doing so*.   You just become responsible for figuring out what its universal meaning is.  (#goodluckwiththat)
+    append files [%foo.r %bar.r]
+    code: compose [... keep [sum: sum + x] ...]
 
-Remember that AUGMENT lets you add parameters to functions.
+But problems immediately strike when you start using variables that may-or-may-not-be blocks.  You can&#39;t rely on any invariants, and this leads to broken code:
 
-    &gt;&gt; foo: func [x] [print [&quot;x is&quot; mold x]]
-    &gt;&gt; parameters of :foo
-    == [x]
+    &gt;&gt; block: [#a {b} [c d e] %f]
 
-    &gt;&gt; foo+: augment :foo [/only &quot;An ONLY parameter&quot;]
-    &gt;&gt; parameters of :foo+
-    == [x /only]
+    &gt;&gt; pick block 3
+    == [c d e]
 
-    &gt;&gt; foo+ 10
-    x is 10
+    &gt;&gt; find block pick block 3
+    ; null
 
-    &gt;&gt; foo+/only 10
-    x is 10
+Time and experience has proven that &quot;as-is&quot; semantics are the safest and clearest default:
 
-But adding parameters doesn&#39;t actually do anything but expand the specification.  You have to use another tool like ADAPT or ENCLOSE to make use of the new parameters that FOO never knew about.
+    &gt;&gt; append [a b c] [d e]
+    == [a b c [d e]]
 
-    &gt;&gt; foo++: adapt :foo+ [print either only [&quot;/ONLY!&quot;] [&quot;no /ONLY&quot;]]
+Ren-C offers a new tool for &quot;spliced&quot; semantics...which is to pass a BLOCK! isotope (&quot;quoting level -1&quot;).  SPREAD is the first function offered which produces them:
 
-    &gt;&gt; foo++ 10
-    no /ONLY
-    x is 10
+    &gt;&gt; append [a b c] spread [d e]
+    == [a b c d e]
 
-    &gt;&gt; foo++/only 10
-    /ONLY!
-    x is 10
+But there&#39;s nothing particularly special about SPREAD, and there will be many other options for defining functions that may-or-may-not return block isotopes...which have more parameterization and nuance.
 
-So here&#39;s an ONLIFY transformer that adds a refinement to a function, and then injects a little code to pre-process the parameter to quote it:
+## Making The Value Carry Splicing Intent Brings Systemic Good
 
-    onlify: func [
-        {Add /ONLY behavior to APPEND, INSERT, CHANGE}
-        action [action!]
-    ][
-        adapt (augment :action [/only &quot;Use quoted semantics for value&quot;]) [
-            all [only, any-array? series] then [
-                value: quote :value
-            ]
-            ; ...fall through to normal handling
-        ]
-    ]
+The benefits are everywhere, with safer defaults and clear choices...for instance in REPLACE:
 
-Then you can apply it to the functions:
+    &gt;&gt; replace/all [[a b] a b a b] [a b] [c d e]
+    == [[c d e] a b a b] 
 
-    append: my onlify  ; e.g. `append: onlify :append` 
-    insert: my onlify
-    change: my onlify
+    &gt;&gt; replace/all [[a b] a b a b] spread [a b] [c d e]
+    == [[a b] [c d e] [c d e]]
 
-**This is the punchline.**  Ren-C&#39;s arsenal of abilities lets language twist and morph in your hands.
+    &gt;&gt; replace/all [[a b] a b a b] [a b] spread [c d e]
+    == [c d e a b a b]
 
-## One Fewer Semantic To Worry About
+    &gt;&gt; replace/all [[a b] a b a b] spread [a b] spread [c d e]
+    == [[a b] c d e c d e]
 
-/ONLY was well defined for block-to-block appends.  But other places had no idea.
+Branching code can make decisions to splice-or-not-splice on a case by case basis:
 
-What did APPEND/ONLY a BLOCK! to a string vs. regular APPEND to a string mean?  How about a PORT!?
+    &gt;&gt; code: [&lt;splice&gt; [a b] &lt;no-splice&gt; [c d] &lt;no-splice&gt; &#39;x]
 
-You could just ignore it, and a lot of places did that.  Yet this is uncomfortable.  It makes it feel like every implementer of an APPEND has to think about what &quot;only-ness&quot; means in that context or they are somehow missing out.
+    &gt;&gt; map-each [instruction item] code [
+           switch instruction [
+                &lt;splice&gt; [spread item]
+                &lt;no-splice&gt; [item]
+                fail [&quot;Bad instruction:&quot; instruction]
+           ]
+       ]
+    == [a b [c d] &#39;x]
 
-*But ONLY-ness has no meaning.*  It&#39;s always been a Rebol-specific &quot;quirk&quot; that I (especially) hated.  While the non-native-English speakers might have been more willing to accept that &quot;it is whatever it does&quot;, it interfered with the desire to make Rebol approximate fluent English as much as possible.
+And COMPOSE can have some slots that splice and others that do not, within the same operation:
 
-Certainly seeing it spread to something every datatype might have to react to or define was bad mojo.  The wrappers above show the ball being lobbed into the user&#39;s court to decide if they want to give it meaning, instead of having this burden borne by every PORT! or OBJECT! that might want to implement &quot;the APPEND generic action&quot;.
+    &gt;&gt; data: [a b]
 
-They&#39;ll have to figure out what they want to do with QUOTED! items, of course.  But that was going to be a problem anyway.  And it was a problem even when there were just **&#39;word** and **&#39;pa/th** in existence...arguably a harder and weirder problem due to the inability to do something generalized.
+    &gt;&gt; compose [spliced (spread data) non-spliced (data)]
+    == [spliced a b non-spliced [a b]]
 
-Long story short: Good riddance to having every APPEND/CHANGE/INSERT/FIND/SELECT implementer make up What /ONLY Means for Every parameter combination.
+(COMPOSE is a case where not splicing by default is glaringly obvious as the right choice for a generic operation.)
 
-## There Will Be A Lot Of (Generalized) Tools To Help
+## BLOCK! Isotopes Are Special (&quot;unfriendly&quot; :japanese_goblin: )
 
-I&#39;ve hesitated on going &quot;hard-line&quot; on this, to say that you can&#39;t do things like:
+Normal parameters cannot accept them.
 
-    &gt;&gt; find [a b &quot;cde&quot; [f g] h] &quot;cde&quot;
-    ** Error: FIND on ANY-ARRAY! requires ANY-ARRAY! or QUOTED!
+    &gt;&gt; normal-function: func [value] [print [&quot;Normal got:&quot; mold value]]
 
-You can grumble a bit and say:
+    &gt;&gt; normal-function spread [d e]
+    ** Error: NORMAL-FUNCTION can&#39;t take a BLOCK! isotope as its VALUE argument
 
-    &gt;&gt; find [a b &quot;cde&quot; [f g] h] [&quot;cde&quot;]
-    == [&quot;cde&quot; [f g] h]
+The way that you indicate you can take an isotope is using a ^META parameter.
 
-But that&#39;s now more &quot;blocky&quot; than someone might like.  Moreover, what if it&#39;s in a variable?
+But the convention with meta parameters is they will always be &quot;one quote level higher&quot; than the thing that they represent.
 
-Well, the variable case is the one we were actually worrying about.  It&#39;s to stop problems with:
+    &gt;&gt; meta-function: func [^value] [print [&quot;Meta got:&quot; mold value]]
 
-    &gt;&gt; find data item
-    ** Error: FIND on ANY-ARRAY! requires pattern to be ANY-ARRAY! or QUOTED!
+    &gt;&gt; meta-function [d e]
+    Meta got: &#39;[d e]  ; one quote level above 0 for unquoted input
 
-You can easily lose your bearings if you are trying to write generic code...to the point that generic code was nigh-impossible to write.
+    &gt;&gt; meta-function first [&#39;&#39;[d e]]
+    Meta got: &#39;&#39;&#39;[d e]  ; three quote levels above 0 for double-quoted input
 
-But with the right tools, I think this becomes so regularized that it feels natural to comply.  You can choose more wordy or more blocky or more symbol-y, it&#39;s all up to your style.
+    &gt;&gt; meta-function spread [d e]
+    Meta got: [d e]  ; no quotes for isotopic input
 
-So imagine:
+Using this detection mechanism, you can write your own routines that react specially to isotopes.
 
-    &gt;&gt; data: [a b &quot;cde&quot; [f g] h]
-    &gt;&gt; item: &quot;cde&quot;
+## Isotope Parameter Conventions Should Be Used *Sparingly*!
 
-There are now an arsenal of tools for manipulating the quoting status:
+Routines that do not intend to react to an isotope should not take them as parameters.
 
-    &gt;&gt; find data quote item
-    == [&quot;cde&quot; [f g] h]
+As a good example, REDUCE might seem like the kind of thing that could act on block isotopes:
 
-    &gt;&gt; find data ^item
-    == [&quot;cde&quot; [f g] h]
+    &gt;&gt; append [a b c] reduce spread [1 + 2 3 + 4]
+    == [a b c 3 7]
 
-    &gt;&gt; find data just b
-    == [b &quot;cde&quot; [f g] h]
+But we want to avoid this temptation, to stop the &quot;spread&quot; of isotopes to touching parts of the system that should not be concerned with them.  So exercise restraint here...and shift the burden on the calling code to reshape itself so that isotopes only exist at the points that are very close to the calls they affect:
 
-    &gt;&gt; find data [b]
-    == [b &quot;cde&quot; [f g] h]
-
-    &gt;&gt; find data ^(first [h i])
-    == [h]
-
-And it means that you just think of anytime that you&#39;re writing patterns to look for in blocks, you can default to making them be blocks or quoted blocks.
-
-    &gt;&gt; pattern-one: [b &quot;cde&quot;]
-    &gt;&gt; pattern-two: quote [f g]  ; or ^[f g], or [[f g]]
-
-    &gt;&gt; find data pattern-one
-    == [b &quot;cde&quot; [f g] h]
-
-    &gt;&gt; find data pattern-two
-    == [[f g] h]
-
-**Key is to stop losing sleep over these low-level routines being a little more &quot;inconvenient&quot;, and instead have faith that making them well-defined will let you build the specializations or adaptations you need.**
+    &gt;&gt; append [a b c] spread reduce [1 + 2 3 + 4]
+    == [a b c 3 7]
 
 ## Good Riddance /ONLY
 
@@ -141,117 +118,234 @@ The elimination of /ONLY from the semantic model, and to have it not contaminate
 
 Its appearance in Ren-C will be limited to the Redbol compatibility module.</description>
     
-    <lastBuildDate>Sat, 15 May 2021 11:18:07 +0000</lastBuildDate>
+    <lastBuildDate>Sat, 23 Jul 2022 04:17:43 +0000</lastBuildDate>
     <category>Internals</category>
     <atom:link href="https://forum.rebol.info/t/the-long-awaited-death-of-only/1607.rss" rel="self" type="application/rss+xml" />
       <item>
         <title>The Long-Awaited Death of /ONLY</title>
         <dc:creator><![CDATA[hostilefork]]></dc:creator>
         <description><![CDATA[
-            <p><strong>It is looking 99% certain that I will be killing off /ONLY, and that the only things you can append to BLOCK! (and GROUP!, etc.) will be ANY-ARRAY!, QUOTED!, and BLANK! (no op).</strong></p>
-<p>So let's talk about that...</p>
-<h2>Key Point Up Front: You Can Have /ONLY If You Want It</h2>
-<p><em>Ren-C's flexibility means you can get /ONLY back if you want it, and not break a sweat doing so</em>.   You just become responsible for figuring out what its universal meaning is.  (<span class="hashtag">#goodluckwiththat</span>)</p>
-<p>Remember that AUGMENT lets you add parameters to functions.</p>
-<pre><code>&gt;&gt; foo: func [x] [print ["x is" mold x]]
-&gt;&gt; parameters of :foo
-== [x]
+            <aside class="quote no-group quote-modified" data-username="rgchris" data-post="2" data-topic="1607">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/rgchris/40/14_2.png" class="avatar"> rgchris:</div>
+<blockquote>
+<p>Will use <code>#"</code>"` to denote a -1 quoted block:</p>
+</blockquote>
+</aside>
+<p>All this is new, so the thinking is going to naturally get shuffled around.  It's a complex puzzle with a lot of pieces.</p>
+<p>But...it may be that the existing rules are right, and isotopes <em>don't really have any representation at all</em>.</p>
+<p>You only know they exist by virtue of ^META'ing them and seeing something unquoted...or the errors you get when you try to access them (which tell you you have an isotope, and show you the value un-isotopified).</p>
+<p>This is how things work today (which is why you get the little <strong><code>; isotope</code></strong> comment stuck after the BAD-WORD!s that are in isotope forms).  But I thought that maybe it would be possible to generalize this in formatting.  But trying to reason about it in any way that isotopes are willing to "mold" doesn't cohere.</p>
+<p>I'm definitely leaning toward a new meaning for GET-XXX! things, which builds in an UNMETA.  This is unfortunate for those who liked <strong><code>:[...]</code></strong> meaning "reduce block".  But on the plus side, it would give us a new shorthand:</p>
+<pre><code>&gt;&gt; :[d e]
+== [d e]  ; isotope
 
-&gt;&gt; foo+: augment :foo [/only "An ONLY parameter"]
-&gt;&gt; parameters of :foo+
-== [x /only]
-
-&gt;&gt; foo+ 10
-x is 10
-
-&gt;&gt; foo+/only 10
-x is 10
+&gt;&gt; append [a b c] :[d e]
+== [a b c d e]
 </code></pre>
-<p>But adding parameters doesn't actually do anything but expand the specification.  You have to use another tool like ADAPT or ENCLOSE to make use of the new parameters that FOO never knew about.</p>
-<pre><code>&gt;&gt; foo++: adapt :foo+ [print either only ["/ONLY!"] ["no /ONLY"]]
+<p>More importantly than shorthand, it provides a single value notation for isotopic forms:</p>
+<pre><code> &gt;&gt; make object! [x: unmeta [d e], y: the :[d e]]
+ == make object! [
+     x: :[d e]
+     y: ':[d e]
+ ]
+</code></pre>
+<p>The whole "molded representations of objects" issue is up in the air, of course.  But I think there is broader importance to the idea that you can use single literal values that produce any state of a variable after evaluation.</p>
+<aside class="quote no-group" data-username="hostilefork" data-post="3" data-topic="1607">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/40/26_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<pre><code>&gt;&gt; thing: spread [a b c]
+== [a b c]  ; isotope
+</code></pre>
+</blockquote>
+</aside>
+<p>The <code>; isotope</code> is a little hard to see.  The web console might stylize it more.</p>
+<p><strong>We may actually want to keep the colon on it, and say it's a GET-BLOCK! (or whatever) isotope.</strong></p>
+<pre><code>&gt;&gt; thing: spread [a b c]
+== :[a b c]  ; isotope
+</code></pre>
+<p>Adopting this systemically may make things a bit uglier, such as by ^META operations yielding a decorated block:</p>
+<pre><code>&gt;&gt; ^ spread [a b c]
+== :[a b c]
+</code></pre>
+<p>But it could give reason to a new theory of what sorts of things have isotopes: <strong>the only things that have isotopic forms are things whose evaluator behavior is to produce isotopes of themselves.</strong></p>
+<p>So that would explain why there are no plain BLOCK! isotopes, or SET-BLOCK! isotopes, or INTEGER! isotopes... because there's no single value that can be ^META'd to get the non-isotopic form.</p>
+<p>And it would explain why ACTION! values evaluate to isotopes of ACTION! (which then, accessed via WORD!, will run the action vs. erroring...in a peculiarity of how action isotopes behave).</p>
+<p>Though it twists a little the plan for <strong><code>:</code></strong> becoming UNMETA:</p>
+<pre><code>&gt;&gt; append [a b c] : reduce [1 + 2 3 + 4]
+== [a b c 3 7]
+</code></pre>
+<p>Because it would be saying that UNMETA of a BLOCK! is a GET-BLOCK! isotope.</p>
+<p>Anyway, like I say... some bendy stuff.  It's being invented.  Have to look at what works across the various inventory of complex scenarios that have accrued.</p>
+          <p><a href="https://forum.rebol.info/t/the-long-awaited-death-of-only/1607/4">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/the-long-awaited-death-of-only/1607/4</link>
+        <pubDate>Fri, 22 Jul 2022 04:47:05 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1607-4</guid>
+        <source url="https://forum.rebol.info/t/the-long-awaited-death-of-only/1607.rss">The Long-Awaited Death of /ONLY</source>
+      </item>
+      <item>
+        <title>The Long-Awaited Death of /ONLY</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="rgchris" data-post="2" data-topic="1607">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/rgchris/40/14_2.png" class="avatar"> rgchris:</div>
+<blockquote>
+<p>Can this be addressed in how SPREAD blocks are evaluated? A variation on lit-bit decay</p>
+</blockquote>
+</aside>
+<p>I do not believe in decaying them, so this is what you would get</p>
+<pre><code>&gt;&gt; spread [a b c]
+== [a b c]  ; isotope
 
-&gt;&gt; foo++ 10
-no /ONLY
-x is 10
+&gt;&gt; thing: spread [a b c]
+== [a b c]  ; isotope
 
-&gt;&gt; foo++/only 10
-/ONLY!
-x is 10
-</code></pre>
-<p>So here's an ONLIFY transformer that adds a refinement to a function, and then injects a little code to pre-process the parameter to quote it:</p>
-<pre><code>onlify: func [
-    {Add /ONLY behavior to APPEND, INSERT, CHANGE}
-    action [action!]
-][
-    adapt (augment :action [/only "Use quoted semantics for value"]) [
-        all [only, any-array? series] then [
-            value: quote :value
-        ]
-        ; ...fall through to normal handling
-    ]
-]
-</code></pre>
-<p>Then you can apply it to the functions:</p>
-<pre><code>append: my onlify  ; e.g. `append: onlify :append` 
-insert: my onlify
-change: my onlify
-</code></pre>
-<p><strong>This is the punchline.</strong>  Ren-C's arsenal of abilities lets language twist and morph in your hands.</p>
-<h2>One Fewer Semantic To Worry About</h2>
-<p>/ONLY was well defined for block-to-block appends.  But other places had no idea.</p>
-<p>What did APPEND/ONLY a BLOCK! to a string vs. regular APPEND to a string mean?  How about a PORT!?</p>
-<p>You could just ignore it, and a lot of places did that.  Yet this is uncomfortable.  It makes it feel like every implementer of an APPEND has to think about what "only-ness" means in that context or they are somehow missing out.</p>
-<p><em>But ONLY-ness has no meaning.</em>  It's always been a Rebol-specific "quirk" that I (especially) hated.  While the non-native-English speakers might have been more willing to accept that "it is whatever it does", it interfered with the desire to make Rebol approximate fluent English as much as possible.</p>
-<p>Certainly seeing it spread to something every datatype might have to react to or define was bad mojo.  The wrappers above show the ball being lobbed into the user's court to decide if they want to give it meaning, instead of having this burden borne by every PORT! or OBJECT! that might want to implement "the APPEND generic action".</p>
-<p>They'll have to figure out what they want to do with QUOTED! items, of course.  But that was going to be a problem anyway.  And it was a problem even when there were just <strong>'word</strong> and <strong>'pa/th</strong> in existence...arguably a harder and weirder problem due to the inability to do something generalized.</p>
-<p>Long story short: Good riddance to having every APPEND/CHANGE/INSERT/FIND/SELECT implementer make up What /ONLY Means for Every parameter combination.</p>
-<h2>There Will Be A Lot Of (Generalized) Tools To Help</h2>
-<p>I've hesitated on going "hard-line" on this, to say that you can't do things like:</p>
-<pre><code>&gt;&gt; find [a b "cde" [f g] h] "cde"
-** Error: FIND on ANY-ARRAY! requires ANY-ARRAY! or QUOTED!
-</code></pre>
-<p>You can grumble a bit and say:</p>
-<pre><code>&gt;&gt; find [a b "cde" [f g] h] ["cde"]
-== ["cde" [f g] h]
-</code></pre>
-<p>But that's now more "blocky" than someone might like.  Moreover, what if it's in a variable?</p>
-<p>Well, the variable case is the one we were actually worrying about.  It's to stop problems with:</p>
-<pre><code>&gt;&gt; find data item
-** Error: FIND on ANY-ARRAY! requires pattern to be ANY-ARRAY! or QUOTED!
-</code></pre>
-<p>You can easily lose your bearings if you are trying to write generic code...to the point that generic code was nigh-impossible to write.</p>
-<p>But with the right tools, I think this becomes so regularized that it feels natural to comply.  You can choose more wordy or more blocky or more symbol-y, it's all up to your style.</p>
-<p>So imagine:</p>
-<pre><code>&gt;&gt; data: [a b "cde" [f g] h]
-&gt;&gt; item: "cde"
-</code></pre>
-<p>There are now an arsenal of tools for manipulating the quoting status:</p>
-<pre><code>&gt;&gt; find data quote item
-== ["cde" [f g] h]
+&gt;&gt; thing
+** Error: THING is an isotope, you must use ^META operations
 
-&gt;&gt; find data ^item
-== ["cde" [f g] h]
+&gt;&gt; ^thing  ; ^META access adds one level of quote, removing isotope status
+== [a b c]
 
-&gt;&gt; find data just b
-== [b "cde" [f g] h]
+&gt;&gt; get/any 'thing  ; should likely be called get/isotope now
+== [a b c]  ; isotope</code></pre>
+          <p><a href="https://forum.rebol.info/t/the-long-awaited-death-of-only/1607/3">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/the-long-awaited-death-of-only/1607/3</link>
+        <pubDate>Thu, 21 Jul 2022 22:07:03 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1607-3</guid>
+        <source url="https://forum.rebol.info/t/the-long-awaited-death-of-only/1607.rss">The Long-Awaited Death of /ONLY</source>
+      </item>
+      <item>
+        <title>The Long-Awaited Death of /ONLY</title>
+        <dc:creator><![CDATA[rgchris]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="1607">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/40/26_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>But we want to avoid this temptation, to stop the "spread" of isotopes to touching parts of the system that should not be concerned with them. So exercise restraint here...and shift the burden on the calling code to reshape itself so that isotopes only exist at the points that are very close to the calls they affect:</p>
+</blockquote>
+</aside>
+<p>Can this be addressed in how SPREAD blocks are evaluated? A variation on lit-bit decay <img src="https://forum.rebol.info/images/emoji/twitter/grimacing.png?v=9" title=":grimacing:" class="emoji" alt=":grimacing:">. Will use <code>#"`"</code> to denote a -1 quoted block (for presentation purposes, not a proposition):</p>
+<pre><code class="lang-nohighlight">&gt;&gt; spread [a b c]
+== `[a b c]
 
-&gt;&gt; find data [b]
-== [b "cde" [f g] h]
+&gt;&gt; thing: spread [a b c]
+== `[a b c]
 
-&gt;&gt; find data ^(first [h i])
-== [h]
+&gt;&gt; thing
+== [a b c]  ; on second evaluation, decay
+
+&gt;&gt; append [] thing: spread [a b c]
+== [[a b c]]  ; ^^ is second evaluation, =&gt; decay
 </code></pre>
-<p>And it means that you just think of anytime that you're writing patterns to look for in blocks, you can default to making them be blocks or quoted blocks.</p>
-<pre><code>&gt;&gt; pattern-one: [b "cde"]
-&gt;&gt; pattern-two: quote [f g]  ; or ^[f g], or [[f g]]
-
-&gt;&gt; find data pattern-one
-== [b "cde" [f g] h]
-
-&gt;&gt; find data pattern-two
-== [[f g] h]
+<p>Probably not, but would be nice to ditch the assignation as soon as possible as it's something of a hidden attribute</p>
+          <p><a href="https://forum.rebol.info/t/the-long-awaited-death-of-only/1607/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/the-long-awaited-death-of-only/1607/2</link>
+        <pubDate>Thu, 21 Jul 2022 22:01:43 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1607-2</guid>
+        <source url="https://forum.rebol.info/t/the-long-awaited-death-of-only/1607.rss">The Long-Awaited Death of /ONLY</source>
+      </item>
+      <item>
+        <title>The Long-Awaited Death of /ONLY</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p><strong>As of July 2022, /ONLY is no longer a refinement available on APPEND, INSERT, CHANGE, FIND, SELECT, COMPOSE, or similar functions.</strong>  It only appears in the Redbol module <a href="https://forum.rebol.info/t/agree-to-disagree-points-places-i-see-both-sides/1862/3">through emulation</a>.</p>
+<h2>"AS-IS" Semantics Are Default</h2>
+<p>It's easy to sympathize with the historical Rebol idea of "splice blocks by default", if you only look at examples where the code is fully literal:</p>
+<pre><code>append files [%foo.r %bar.r]
+code: compose [... keep [sum: sum + x] ...]
 </code></pre>
-<p><strong>Key is to stop losing sleep over these low-level routines being a little more "inconvenient", and instead have faith that making them well-defined will let you build the specializations or adaptations you need.</strong></p>
+<p>But problems immediately strike when you start using variables that may-or-may-not-be blocks.  You can't rely on any invariants, and this leads to broken code:</p>
+<pre><code>&gt;&gt; block: [#a {b} [c d e] %f]
+
+&gt;&gt; pick block 3
+== [c d e]
+
+&gt;&gt; find block pick block 3
+; null
+</code></pre>
+<p>Time and experience has proven that "as-is" semantics are the safest and clearest default:</p>
+<pre><code>&gt;&gt; append [a b c] [d e]
+== [a b c [d e]]
+</code></pre>
+<p>Ren-C offers a new tool for "spliced" semantics...which is to pass a BLOCK! isotope ("quoting level -1").  SPREAD is the first function offered which produces them:</p>
+<pre><code>&gt;&gt; append [a b c] spread [d e]
+== [a b c d e]
+</code></pre>
+<p>But there's nothing particularly special about SPREAD, and there will be many other options for defining functions that may-or-may-not return block isotopes...which have more parameterization and nuance.</p>
+<h2>Making The Value Carry Splicing Intent Brings Systemic Good</h2>
+<p>The benefits are everywhere, with safer defaults and clear choices...for instance in REPLACE:</p>
+<pre><code>&gt;&gt; replace/all [[a b] a b a b] [a b] [c d e]
+== [[c d e] a b a b] 
+
+&gt;&gt; replace/all [[a b] a b a b] spread [a b] [c d e]
+== [[a b] [c d e] [c d e]]
+
+&gt;&gt; replace/all [[a b] a b a b] [a b] spread [c d e]
+== [c d e a b a b]
+
+&gt;&gt; replace/all [[a b] a b a b] spread [a b] spread [c d e]
+== [[a b] c d e c d e]
+</code></pre>
+<p>Branching code can make decisions to splice-or-not-splice on a case by case basis:</p>
+<pre><code>&gt;&gt; code: [&lt;splice&gt; [a b] &lt;no-splice&gt; [c d] &lt;no-splice&gt; 'x]
+
+&gt;&gt; map-each [instruction item] code [
+       switch instruction [
+            &lt;splice&gt; [spread item]
+            &lt;no-splice&gt; [item]
+            fail ["Bad instruction:" instruction]
+       ]
+   ]
+== [a b [c d] 'x]
+</code></pre>
+<p>And COMPOSE can have some slots that splice and others that do not, within the same operation:</p>
+<pre><code>&gt;&gt; data: [a b]
+
+&gt;&gt; compose [spliced (spread data) non-spliced (data)]
+== [spliced a b non-spliced [a b]]
+</code></pre>
+<p>(COMPOSE is a case where not splicing by default is glaringly obvious as the right choice for a generic operation.)</p>
+<h2>BLOCK! Isotopes Are Special ("unfriendly" <img src="https://forum.rebol.info/images/emoji/twitter/japanese_goblin.png?v=9" title=":japanese_goblin:" class="emoji" alt=":japanese_goblin:"> )</h2>
+<p>Normal parameters cannot accept them.</p>
+<pre><code>&gt;&gt; normal-function: func [value] [print ["Normal got:" mold value]]
+
+&gt;&gt; normal-function spread [d e]
+** Error: NORMAL-FUNCTION can't take a BLOCK! isotope as its VALUE argument
+</code></pre>
+<p>The way that you indicate you can take an isotope is using a ^META parameter.</p>
+<p>But the convention with meta parameters is they will always be "one quote level higher" than the thing that they represent.</p>
+<pre><code>&gt;&gt; meta-function: func [^value] [print ["Meta got:" mold value]]
+
+&gt;&gt; meta-function [d e]
+Meta got: '[d e]  ; one quote level above 0 for unquoted input
+
+&gt;&gt; meta-function first [''[d e]]
+Meta got: '''[d e]  ; three quote levels above 0 for double-quoted input
+
+&gt;&gt; meta-function spread [d e]
+Meta got: [d e]  ; no quotes for isotopic input
+</code></pre>
+<p>Using this detection mechanism, you can write your own routines that react specially to isotopes.</p>
+<h2>Isotope Parameter Conventions Should Be Used <em>Sparingly</em>!</h2>
+<p>Routines that do not intend to react to an isotope should not take them as parameters.</p>
+<p>As a good example, REDUCE might seem like the kind of thing that could act on block isotopes:</p>
+<pre><code>&gt;&gt; append [a b c] reduce spread [1 + 2 3 + 4]
+== [a b c 3 7]
+</code></pre>
+<p>But we want to avoid this temptation, to stop the "spread" of isotopes to touching parts of the system that should not be concerned with them.  So exercise restraint here...and shift the burden on the calling code to reshape itself so that isotopes only exist at the points that are very close to the calls they affect:</p>
+<pre><code>&gt;&gt; append [a b c] spread reduce [1 + 2 3 + 4]
+== [a b c 3 7]
+</code></pre>
 <h2>Good Riddance /ONLY</h2>
 <p>The elimination of /ONLY from the semantic model, and to have it not contaminate the user's heads, means that people can learn more generic tools that work in more contexts.</p>
 <p>Its appearance in Ren-C will be limited to the Redbol compatibility module.</p>

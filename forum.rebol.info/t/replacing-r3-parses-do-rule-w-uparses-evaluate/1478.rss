@@ -1,0 +1,148 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Replacing R3 PARSE&#39;s &quot;DO&quot; Rule w/UPARSE&#39;s EVALUATE</title>
+    <link>https://forum.rebol.info/t/replacing-r3-parses-do-rule-w-uparses-evaluate/1478</link>
+    <description>R3-Alpha PARSE had a partially-implemented feature that Red did not carry forward which was the **do** keyword.  I&#39;m pretty sure nobody used it--because it didn&#39;t work.  It took me a while when I first looked at PARSE&#39;s code to even figure out what it was *supposed* to do.
+
+It was *trying* to perform a &quot;DO/NEXT&quot; step on the *input* as a code block, and match the following rule against the evaluative result:
+
+    r3-alpha&gt;&gt; parse [reverse copy &quot;aab&quot;] [do &quot;baa&quot;]
+    == true
+
+I gather that things like the following were likely *intended* to work, but didn&#39;t:
+
+    r3-alpha&gt;&gt; parse [reverse copy &quot;aab&quot;] [do [&quot;b&quot; some &quot;a&quot;]]
+    == false
+
+**It seems this feature was added to make it easier to do dialect processing where the dialect had code inline in the block you were processing...but not in a block or group.**  This means only the evaluator knows how much to advance to do one step of processing.  So could be useful.
+
+But the implementation was completely broken (partially because R3-Alpha PARSE evolved organically and non-trivial rules could not compose):
+
+    r3-alpha&gt;&gt; parse [1 + 2] [set var do [quote 3]]
+    == true
+
+    r3-alpha&gt;&gt; var
+    == 1  ; not 3, which you might expect
+
+    r3-alpha&gt;&gt; parse [1 + 2] [thru do integer!]
+    == false</description>
+    
+    <lastBuildDate>Mon, 23 May 2022 20:06:54 +0000</lastBuildDate>
+    <category>Parsing</category>
+    <atom:link href="https://forum.rebol.info/t/replacing-r3-parses-do-rule-w-uparses-evaluate/1478.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Replacing R3 PARSE&#39;s &quot;DO&quot; Rule w/UPARSE&#39;s EVALUATE</title>
+        <dc:creator><![CDATA[BlackATTR]]></dc:creator>
+        <description><![CDATA[
+            <p>Very cool indeed! Great feature to add!</p>
+          <p><a href="https://forum.rebol.info/t/replacing-r3-parses-do-rule-w-uparses-evaluate/1478/4">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/replacing-r3-parses-do-rule-w-uparses-evaluate/1478/4</link>
+        <pubDate>Mon, 23 May 2022 20:06:54 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1478-4</guid>
+        <source url="https://forum.rebol.info/t/replacing-r3-parses-do-rule-w-uparses-evaluate/1478.rss">Replacing R3 PARSE&#39;s &quot;DO&quot; Rule w/UPARSE&#39;s EVALUATE</source>
+      </item>
+      <item>
+        <title>Replacing R3 PARSE&#39;s &quot;DO&quot; Rule w/UPARSE&#39;s EVALUATE</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="1478">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/40/26_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p><em>It seems this feature was added to make it easier to do dialect processing where the dialect had code inline in the block you were processing...but not in a block or group.</em> This means only the evaluator knows how much to advance to do one step of processing. So could be useful.</p>
+</blockquote>
+</aside>
+<p>With UPARSE, I realized this had become trivial!</p>
+<h2>Meet UPARSE-EVALUATE</h2>
+<p>It's everything R3-Alpha's PARSE-DO wanted to be and more...and it's two lines of code!  <img src="https://forum.rebol.info/images/emoji/twitter/star2.png?v=9" title=":star2:" class="emoji" alt=":star2:"></p>
+<pre><code>uparse-evaluate: combinator [
+    {Run the evaluator one step to advance input, and produce a result}
+    return: "Result of one evaluation step"
+        [&lt;opt&gt; any-value!]
+][
+    if tail? input [return null]
+
+    return [# (remainder)]: evaluate input
+]
+</code></pre>
+<p><em>(Note: EVALUATE is a multi-return, where the first output is the evaluated-to value and the second is the position after evaluation.  <strong>[# (remainder)]:</strong> says we want the main output but don't want to have to name it (#) and this will be the overall result of the expression...what the combinator product is. <strong>(remainder)</strong> says the variable name to put the second output in is specified by remainder, and this is the protocol for how combinators tell UPARSE the amount of input consumed.  So it's perfect!)</em></p>
+<p>Let's make a goofy function that uses it, that either keeps or prints expressions it sees:</p>
+<pre><code>keeper-printer: func [block [block!] &lt;local&gt; mode value] [
+    mode: #print
+    uparse block [collect [
+        some [
+            mode: ['&lt;K&gt; (#keep) | '&lt;P&gt; (#print)]
+            |
+            [',]  ; skip over commas
+            |
+            [value: uparse-evaluate] [
+                :(mode = #keep) keep ^ (value)
+                |
+                :(mode = #print) (if did value [print ["PRINTING:" value]])
+            ]
+        ]
+    ]]
+]
+</code></pre>
+<p>While this is goofy, it's nonetheless pretty impressive!</p>
+<pre><code>&gt;&gt; keeper-printer [
+       1 + 2
+       &lt;K&gt; (3 + 4) * 5 if true [6 + 7]
+       &lt;P&gt; 7 + 8, if false [9 + 10] else ["print me!"] &lt;K&gt;, 11 + 12
+  ]
+
+PRINTING: 3  ; 1 + 2
+PRINTING: 15  ; 7 + 8 
+PRINTING: print me!
+== [35 13 23]  ; (3 + 4 * 5) (6 + 7) (11 + 12)
+</code></pre>
+<h2>The Power of the Evaluator, Inline In your Dialect!</h2>
+<p>It's just a test right now and not in UPARSE proper yet, I am doing some fiddling with the EVALUATE native and maybe it will change.  But I'd say the odds are this is worthy of inclusion.</p>
+<p>One thing I noticed, though, is that we don't have an easy way to parse INTO a the result of an evaluate, e.g. this wouldn't work:</p>
+<pre><code> uparse [1 + 2 reverse "abc" 3 * 4] [some into [evaluate] [integer! | text!]]
+</code></pre>
+<p>That's because parsing hits its limit when things aren't in a series.  This suggests a need for some kind of INTO variation that implicitly wraps the argument into a block.  It ties into my remarks regarding the concept of <a href="https://forum.rebol.info/t/contemplating-uparse-value/1822">UPARSE-VALUE</a> implicitly wrapping things into a BLOCK!.</p>
+<p>If it's a refinement to INTO (like INTO/ENBLOCK) it should be the same pattern as for the overall parse operation... INTO/VALUE and PARSE/VALUE don't seem quite right.</p>
+<p>Anyway, progress!</p>
+          <p><a href="https://forum.rebol.info/t/replacing-r3-parses-do-rule-w-uparses-evaluate/1478/3">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/replacing-r3-parses-do-rule-w-uparses-evaluate/1478/3</link>
+        <pubDate>Mon, 23 May 2022 16:30:03 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1478-3</guid>
+        <source url="https://forum.rebol.info/t/replacing-r3-parses-do-rule-w-uparses-evaluate/1478.rss">Replacing R3 PARSE&#39;s &quot;DO&quot; Rule w/UPARSE&#39;s EVALUATE</source>
+      </item>
+      <item>
+        <title>Replacing R3 PARSE&#39;s &quot;DO&quot; Rule w/UPARSE&#39;s EVALUATE</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>R3-Alpha PARSE had a partially-implemented feature that Red did not carry forward which was the <strong>do</strong> keyword.  I'm pretty sure nobody used it--because it didn't work.  It took me a while when I first looked at PARSE's code to even figure out what it was <em>supposed</em> to do.</p>
+<p>It was <em>trying</em> to perform a "DO/NEXT" step on the <em>input</em> as a code block, and match the following rule against the evaluative result:</p>
+<pre><code>r3-alpha&gt;&gt; parse [reverse copy "aab"] [do "baa"]
+== true
+</code></pre>
+<p>I gather that things like the following were likely <em>intended</em> to work, but didn't:</p>
+<pre><code>r3-alpha&gt;&gt; parse [reverse copy "aab"] [do ["b" some "a"]]
+== false
+</code></pre>
+<p><strong>It seems this feature was added to make it easier to do dialect processing where the dialect had code inline in the block you were processing...but not in a block or group.</strong>  This means only the evaluator knows how much to advance to do one step of processing.  So could be useful.</p>
+<p>But the implementation was completely broken (partially because R3-Alpha PARSE evolved organically and non-trivial rules could not compose):</p>
+<pre><code>r3-alpha&gt;&gt; parse [1 + 2] [set var do [quote 3]]
+== true
+
+r3-alpha&gt;&gt; var
+== 1  ; not 3, which you might expect
+
+r3-alpha&gt;&gt; parse [1 + 2] [thru do integer!]
+== false</code></pre>
+          <p><a href="https://forum.rebol.info/t/replacing-r3-parses-do-rule-w-uparses-evaluate/1478/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/replacing-r3-parses-do-rule-w-uparses-evaluate/1478/1</link>
+        <pubDate>Wed, 27 Jan 2021 09:11:48 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1478-1</guid>
+        <source url="https://forum.rebol.info/t/replacing-r3-parses-do-rule-w-uparses-evaluate/1478.rss">Replacing R3 PARSE&#39;s &quot;DO&quot; Rule w/UPARSE&#39;s EVALUATE</source>
+      </item>
+  </channel>
+</rss>

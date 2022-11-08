@@ -1,0 +1,245 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Experiences While Paring Down DATATYPE!</title>
+    <link>https://forum.rebol.info/t/experiences-while-paring-down-datatype/1978</link>
+    <description>You likely know that DATATYPE! in R3-Alpha (Rebol 2, Red...) has a distinct &quot;type byte&quot; in the cell.  So you can tell it&#39;s a different thing, even if not all representations show that:
+
+    r3-alpha&gt;&gt; block: reduce [&#39;integer! integer!]
+    == [integer! integer!]
+
+    r3-alpha&gt;&gt; type? first block
+    == word!
+
+    r3-alpha&gt;&gt; type? second block
+    == datatype!
+
+One way R3-Alpha has to see the difference is with MOLD/ALL
+
+    r3-alpha&gt;&gt; mold/all block
+    == &quot;[integer! #[datatype! integer!]]&quot;
+
+## But What&#39;s Actually *in* a DATATYPE! Cell?
+
+This was [the definition struct from R3-Alpha](https://github.com/rebol/rebol/blob/25033f897b2bd466068d7663563cd3ff64740b94/src/include/sys-value.h#L106):
+
+    typedef struct Reb_Type {
+        REBINT type;  // base type
+        REBSER *spec;
+        // REBINT min_type;
+        // REBINT max_type;
+    } REBTYP;
+
+So an integer to say what **`type`** it is (e.g. REB_INTEGER = 1, REB_LOGIC = 2, REB_BLOCK = 3 or whatever).  Note that this in the *payload* of the cell, not the header...because the type in the header is REB_DATATYPE to say it carries a &quot;datatype payload&quot;.
+
+Who knows what the commented-out **`min_type`** and **`max_type`** were.  But a remark says this payload is for a &quot;Datatype or pseudo-datatype&quot;.  We can guess these were for pseudo-datatypes as a way of specifying a range of REB_XXX numbers to implement categories like ANY-SERIES!, as an alternative to typesets (?)
+
+The **`spec`** is actually an object, that comes back as the answer to SPEC-OF:
+
+    r3-alpha&gt;&gt; spec-of integer!
+    == make object! [
+        title: &quot;64 bit integer&quot;
+        type: &#39;scalar
+    ]
+
+This limited amount of information was built into the executable from the [Rebol-format table table in %typespec.r](https://github.com/rebol/rebol/blob/25033f897b2bd466068d7663563cd3ff64740b94/src/boot/typespec.r#L24). 
+
+You needed to use SPEC-OF to access these properties, but it could have been accessible with paths, e.g. **integer!/title**.  And it might have had more interesting properties:
+
+    &gt;&gt; integer!/max-value
+    == 9223372036854775807
+
+## Ren-C Had Actually Added More To DATATYPE!...
+
+Builtin types use a byte for the type in cells of the instances of values of that type.  This byte would index a static table of handlers that implement the datatype.  That would limit to you to 256 types...although for technical reasons the limit was actually 64.
+
+Ren-C pushed [toward an implementation of extension types](https://forum.rebol.info/t/user-defined-datatype-discussion/1203/2?u=hostilefork).  This made it so if that byte was a special signal of &quot;CUSTOM&quot;, it meant the implementation cells for that type must surrender one of their 4 platform-pointer-sized slots for a pointer to the method table.
+
+A cool aspect of this generalization was that two bits in the cells started being used to flag whether the 2 out of the 4 remaining slots in the cell needed to be marked by the GC.  This generalized garbage collection to where a cell could be marked without having to customize the garbage collector for its type byte.  It just had to speak in the currency of &quot;nodes&quot;.
+
+*(Doing this in a way that honors C&#39;s rules about strict aliasing was a little tricky, but possible.)*
+
+## All Redbols Conflated The Looks of DATATYPE! and WORD!
+
+In lockstep, they all did it:
+
+    rebol2&gt;&gt; integer!
+    == integer!
+
+    r3-alpha&gt;&gt; integer!
+    == integer!
+    
+    red&gt;&gt; integer!
+    == integer!
+
+Since I have Boron built, I find it renames integer! to int!, but otherwise the same:
+
+    )&gt; int!
+    == int!
+
+    )&gt; type? int!
+    == datatype!
+
+    )&gt; type? first [int!]
+    == word!
+
+**It seemed to me that this conflation couldn&#39;t possibly be the best answer.**  So I made Ren-C buck this trend to use the R3-Alpha construction syntax, because it was something that could LOAD back:
+
+    &gt;&gt; integer!
+    == #[datatype! integer!]
+
+    &gt;&gt; load &quot;#[datatype! integer!]&quot;
+    == [#[datatype! integer!]]
+
+**Rendering differently was good, but the specific different rendering wasn&#39;t all that palatable.**  And it wasn&#39;t showing it as any complex object.
+
+There seemed to be two directions to go with this:
+
+* Accept DATATYPE! as some kind of alien complex type which has ugly rendering
+
+* Fit it into the lexical space somewhere.
+
+If it was going to be in the lexical space, that would mean the type would likely be coming from a symbol-bearing type. 
+
+## Paring It Down: Making DATATYPE! Hold Only A Symbol
+
+Ren-C doesn&#39;t use integers to refer to symbols like R3-Alpha and Red.  Instead, symbol table entries are series...like strings, which now hold UTF-8 data even when mutable.  (Frequently they are compact strings, whose UTF-8 spelling data fits in the space where tracking information for an allocation would live if an allocation were needed.)
+
+So WORD! cells use pointers to refer to their symbols.  Despite that, *some* built-in symbols still are numbered.  These symbols have space statically allocated vs. allocated as series from the heap, and they can be indexed by number quickly.  Also, the symbols store their (16-bit) number in the series stub so you can go the other direction...from symbol to number.
+
+The first 64 or so symbols are specifically chosen to be things like INTEGER!.  This means if a datatype just stored a symbol, it&#39;s easy to use that number to index into the builtin-type-hooks table.
+
+If you refer to extension types by some arbitrary symbol which isn&#39;t predicted in those first 64 symbols, then it would likely have no number at all.  So with a DATATYPE! in your hand and that symbol, you&#39;d have to look some extension type mapping table to get the hooks for that type.
+
+*But* I mentioned that instances of extension types gave up one of their 4 cell pointers to indicate this table.  And usually you need the dispatch table when you have an instance--not the datatype--so this isn&#39;t much of a problem.
+
+## For Now, DATATYPE! Renders With An &amp;
+
+One step removed would be to say that as today, the WORD-ending-in-! is a layer of indirection over concrete types that use a sigil like &amp;.  This has been pitched as perhaps looking like:
+
+    integer!: &amp;integer
+
+    any-word!: &amp;[word set-word get-word the-word meta-word]
+
+    is-even!: &amp;(#[action! {even?} [value]])
+
+But the details are still being worked out.
+
+What I will say is just that I think going in the direction toward where DATATYPE! goes toward &quot;just being a symbol&quot; and having everything else looked up feels correct.
+
+I don&#39;t think making DATATYPE! itself a complex object was a direction we wanted to go further in.</description>
+    
+    <lastBuildDate>Mon, 26 Sep 2022 09:47:27 +0000</lastBuildDate>
+    <category>Datatypes</category>
+    <atom:link href="https://forum.rebol.info/t/experiences-while-paring-down-datatype/1978.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Experiences While Paring Down DATATYPE!</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>You likely know that DATATYPE! in R3-Alpha (Rebol 2, Red...) has a distinct "type byte" in the cell.  So you can tell it's a different thing, even if not all representations show that:</p>
+<pre><code>r3-alpha&gt;&gt; block: reduce ['integer! integer!]
+== [integer! integer!]
+
+r3-alpha&gt;&gt; type? first block
+== word!
+
+r3-alpha&gt;&gt; type? second block
+== datatype!
+</code></pre>
+<p>One way R3-Alpha has to see the difference is with MOLD/ALL</p>
+<pre><code>r3-alpha&gt;&gt; mold/all block
+== "[integer! #[datatype! integer!]]"
+</code></pre>
+<h2>But What's Actually <em>in</em> a DATATYPE! Cell?</h2>
+<p>This was <a href="https://github.com/rebol/rebol/blob/25033f897b2bd466068d7663563cd3ff64740b94/src/include/sys-value.h#L106">the definition struct from R3-Alpha</a>:</p>
+<pre><code>typedef struct Reb_Type {
+    REBINT type;  // base type
+    REBSER *spec;
+    // REBINT min_type;
+    // REBINT max_type;
+} REBTYP;
+</code></pre>
+<p>So an integer to say what <strong><code>type</code></strong> it is (e.g. REB_INTEGER = 1, REB_LOGIC = 2, REB_BLOCK = 3 or whatever).  Note that this in the <em>payload</em> of the cell, not the header...because the type in the header is REB_DATATYPE to say it carries a "datatype payload".</p>
+<p>Who knows what the commented-out <strong><code>min_type</code></strong> and <strong><code>max_type</code></strong> were.  But a remark says this payload is for a "Datatype or pseudo-datatype".  We can guess these were for pseudo-datatypes as a way of specifying a range of REB_XXX numbers to implement categories like ANY-SERIES!, as an alternative to typesets (?)</p>
+<p>The <strong><code>spec</code></strong> is actually an object, that comes back as the answer to SPEC-OF:</p>
+<pre><code>r3-alpha&gt;&gt; spec-of integer!
+== make object! [
+    title: "64 bit integer"
+    type: 'scalar
+]
+</code></pre>
+<p>This limited amount of information was built into the executable from the <a href="https://github.com/rebol/rebol/blob/25033f897b2bd466068d7663563cd3ff64740b94/src/boot/typespec.r#L24">Rebol-format table table in %typespec.r</a>.</p>
+<p>You needed to use SPEC-OF to access these properties, but it could have been accessible with paths, e.g. <strong>integer!/title</strong>.  And it might have had more interesting properties:</p>
+<pre><code>&gt;&gt; integer!/max-value
+== 9223372036854775807
+</code></pre>
+<h2>Ren-C Had Actually Added More To DATATYPE!...</h2>
+<p>Builtin types use a byte for the type in cells of the instances of values of that type.  This byte would index a static table of handlers that implement the datatype.  That would limit to you to 256 types...although for technical reasons the limit was actually 64.</p>
+<p>Ren-C pushed <a href="https://forum.rebol.info/t/user-defined-datatype-discussion/1203/2">toward an implementation of extension types</a>.  This made it so if that byte was a special signal of "CUSTOM", it meant the implementation cells for that type must surrender one of their 4 platform-pointer-sized slots for a pointer to the method table.</p>
+<p>A cool aspect of this generalization was that two bits in the cells started being used to flag whether the 2 out of the 4 remaining slots in the cell needed to be marked by the GC.  This generalized garbage collection to where a cell could be marked without having to customize the garbage collector for its type byte.  It just had to speak in the currency of "nodes".</p>
+<p><em>(Doing this in a way that honors C's rules about strict aliasing was a little tricky, but possible.)</em></p>
+<h2>All Redbols Conflated The Looks of DATATYPE! and WORD!</h2>
+<p>In lockstep, they all did it:</p>
+<pre><code>rebol2&gt;&gt; integer!
+== integer!
+
+r3-alpha&gt;&gt; integer!
+== integer!
+
+red&gt;&gt; integer!
+== integer!
+</code></pre>
+<p>Since I have Boron built, I find it renames integer! to int!, but otherwise the same:</p>
+<pre><code>)&gt; int!
+== int!
+
+)&gt; type? int!
+== datatype!
+
+)&gt; type? first [int!]
+== word!
+</code></pre>
+<p><strong>It seemed to me that this conflation couldn't possibly be the best answer.</strong>  So I made Ren-C buck this trend to use the R3-Alpha construction syntax, because it was something that could LOAD back:</p>
+<pre><code>&gt;&gt; integer!
+== #[datatype! integer!]
+
+&gt;&gt; load "#[datatype! integer!]"
+== [#[datatype! integer!]]
+</code></pre>
+<p><strong>Rendering differently was good, but the specific different rendering wasn't all that palatable.</strong>  And it wasn't showing it as any complex object.</p>
+<p>There seemed to be two directions to go with this:</p>
+<ul>
+<li>
+<p>Accept DATATYPE! as some kind of alien complex type which has ugly rendering</p>
+</li>
+<li>
+<p>Fit it into the lexical space somewhere.</p>
+</li>
+</ul>
+<p>If it was going to be in the lexical space, that would mean the type would likely be coming from a symbol-bearing type.</p>
+<h2>Paring It Down: Making DATATYPE! Hold Only A Symbol</h2>
+<p>Ren-C doesn't use integers to refer to symbols like R3-Alpha and Red.  Instead, symbol table entries are series...like strings, which now hold UTF-8 data even when mutable.  (Frequently they are compact strings, whose UTF-8 spelling data fits in the space where tracking information for an allocation would live if an allocation were needed.)</p>
+<p>So WORD! cells use pointers to refer to their symbols.  Despite that, <em>some</em> built-in symbols still are numbered.  These symbols have space statically allocated vs. allocated as series from the heap, and they can be indexed by number quickly.  Also, the symbols store their (16-bit) number in the series stub so you can go the other direction...from symbol to number.</p>
+<p>The first 64 or so symbols are specifically chosen to be things like INTEGER!.  This means if a datatype just stored a symbol, it's easy to use that number to index into the builtin-type-hooks table.</p>
+<p>If you refer to extension types by some arbitrary symbol which isn't predicted in those first 64 symbols, then it would likely have no number at all.  So with a DATATYPE! in your hand and that symbol, you'd have to look some extension type mapping table to get the hooks for that type.</p>
+<p><em>But</em> I mentioned that instances of extension types gave up one of their 4 cell pointers to indicate this table.  And usually you need the dispatch table when you have an instance--not the datatype--so this isn't much of a problem.</p>
+<h2>For Now, DATATYPE! Renders With An &amp;</h2>
+<p>One step removed would be to say that as today, the WORD-ending-in-! is a layer of indirection over concrete types that use a sigil like &amp;.  This has been pitched as perhaps looking like:</p>
+<pre><code>integer!: &amp;integer
+
+any-word!: &amp;[word set-word get-word the-word meta-word]
+
+is-even!: &amp;(#[action! {even?} [value]])
+</code></pre>
+<p>But the details are still being worked out.</p>
+<p>What I will say is just that I think going in the direction toward where DATATYPE! goes toward "just being a symbol" and having everything else looked up feels correct.</p>
+<p>I don't think making DATATYPE! itself a complex object was a direction we wanted to go further in.</p>
+          <p><a href="https://forum.rebol.info/t/experiences-while-paring-down-datatype/1978/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/experiences-while-paring-down-datatype/1978/1</link>
+        <pubDate>Sat, 24 Sep 2022 08:02:56 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1978-1</guid>
+        <source url="https://forum.rebol.info/t/experiences-while-paring-down-datatype/1978.rss">Experiences While Paring Down DATATYPE!</source>
+      </item>
+  </channel>
+</rss>

@@ -5,8 +5,184 @@
     <link>https://forum.rebol.info/c/development/optimization/53</link>
     <description>Topics in the &#39;Optimization&#39; category This is a category for discussing performance and optimization ideas.</description>
     
-      <lastBuildDate>Mon, 22 Aug 2022 15:09:13 +0000</lastBuildDate>
+      <lastBuildDate>Sat, 24 Sep 2022 01:57:39 +0000</lastBuildDate>
       <atom:link href="https://forum.rebol.info/c/development/optimization/53.rss" rel="self" type="application/rss+xml" />
+        <item>
+          <title>Boot Footprint: Giant String Literal vs. Encap?</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Optimization</category>
+          <description><![CDATA[
+            <p>One thing you can do with C is embed literal data.  This is how R3-Alpha ships with its mezzanine functions "built in", the prep process stores everything in a big compressed array of bytes called (misleadingly) <strong><code>Native_Specs</code></strong>:</p>
+<p><a href="https://github.com/rebol/rebol/blob/25033f897b2bd466068d7663563cd3ff64740b94/src/core/b-init.c#L166">https://github.com/rebol/rebol/blob/25033f897b2bd466068d7663563cd3ff64740b94/src/core/b-init.c#L166</a></p>
+<p>The name being <code>Native_Specs</code> might suggest it was the contents of <a href="https://github.com/rebol/rebol/blob/25033f897b2bd466068d7663563cd3ff64740b94/src/boot/natives.r">%natives.r</a>.  But it's actually a lot more, with glued-together source code... including all of the contents of the <a href="https://github.com/rebol/rebol/tree/master/src/mezz">%base-xxx.r, %sys-xxx.r, and %mezz-xxx.r</a> files.  So I renamed it to <code>Boot_Block_Compressed</code>.</p>
+<p>But it doesn't embed the files as-is... it LOADs them and SAVEs them using an already-built version of R3.  This round-tripping removes the comments and normalizes the spacing.  It also actually scrambled it with CLOAK for whatever reason--a waste of time because you could read all the code with SOURCE if you felt like it.  :-/</p>
+<p><em>(Ren-C doesn't use an old-R3's LOAD+SAVE to strip out comments, because it would lock down the format.  Your hands would be tied on adding or changing lexical forms in the sys/base/mezzanine.  So it has its own STRIPLOAD function that does a light stripping out of comments and spaces for this glue-files-together purpose)</em></p>
+<h2>Is Embedding Big Fat C Constants Supported By The Standard?</h2>
+<p>C compilers are only <em>required</em> to allow you to build in string literals that are <a href="https://stackoverflow.com/a/11488687">509 characters in C89, and 4095 characters in C99</a>.  They can allow more, but don't have to.</p>
+<p>So I recall R3-Alpha having problems when you turn up <code>--pedantic</code> warning levels by using a syntax like:</p>
+<pre><code>const char Native_Specs[] = "\x01\x02\x03...";
+</code></pre>
+<p>That warning went away when I changed it to:</p>
+<pre><code>const unsigned char Boot_Block_Compressed[] = { 0x01, 0x02, 0x03 ...};
+</code></pre>
+<p>Regarding the problem of hitting length limits, Ren-C actually breaks things up a bit more...because each extension has its own constant declaration like this for its Rebol portion.</p>
+<p>Because this code is decompressed and scanned once--and then tossed--there's probably a number of experiments that could be done.  What if the blob were loaded as mutable data, and then used as some kind of buffer for another purpose?  Is there some way to help hint to the OS that you really are only going to use the information only once so it will throw out the page from memory?  Or will the right thing happen to scan it and use it just once?</p>
+<p>Long story short--it hasn't been a problem, even with the TCC build.  So it has been taken for granted that it works acceptably.</p>
+<h2>But Would Encapping Be Better?</h2>
+<p>One vision of how the boot would work is that it would only load enough to get de-encapping working.  Then the de-encapping would be how all the blobs for the "built-in" extensions were extracted.</p>
+<p><em>This seems like an interesting vision,</em> because if someone gave you a big fat Ren-C and you wanted any skinnier version, you could basically ask it to cut everything out you don't want and give you a new EXE.  You could roll it up with any customizations you like.</p>
+<p>But if you're using any "real" form of encapping (e.g. manipulating the resource portions of a Linux ELF file or a Windows PE file) this gets complicated.  And Ren-C's encap facilities are <a href="https://github.com/metaeducation/ren-c/blob/master/scripts/encap.reb">written in usermode</a>...so that expects things like file I/O and PARSE of a BINARY!, etc.  I also assume that unzip facilities would be part of encapping.  So you need a reasonably runnable system just to get to that point.</p>
+<p><strong>I've punted on worrying too much about this, because of the focus on the web build.</strong></p>
+<p>It would be a bad investment of limited resources to handwrite and maintain encapping code in C, just so that encapping can be the means by which more of the bootstrap can be done with encap.</p>
+<h2>Script Code Is Easy to Encap, EXE/DLL Code Is Not</h2>
+<p>So the "easy" part would be changing the build to go in two steps.</p>
+<p>The first step would make an r3-one.exe that is capable of augmenting itself with encapped data.  The second step would ask that r3 to fold in various scripts and resources to make an r3-two.exe that had more things in it...such as a console.</p>
+<p>This isn't that far out to accomplish.  <strong>The hard part is when what you're encapping isn't script data, but compiled and executable C code...like bits from a DLL.</strong>  e.g. encapping "extensions".</p>
+<p>What some people do in this situation is to actually glue the DLL file into the executable, but extract it to the filesystem and load the extracted version.  If you Google around for "using a DLL as an embedded resource" you'll find people who've done such things...but the answers you find will be from over a decade ago, because no one cares about how they ship such things anymore.</p>
+<h2>Making Encap A Dependency Is Probably Unwise...</h2>
+<p>It isn't going to be a terribly big win for bootstrap if it can't be used to pull out or put in extensions.</p>
+<p>I don't think it's wise to pursue handcrafted C de-encapping.  In fact there's no way I'd be writing any kind of encap code right now if it weren't already made.  Kind of the only reason we have the usermode encapping around is because Atronix was using it, but I was trying to keep the feature but cut it out of the C.  It hasn't been tossed entirely because it functions as test code.</p>
+<p>We <em>could</em> make a token two-step build (the phase one executable, that uses the phase one to build a phase two with encapped data in it).</p>
+<p>But it seems what we might want more is an easy option to not build in encapping whatsoever, and have more control over options at build time than the current list of extensions.</p>
+<p>For the limited audience looking at desktop builds--I imagine the answer will be that if you want a differently-sized r3.exe, you do it with a C compiler and ticking different boxes.  Or you build everything as a DLL and accept it's not all one file.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/boot-footprint-giant-string-literal-vs-encap/1977">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/boot-footprint-giant-string-literal-vs-encap/1977</link>
+          <pubDate>Sat, 24 Sep 2022 01:57:39 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-1977</guid>
+          <source url="https://forum.rebol.info/t/boot-footprint-giant-string-literal-vs-encap/1977.rss">Boot Footprint: Giant String Literal vs. Encap?</source>
+        </item>
+        <item>
+          <title>Influences On Startup Time And Memory Use</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Optimization</category>
+          <description><![CDATA[
+            <p>Right now it's not ideal to be focusing on things like startup time and memory use.  There are a lot of fundamental features being rethought--and recall that rules of optimizing code at the cost of clarity and flexibility of design are:</p>
+<ul>
+<li>
+<p>Rule <span class="hashtag">#1:</span> Don't Do It</p>
+</li>
+<li>
+<p>Rule <span class="hashtag">#2</span> (Experts Only) Don't Do It... Yet.</p>
+</li>
+</ul>
+<p>...BUT, the issues can't be ignored forever.  And it's reasonable for one to ask why there's been a dramatic increase in boot time and memory use between the build being used for bootstrap and a current commit.</p>
+<p>So it's worth having a thread here to track some of what's involved.</p>
+<h2>ENCAP Detection</h2>
+<p>By default we still run encap detection on all desktop builds, scanning the executable.  On Windows I think Shixin's version loads the whole binary into memory, and on Linux it still does quite a lot.</p>
+<p>You can skip the detection by using <code>--no-encap</code>.</p>
+<p><a href="https://github.com/metaeducation/ren-c/blob/master/scripts/encap.reb">https://github.com/metaeducation/ren-c/blob/master/scripts/encap.reb</a></p>
+<p>But the encap and de-encapping tools will still be bundled in the executable.  They're not an extension, so if you don't want to pay for that...you need to entirely remove <a href="https://forum.rebol.info/t/boot-footprint-giant-string-literal-vs-encap/1977">early-boot modules like encap and unzip</a> which are <a href="https://github.com/metaeducation/ren-c/blob/02d1ba2c6e2a8b5fc689d4d6684435ae369a528d/src/main/prep-main.reb#L45">built in another way</a></p>
+<p>Obviously platform-specific C code would be faster and lighter than PARSE.  And there was some before, but it entangled things in the core with FILE I/O...and it was dedicated finicky C for a purpose we're not really focusing on, especially in the web build.</p>
+<p>The decision to move encapping to userspace tools was mine, and not something I regret.  But since we're not using it, all it's really doing is acting as a test.  I've made a separate thread to talk about the fate of Encap, and whether we should depend on it more or distance from it further:</p>
+<p><a href="https://forum.rebol.info/t/boot-footprint-giant-string-literal-vs-encap/1977" class="inline-onebox">Boot Footprint: Giant String Literal vs. Encap?</a></p>
+<h2>A Big Cost Is Going To Come From UPARSE</h2>
+<p>UPARSE right now is an elaborate exercise of the ability to build complex feature-filled dialects in userspace.  And it does so at great cost to the evaluator.</p>
+<p>Of course the plan is to cut that down, because COMBINATORs are just functions.  They could be written as natives.  And even more importantly, the process of <em>combinating itself</em> needs to be native.</p>
+<p>I have done some experiments with this:</p>
+<p><a href="https://forum.rebol.info/t/progress-on-nativizing-parser-combinators/1636" class="inline-onebox">Progress on Nativizing Parser Combinators</a></p>
+<p>But those experiments are currently inactive, because the design needed more work.  And it's easier to churn through that work with userspace code.</p>
+<p>What can we do about it? Well until UPARSE goes through an optimization phase, we can just use PARSE3 in boot...or at least for whatever subsetted codebase is in this metric.  The main thing is just to get it measured so we know how much of this is known UPARSE-ism vs. other unknowns.  I'm going to bet it's a lot...even though it's not used all that terribly much in boot, it's going to be big.</p>
+<p>Cutting it out for the moment would at least help focus on the next bigger things.</p>
+<h2>Another Pain Point Is Going to be GET+SET Atop PICK+POKE</h2>
+<p>I spent quite a while working through what a GET and SET and PICK and POKE actually were.  Ultimately I concluded:</p>
+<ul>
+<li>
+<p>GETs are just sequences of individual PICK steps (where a GET of a WORD! starts the chain with the binding of the word, and PICKs the word out of that object)</p>
+</li>
+<li>
+<p>SETs are a sequence of PICK steps which are kept track of...followed by POKE.  That POKE can return nothing (in which case you're done) or it can return an adjusted value.  If the value needed to be adjusted that means it then gets POKE'd back into the cell back in the chain, and this ripples back so long as the bitpattern in cells need to be adjusted.</p>
+</li>
+</ul>
+<p>I haven't gone back to this prototype and optimized it.  That means it quite literally is building evaluation chains of PICK and POKE every time it does tuple processing (what would be "path picking", e.g. variables out of objects).  I wasn't sure if this was the answer or not, so it seemed best to keep it general to be able to play with it.</p>
+<p>It's tough to know how much "hardening" should be done on this.  It's nice to be able to hijack and hook and bend things.  I think I still want to consider it to be calls to PICK and POKE, but we can do those calls via frames built just for those functions...and not generic evaluation.  I'll have to look at it.</p>
+<h2>Each Extension Adds Memory Use, But Also Has Startup Code</h2>
+<p>By default the desktop includes every extension, even for making animated GIFs...as well as currently</p>
+<p>If one wants to make a non-kitchen-sink test build of Ren-C...obviously use <code>debug: none</code>, and <a href="https://github.com/metaeducation/ren-c/blob/02d1ba2c6e2a8b5fc689d4d6684435ae369a528d/configs/default-config.r#L23">chopping extensions out with <strong><code>-</code></strong> instead of <strong><code>+</code></strong></a>, for starters.  Note that extensions can be <a href="https://github.com/metaeducation/ren-c/actions/runs/3056527403/jobs/4930783888#step:22:3">built as separate DLL/.so with <strong><code>*</code></strong></a></p>
+<h2>Other Factors Need Managing On a Case-by-Case Basis</h2>
+<p>Those would be among the only things that can be done without <em>some</em> attention to the C, which hasn't been vetted for this metric in years.  But it isn't a priority right at this exact moment--there are much more important things.</p>
+<p><em>(If you want some of my general philosophy about why Ren-C will be competitive with R3-Alpha despite "increased complexity", then seeing some <a href="https://forum.rebol.info/t/the-now-even-more-special-specialize/588">old stats on SPECIALIZE might be illuminating</a>)</em></p>
+            <p><small>3 posts - 2 participants</small></p>
+            <p><a href="https://forum.rebol.info/t/influences-on-startup-time-and-memory-use/1972">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/influences-on-startup-time-and-memory-use/1972</link>
+          <pubDate>Sun, 18 Sep 2022 22:11:11 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-1972</guid>
+          <source url="https://forum.rebol.info/t/influences-on-startup-time-and-memory-use/1972.rss">Influences On Startup Time And Memory Use</source>
+        </item>
+        <item>
+          <title>Rethinking The Stale Bit: Invisibility In The Isotopic Age</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Optimization</category>
+          <description><![CDATA[
+            <p>Every evaluation step is asked to target an output cell.  Before the evaluation, a single bit is set on that cell to say it is "stale".  So if the evaluation doesn't write to it--and confirms that wasn't a mistake--then the old result is left around to recover.</p>
+<p>The ability to recover the previous result with the flip of a bit is used for invisibility.  It's used not just in the evaluator when it goes step by step, but also in things like ANY and ALL.</p>
+<pre><code>&gt;&gt; 1 + 2 comment "in the evaluator"
+== 3
+
+&gt;&gt; all [1 + 2 comment "here too"]
+== 3
+</code></pre>
+<p><em>Doing it this way has sacrificed some features.</em>  For instance, you can't make an "invisible" enfix function:</p>
+<pre><code>&gt;&gt; foo: enfix func [left] [
+       print ["Left was" left]
+       return void
+   ]
+
+&gt;&gt; 304 1020 foo
+Left was 1020
+== 1020
+</code></pre>
+<p>The 1020 from the previous evaluation was used as an argument.  But after "consuming all its arguments" the product of FOO could not leave the 304 there.  If each evaluation step was to a temporary cell, that temporary cell could be used to fill the enfix slot of FOO... and 304 could be left.</p>
+<p><em>Doing it this way has also required acrobatics to accomplish non-negotiable features.</em>  The related problem of making it possible for an enfix function to perceive voidness on the left hand side requires stale bit mechanics that aren't for the faint of heart... e.g. to differentiate these two cases:</p>
+<pre><code>&gt;&gt; (else [print "Won't work"])
+** Error
+
+&gt;&gt; () else [print "Will work"]
+Will work
+</code></pre>
+<h2>Is All The Bit-Fiddling Worth It Vs. Copying?</h2>
+<p>Considering the small size of cells (4 platform pointers), the logic to test and clear the "stale" bit may seem to add overhead and complexity that isn't saving that much.  Instead, every evaluation could be done into a temporary slot...and then if not invisible, the 4 pointers could be moved.</p>
+<p>This is actually a bit misleading--because copying cells is actually a bit more expensive in the general case.  Cell format flags have to be checked, bindings may need to be managed, and if a reference count mechanic is implemented this could make it all worse.</p>
+<p>Less copying is desirable, and it seems neat to have achieved invisibility thus far without needing an extra eval per-eval-step.</p>
+<blockquote>
+<p><em>"So if the evaluation doesn't write to it--and confirms that wasn't a mistake..."</em></p>
+</blockquote>
+<p>This is one of the main reasons I've stuck with the current method.  It's useful for debug purposes to know if a native just forgot to write an output cell anyway.  So I figured: <em>"so long as the output cell is going to have a flag on it saying it hasn't been written to yet, why not make that flag able to coexist with the previous value...and hence avoid a mechanic of needing to copy every time?"</em></p>
+<h2>But Isotopes Mean It's Time For Change</h2>
+<p>Early on I observed that there was no way to get this to work:</p>
+<pre><code>&gt;&gt; 1000 + 20 if true [comment "hi"]
+== 1020  ; not possible
+</code></pre>
+<p>The IF had to produce something as a proxy for VOID that wasn't void... in order to signal a taken branch (we want THEN to run).</p>
+<p>But even if that proxy was able to <em>decay</em> to a void state, it was too late.  It had overwritten the output.  Today that proxy is a parameter pack with a meta-void in it: <strong><code>~[~]~</code></strong>.</p>
+<p>There's more stuff with parameter packs that <em>should</em> work, like this:</p>
+<pre><code> &gt;&gt; 1000 + 20 [x @y]: pack [304 void]
+ == 1020
+</code></pre>
+<p><em>And isotopic objects that represent lazy evaluations should be able to produce void, too.</em>  They're a proxy for behavior, and if you pick and choose behaviors that could be accomplished with a normal result that a REIFY method on a lazy object can't, you're saying they're not as powerful.</p>
+<p><strong>These features tip the scales.</strong>  And really, the circuitous nature of void enfix handling was already tipping them.</p>
+<p>The concerns over copying are mostly addressed by something I'm calling "cell movement"; this means we can really get closer to the 4 platform pointer copies, because you're destroying the old cell in the process.  So if techniques like reference counting came along, you're not adding and removing them--you're just letting the new cell take over the resources of the old.</p>
+<p>Plus, detecting whether a cell has been written to or not is a generic debug feature now that has easy coverage.</p>
+<p><em>The stale bit is thus on the chopping block.</em>  So expect more robust void-related behavior coming soonish.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/rethinking-the-stale-bit-invisibility-in-the-isotopic-age/1963">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/rethinking-the-stale-bit-invisibility-in-the-isotopic-age/1963</link>
+          <pubDate>Thu, 08 Sep 2022 21:34:36 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-1963</guid>
+          <source url="https://forum.rebol.info/t/rethinking-the-stale-bit-invisibility-in-the-isotopic-age/1963.rss">Rethinking The Stale Bit: Invisibility In The Isotopic Age</source>
+        </item>
         <item>
           <title>Incomplete TRANSCODEs: Actually an Optimization Problem</title>
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
@@ -868,7 +1044,7 @@ Value is :foo
 <h2>I'm Probably Over-Worrying About It</h2>
 <p>...these protection mechanisms I mention in order to make it painless to change a parameter convention are not likely suited to being the kind of concern that applies.</p>
 <p>But it's good to articulate what the limits of a design are...</p>
-            <p><small>3 posts - 1 participant</small></p>
+            <p><small>4 posts - 1 participant</small></p>
             <p><a href="https://forum.rebol.info/t/beating-repend-a-new-parameter-convention/1673">Read full topic</a></p>
           ]]></description>
           <link>https://forum.rebol.info/t/beating-repend-a-new-parameter-convention/1673</link>
@@ -1211,7 +1387,7 @@ for (; item != tail; ++item) {
 </ul>
 </li>
 <li>
-<p>The initial implementation in NewPath cost those pointers <em>plus</em> 8 pointers for a series node <em>plus</em> a pool element that was 4 units long of 4 pointers each...to be big enough for 2 elements and a terminator.</p>
+<p>The initial implementation in NewPath cost those pointers <em>plus</em> 8 pointers for a series stub <em>plus</em> a pool element that was 4 units long of 4 pointers each...to be big enough for 2 elements and a terminator.</p>
 <ul>
 <li>That's 112 bytes on 32-bit platforms, 224 bytes on 64-bit platforms</li>
 </ul>
@@ -1219,7 +1395,7 @@ for (; item != tail; ++item) {
 </ul>
 <p>Not only do you get a factor of 7 cost increase, you now have 3 separate locations in memory to jump around at to process what you have (in addition to the locality issue of having to go find the symbol itself, which WORD!s had to do as well).</p>
 <p>In the "keeping it Amish" spirit, it felt like too much when the difference between <strong>/FOO</strong> and <strong>FOO</strong> jumped like that.  It only takes a few factors of 10 to get to the kinds of software situations we see today.  :-/</p>
-<h2>Before Going Further: Let's Recap CELLs and NODEs</h2>
+<h2>Before Going Further: Let's Recap CELLs and STUBs</h2>
 <p>For those who've looked at Rebol sources, you know that a Rebol cell is the size of <em>four platform pointers</em>.</p>
 <p>Ren-C keeps the general gist, with some important adjustments.  It breaks down as:</p>
 <ul>
@@ -1238,12 +1414,12 @@ for (; item != tail; ++item) {
 <h2>Despite Optimizations, <em>Arrays Cost Notably More</em>
 </h2>
 <p>When we try to understand the difference between <strong>[1 2 3]</strong> and <strong>[[1] [2] [3]]</strong>, just how much of cost is that in bytes or processing overhead?  If you're designing a dialect, should you fear BLOCK!s, GROUP!s, and PATH!s?</p>
-<p>Well, when you've got that cell and the header says it's a REB_BLOCK, the "extra" field is used for stuff I'm not going to explain here.  But the Reb_Block_Payload union contains to two things: a <em>series node</em> pointer and the index that series value has in the block.</p>
-<p>Series nodes are fixed-size tracking entities.  Though they're pretty small, they're still <em>eight platform pointers</em>.  To get to the node from the cell you have to hop through the pointer to another memory location, and so that's going to affect caching.</p>
-<p>If you have a block of length 1 or 0, then Ren-C has a very neat optimization called "singular arrays".  The payload for the array lives <em>directly in the series node</em>.  Careful mechanics allow this to work, not breaking any alignment or aliasing rules, and even building some safety in via bit patterns to help catch attempts to wander off the edge of the data into neighboring node stubs.</p>
-<p>So in this case--if you're lucky--you've gone from taking 4 platform pointers for just the REB_INTEGER cell, to a REB_BLOCK cell of 4 platform pointers...and a series node of 8 pointers.  3x the size for <strong>[1]</strong> vs. just <strong>1</strong>.</p>
+<p>Well, when you've got that cell and the header says it's a REB_BLOCK, the "extra" field is used for stuff I'm not going to explain here.  But the Reb_Block_Payload union contains to two things: a <em>series stub</em> pointer and the index that series value has in the block.</p>
+<p>Series stubs are fixed-size tracking entities.  Though they're pretty small, they're still <em>eight platform pointers</em>.  To get to the stub from the cell you have to hop through the pointer to another memory location, and so that's going to affect caching.</p>
+<p>If you have a block of length 1 or 0, then Ren-C has a very neat optimization called "singular arrays".  The payload for the array lives <em>directly in the series stub</em>.  Careful mechanics allow this to work, not breaking any alignment or aliasing rules, and even building some safety in via bit patterns to help catch attempts to wander off the edge of the data into neighboring stubs.</p>
+<p>So in this case--if you're lucky--you've gone from taking 4 platform pointers for just the REB_INTEGER cell, to a REB_BLOCK cell of 4 platform pointers...and a series stub of 8 pointers.  3x the size for <strong>[1]</strong> vs. just <strong>1</strong>.</p>
 <p>But let's say instead of a block, you were doing a PATH!, like the proposed 2-element path for <strong>/refinement</strong> (a BLANK! that's not rendered, and then the WORD! "refinement").  What would a 2-element array cost?</p>
-<p>You've still got the 4 pointer cell and the 8 pointer series node.  But now you need a dynamic allocation to hold the 2 cells, so that would be 8 more platform pointers.</p>
+<p>You've still got the 4 pointer cell and the 8 pointer series stub.  But now you need a dynamic allocation to hold the 2 cells, so that would be 8 more platform pointers.</p>
 <blockquote>
 <p>Note: It would have needed to be 4 cells when a terminator was needed...but <a href="https://forum.rebol.info/t/moving-away-from-null-termination-end-of-block-s/1445">the terminator no longer applies</a>!  So arrays of length 2 can really just use 8 pointers in their allocation now.  <img src="https://forum.rebol.info/images/emoji/twitter/partying_face.png?v=9" title=":partying_face:" class="emoji" alt=":partying_face:"></p>
 </blockquote>
@@ -1253,7 +1429,7 @@ for (; item != tail; ++item) {
 <p>Once I realized paths and tuples could be immutable, it began to make sense that they could avoid the problem of being like arrays.</p>
 <p>I called them "sequences", and dropped the assumption that every sequence had an array backing it.  Instead, some would...and some would not.</p>
 <p>So you wouldn't ask for a pointer to the head cell of a sequence directly.  Instead, you would ask for the Nth element of a sequence...and <em>maybe</em> you would get a pointer to a cell that was part of an array.  Or you could get a pointer back to a temporary cell you passed in where the item would be written.</p>
-<p>Then, something like a refinement-type PATH! would not point at an array node, but to a word spelling node.  It's possible to tell the difference because in Ren-C all Nodes have "flavor bytes" (which are a parallel to the heart byte in a Cell that tells you if it's a BLOCK! or WORD! etc.)</p>
+<p>Then, something like a refinement-type PATH! would not point at an array stub, but to a word spelling stub.  It's possible to tell the difference because in Ren-C all Stubs have "flavor bytes" (which are a parallel to the heart byte in a Cell that tells you if it's a BLOCK! or WORD! etc.)</p>
 <p>Since 1-element paths are illegal, we can assume that if a path points to a word spelling it must represent either <strong>/a</strong> or <strong>a/</strong>.  The distinction is encoded with a single bit in the cell.</p>
 <h2>It's All Been Working Great</h2>
 <p>Immutable PATH! and TUPLE! are clearly good, and they permit this optimization.</p>
