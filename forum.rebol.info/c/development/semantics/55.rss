@@ -5,8 +5,54 @@
     <link>https://forum.rebol.info/c/development/semantics/55</link>
     <description>Topics in the &#39;Semantics&#39; category While the &quot;Internals&quot; discusses the bits and bytes of how things are implemented, this category is for discussing things design questions of the language... like what &lt;strong&gt;do []&lt;/strong&gt; should return.</description>
     
-      <lastBuildDate>Wed, 14 Sep 2022 17:08:13 +0000</lastBuildDate>
+      <lastBuildDate>Sun, 27 Nov 2022 06:00:32 +0000</lastBuildDate>
       <atom:link href="https://forum.rebol.info/c/development/semantics/55.rss" rel="self" type="application/rss+xml" />
+        <item>
+          <title>Should ELSE be FALSE-reactive? (in addition to void and null?)</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Semantics</category>
+          <description><![CDATA[
+            <p>Historically one might have asked why ELSE doesn't think falseness is something worth reacting to:</p>
+<pre><code>&gt;&gt; 1 = 2 else [print "Why not print?"]
+Why not print?  ; seems not so bad, right?
+</code></pre>
+<p>The idea was panned, because <code>#[false]</code> was <em>a value</em> and ELSE's main job was to react to the situation of a branching construct that didn't produce a value:</p>
+<pre><code>&gt;&gt; math-broken: if 1 = 1 [false] else [true]
+== #[false]  ; if this were #[true], math seems broken
+</code></pre>
+<p>But now, the actual falsey <code>~false~</code> state is isotopic.  And some years of struggle with the parallel problem of what to do with branches that returned "non-values" bore curious fruit: a box that could hold a "non-value" like a null.</p>
+<pre><code>&gt;&gt; if false [null]
+== ~null~  ; isotope
+     ^-- there is no result
+
+&gt;&gt; if true [null]
+== ~[~null~]~  ; isotope
+     ^-- there is a result and it is null
+</code></pre>
+<p>Isotopic blocks containing one element will decay to that one element in most situations.  But ELSE is sensitive to the difference via a ^META parameter.  If someone has gone through the effort to box up a null or void vs leave it as a plain isotope, the ELSE assumes it's a meaningful result and should pass it on.  And conditional expressions know to do this; they box up nulls and voids if they are produced by executing branches.</p>
+<p><strong>The same technique could work for false.</strong></p>
+<pre><code>&gt;&gt; if 1 = 1 [false]
+== ~[~false~]~  ; isotope
+
+&gt;&gt; if 1 = 1 [false] else [true]
+== ~[~false~]~  ; isotope
+
+&gt;&gt; math-broken: if 1 = 1 [false] else [true]
+== ~false~  ; isotope
+</code></pre>
+<p>It's barely any additional work for conditionals to do on top of what they're doing already.  Although it can result in branches producing false to cost a small bit more than they do today <em>(I wouldn't worry about it, these single element boxes could be optimized if it was a problem)</em></p>
+<p>But I don't know how useful it would actually be.  <img src="https://forum.rebol.info/images/emoji/twitter/man_shrugging.png?v=9" title=":man_shrugging:" class="emoji" alt=":man_shrugging:">  Just writing down the observation.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/should-else-be-false-reactive-in-addition-to-void-and-null/1991">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/should-else-be-false-reactive-in-addition-to-void-and-null/1991</link>
+          <pubDate>Sun, 27 Nov 2022 06:00:32 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-1991</guid>
+          <source url="https://forum.rebol.info/t/should-else-be-false-reactive-in-addition-to-void-and-null/1991.rss">Should ELSE be FALSE-reactive? (in addition to void and null?)</source>
+        </item>
         <item>
           <title>Line Continuation and Arity Bugs: Thoughts?</title>
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
@@ -1587,57 +1633,6 @@ Strictness:
           <discourse:topicArchived>No</discourse:topicArchived>
           <guid isPermaLink="false">forum.rebol.info-topic-1824</guid>
           <source url="https://forum.rebol.info/t/why-isnt-print-invisible/1824.rss">Why Isn&#39;t PRINT Invisible?</source>
-        </item>
-        <item>
-          <title>Can `TAKE []` Just Return Null?</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Semantics</category>
-          <description><![CDATA[
-            <p>Here is the behavior of TAKE in Rebol2:</p>
-<pre><code>rebol2&gt;&gt; block: compose [1020 (none)]
-== [1020 none]
-
-rebol2&gt;&gt; take block
-== 1020
-
-rebol2&gt;&gt; take block
-== none
-
- rebol2&gt;&gt; take block
- == none
-
- rebol2&gt;&gt; take block
- == none
-</code></pre>
-<p>One thing I was bothered about was the inability to notice a difference between taking from an empty block and taking from a block containing a NONE!.  Ren-C can resolve that with NULL as a unique response to taking from a block with no elements in it.</p>
-<p>But there's another concern which BrianH expressed, about a routine that you expected to have a side effect that did not.  If you write a line simply like <strong>take block</strong> and it doesn't take anything away, should it be silent about that fact?</p>
-<h2>Early Ren-C introduced <code>TAKE*</code> as distinct from <code>TAKE</code>...</h2>
-<p>Experiments at being prescriptive worried that getting back a NULL might not be enough to warn you about a misunderstanding.  So we wound up with this:</p>
-<pre><code>ren-c&gt;&gt; take []
-** Error: TAKE-ing from an empty block, use TAKE*
-
-ren-c&gt;&gt; take* []
-; null
-</code></pre>
-<p>To make things simple, TAKE was just a chained function derived from the lower-level <code>TAKE*</code>.  This seemed "safer"...at the time, and addressed BrianH's (pre-NULL) concern...as well as my general overarching desire to use things that are "more checked".</p>
-<p><strong>But this may be the wrong place to get paranoid about the user's intent, and we should just be happy that the NULL offers a unique result that means nothing was taken.</strong></p>
-<p>When I wrote about <a href="https://forum.rebol.info/t/make-your-own-safety/1118/3">"Make Your Own Safety"</a> I asked what the odds were that we could guess the top pet-peeve that every programmer would have.</p>
-<p>How many times have you been bitten by TAKE on an empty block you didn't know was empty?  When you did, how likely was it that you blamed yourself vs. the tool?</p>
-<p>Not only that, but what if you could get the "hardened" versions of <code>TAKE</code> and <code>TAKE*</code> in the files where it was bothering you as easily as:</p>
-<pre><code> take*: :lib/take
- take: (=&gt; non null lib/take)
-</code></pre>
-<p>This seems the better angle, and avoids making it feel like there's any kind of bias toward the "tics" that bother <a class="mention" href="/u/rgchris">@rgchris</a>, which the <code>*</code> may represent.  <strong>Give people the power to bend fast to address the specific concerns that are bothering them with the bent and personalized/customized code they are writing to solve the problem they have <em>right now</em>.</strong></p>
-            <p><small>3 posts - 2 participants</small></p>
-            <p><a href="https://forum.rebol.info/t/can-take-just-return-null/1265">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/can-take-just-return-null/1265</link>
-          <pubDate>Tue, 03 Mar 2020 20:45:06 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-1265</guid>
-          <source url="https://forum.rebol.info/t/can-take-just-return-null/1265.rss">Can `TAKE []` Just Return Null?</source>
         </item>
   </channel>
 </rss>

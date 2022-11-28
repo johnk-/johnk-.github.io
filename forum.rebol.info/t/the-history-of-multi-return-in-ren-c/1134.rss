@@ -77,9 +77,163 @@ Going even further, I suggested *&quot;it would be important that if a function 
 
 ### ***...but all this would require some kind of magic...*** :mage:</description>
     
-    <lastBuildDate>Sat, 20 Aug 2022 10:06:31 +0000</lastBuildDate>
+    <lastBuildDate>Sun, 27 Nov 2022 10:36:44 +0000</lastBuildDate>
     <category>Functions</category>
     <atom:link href="https://forum.rebol.info/t/the-history-of-multi-return-in-ren-c/1134.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>The History of Multi-Return in Ren-C</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="9" data-topic="1134">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/40/26_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>But lingering issues regarding wrapping and composing multi-returns remained...</p>
+</blockquote>
+</aside>
+<p>The proxying technique had shown clear advantages for the authors of functions, to be able to do direct assignments vs. need to remember to always <strong><code>SET</code></strong> the named variable passed in.</p>
+<p>But underneath the hood, the names of the variables were still like inputs to the lower-level function.  This went as far as trying to act compatibly with the variable-passed-by-refinement trick that historical Redbol used for multiple returns.</p>
+<p>Among the many problems were trying to write something like ENCLOSE.  An enclosing function could only influence the primary output, unless it went through some particularly convoluted work:</p>
+<ul>
+<li>
+<p>It would have to capture the variable name passed in before delegating, because the name would be repurposed as the proxied value slot</p>
+</li>
+<li>
+<p>The delegated function would be called and would update the variable as part of its RETURN</p>
+</li>
+<li>
+<p>The encloser would then have to read back this written variable with GET to see it, and use SET to update it...again.</p>
+</li>
+</ul>
+<p>Here's an example of what you could think you might have to do:</p>
+<pre><code>multi-returner: func [
+    return: [integer!]
+    extra: [integer!]
+][
+    extra: 20  ; by this point, variable passed as /EXTRA hidden
+    return 10  ; stowed /EXTRA variable written back using EXTRA's 20 value
+]
+
+wrapper: enclose :multi-returner func [f [frame!]] [
+    let extra-var: f.extra  ; capture var before call via DO moves it aside
+    result: do f  ; callee proxies input variable during RETURN
+    set extra-var (get extra-var) + 1  ; get new written value and update it 
+    return result + 1
+]
+
+&gt;&gt; [a b]: wrapper
+== 11
+
+&gt;&gt; a
+== 11
+
+&gt;&gt; b
+== 21
+</code></pre>
+<p><em>The situation was actually even worse than that.</em>  All the complex logic for filling proxy slots with variable WORD!s was done during the frame building.  e.g. <strong><code>extra-var</code></strong> wasn't the hypothetical "parameter passed to extra before it got shifted into a hidden variable slot by FUNC", it was already the unset slot to be filled by the callee.  And the actual variable name was private, known only to the enclosed function.</p>
+<p><em>And it's worse than that</em> if you want to preserve the ability to have behavior depending on how many inputs are requested, because there may be no variable at all... or an "opt in for the feature without a variable" placeholder.  Correct code would be much more convoluted, if meaningful code could be written at all.</p>
+<p>The headaches go deeper.  Copying a frame and running it multiple times introduced semantic and ordering problems about the writing of these additional outputs!</p>
+<h2>Simply Put: Variable Names As Inputs Make Poor Outputs</h2>
+<p>All of this pointed to the inconvenient truth:</p>
+<p><strong>Implementing a function's conceptual outputs by passing named variables as input that are imperatively written during the function's body--anywhere, even at the end--is something that will break composition.</strong></p>
+<p><strong>It's also horrible for atomicity, because a SET of an output variable may happen but then there's an error which occurs before the final return result can be produced... so any multi-return function working in this way is either broken or bearing an undue burden to do its own "transaction management", which is to say probably also broken.</strong></p>
+<p>Of course we knew this.  But to get the desired effects (single return unless you use a SET-BLOCK!), there's no other choice, right?</p>
+<p>The idea of making an ANY-VALUE! which tried to bundle values was nixed in the beginning.  Because if we declared some new datatype to represent a multi-return pack that decays to its first value when assigned to a variable, you enter a catch-22, like this early puzzle when <strong><code>@[...]</code></strong> was being considered to denote multi-returns:</p>
+<pre><code>multi-return: func [] [
+    return @[10 20]  ; assume RETURN is "magic" and returns @[10 20] vs. 10
+]
+
+&gt;&gt; x: multi-return
+== 10
+
+&gt;&gt; [x y]: multi-return
+== 10
+
+&gt;&gt; x
+== 10
+
+&gt;&gt; y
+== 20
+</code></pre>
+<p>The problems are apparent on even a trivial analysis.  These "highly reactive" <strong><code>@[...]</code></strong> values wreak havoc in a general system.  If you walked across a block and encountered one, trying to work with it to store them in a variable would introduce distortions on assignment when they "decayed" to their first element.</p>
+<pre><code>for-each x [foo @[10 20] bar] [
+    if integer? x [...]  ; INTEGER? sees @[10 20] as just 10
+] 
+</code></pre>
+<p><img src="https://forum.rebol.info/images/emoji/twitter/man_facepalming.png?v=9" title=":man_facepalming:" class="emoji" alt=":man_facepalming:"> ...but gee... if only there were some variation of BLOCK! which you could be guaranteed not to encounter when enumerating other blocks, and that couldn't be stored in variables... and a method for dealing with transforming them into and out of reified states so you could work with them...</p>
+<p><em>Hey, waitaminute...</em> <img src="https://forum.rebol.info/images/emoji/twitter/atom_symbol.png?v=9" title=":atom_symbol:" class="emoji" alt=":atom_symbol:"></p>
+<h2>September 2022: Core Multi-Return via Isotopic BLOCK!</h2>
+<p><a href="https://forum.rebol.info/t/a-justification-of-generalized-isotopes/1918">Generalized Isotopes</a> made longstanding problems seem to fall like dominos; like block splicing and error handling.  And they could be applied here, too... solving several profound problems:</p>
+<ul>
+<li>
+<p>As with all isotopes, you wouldn't be able to put BLOCK! isotopes in blocks...alleviating many conceptual problems.</p>
+</li>
+<li>
+<p>Yet even more severely, you wouldn't be able to put BLOCK! isotopes in <em>variables</em>.  Isotopic BLOCK!s would decay to their first value when assigned to <em>any</em> variable</p>
+<ul>
+<li>
+<p>This turned out to be the <em>only</em> isotopic "decay" mechanism required, subsuming prior concepts like decaying "heavy null" to "light null".  Heavy null would simply be a null representation in an isotopic block.</p>
+</li>
+<li>
+<p>Representing things like null would be possible since ^META values would be used in the multi-return convention, to afford the multi-return of isotopes themselves</p>
+</li>
+</ul>
+</li>
+<li>
+<p>Fitting in with the general rules of isotopes, a QUASI-BLOCK! would evaluate to an isotopic block:</p>
+<pre><code>&gt;&gt; ~['10 '20]~
+== ~['10 '20]~  ; isotope
+
+&gt;&gt; x: ~['10 '20]~
+== 10
+</code></pre>
+</li>
+<li>
+<p>Functions that might be interested in the isotopic state would need to take a parameter via a ^META parameter, in which case they would receive a QUASI-BLOCK! vs the decayed parameter</p>
+<ul>
+<li>
+<p>A good example of a function that would want this would be RETURN, in order to be able to have a forwarding mode that would return an isotopic result vs. its decayed first value</p>
+</li>
+<li>
+<p><strong>This doesn't rule out the proxying-named-output-variable concept</strong>; in fact it fixes its problems, by limiting the relevance of the fact that proxying is being used to the interior of the function, and making its external speak the isotopic block protocol.  If you want a proxying-FUNC you can have it.</p>
+</li>
+<li>
+<p>It also opens the doors to many other conceptions of how to abstract the multi-return process</p>
+</li>
+</ul>
+</li>
+<li>
+<p>SET-BLOCK! assignments would have special understandings of how to decompose isotopic blocks and assign the component variables</p>
+<ul>
+<li>
+<p>This would break the uneasy "backchannel" between caller and callee of variable names</p>
+</li>
+<li>
+<p>The most obvious sign this had been a problem was that mere parenthesization would break historical multi-assignment:</p>
+<pre><code>&gt;&gt; [a b]: multi-return   ; would work
+
+&gt;&gt; [a b]: (multi-return)  ; would act like `(a: multi-return)`
+</code></pre>
+</li>
+<li>
+<p>Now any expression that doesn't store a variable as intermediate can act pass-thru (such as a conditional), and if a variable wanted to capture the multi-return character temporarily it could META it...potentially manipulate the QUASI-BLOCK!, and UNMETA it back</p>
+</li>
+</ul>
+</li>
+</ul>
+<h2>Casualties of Composability</h2>
+<p>One casualty of this was be the feature of being able to make a function's behavior depend on how many outputs were requested.  But the feature can still be achieved with enfix quoting left-hand-side and managing the assignment, it's just no longer be something the core attempts to generalize.</p>
+<p>Another casualty is legacy compatibility with passing in variable names via refinement.  But again: this feature could be achieved by AUGMENT-ing the function with the refinement, then ENCLOSE-ing that with something that wrote the multi-return's output to the variable passed in via that augmented refinement.</p>
+<p>But there's really no competition here.  As I've hopefully made clear, passing in a named variable via refinement is simply not in the same league as a mechanism which legitimately makes additional outputs.</p>
+<p><strong>As usual with these things, I'll admit it may not be simple or obvious at first glance, but the results are speaking for themselves!</strong></p>
+          <p><a href="https://forum.rebol.info/t/the-history-of-multi-return-in-ren-c/1134/12">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/the-history-of-multi-return-in-ren-c/1134/12</link>
+        <pubDate>Sun, 27 Nov 2022 04:54:58 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1134-12</guid>
+        <source url="https://forum.rebol.info/t/the-history-of-multi-return-in-ren-c/1134.rss">The History of Multi-Return in Ren-C</source>
+      </item>
       <item>
         <title>The History of Multi-Return in Ren-C</title>
         <dc:creator><![CDATA[hostilefork]]></dc:creator>
@@ -231,7 +385,7 @@ Going even further, I suggested *&quot;it would be important that if a function 
 
 &gt;&gt; [value next-pos error]: transcode "1 [2] &lt;3&gt;"
 </code></pre>
-<p>We're also given the feature of being able to check for if a return is requested, and vary the behavior based on it. This is fantastic:</p>
+<p>We're also given the feature of being able to check for if a return is requested, and vary the behavior based on it:</p>
 <pre><code> &gt;&gt; transcode "abc def ghi"
  == [abc def ghi]
 
@@ -241,7 +395,7 @@ Going even further, I suggested *&quot;it would be important that if a function 
  &gt;&gt; rest
  == [def ghi]
 </code></pre>
-<p><strong><a href="https://forum.rebol.info/t/transcode-and-load-multi-return-improvements/1925">TRANSCODE and LOAD showed great results immediately.</a></strong></p>
+<p><strong><a href="https://forum.rebol.info/t/transcode-and-load-multi-return-improvements/1925">TRANSCODE and LOAD seemed to show great results immediately</a></strong> <em>(though later problems of composability from this feature ultimately lead to it being panned to use in core functions <img src="https://forum.rebol.info/images/emoji/twitter/frowning.png?v=9" title=":frowning:" class="emoji" alt=":frowning:"> )</em></p>
 <p>And this was tried going along for the next year...</p>
           <p><a href="https://forum.rebol.info/t/the-history-of-multi-return-in-ren-c/1134/6">Read full topic</a></p>
         ]]></description>
