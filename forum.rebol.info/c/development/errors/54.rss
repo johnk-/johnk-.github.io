@@ -80,7 +80,7 @@
           <source url="https://forum.rebol.info/t/the-fail-that-wins-big-combinator-definitional-errors/1922.rss">The FAIL That Wins Big: Combinator Definitional Errors</source>
         </item>
         <item>
-          <title>Definitional Errors as BLANK!-in-NULL-out Alternative</title>
+          <title>The VOID-in-NULL-out Protocol</title>
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
           <category>Errors</category>
           <description><![CDATA[
@@ -96,93 +96,56 @@
 <em>"Yes, but the less of them we have, the better, as they lower the robustness of user code, by making some error cases passing silently. The goal of such none-transparency is to be able to chain calls and do nothing in case of <code>none</code>, avoiding an extra <code>either</code> construct. In the above case, it still requires an extra conditional construct (<code>any</code>), so that is not the same use-case as for other none-transparent functions (like <code>remove</code>)."</em></p>
 </blockquote>
 <h2>But I Didn't Give Up So Easily...</h2>
-<p>The strategy cooked up for Ren-C has been called "BLANK!-in-NULL-out"...leveraging a new meaning of the short word "TRY".</p>
-<p>There was an asymmetry created, in which certain functions that didn't have a meaning for BLANK! as input would accept BLANK!, but then just return NULL out.</p>
-<p>Then TRY would turn nulls into BLANK!.</p>
-<p>As long as functions would generally reject NULL as an input, this created a dynamic where you'd put as many TRY in a chain as you felt was warranted, if you expected any steps could fail.  So perhaps <strong>first try select block try second options</strong>.  A reader could tell which operations could potentially fail using this method.</p>
-<h2>The Achilles Heel: What if a Function Has Meaning for BLANK! ?</h2>
-<p>Think about something like PICK and POKE.  It's legitimate to put a mapping from BLANK! to something in a MAP!.  So consider these mechanics:</p>
-<pre><code> my-map.(key)
-     =&gt; pick my-map key
+<p>The strategy cooked up for Ren-C is called "VOID-in-NULL-out".</p>
+<p>There is an asymmetry created, in which certain functions take VOID as input, but then just return NULL out.</p>
+<p>Then MAYBE can turn nulls into VOID.</p>
+<p>Since (nearly) no function naturally takes VOID as an input, this creates a dynamic where you'd put as many MAYBE in a chain as you felt was warranted, if you expected any steps could fail.  So perhaps <strong>first maybe select block maybe second options</strong>.  A reader could tell which operations could potentially fail using this method.</p>
+<p>It has shown systemic success:</p>
+<pre><code>&gt;&gt; case [false [[a b c]]]
+; void
 
- my-map.(key): value
-     =&gt; poke my-map key value
-</code></pre>
-<p>You can't "opt out" of this with blank-in, null out...because blank is one of the legitimate keys.</p>
-<p>This is unfortunate, because it would be nice to be able to use TRY with PICK.</p>
-<h2>An Atomic-Age Solution <img src="https://forum.rebol.info/images/emoji/twitter/atom_symbol.png?v=9" title=":atom_symbol:" class="emoji" alt=":atom_symbol:">  Let TRY Defuse Isotopic Errors</h2>
-<p>My new idea, which we might call <strong>NULL-In-TRY-Out</strong>, looks like a conventional error case:</p>
-<pre><code>&gt;&gt; first null
-** Error: FIRST doesn't accept NULL for its SERIES argument
-</code></pre>
-<p>But this isn't a typical type-checking error (which would happen in the evaluation engine and hence not qualify for being "definitional").</p>
-<p>The parameter convention would basically say that the function returned the isotopic error as its output, making it interceptable.  <strong>In other words: It actually <em>did</em> accept the NULL parameter and call the function...but then the only action it took was immediately put an isotopic error in its output cell.</strong></p>
-<p>And one of the constructs that would trap it would be TRY.</p>
-<pre><code>&gt;&gt; try first null
+&gt;&gt; second case [false [[a b c]]]  ; "opt out" gives you a first step w/o error
 ; null
+
+&gt;&gt; first second case [false [[a b c]]]
+** Error: FIRST doesn't take NULL as input (use MAYBE to opt out via VOID)
+
+&gt;&gt; first maybe second case [false [[a b c]]]
+; null
+
+&gt;&gt; first second case [true [[a [b] c]]]
+== b
 </code></pre>
-<h2>Will People Notice A Difference?</h2>
-<p>It flips it around, to where you put the TRY on the operation that's supposed to tolerate the NULL, not the NULL being tolerated.</p>
-<p>So before you would write something like:</p>
-<pre><code>adjust-url-for-raw try match url! :source
-</code></pre>
-<p>That would say <em>"if MATCH returns NULL, morph it into a 'less ornery' BLANK!, so ADJUST-URL-FOR-RAW knows not to complain"</em></p>
-<p>But now:</p>
-<pre><code>try adjust-url-for-raw match url! :source
-</code></pre>
-<p>What you're saying is <em>"I know ADJUST-URL-FOR-RAW can't use that NULL, but it expects that I might give it one, so keep the isotopic error it returns from being raised."</em></p>
-<p>Each has its merits.</p>
+<h2>VOID is a Better Choice Than NULL, BLANK!, etc.</h2>
+<p>Prior to the rise of non-interstitial void, the strategy was tried as "BLANK!-in-NULL-out".  But this created problems since sometimes blank was meaningful as input.</p>
+<p>VOID has all the properties we're looking for, here.  It's basically about as out-of-band as you can get.</p>
 <ul>
 <li>
-<p>In the old way, you were pointing a finger right at which operation could potentially return NULL.</p>
+<p>It really isn't supposed to have meaning to any routine, so "no op" is about the best reaction to "hey, you got a void".</p>
 </li>
 <li>
-<p>In the new way, you're pointing right at the operation that might be bypassed due to parameter conventoins and not run.</p>
+<p>Like NULL, it can't be stored in blocks</p>
+</li>
+<li>
+<p>Unlike NULL, it's not easy to get out of variables...so if you manage to generate a void, you probably did it on purpose.</p>
+</li>
+<li>
+<p>There's a nice operator for turning NULL into VOID called MAYBE.</p>
+</li>
+<li>
+<p>Control constructs return VOID when none of their branches run, so there's a bunch of functions you can draw from that effectively "fold the MAYBE in"</p>
 </li>
 </ul>
-<p>All things being equal you could argue for either.  But things aren't equal: it's much cleaner to untangle this behavior from BLANK!, and push it out-of-band...freeing BLANK! to take its natural meanings.</p>
-<p>On that note, another "nothing of value was lost" feature will be when someone would deliberately put BLANK! in variables to signal opting out of something, without needing to use a TRY on the first step.</p>
-<pre><code>&gt;&gt; var: _
-
-&gt;&gt; find "abc" var
-; null
-
-&gt;&gt; if (find "abc" var) [print "This used to work"]
-This used to work
-
-&gt;&gt; if (first find "abc" var) [print "Here's where you got your error"]
-** Error: ...
-
-&gt;&gt; if (first try find "abc" var) [print "Only one TRY needed"]
-Only one TRY needed
-</code></pre>
-<p>There'd be no such option here, because there's no state besides NULL being used for the opt-out behavior.  So you start off with <strong><code>var: null</code></strong> and then have to say <strong><code>try find "abc" var</code></strong>.  You can't "pre-game your TRY".</p>
-<p>Who cares.  <img src="https://forum.rebol.info/images/emoji/twitter/man_shrugging.png?v=9" title=":man_shrugging:" class="emoji" alt=":man_shrugging:">  This is better.</p>
-<h2>We Might Be Able To Loosen Up About Mutating Operations...</h2>
-<p>Hey, why not TRY an APPEND?</p>
-<pre><code>&gt;&gt; series: null
-
-&gt;&gt; append series generate-data
-** Error: APPEND doesn't accept NULL for its argument
-
-&gt;&gt; try append series generate-data
-; null
-</code></pre>
-<p>The conventional wisdom historically was that it would be too risky to let APPEND allow you to pass a none/blank/null as input, because you wouldn't find out your modification didn't take.  But if you have to put a TRY on to avoid the error--and you can cleanly know the error came from <em>that</em> APPEND (not some weird problem deep in GENERATE-DATA) you've got some safety!</p>
-<h2>Just Thought of it, So I haven't Implemented it Yet...</h2>
-<p>I'm sure there'll be some quirks to come up.</p>
-<p>My first instinct is to say that TRY will only respond to some narrow errors (like "NULL given for TRY-able input" or similar), and require you to use ATTEMPT if you want to suppress a wide range of problems.  But it's early yet to know.</p>
-<p><em>But I think this is a winner.</em></p>
-            <p><small>7 posts - 2 participants</small></p>
-            <p><a href="https://forum.rebol.info/t/definitional-errors-as-blank-in-null-out-alternative/1880">Read full topic</a></p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/the-void-in-null-out-protocol/1880">Read full topic</a></p>
           ]]></description>
-          <link>https://forum.rebol.info/t/definitional-errors-as-blank-in-null-out-alternative/1880</link>
+          <link>https://forum.rebol.info/t/the-void-in-null-out-protocol/1880</link>
           <pubDate>Thu, 14 Jul 2022 04:21:12 +0000</pubDate>
           <discourse:topicPinned>No</discourse:topicPinned>
           <discourse:topicClosed>No</discourse:topicClosed>
           <discourse:topicArchived>No</discourse:topicArchived>
           <guid isPermaLink="false">forum.rebol.info-topic-1880</guid>
-          <source url="https://forum.rebol.info/t/definitional-errors-as-blank-in-null-out-alternative/1880.rss">Definitional Errors as BLANK!-in-NULL-out Alternative</source>
+          <source url="https://forum.rebol.info/t/the-void-in-null-out-protocol/1880.rss">The VOID-in-NULL-out Protocol</source>
         </item>
         <item>
           <title>FAIL vs. RETURN RAISE: The New Age of Definitional Failures!</title>
@@ -523,6 +486,103 @@ r3-alpha&gt;&gt; do compose [(:append) 1 &lt;d&gt;]  ; dispatched as ACTION!
           <discourse:topicArchived>No</discourse:topicArchived>
           <guid isPermaLink="false">forum.rebol.info-topic-1357</guid>
           <source url="https://forum.rebol.info/t/more-comprehensible-errors-with-per-cell-labeling/1357.rss">More Comprehensible Errors With per-Cell Labeling!</source>
+        </item>
+        <item>
+          <title>Safety Concept: Error on discarded plain BLOCK! ?</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Errors</category>
+          <description><![CDATA[
+            <p>I just had a bug that was rather frustrating to find.  I changed:</p>
+<pre><code>foo: func [
+    {Description}
+    param [...]
+    /refine
+][
+    ...
+]
+</code></pre>
+<p>into:</p>
+<pre><code>foo-core: func [
+    {Description}
+    param [...]
+    /refine
+][
+    ...
+]
+
+foo: adapt 'foo-core [
+    {Description}
+][
+    ...
+]
+</code></pre>
+<p><strong>But ADAPT doesn't take two parameters.</strong>  I should have eliminated the "spec" block from the ADAPT entirely, but I only deleted the parameters.  This effectively gave me:</p>
+<pre><code>foo: adapt 'foo-core [
+    {Description}
+]  ; "spec" block treated as the adapt "prelude"
+
+[...]  ; stray random block, thrown out
+</code></pre>
+<p>There's no warning in this case, because a plain BLOCK! evaluates to a plain BLOCK! and gets thrown out.</p>
+<h2>There's nothing we can do.  Or... is there?</h2>
+<p>This kind of thing almost always represents an error.  This got me to wondering about generalized quoting.  Might it help us?</p>
+<p><em>What if plain unevaluated BLOCK! was an error in evaluation if it was not a parameter to anything, and not a result of anything</em>...?</p>
+<p>So maybe this would be an error:</p>
+<pre><code>all [
+    a = b
+    c = d
+    [this block does nothing]
+]
+</code></pre>
+<p>But this would not:</p>
+<pre><code>data: all [
+    a = b
+    c = d
+    [assignment target, it's okay]
+]
+</code></pre>
+<p>And this would also be fine:</p>
+<pre><code>foo: func [return: [block!] a b c d] [
+    all [
+        a = b
+        c = d
+        [result of function so it gets used]
+    ]
+]
+</code></pre>
+<p>Maybe quoting could let you subvert the rule:</p>
+<pre><code> all [
+    a = b
+    c = d
+    '[just throw this out, don't complain]
+]
+</code></pre>
+<p>Note COMPOSE has power for this kind of thing built-in:</p>
+<pre><code> block: [thing to throw out]
+ data: all compose [
+    a = b
+    c = d
+    '(block)  ; the tick would also suppress ACTION! evaluation, etc.
+]
+</code></pre>
+<p>I don't know if the QUOTED! exemption is necessary or not, because this could run into problems as well of throwing out a quoted thing.</p>
+<p><strong>Challenge: when is non-evaluation utilized?</strong></p>
+<p>There's been some play with the fact that things don't evaluate to make constructs that have markup in them.  Think of for example a modification of EITHER that lets you label the branches:</p>
+<pre><code> my-either condition [&lt;tag&gt; ...code...] [&lt;tag&gt; ...code...]
+</code></pre>
+<p>Skipping the tag silently might be considered a feature, because the code is looked at.  I don't know, maybe having to skip that tag before executing is better practice.</p>
+<p>Just asking the philosophical question here of "why is throwing away inert interstitial expressions of great value".  We have ELIDE and COMMENT.  Might we do more for the sanity of the language if we noticed and errored if values were being silently discarded?</p>
+<p><em>Usually trying to implement a rule like this shows problematic cases, but I tend to write it up as a way of seeing if I can talk myself out of it by coming up with a disproof before bothering to try writing it...</em></p>
+            <p><small>4 posts - 2 participants</small></p>
+            <p><a href="https://forum.rebol.info/t/safety-concept-error-on-discarded-plain-block/1305">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/safety-concept-error-on-discarded-plain-block/1305</link>
+          <pubDate>Sat, 18 Jul 2020 19:16:03 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-1305</guid>
+          <source url="https://forum.rebol.info/t/safety-concept-error-on-discarded-plain-block/1305.rss">Safety Concept: Error on discarded plain BLOCK! ?</source>
         </item>
         <item>
           <title>Should We Point The Blame in FAIL With &quot;@&quot;?</title>

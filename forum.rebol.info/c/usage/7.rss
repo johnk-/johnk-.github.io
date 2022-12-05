@@ -1546,104 +1546,6 @@ Dynamic extensions
           <source url="https://forum.rebol.info/t/should-built-in-constructs-leverage-more-reserved-words/1622.rss">Should Built-In Constructs Leverage More &quot;Reserved Words&quot;?</source>
         </item>
         <item>
-          <title>The 2021 Philosophy of NULL vs. BLANK! vs. BAD-WORD!</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Philosophy</category>
-          <description><![CDATA[
-            <p>I was looking at rebmake code where many variables had been assigned to a BLANK!:</p>
-<pre><code>extension-class: make object! [
-    class: #extension
-    name: _
-    loadable: yes  ; can be loaded at runtime
-    modules: _
-    source: _  ; main script
-    depends: _  ; additional C files compiled in
-    requires: _  ; it might require other extensions
-    ...
-]
-</code></pre>
-<p>It struck me that the code had to take a lot of precautions to wind up not putting these real BLANK! values into blocks.  If something like <strong><code>depends</code></strong> can be-a-BLOCK-or-not, then when you write code like <strong>append items depends</strong> there's always the risk that it's still a blank.  You had to OPT it:</p>
-<pre><code>append items opt depends  ; if depends was a BLANK!, make it a NULL
-</code></pre>
-<p>That's easy to forget, and a nightmare to go back and find where the blanks are coming from...since there was no error-in-the-moment.  There had been functions created to hunt and check through blocks for BLANK!s, since it was a common way to get things to trip up...but you were doing it all after-the-fact, when it was too late.</p>
-<p><strong>What I've been talking about sounds like a much better plan</strong>:</p>
-<ul>
-<li>
-<p>Make these kinds of things NULL to start off with</p>
-</li>
-<li>
-<p>Have it so that APPEND and friends will error if you append a NULL, but perform a no-op if you append a BLANK! (if not quoted or /ONLY)</p>
-</li>
-<li>
-<p>Use TRY at the callsites that want to show that they are wishing to opt-out of an append in the cases where they really were aware the value could be NULL.</p>
-</li>
-</ul>
-<p>I tried it, and indeed it did seem like a much better plan.  Unfortunately... <em>I forgot that the reason it had been done this way was that the bootstrap executable errored when you accessed plain NULL variables, because those were considered "unset".</em>  <img src="https://forum.rebol.info/images/emoji/twitter/man_facepalming.png?v=9" title=":man_facepalming:" class="emoji" alt=":man_facepalming:"></p>
-<p>That historical accident aside...the exercise showed the unique value of what NULL does today...as a <em>conditionally-false</em> and <em>non-valued</em> thing.  If we tried to make anything else serve this role (let's say the unfriendly BAD-WORD! <strong>~null~</strong>) then things would be twisting out of shape to accomplish it.</p>
-<h2>There's No Single Answer To What To Initialize Variables To</h2>
-<p>A BAD-WORD! is a good choice when you really expect something to happen before anybody even looks at the variable.</p>
-<pre><code>  config: ~initialize-system-not-called~
-
-  initialize-system: func [
-      {Let's say this function reads the config file}
-  ][
-      ...
-      config: [...]
-  ]
-</code></pre>
-<p>This causes a nice labeled message anytime someone references CONFIG too early.  We're now at the point where that error happens on GET-WORD! or plain WORD!...which has the nice property of making GET-WORD! clearly convey that you intend to defuse a function execution.</p>
-<p>Going this route would create a pain point for anyone who thought they were going to test for whether you had a config initialized by testing <strong>if config [...]</strong>.  So that has to be considered as whether it's what you want.</p>
-<p>Because on the other hand, you should use NULL as the initialization for something you may run some code and find it doesn't assign, and you want to be able to test that.</p>
-<pre><code> directory: null
-
- for-each [key val] config [
-     if key = 'directory [
-         if directory [
-             fail ["Directory was already set by config:" directory]
-         ]
-         directory: val
-     ]
- ]
-</code></pre>
-<p>This will be a better choice if you want most operations to fail if they try to use the directory that hasn't been assigned.  BLANK! is a more permissive choice, as it would be willing to APPEND and be a no-op (for example).   More functions are willing to take BLANK!.  It's easy to convert a NULL to a BLANK! with TRY, so you aren't far from it when you need it.</p>
-<p>You still might want to initialize variables to blank, if that suits your thoughts of what's convenient.  You'll get fewer errors to point out you're using something you haven't "assigned meaningfully", but maybe that is desirable for your case.</p>
-<p>The Rebmake case shows a situation where the NULL is likely better, even if BLANK!s vaporize in appends by default.  Because an APPEND/ONLY ... VAR or a APPEND ... @ VAR will still append that blank you may not want.</p>
-<h2>Literalizing Operators Further Justify NULL</h2>
-<p>NULL has  a critical property as a non-valued thing with the literalizing operators.</p>
-<pre><code>&gt;&gt; ^ if false [&lt;let's make a null&gt;]
-; null
-
-&gt;&gt; ^ ^ if false [&lt;let's make a null&gt;]
-; null
-</code></pre>
-<p><strong>No matter how many times you literalize a NULL, the result is still NULL.</strong>  If we tried to make any <em>value</em> interact with the literalized domain, we wouldn't have this, and it is critical.</p>
-<p>I've said before and I've said it again: If you like Ren-C features (let's say, UPARSE?) then you like NULL whether you realize it or not.  It's foundational.</p>
-<h2>But Fewer Operations Will Be Taking NULL Now...</h2>
-<p>It was already the case that not a lot of operations would take NULL.  In the interest of erroring, the <a href="https://forum.rebol.info/t/blank-in-null-out-convention-vs-logic-returning-actions/954">BLANK!-in-NULL-out convention</a> had been established and working well.</p>
-<p>Now APPEND and friends are joining the fold, also taking the meaning that BLANK! is a request to "opt-out"...with NULL representing an error.  You'll be required to TRY arguments to opt out of the null cases.</p>
-<p>There's some question of how this should impact something like COMPOSE.  I feel like as a dialect, COMPOSE is in something of a different space.  It's not a "function taking arguments", it's a template for code at a high level.  I think the choice for dialects to vaporize NULLs is something unique to their flow and operation...a bit different from function arguments.</p>
-<p>In other words, I still am quite attached to:</p>
-<pre><code> &gt;&gt; compose [&lt;a&gt; (if false [&lt;b&gt;]) &lt;c&gt;]
- == [&lt;a&gt; &lt;c&gt;]
-</code></pre>
-<p>I don't want to have to write:</p>
-<pre><code> &gt;&gt; compose [&lt;a&gt; (try if false [&lt;b&gt;]) &lt;c&gt;]
- == [&lt;a&gt; &lt;c&gt;]
-</code></pre>
-<p>And I also don't want to have to worry about all the quoting operations to get things as /ONLY by default inside COMPOSE.  The idea of using <strong>(( ))</strong> is that it could go to the semantics of splicing, and then blanks would vaporize and you'd have to quote any evaluative values...</p>
-<p>More discussion on this to come.</p>
-            <p><small>1 post - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/the-2021-philosophy-of-null-vs-blank-vs-bad-word/1604">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/the-2021-philosophy-of-null-vs-blank-vs-bad-word/1604</link>
-          <pubDate>Fri, 14 May 2021 14:44:05 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-1604</guid>
-          <source url="https://forum.rebol.info/t/the-2021-philosophy-of-null-vs-blank-vs-bad-word/1604.rss">The 2021 Philosophy of NULL vs. BLANK! vs. BAD-WORD!</source>
-        </item>
-        <item>
           <title>How Is COUNT-UP Implemented?</title>
           <dc:creator><![CDATA[iArnold]]></dc:creator>
           <category>First Steps</category>
@@ -1737,6 +1639,66 @@ func: funco [
           <discourse:topicArchived>No</discourse:topicArchived>
           <guid isPermaLink="false">forum.rebol.info-topic-1591</guid>
           <source url="https://forum.rebol.info/t/debunking-the-arity-1-make/1591.rss">Debunking the Arity-1 MAKE</source>
+        </item>
+        <item>
+          <title>Circling Multi-Returns: Choose Which Is Expression Result</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Feature Discover</category>
+          <description><![CDATA[
+            <p>Multi-Returns have a feature of being able to "circle" which result will be the value of the overall expression.  You do the circling with an <strong><code>@word</code></strong> or an <strong><code>@tu.p.le</code></strong>... or an <strong><code>@(gr o up)</code></strong> that evaluates to what you want to assign.</p>
+<h3>Demo!</h3>
+<p>Here's a function with a secondary return value to demonstrate with:</p>
+<pre><code>multi: func [
+    return: "Main return value"
+        [integer!]
+    secondary: "Secondary return value"
+        [integer!]
+][
+    if wanted? 'secondary [  ; multi-return may not be requested at callsite
+        secondary: 10 + 10  ; so we can choose to avoid this calculation
+    ]
+    return 10
+]
+</code></pre>
+<p>Traditionally you could ask for both results, and the overall result would be the first return:</p>
+<pre><code>&gt;&gt; [a b]: multi
+== 10  ; defaults to same value as first result, e.g. A
+
+&gt;&gt; a
+== 10
+
+&gt;&gt; b
+== 20
+</code></pre>
+<p>But now you can "circle" to ask for a different result, e.g. the second:</p>
+<pre><code>&gt;&gt; [a @b]: multi
+== 20  ; same value as b
+
+&gt;&gt; a
+== 10
+
+&gt;&gt; b
+== 20
+</code></pre>
+<p>You can combine this with things like GROUP!s to calculate the variable name, or even omit the variable name and use <code>#</code>:</p>
+<pre><code>&gt;&gt; [a @(#)]: multi
+== 20  
+
+&gt;&gt; a
+== 10
+</code></pre>
+<p>There are some places where this comes in handy, although you generally want to pick the main return to be the thing people are most interested in responding to (e.g. determining success or failure of an operation).</p>
+<p>There's also a characteristic that only the main return can return pure voids without having to contort the value convention itself to encode the void state (e.g. by ^META quoting the results).  So that should be weighed as well when thinking about how to plan the results.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/circling-multi-returns-choose-which-is-expression-result/1587">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/circling-multi-returns-choose-which-is-expression-result/1587</link>
+          <pubDate>Sat, 17 Apr 2021 06:06:59 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-1587</guid>
+          <source url="https://forum.rebol.info/t/circling-multi-returns-choose-which-is-expression-result/1587.rss">Circling Multi-Returns: Choose Which Is Expression Result</source>
         </item>
   </channel>
 </rss>

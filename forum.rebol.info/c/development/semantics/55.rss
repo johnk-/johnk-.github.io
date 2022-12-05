@@ -42,7 +42,7 @@ Why not print?  ; seems not so bad, right?
 </code></pre>
 <p>It's barely any additional work for conditionals to do on top of what they're doing already.  Although it can result in branches producing false to cost a small bit more than they do today <em>(I wouldn't worry about it, these single element boxes could be optimized if it was a problem)</em></p>
 <p>But I don't know how useful it would actually be.  <img src="https://forum.rebol.info/images/emoji/twitter/man_shrugging.png?v=9" title=":man_shrugging:" class="emoji" alt=":man_shrugging:">  Just writing down the observation.</p>
-            <p><small>1 post - 1 participant</small></p>
+            <p><small>2 posts - 1 participant</small></p>
             <p><a href="https://forum.rebol.info/t/should-else-be-false-reactive-in-addition-to-void-and-null/1991">Read full topic</a></p>
           ]]></description>
           <link>https://forum.rebol.info/t/should-else-be-false-reactive-in-addition-to-void-and-null/1991</link>
@@ -1067,28 +1067,244 @@ Mixing unspacedpart with spaced part
           <source url="https://forum.rebol.info/t/block-behavior-in-delimit-hence-spaced-unspaced-print/1642.rss">BLOCK! Behavior In DELIMIT (hence SPACED, UNSPACED, PRINT)</source>
         </item>
         <item>
+          <title>Shades of Distinction In Non-Valued Intents</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Semantics</category>
+          <description><![CDATA[
+            <p><em><strong>UPDATE 2022:</strong> Rewritten completely to explain the modern answers for the topic than inbound links to this thread wanted to talk about.</em></p>
+<hr>
+<h2>Rebol2/R3-Alpha/Red Have Two Kinds of Nothing (both reified)</h2>
+<p>Historical Redbol gives you two main choices for "nothingness"...<strong><code>#[none]</code></strong> and <strong><code>#[unset]</code></strong>... both of which can be found either in variables, or as values in blocks:</p>
+<pre><code>rebol2&gt;&gt; block: reduce [none print "print returns unset"]
+print returns unset
+== [none unset]  ; misleadingly renders as WORD!s
+
+rebol2&gt;&gt; type? first block
+== none!
+
+rebol2&gt;&gt; type? second block
+== unset!
+</code></pre>
+<p>Using <code>#[none]</code> has the advantage of being "friendly" on access via word, allowing you to write things like:</p>
+<pre><code>rebol2&gt;&gt; var: none
+
+rebol2&gt;&gt; either var [print "do something with var"] [print "do something else"]
+do something else
+</code></pre>
+<p>But when var contained an #[unset], you'd get an error instead:</p>
+<pre><code>rebol2&gt;&gt; unset 'var
+
+rebol2&gt;&gt; either var [print "do something with var"] [print "do something else"]
+do something else
+</code></pre>
+<p>So instead of using var directly, you had to do something more circuitous and pass the word "var" into a special test routine (morally equivalent to today's <strong>set? 'var</strong>)</p>
+<p><strong>Hence #[none] was reached for frequently out of convenience.  Yet this convenience came with a cost: it was very easy to accidentally append one to a block, even if its non-valued intent should have conveyed you might not have wanted to add anything at all.</strong></p>
+<p>But it's hard to say: sometimes you <em>did</em> want to add #[none] to a block, to serve as a placeholder.</p>
+<p>Also, being able to enumerate a block which contained #[unset] values was problematic, because if you did something like a FOR-EACH it would appear that the variable you were enumerating with was itself not set.</p>
+<h2>Early Ren-C Made Reified BLANK! and non-Valued NULL</h2>
+<p>One thing that bugged me was that there was no "pretty" representation for a non-valued state in a block... and that <code>#[none]</code> often thus displayed itself as the word <code>none</code> (seen in the example at the top of the post).</p>
+<p>So the BLANK! datatype took the single underscore <strong>_</strong>.</p>
+<pre><code>&gt;&gt; second [a _]
+== _
+
+&gt;&gt; if blank? _ [print "yep, it's a blank"]
+yep it's a blank
+
+&gt;&gt; if not _ [print "blank is also falsey"]
+blank is also falsey
+</code></pre>
+<p>And critically, one of the first things I tried to do was rethink the <code>#[unset]</code> state into something that you'd never find in a block, and called it NULL (as well as made it correspond to C/Javascript null in the API):</p>
+<pre><code>&gt;&gt; second [a _]
+== _
+
+&gt;&gt; third [a _]
+; null
+</code></pre>
+<p>Since NULL couldn't be found in a block, it wasn't ambiguous when you got NULL back from a block operation as to whether there was a "null in that position".</p>
+<p>But it's still just two things:</p>
+<ul>
+<li>
+<p><strong>blank!</strong> - A nothing you can put in a block</p>
+<ul>
+<li>it was logically false</li>
+<li>it was friendly via word access (no need for GET-WORD!)</li>
+</ul>
+</li>
+<li>
+<p><strong>null</strong> - A nothing you couldn't put in a block</p>
+<ul>
+<li>it was also logically false</li>
+<li>it was <em>unfriendly</em> via word access (need GET-WORD! for :VAR, or SET? 'VAR)</li>
+</ul>
+</li>
+</ul>
+<p>This put you in a difficult situation for your choices of emptiness when you were dealing with something like:</p>
+<pre><code>append block value  ; what nothing state should you use for value?
+</code></pre>
+<p>If you wanted to avoid accidentally appending blanks to arrays, you kind of wanted NULL so you'd get an error.  But once you used NULL, you could not write the convenient <strong><code>if value [...]</code></strong>  control structure.</p>
+<h2>Later Ren-C added a separate "ornery" non-Value State</h2>
+<p>A third state was added to be neither logically true nor false, and that would trigger an error on accessing a variable with it.  (I'll whitewash history a bit and say this state was always called "NIHIL", and also always could not be put in blocks.)</p>
+<p>This was the new state of unset variables:</p>
+<pre><code>&gt;&gt; unset 'x
+
+&gt;&gt; x
+** Error: X is an unset variable
+
+&gt;&gt; get/any 'x
+; nihil
+
+&gt;&gt; if get/any 'x [print "Ornery!"]
+** Error: nihil is neither logically true nor false
+</code></pre>
+<p>So NULL now represented a middle ground.  It was something that was easy to test for being nothing (using IF) but that was impossible to accidentally put into a block.</p>
+<p>This gave you three behaviors:</p>
+<pre><code>[1]  &gt;&gt; nihil-value
+     ** Error: NIHIL-VALUE variable is unset
+
+[2]  &gt;&gt; null-value
+     ; null
+
+     &gt;&gt; append [a b] null-value
+     ** Error: APPEND does not allow adding NULL to blocks
+
+[3]  &gt;&gt; blank-value
+     == _
+
+     &gt;&gt; append [a b] blank-value
+     == [a b _]
+</code></pre>
+<h2>WORD! Isotopes Brought Infinite Non-Valued Choices</h2>
+<p>Eventually the NULL state became the isotopic status of the WORD! null, so a <strong>~null~</strong> isotope.</p>
+<p>It joined <strong>~true~</strong> and <strong>~false~</strong> as being isotopes you could test for truthiness and falseyness.  But if you were okay with getting an error on conditional testing, any other word could be used:</p>
+<pre><code>  config: ~initialize-system-not-called~
+
+  initialize-system: func [
+      {Let's say this function reads the config file}
+  ][
+      ...
+      config: [...]
+  ]
+</code></pre>
+<p>This usually causes a nice labeled message anytime someone tries to use CONFIG:</p>
+<p>Going this route would create a pain point for anyone who thought they were going to test for whether you had a config initialized by testing <strong>if config [...]</strong>.  So that has to be considered as whether it's what you want.</p>
+<p>Because on the other hand, you should use the null isotope as the initialization for something you may run some code and find it doesn't assign, and you want to be able to test that.</p>
+<pre><code> directory: ~null~
+
+ for-each [key val] config [
+     if key = 'directory [
+         if directory [
+             fail ["Directory was already set by config:" directory]
+         ]
+         directory: val
+     ]
+ ]
+</code></pre>
+<h2>VOID Provided a Clean "Opt-Out" Option</h2>
+<p>An unfortunate sacrifice that had been made in the design was that the "non-valued" status of NULL was chosen to raise attention to an error condition, rather than be an opportunity to opt-out of an APPEND:</p>
+<pre><code>&gt;&gt; append [a b] null-value
+** Error: This is the choice that we went with
+
+&gt;&gt; append [a b] null-value
+== [a b]  ; would have been another possibility, but too accident prone
+</code></pre>
+<p>Some "strange" things were tried...such as making it so that appending a BLANK! was a no-op, and if you wanted to append a literal blank you had to append a quoted blank:</p>
+<pre><code> &gt;&gt; append [a b] _
+ == [a b]  ; hmmm.
+
+ &gt;&gt; append [a b] quote _
+ == [a b _]  ; hmmm.
+</code></pre>
+<p><em>(It wasn't that strange considering appending a BLOCK! would append its contents, and a quoted block was being tried as the way of specifying /ONLY.  This line of thinking ultimately led to the <a href="https://forum.rebol.info/t/a-justification-of-generalized-isotopes/1918">designs for the isotopes that solve things like splicing intent</a>, so it wasn't all for naught!)</em></p>
+<p>When invisibles were first introduced, you couldn't "pass a void" to a function.  Because so long as the evaluator processed an argument which vanished, it would keep re-triggering until it found one.</p>
+<pre><code>&gt;&gt; append [a b] comment "hi" 1 + 2
+== [a b 3]  ; old idea was that comment vanished
+</code></pre>
+<p>This seemed justified because there wasn't anything you <em>could</em> pass.  Void was the absence of value, not something that a variable could take on.</p>
+<p>But with a change in perspective, void became a state that variables were allowed to hold.  Not only that, but it could be quoted too:</p>
+<pre><code>&gt;&gt; comment "hi"
+; void
+
+&gt;&gt; quote comment "hi"
+== '
+</code></pre>
+<p>The re-triggering was removed, and I realized that void was the perfect choice for opting out of operations:</p>
+<pre><code>&gt;&gt; append [a b] comment "hi"
+== [a b]
+
+&gt;&gt; append comment "hi" [a b c]
+== ~null~  ; isotope
+</code></pre>
+<p>As you see above, an operation can return null when it doesn't have another good answer for giving back in case of a no-op.  This gives good error locality, since the null won't trigger another opting out unless you explicitly convert the null to a void with MAYBE.</p>
+<pre><code>&gt;&gt; append (append comment "hi" [a b c]) [d e f]
+** Error: APPEND doesn't accept ~NULL~ isotope for the series argument
+
+&gt;&gt; maybe null
+; void
+
+&gt;&gt; append (maybe append comment "hi" [a b c]) [d e f]
+== ~null~  ; isotope
+</code></pre>
+<p>Void variables were deemed to be something it would be undesirable to have be "too friendly".  So they were slated to be mean on WORD!-access, and instead MAYBE would be used with null variables.</p>
+<p>This gives a (seemingly) complete picture</p>
+<pre><code>[1]  &gt;&gt; nihil-value
+     ** Error: NIHIL-VALUE variable is unset
+
+      &gt;&gt; append [a b] get/any 'nihil-value
+      ** Error: APPEND does not allow adding ~ isotopes to blocks
+      
+[2]  &gt;&gt; void-value
+     ** Error: VOID-VALUE is void (use GET-WORD! or GET/ANY)
+
+     &gt;&gt; append [a b] :void-value
+     == [a b]
+
+[3]  &gt;&gt; null-value
+     == ~null~  ; isotope
+
+     &gt;&gt; append [a b] null-value
+     ** Error: APPEND does not allow adding NULL to blocks
+
+[3a] &gt;&gt; append [a b] maybe null-value
+     == [a b]
+
+[4]  &gt;&gt; blank-value
+     == _
+
+     &gt;&gt; append [a b] blank-value
+     == [a b _]</code></pre>
+            <p><small>2 posts - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/shades-of-distinction-in-non-valued-intents/1604">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/shades-of-distinction-in-non-valued-intents/1604</link>
+          <pubDate>Fri, 14 May 2021 14:44:05 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-1604</guid>
+          <source url="https://forum.rebol.info/t/shades-of-distinction-in-non-valued-intents/1604.rss">Shades of Distinction In Non-Valued Intents</source>
+        </item>
+        <item>
           <title>Why Isn&#39;t PRINT Invisible (&quot;void&quot;)?</title>
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
           <category>Semantics</category>
           <description><![CDATA[
-            <p>Since PRINT doesn't have an interesting return value, we might ask what the harm would be in making it invisible.</p>
+            <blockquote>
+<p><strong>2022 UPDATE:</strong> Modern thinking in Ren-C is that void states <a href="https://forum.rebol.info/t/non-interstitial-invisibles-more-trouble-than-theyre-worth/1582">only vanish in "interstitial" slots</a>.  They can be recorded in variables, just not be put in blocks:</p>
+<pre><code>   &gt;&gt; x: void
+   ; void
+</code></pre>
+<p>The question of how permissive to be is still open, and at time of writing it does this:</p>
+<pre><code>  &gt;&gt; x
+  ; void
+
+  &gt;&gt; 1 + 2 x
+  == 3
+</code></pre>
+<p>This impacted some elements of the discussion, so I edited the post accordingly to bring it up to date.</p>
+</blockquote>
+<hr>
+<p>Since PRINT doesn't have an interesting return value, we might ask what the harm would be in making it invisible, vs give back something that trips up things like ANY and ALL.</p>
 <p>But let's generalize the question to SOME-FUNCTION where the key point is that at the time you write it, you haven't thought of a meaningful result for it.</p>
-<h2>Catching Erroneous Assignments</h2>
-<p>Returning an "ornery" value helps catch mistakes more easily when a meaningless result is accidentally used.</p>
-<p>But with invisibles, we might adopt a philosophy like C's, and say you cannot put a void function directly after an assignment:</p>
-<pre><code>int x = some_void_function(...);  /* compiler will error */
-</code></pre>
-<p>Interestingly, C lets use them in comma-delimited expressions so long as they are discarded...you have to use parentheses to do it:</p>
-<pre><code>int x = (some_void_function(...), 10 + 20);  /* this is okay */
-int x =  some_void_function(...), 10 + 20;  /* this errors */
-</code></pre>
-<p>We could do something similar</p>
-<pre><code>x: comment "hi" 1 + 2  ; this could error
-x: (comment "hi" 1 + 2)  ; this could be okay
-</code></pre>
-<p>That's a little bit of a bummer for comment, but not the end of the world.</p>
-<p>However, I want to see Ren-C's void/invisible used for things like BREAKPOINT and other tools... where having to rearrange your code in this way could be a nuisance (or dialect-wise, the GROUP!s could have semantic implications, e.g. if the code was inside of a COMPOSE).</p>
-<p>But there are other issues...</p>
 <h2>Limiting Interface Flexibility</h2>
 <p>If at the time of writing a function you know that it doesn't have a meaningful return value, then making it void--instead of returning a trash value--ties your hands in changing it.</p>
 <p>People will start writing things like:</p>
@@ -1109,26 +1325,32 @@ x: (comment "hi" 1 + 2)  ; this could be okay
 <h2>In PRINT's Case, a Differentiated NULL Output Has Value</h2>
 <p>Having a return value from PRINT that is either an ornery value or nothing lets you offer the neat option of returning NULL if the result of the print was nothing.</p>
 <pre><code> &gt;&gt; line: "some text"
- &gt;&gt; print line then [print "We had output!"]
+ &gt;&gt; (print line) then [print "We had output!"]
  some text
  We had output!
 
- &gt;&gt; line: _
- &gt;&gt; print line then [print "We had output!"]  ; no-op
+ &gt;&gt; line: null
+ &gt;&gt; (print maybe line) then [print "We had output!"]
+ ; null
 </code></pre>
-<p>To do this kind of thing requires having an output value.</p>
+<p>To do this kind of thing requires having an output value that wouldn't trigger THEN when there is output.  So not null, and not void.  The none isotope works for this.</p>
 <p>I might be convinced that how people want to use PRINT is universally enough that they would rather it be invisible.  But that would involve a very specific understanding of a very common function...similar to how <strong>elide</strong> and <strong>comment</strong> and <strong>assert</strong> and <strong>--</strong> are known to have no result.</p>
 <p>I don't think the average "no meaningful result" function fits in this category, and I'd say I'm fairly skeptical if PRINT belongs in it.</p>
 <h2>I Think "Void" Functions Should Be Used Sparingly</h2>
 <p>I think the feature should be <em>discoverable</em>, because how it's done is unique...and we are giving it a more normal name ("void function")</p>
-<p>I'm feeling a bit more amenable to the idea that these are void return modes, even if it creates barriers to a multi-valued RETURN:</p>
-<pre><code>f1: func [x] [return]
-f1: func [x] [return comment x]
+<p>And it's all right that these forms of RETURN generate void functions:</p>
+<pre><code>f1: func [x] [return void]
+f2: func [x] [return comment x]
+f3: func [x] [return ()]
+f4: func [x] [return (void)]
+f5: func [x] [return (comment x)]
 </code></pre>
-<p>But this means there needs to be a relatively comfortable syntax for returning a BAD-WORD! that is like what we're used to.  <a href="https://forum.rebol.info/t/the-return-of-none/1467">I'm wondering if <strong>return none</strong>, recycling the word none for <strong>~none~</strong>, is the right compromise.</a></p>
-<blockquote>
-<p><strong>UPDATE:</strong> I've found some other reasons why not to do this again.  So I think arity-0 RETURN is likely going to keep the "return meaningless (and ornery) value" semantic.</p>
-</blockquote>
+<p>But this arity-0 return should <em>not</em> be a void function:</p>
+<pre><code>f6: func [x] [return]
+</code></pre>
+<p>Instead it should be either an error, or act like <strong>return none</strong> (e.g. <code>return ~[]~</code>, an isotopic block representing an empty parameter pack).  While the latter <em>sounds</em> neat, it creates problems if people depend on it and start thinking they can throw a plain <code>return</code> in on its own line and not bother commenting things out after it... but the return picks it up:</p>
+<p><a href="https://forum.rebol.info/t/line-continuation-and-arity-bugs-thoughts/1965" class="inline-onebox">Line Continuation and Arity Bugs: Thoughts?</a></p>
+<p>So it's something that should not be allowed, or that has mitigation for this "return put on its own line in the middle of code" vulnerability.</p>
             <p><small>4 posts - 2 participants</small></p>
             <p><a href="https://forum.rebol.info/t/why-isnt-print-invisible-void/1466">Read full topic</a></p>
           ]]></description>
@@ -1612,27 +1834,6 @@ Strictness:
           <discourse:topicArchived>No</discourse:topicArchived>
           <guid isPermaLink="false">forum.rebol.info-topic-1318</guid>
           <source url="https://forum.rebol.info/t/comparison-semantics/1318.rss">Comparison Semantics</source>
-        </item>
-        <item>
-          <title>Why Isn&#39;t PRINT Invisible?</title>
-          <dc:creator><![CDATA[rgchris]]></dc:creator>
-          <category>Semantics</category>
-          <description><![CDATA[
-            <blockquote>
-<p>Note: This pertinent question moved from a topic culled by curation.</p>
-<p><em>(The topic was "should you be able to assign ~unset~ isotopes via SET-WORD! without getting an error, and the answer is obviously yes in light of new features...so the old conversation was just a jumble of outdated terminology which would confuse anyone finding it.)</em></p>
-</blockquote>
-<p>On a tangential note: I'm not sure why PRINT returns a ~none~ isotope, and wonder if it wouldn't be better to have it be silent like ELIDE? Would that create havoc if new users did confuse its usage?</p>
-            <p><small>3 posts - 2 participants</small></p>
-            <p><a href="https://forum.rebol.info/t/why-isnt-print-invisible/1824">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/why-isnt-print-invisible/1824</link>
-          <pubDate>Mon, 29 Jun 2020 15:03:39 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>Yes</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-1824</guid>
-          <source url="https://forum.rebol.info/t/why-isnt-print-invisible/1824.rss">Why Isn&#39;t PRINT Invisible?</source>
         </item>
   </channel>
 </rss>
