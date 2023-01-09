@@ -1,0 +1,288 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Happy 2023, and 2022 General Status &amp; Reflection</title>
+    <link>https://forum.rebol.info/t/happy-2023-and-2022-general-status-reflection/1988</link>
+    <description># Happy New Year!
+
+:champagne: :partying_face:
+
+&gt; Note: This was originally an October 2022 status report, but I didn&#39;t do anything in November or December, so I&#39;m really just going to add a bit to it...
+
+*Having hit up against some pretty deep questions about redesigning datatypes in October, I&#39;ve been taking a break.*  It&#39;s good to clear one&#39;s head sometimes. I packed up and moved, and there was a lot to do for that.
+
+I&#39;ve been poking around some other languages and tools... tinkering with things like the Rust compiler sources... looking at Stable Diffusion and what sorts of trends are on the rise in open-source AI.  Reading a lot of articles and watching YouTube Videos.
+
+Hopefully some of the datatype-related ideas will settle in my head and I&#39;ll be able to start making progress on those.  But I thought I&#39;d review some of what&#39;s gone on the last months.
+
+* It&#39;s certainly worth pointing out that the [system is using &quot;stackless&quot; processing](https://forum.rebol.info/t/stackless-is-here-today-now/1844)... which is a significant change, that from a practical standpoint has let us get rid of costly workarounds needed for browser interop in the web build.
+
+* Changes were made to [permit executing in WASI runtimes](https://forum.rebol.info/t/ren-c-is-now-on-the-clouds-with-wasi/1854), enabling a new cross-platform target as well as being used in &quot;serverless&quot; cloud computing scenarios.
+
+* [Integrating a rich editor and tabbed interface to the web REPL](https://forum.rebol.info/t/visual-parse-on-the-web-has-arrived/1837) is a big cool thing.
+
+I could go on about every little thing (like updating the crypto, or that web tests now [run on cypress.io](https://forum.rebol.info/t/js-testing-with-cypress-io/1778)) but there are posts and git commits for that.
+
+Nearly every other major change worth discussing involves big changes surrounding isotopes.
+
+## Generalized Isotopes Have Changed (Almost) Everything
+
+From the beginning, Ren-C&#39;s goal has been to attack the fundamental weaknesses in how Rebol works as a language.
+
+Integral to attacks on several major problems has been the idea of *&quot;generalized isotopes&quot;*.  If anyone hasn&#39;t had a chance to read the thread describing the rationale, I suggest doing so now (or re-reading it):
+
+**[&quot;A Justification of Generalized Isotopes&quot;](https://forum.rebol.info/t/a-justification-of-generalized-isotopes/1918)**
+
+This development kind of touches everything in the system:
+
+* **[It strikes at the heart of the /ONLY issue](https://forum.rebol.info/t/the-long-awaited-death-of-only/1607)**.  When you see it used with something like REPLACE, you can really have that &quot;A Ha&quot; moment... that splicing intent should never have been carried by a refinement
+
+      &gt;&gt; replace/all [[a b] a b a b] [a b] [c d e]
+      == [[c d e] a b a b] 
+
+      &gt;&gt; replace/all [[a b] a b a b] spread [a b] [c d e]
+      == [[a b] [c d e] [c d e]]
+
+      &gt;&gt; replace/all [[a b] a b a b] [a b] spread [c d e]
+      == [c d e a b a b]
+
+      &gt;&gt; replace/all [[a b] a b a b] spread [a b] spread [c d e]
+      == [[a b] c d e c d e]
+  
+* **[&quot;Definitional Errors&quot; have arisen](https://forum.rebol.info/t/fail-vs-return-raise-the-new-age-of-definitional-failures/1852)** as a crucial combination of solutions: one of the earliest Ren-C mechanics (definitional returns) mixes with a new idea (error isotopes), to give an actual viable answer for error handling in the system:
+
+      &gt;&gt; attempt [print &quot;Attempting to read file&quot; read %nonexistent-file.txt]
+      Attempting to read file
+      ; null
+
+      &gt;&gt; attempt [print &quot;Attempting but made typos&quot; rread %nonexistent-file.txt]
+      Attempting but made typos
+      ** Script Error: rread word is attached to a context, but unassigned
+      ** Near: [rread ** %nonexistent-file.txt]
+
+* Moving away from a dedicated &quot;LOGIC!&quot; datatype to **[~true~ and ~false~ isotopes](https://forum.rebol.info/t/thinking-about-isotopes-logically-true-and-false/1944)** solves a &quot;top-of-the-page&quot; representational issue... giving an in-between state that can be held in a variable, but must undergo some reification process before being carried in an array:
+
+      &gt;&gt; 1 = 2
+      == ~false~  ; isotope
+
+      &gt;&gt; append [a b c] 1 = 2
+      ** Error: Arrays cannot hold ~false~ isotopes, must REIFY or META
+
+      &gt;&gt; append [a b c] meta 1 = 2
+      == [a b c ~false~]
+
+      &gt;&gt; append [a b c] reify 1 = 2
+      == [a b c false]
+
+* Treatment of **[BLOCK! isotopes as &quot;packs&quot;](https://forum.rebol.info/t/thought-reimplementing-multi-return-via-isotopic-block/1955)** gives answers to how to pipe and transform multi-return expressions... and has also been leveraged as a way to tell the difference between &quot;true null&quot; (e.g. should trigger an else) and &quot;packaged null&quot; (a null packed into a block that is &quot;a positive result that just happens to be null&quot;).
+
+* It has reshaped &quot;voidness&quot;--as something **[which only vanishes in interstitial slots](https://forum.rebol.info/t/non-interstitial-invisibles-more-trouble-than-theyre-worth/1582)**, and can be manipulated conveniently in its isotopic form.
+
+    * Being able to pass voids as arguments enables fully functional compositions, [like the infamous FOR-BOTH case](https://forum.rebol.info/t/demonstrating-for-both-loop-composability-for-the-win/1833) of writing a loop wrapper that preserves the loop behavior invariants.
+
+* Isotopes are also covering things like being able to tell the difference between **[passing an ACTION! you want to run and an ACTION! you want to look for literally](https://forum.rebol.info/t/find-treats-typeset-s-specially-why-not-functions/1881/2?u=hostilefork)** (by its identity)
+
+In some sense, this &quot;discovery&quot; has pushed a big reset button on the project... because it affects so many things.  Nearly everything has to be revisited.  But the biggest issue is with the type system.
+
+## Isotopes Further Stress Weaknesses Of DATATYPE! / TYPESET!
+
+Rebol and all of its clones deal with datatypes in the exact same simplistic way, limiting it to 64 datatypes... with a TYPESET! being a 64-bit number with one bit for each type.
+
+Perhaps there are those out there who think this is fine.  They may see it as like the [engineer and the toaster story](https://www.danielsen.com/jokes/objecttoaster.txt)... where making a toaster with very few settings is virtuous, and it&#39;s unnecessary complexity to have any more complicated type system.
+
+I&#39;ve laid out some of my beliefs...such as that &quot;kinds&quot; of values (in a coarse sense) are at the very least based on WORD!, so you can add new things like **`vector`** and **`matrix`** and **`image`**...none of which I believe should be mandatory to build into the core...so lighter builds can be made.
+
+Beyond that I have suggested that getting a full &quot;type&quot; description could be a more descriptive structure, telling you not only that something is a matrix but also giving you its dimensions.
+
+The more these kinds of thoughts seem true, it makes TYPESET! seem like a bogus kind of thing... and type checking functions might make more sense.  Why not something like:
+
+    foo: func [bar [integer! series? even?]] [...]
+
+Performance aside, trading off typesets has some dangerous implications...such as what if a function gets specialized with a value that passes, but either the function or something about the value changes so it wouldn&#39;t pass?  As it happens, today&#39;s specialized values are written in the place where type information for a parameter would usually be--so you can&#39;t typecheck after the fact.
+
+With so many aspects of isotopes working out, it&#39;s unfortunate that the terrible type system is getting in the way.  A dissatisfying answer would be just to say that all isotopes report that they are ISOTOPE! and you have to perform operations on them to find out the actual type... but this is what you historically have to do with items in BLOCK! (you can&#39;t typecheck for &quot;block that contains one integer!&quot; vs. &quot;block that contains two strings&quot;).
+
+Anyway: this is a longstanding problem area, that isotopes are now making it more imperative to solve.
+
+## Still...There Are A Lot Of New And Interesting Things
+
+The biggest takeaway here is that isotopes have added new dimensions that are letting Ren-C bring really advanced capabilities within reach of very novice users.
+
+There are many examples, but some of the most amazing to me are things like hooking the default UPARSE combinators--which have multiple return values--by being able to turn those return values into blocks and transform them.
+
+So I&#39;m still &quot;finding the cool&quot; in new behaviors, so that&#39;s motivating.  But maybe with the basics sorted out, it&#39;s getting closer to time to start ripping out some unnecessary parts, so that a committed subset can be pushed out to people on the web.</description>
+    
+    <lastBuildDate>Thu, 05 Jan 2023 19:43:56 +0000</lastBuildDate>
+    <category>Announcements</category>
+    <atom:link href="https://forum.rebol.info/t/happy-2023-and-2022-general-status-reflection/1988.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Happy 2023, and 2022 General Status &amp; Reflection</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>I mention up top that I have been busy for all of November and December, so I didn't do anything worth adding to the October status post in terms of <em>code progress</em>.</p>
+<p>But putting some space between yourself and the code can offer other insights.</p>
+<aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="1988">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/40/26_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>I'm still "finding the cool" in new behaviors, so that's motivating. But maybe with the basics sorted out, it's getting closer to time to start ripping out some unnecessary parts, so that a committed subset can be pushed out to people on the web.</p>
+</blockquote>
+</aside>
+<p><em>Definitely this:</em> <em><strong>I want to put the system into people's hands.</strong></em></p>
+<p>We've reached a point where for once, we know how APPEND works.  That is no small feat... and the solution was a decade in the making.</p>
+<p>I believe we now know how true and false work, with <code>~true~</code> and <code>~false~</code> being their meta state that evaluates to an isotopic state which can't be put into blocks.</p>
+<p>There are so many neat solutions to old questions... like what is <strong><code>any []</code></strong> or <strong><code>all []</code></strong>, and having coherent answers to basic questions is something to stand on the shoulders of for the next tough question.  It all interlocks.</p>
+<p><strong>I'm hard-pressed to say exactly what's going to happen with binding, but I'm wondering if there's any way to make a system that's useful even if we don't know how that will work.</strong></p>
+<p>But I'm going to keep going at it, and start posting again here now that I'm getting more settled.  Again: Happy New Year!</p>
+          <p><a href="https://forum.rebol.info/t/happy-2023-and-2022-general-status-reflection/1988/3">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/happy-2023-and-2022-general-status-reflection/1988/3</link>
+        <pubDate>Thu, 05 Jan 2023 19:43:56 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1988-3</guid>
+        <source url="https://forum.rebol.info/t/happy-2023-and-2022-general-status-reflection/1988.rss">Happy 2023, and 2022 General Status &amp; Reflection</source>
+      </item>
+      <item>
+        <title>Happy 2023, and 2022 General Status &amp; Reflection</title>
+        <dc:creator><![CDATA[iArnold]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="1988">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/40/26_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>With so many aspects of isotopes working out, it's unfortunate that the terrible type system is getting in the way. A dissatisfying answer would be just to say that all isotopes report that they are ISOTOPE! and you have to perform operations on them to find out the actual type... but this is what you historically have to do with items in BLOCK! (you can't typecheck for "block that contains one integer!" vs. "block that contains two strings").</p>
+</blockquote>
+</aside>
+<p>When we think about this, it is the programmer that decides that the things an end-user selects get put inside a block to process the given information, it is also to the programmer to check on the validity of the items inside a block! (type! and value).<br>
+That is thus okay.<br>
+The problem is that even if the rest of the software development world thinks that fewer than 64 datatypes is sufficient, we the Redbol world occupants really want to expand beyond that limit. What you describe is the (non)solution of having ISOTOPE! call out "hey I am different, but you need to find out for yourself how different exactly". Which is surely not what we really want.<br>
+Hence we need a way to expand beyond our 64 datatypes limit.<br>
+When there is no room anymore, which is the case, I propose to follow some kind of ASCII to UTF extension trick. This will limit the number of primary datatypes (with a 0 in first position) even more, but other type would then make use of a follow up byte to mark the definitive datatype.</p>
+<aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="1988">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/40/26_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>Also, I'm packing up and moving in less than two weeks and there's a lot to do for that.</p>
+</blockquote>
+</aside>
+<p>Take care, hope you have found a great place to stay!</p>
+          <p><a href="https://forum.rebol.info/t/happy-2023-and-2022-general-status-reflection/1988/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/happy-2023-and-2022-general-status-reflection/1988/2</link>
+        <pubDate>Sun, 16 Oct 2022 10:08:21 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1988-2</guid>
+        <source url="https://forum.rebol.info/t/happy-2023-and-2022-general-status-reflection/1988.rss">Happy 2023, and 2022 General Status &amp; Reflection</source>
+      </item>
+      <item>
+        <title>Happy 2023, and 2022 General Status &amp; Reflection</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <h1>Happy New Year!</h1>
+<p><img src="https://forum.rebol.info/images/emoji/twitter/champagne.png?v=9" title=":champagne:" class="emoji only-emoji" alt=":champagne:"> <img src="https://forum.rebol.info/images/emoji/twitter/partying_face.png?v=9" title=":partying_face:" class="emoji only-emoji" alt=":partying_face:"></p>
+<blockquote>
+<p>Note: This was originally an October 2022 status report, but I didn't do anything in November or December, so I'm really just going to add a bit to it...</p>
+</blockquote>
+<p><em>Having hit up against some pretty deep questions about redesigning datatypes in October, I've been taking a break.</em>  It's good to clear one's head sometimes. I packed up and moved, and there was a lot to do for that.</p>
+<p>I've been poking around some other languages and tools... tinkering with things like the Rust compiler sources... looking at Stable Diffusion and what sorts of trends are on the rise in open-source AI.  Reading a lot of articles and watching YouTube Videos.</p>
+<p>Hopefully some of the datatype-related ideas will settle in my head and I'll be able to start making progress on those.  But I thought I'd review some of what's gone on the last months.</p>
+<ul>
+<li>
+<p>It's certainly worth pointing out that the <a href="https://forum.rebol.info/t/stackless-is-here-today-now/1844">system is using "stackless" processing</a>... which is a significant change, that from a practical standpoint has let us get rid of costly workarounds needed for browser interop in the web build.</p>
+</li>
+<li>
+<p>Changes were made to <a href="https://forum.rebol.info/t/ren-c-is-now-on-the-clouds-with-wasi/1854">permit executing in WASI runtimes</a>, enabling a new cross-platform target as well as being used in "serverless" cloud computing scenarios.</p>
+</li>
+<li>
+<p><a href="https://forum.rebol.info/t/visual-parse-on-the-web-has-arrived/1837">Integrating a rich editor and tabbed interface to the web REPL</a> is a big cool thing.</p>
+</li>
+</ul>
+<p>I could go on about every little thing (like updating the crypto, or that web tests now <a href="https://forum.rebol.info/t/js-testing-with-cypress-io/1778">run on cypress.io</a>) but there are posts and git commits for that.</p>
+<p>Nearly every other major change worth discussing involves big changes surrounding isotopes.</p>
+<h2>Generalized Isotopes Have Changed (Almost) Everything</h2>
+<p>From the beginning, Ren-C's goal has been to attack the fundamental weaknesses in how Rebol works as a language.</p>
+<p>Integral to attacks on several major problems has been the idea of <em>"generalized isotopes"</em>.  If anyone hasn't had a chance to read the thread describing the rationale, I suggest doing so now (or re-reading it):</p>
+<p><strong><a href="https://forum.rebol.info/t/a-justification-of-generalized-isotopes/1918">"A Justification of Generalized Isotopes"</a></strong></p>
+<p>This development kind of touches everything in the system:</p>
+<ul>
+<li>
+<p><strong><a href="https://forum.rebol.info/t/the-long-awaited-death-of-only/1607">It strikes at the heart of the /ONLY issue</a></strong>.  When you see it used with something like REPLACE, you can really have that "A Ha" moment... that splicing intent should never have been carried by a refinement</p>
+<pre><code>&gt;&gt; replace/all [[a b] a b a b] [a b] [c d e]
+== [[c d e] a b a b] 
+
+&gt;&gt; replace/all [[a b] a b a b] spread [a b] [c d e]
+== [[a b] [c d e] [c d e]]
+
+&gt;&gt; replace/all [[a b] a b a b] [a b] spread [c d e]
+== [c d e a b a b]
+
+&gt;&gt; replace/all [[a b] a b a b] spread [a b] spread [c d e]
+== [[a b] c d e c d e]
+</code></pre>
+</li>
+<li>
+<p><strong><a href="https://forum.rebol.info/t/fail-vs-return-raise-the-new-age-of-definitional-failures/1852">"Definitional Errors" have arisen</a></strong> as a crucial combination of solutions: one of the earliest Ren-C mechanics (definitional returns) mixes with a new idea (error isotopes), to give an actual viable answer for error handling in the system:</p>
+<pre><code>&gt;&gt; attempt [print "Attempting to read file" read %nonexistent-file.txt]
+Attempting to read file
+; null
+
+&gt;&gt; attempt [print "Attempting but made typos" rread %nonexistent-file.txt]
+Attempting but made typos
+** Script Error: rread word is attached to a context, but unassigned
+** Near: [rread ** %nonexistent-file.txt]
+</code></pre>
+</li>
+<li>
+<p>Moving away from a dedicated "LOGIC!" datatype to <strong><a href="https://forum.rebol.info/t/thinking-about-isotopes-logically-true-and-false/1944">~true~ and ~false~ isotopes</a></strong> solves a "top-of-the-page" representational issue... giving an in-between state that can be held in a variable, but must undergo some reification process before being carried in an array:</p>
+<pre><code>&gt;&gt; 1 = 2
+== ~false~  ; isotope
+
+&gt;&gt; append [a b c] 1 = 2
+** Error: Arrays cannot hold ~false~ isotopes, must REIFY or META
+
+&gt;&gt; append [a b c] meta 1 = 2
+== [a b c ~false~]
+
+&gt;&gt; append [a b c] reify 1 = 2
+== [a b c false]
+</code></pre>
+</li>
+<li>
+<p>Treatment of <strong><a href="https://forum.rebol.info/t/thought-reimplementing-multi-return-via-isotopic-block/1955">BLOCK! isotopes as "packs"</a></strong> gives answers to how to pipe and transform multi-return expressions... and has also been leveraged as a way to tell the difference between "true null" (e.g. should trigger an else) and "packaged null" (a null packed into a block that is "a positive result that just happens to be null").</p>
+</li>
+<li>
+<p>It has reshaped "voidness"--as something <strong><a href="https://forum.rebol.info/t/non-interstitial-invisibles-more-trouble-than-theyre-worth/1582">which only vanishes in interstitial slots</a></strong>, and can be manipulated conveniently in its isotopic form.</p>
+<ul>
+<li>Being able to pass voids as arguments enables fully functional compositions, <a href="https://forum.rebol.info/t/demonstrating-for-both-loop-composability-for-the-win/1833">like the infamous FOR-BOTH case</a> of writing a loop wrapper that preserves the loop behavior invariants.</li>
+</ul>
+</li>
+<li>
+<p>Isotopes are also covering things like being able to tell the difference between <strong><a href="https://forum.rebol.info/t/find-treats-typeset-s-specially-why-not-functions/1881/2">passing an ACTION! you want to run and an ACTION! you want to look for literally</a></strong> (by its identity)</p>
+</li>
+</ul>
+<p>In some sense, this "discovery" has pushed a big reset button on the project... because it affects so many things.  Nearly everything has to be revisited.  But the biggest issue is with the type system.</p>
+<h2>Isotopes Further Stress Weaknesses Of DATATYPE! / TYPESET!</h2>
+<p>Rebol and all of its clones deal with datatypes in the exact same simplistic way, limiting it to 64 datatypes... with a TYPESET! being a 64-bit number with one bit for each type.</p>
+<p>Perhaps there are those out there who think this is fine.  They may see it as like the <a href="https://www.danielsen.com/jokes/objecttoaster.txt">engineer and the toaster story</a>... where making a toaster with very few settings is virtuous, and it's unnecessary complexity to have any more complicated type system.</p>
+<p>I've laid out some of my beliefs...such as that "kinds" of values (in a coarse sense) are at the very least based on WORD!, so you can add new things like <strong><code>vector</code></strong> and <strong><code>matrix</code></strong> and <strong><code>image</code></strong>...none of which I believe should be mandatory to build into the core...so lighter builds can be made.</p>
+<p>Beyond that I have suggested that getting a full "type" description could be a more descriptive structure, telling you not only that something is a matrix but also giving you its dimensions.</p>
+<p>The more these kinds of thoughts seem true, it makes TYPESET! seem like a bogus kind of thing... and type checking functions might make more sense.  Why not something like:</p>
+<pre><code>foo: func [bar [integer! series? even?]] [...]
+</code></pre>
+<p>Performance aside, trading off typesets has some dangerous implications...such as what if a function gets specialized with a value that passes, but either the function or something about the value changes so it wouldn't pass?  As it happens, today's specialized values are written in the place where type information for a parameter would usually be--so you can't typecheck after the fact.</p>
+<p>With so many aspects of isotopes working out, it's unfortunate that the terrible type system is getting in the way.  A dissatisfying answer would be just to say that all isotopes report that they are ISOTOPE! and you have to perform operations on them to find out the actual type... but this is what you historically have to do with items in BLOCK! (you can't typecheck for "block that contains one integer!" vs. "block that contains two strings").</p>
+<p>Anyway: this is a longstanding problem area, that isotopes are now making it more imperative to solve.</p>
+<h2>Still...There Are A Lot Of New And Interesting Things</h2>
+<p>The biggest takeaway here is that isotopes have added new dimensions that are letting Ren-C bring really advanced capabilities within reach of very novice users.</p>
+<p>There are many examples, but some of the most amazing to me are things like hooking the default UPARSE combinators--which have multiple return values--by being able to turn those return values into blocks and transform them.</p>
+<p>So I'm still "finding the cool" in new behaviors, so that's motivating.  But maybe with the basics sorted out, it's getting closer to time to start ripping out some unnecessary parts, so that a committed subset can be pushed out to people on the web.</p>
+          <p><a href="https://forum.rebol.info/t/happy-2023-and-2022-general-status-reflection/1988/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/happy-2023-and-2022-general-status-reflection/1988/1</link>
+        <pubDate>Sun, 16 Oct 2022 04:56:59 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1988-1</guid>
+        <source url="https://forum.rebol.info/t/happy-2023-and-2022-general-status-reflection/1988.rss">Happy 2023, and 2022 General Status &amp; Reflection</source>
+      </item>
+  </channel>
+</rss>

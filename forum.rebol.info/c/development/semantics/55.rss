@@ -5,8 +5,125 @@
     <link>https://forum.rebol.info/c/development/semantics/55</link>
     <description>Topics in the &#39;Semantics&#39; category While the &quot;Internals&quot; discusses the bits and bytes of how things are implemented, this category is for discussing things design questions of the language... like what &lt;strong&gt;do []&lt;/strong&gt; should return.</description>
     
-      <lastBuildDate>Thu, 22 Dec 2022 04:04:52 +0000</lastBuildDate>
+      <lastBuildDate>Fri, 06 Jan 2023 03:16:23 +0000</lastBuildDate>
       <atom:link href="https://forum.rebol.info/c/development/semantics/55.rss" rel="self" type="application/rss+xml" />
+        <item>
+          <title>Picking ACTION!s from BLOCK!s In The Age of Isotopes</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Semantics</category>
+          <description><![CDATA[
+            <p>In <strong><a href="https://forum.rebol.info/t/reds-design-issues-wiki/1282">Red's Design Questions wiki</a></strong>, they bring up the issue of why picking functions out of blocks runs them:</p>
+<pre><code>red&gt;&gt; block: reduce [does [print "Evaluated."]]
+  == [func [][print "Evaluated."]]
+
+red&gt;&gt; equal? block/1 first block
+Evaluated.  ; d'oh
+== false
+</code></pre>
+<p><a href="https://gitter.im/red/red?at=5c782ca0c1cab53d6f53dd6d">In the Gitter conversation</a>, Boris calls it a "shady area" that they can't get out of "under the current semantic model".  He suggests it is clear that <strong><code>block/1</code></strong> should not run an action, but possible that <strong>block/word</strong> would mean to.</p>
+<p>They contemplate the idea that <strong>block/1</strong> would not run the action, but pick it:</p>
+<pre><code>red&gt;&gt; block: reduce [does [print "Evaluated."]]
+  == [func [][print "Evaluated."]]
+
+red&gt;&gt; equal? block/1 first block  ; hypothetical behavior
+== false
+</code></pre>
+<p><strong>I will argue this doesn't really help you much, the problem just becomes one step removed.</strong>  Quite often people are picking things out of blocks to put them in variables, and you'll just get bit there instead:</p>
+<pre><code>red&gt;&gt; otherblock: copy []
+== []
+
+red&gt;&gt; temp: block/1
+== func [][print "Evaluated."]
+
+red&gt;&gt; append otherblock temp
+Evaluated.  ; d'oh
+== [unset]  ; double d'oh
+</code></pre>
+<h2>Isotopes Bring The Better Semantic Model!</h2>
+<p>In Ren-C's concept (as I'm working on it), the only actions that will run from a word reference are those that are isotopic actions.  And FUNC or DOES creates an isotopic action.</p>
+<p>So you would be stopped from making an illegal block up front:</p>
+<pre><code>&gt;&gt; block: reduce [does [print "Evaluated."]]
+** Script Error: Invalid use of ~#[action! []]~ isotope
+</code></pre>
+<p>You can put quasi-ACTION!s, plain ACTION!s, and quoted actions in blocks.  Just not isotopic ones.</p>
+<p>Whichever you choose, the equality test will work... and picking out a value into a variable will give you an inert variable to work with, that can be used with things like append!</p>
+<pre><code>&gt;&gt; block: reduce [reify does [print "Evaluated."]] 
+== [~#[action! []]~]
+
+&gt;&gt; equal? block.1 first block
+== ~true~  ; isotope  &lt;-- didn't run and print "Evaluated", yay!
+
+&gt;&gt; otherblock: copy []
+== []
+
+red&gt;&gt; temp: block.1
+== ~#[action! []]~
+
+red&gt;&gt; append otherblock temp
+== [~#[action! []]~]   ; &lt;-- didn't run and gave sensible block out
+</code></pre>
+<p>I used REIFY there and got a quasi-action.  BUT which would you rather put in the block: a quasi-action or a plain one?  This depends on what you plan to do with the block.  A plain action will execute when encountered by the evaluator, while a quasi-action will evaluate to an isotopic action--suitable for assigning via SET-WORD! when you meant to make that word dispatch the function when referenced.</p>
+<p>My leaning is to say that either form can be used with APPLY, RUN, or the terminal path form:</p>
+<pre><code>&gt;&gt; block: reduce [reify does [print "Evaluated."]] 
+== [~#[action! []]~]
+
+&gt;&gt; run block.1
+Evaluated.
+
+&gt;&gt; block: reduce [concretize does [print "Evaluated."]] 
+== [#[action! []]]
+
+&gt;&gt; apply block.1 []
+Evaluated.
+</code></pre>
+<p><em>(See post on <a href="https://forum.rebol.info/t/reify-vs-meta-vs-something/2001">difference between REIFY and CONCRETIZE</a>, and the search for a better term...)</em></p>
+<p>If you want to pick an action out of a block and put it into a variable, where it will execute from that variable, there is the RUNS transformer.  It will turn a quasi or plain ACTION! into an action isotope:</p>
+<pre><code> &gt;&gt; active-var: runs block.1
+ == ~#[action! {active-var} []]~  ; isotope  &lt;-- note: also cached name, neat!
+
+ &gt;&gt; active-var
+ Evaluated.
+</code></pre>
+<p><img src="https://forum.rebol.info/images/emoji/twitter/clap.png?v=9" title=":clap:" class="emoji only-emoji" alt=":clap:"></p>
+<p>You can use UNMETA more generically to get an isotope back from any quasi-form (not just actions), or ISOTOPIC to get an isotope from a plain form.</p>
+<h2>The Invariant Is What Counts, Here!</h2>
+<p>The mountain that has been climbed is that we can now say that for any block, this is true:</p>
+<pre><code>block2: collect [
+    for-each item block1 [keep item]
+]
+
+assert [equal? block1 block2]
+</code></pre>
+<ul>
+<li>
+<p>I've just covered that there are no isotopic actions to implicitly execute; you'd get an error trying to put them in the block.</p>
+</li>
+<li>
+<p>There are no blocks/groups/paths that will splice into the target, because splicing requires an explicit conversion to an isotope.</p>
+</li>
+<li>
+<p>There are no "unsets" to trip on that you can find in a block, because the state conveying "unsetness" (nihil) is an isotope.</p>
+</li>
+</ul>
+<p>Of course with objects, it's going to be a different story.  I think we'll still want some safeguards:</p>
+<pre><code>for-each [key value] object [...]  ; will error when value is action
+
+for-each [key :value] object [...]  ; will allow action isotopes as-is
+
+for-each [key ^value] object [...]  ; will give a meta value
+</code></pre>
+<p>A key problem here is I'm wondering how much to cross purposes of GET-WORD! between action disarming and the other isotopic states.  But, it just takes time to work through.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/picking-action-s-from-block-s-in-the-age-of-isotopes/2002">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/picking-action-s-from-block-s-in-the-age-of-isotopes/2002</link>
+          <pubDate>Fri, 06 Jan 2023 03:16:23 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2002</guid>
+          <source url="https://forum.rebol.info/t/picking-action-s-from-block-s-in-the-age-of-isotopes/2002.rss">Picking ACTION!s from BLOCK!s In The Age of Isotopes</source>
+        </item>
         <item>
           <title>SPLIT Semantics</title>
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
@@ -1635,101 +1752,6 @@ red&gt;&gt; type? while [false] ["whatever"]
           <discourse:topicArchived>No</discourse:topicArchived>
           <guid isPermaLink="false">forum.rebol.info-topic-1873</guid>
           <source url="https://forum.rebol.info/t/putting-splicing-intent-on-appended-value/1873.rss">Putting Splicing Intent On APPEND&#39;ed Value</source>
-        </item>
-        <item>
-          <title>Every Thought On Array Splicing Has Been Had :exploding_head:</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Semantics</category>
-          <description><![CDATA[
-            <blockquote>
-<p>Important Updated Response to the topic of this 2020 Post:</p>
-<p><strong>Nope.  I was wrong.  <a href="https://forum.rebol.info/t/cutting-out-only-could-we-make-append-find-etc-only-accept-blocks/1182/18">Quoting levels of -1</a> was a thought that hadn't been had in September 2020.</strong></p>
-<p><em>(Because <a href="https://forum.rebol.info/t/multiple-returns-and-branching-could-it-unseat-voidification/1408">isotopes in their most primitive form weren't proposed until November 2020</a>, and it took some time before ^META conventions were laid out.)</em></p>
-<p>Just goes to show you... there's always room for more insights.  You can ignore this post unless you want to go down some historical dead ends...</p>
-</blockquote>
-<hr>
-<p>Here's what we "know"...</p>
-<h2>BLOCK!s (and only plain BLOCK!s) Splice By Default</h2>
-<p>This is to say that BLOCK! is <em>The</em> universal container (<strong>"[o]"</strong>).  Splicing of the contents of a non-block is done by aliasing it as a block first...which can be done efficiently without copying memory.</p>
-<p>It was always obvious to me that PATH!s should not splice.  But I didn't have any real guidance on GROUP!, or the new types like SET/GET-BLOCK!/GROUP! (and whatever <strong>@[block]</strong> or <strong>@(group)</strong> ultimately gets called).  It was a toss up between <em>"anything that uses spaces to separate elements splice, and anything tighter--like tuples/paths--not"</em> vs. <em>"the logo is [o], so anything with brackets is special"</em> (I was pretty sure <em>"do whatever Rebol2 did"</em> was not a good idea).</p>
-<p>But I think there's a better narrative for justifying this solution.  Looking at other languages like Haskell/Rust/Elm, they all used parentheses for tuples...where their notion of a tuple is fixed-size with elements that aren't necessarily of the same type.  This led me to think about the question of if BLOCK!'s universal containerness might make it something you don't just pick automatically...you'd pick something else when splicing wasn't what you'd <em>typically</em> want.</p>
-<p>Here's a made-up example:</p>
-<pre><code>add-new-products: func [product-list: [block!]] [
-    product1: '(#WID-0304 "Super Widget" $1.99)
-    product2: '(#WID-1020 "Super Widget Plus" $2.00)
-
-    append product-list product1
-    append product-list product2
-    append product-list [
-        (#WID-0421 "Super Widget Premium" $2.01)
-        (#WID-9999 "Super Widget Ultimate" $102,003.04)
-    ]
-]
-</code></pre>
-<p>See how light the generic quoting made the GROUP! literals?  Now this makes the choice of BLOCK! vs. GROUP! something that you can reason about better.  You can take advantage of the difference so you're not fighting the behavior--but "synergizing" with it.</p>
-<p>But also...with <strong>@[...]</strong>/etc that doesn't splice, you have more options for shifting your data's conception of itself as it is passed around.</p>
-<p>I'll point out that since there's no @ or : in the logo, this does ultimately dovetail nicely with "what's in the logo is special"...it's not just any bracketed thing, it's plain BLOCK!.   <img src="https://forum.rebol.info/images/emoji/twitter/slight_smile.png?v=9" title=":slight_smile:" class="emoji" alt=":slight_smile:"></p>
-<h2>
-<a href="https://forum.rebol.info/t/new-parameter-convention-concept-modal-arguments-or-the-arg/1187">"Modal Parameters"</a> are the Answer for Anti-Splicers</h2>
-<p>I've been trying to embrace <a class="mention" href="/u/rgchris">@rgchris</a>'s concept that the language bias should stick to making it so that "common" code does not lean too strongly on symbols to convey meaning.  While you can retrain yourself to comprehend pretty much any symbol soup, letting your mindset drift to that "new normal" isn't good for communicating code to others.  <em>(And it's probably not good for your own ability to see clearly, either...even if you -think- you understand what you're doing.)</em></p>
-<p>This has to be balanced against many other design factors; to which I'm sensitive because I actually understand what it takes to make things <em>work</em> at a mechanical bits-and-bytes level.  So this pushes back and forth.</p>
-<p>Modal parameters give an easy mechanism to library authors, or others who want a rigorous way to append values "as is" without typing /only at every callsite.</p>
-<pre><code>&gt;&gt; append [a b c] @[d e]
-== [a b c [d e]]
-
-&gt;&gt; item: @[d e]
-&gt;&gt; append [a b c] item
-== [a b c @[d e]]  ; modality comes from parameter, not fetched value
-
-&gt;&gt; append [a b c] '@[d e]
-== [a b c @[d e]]  ; quoting suppresses modality, then evaluates away
-
- &gt;&gt; do compose [append [a b c] '(third [&lt;d&gt; #e @[f g]])]
- == [a b c @[f g]]  ; quoting in COMPOSE is there to help in cases like this
-</code></pre>
-<p>It's not something that has to be brought up in early tutorials.  But I like it.  And it's a generic mechanism that people can use when they want a parameter to indicate the mode of a refinement...so there's generic uses for it.</p>
-<h2>Further changes to APPEND and such will be abandoned</h2>
-<p>I experimented with making APPEND only accept blocks, and then maybe blocks and strings, and other kinds of tweaks.  They weren't worth it.</p>
-<p>What's changing the game here is making BLOCK! the only type that splices by default.</p>
-<p>It used to be that when you had a moment of doing an append of some parameter--that wasn't a block before but suddenly is now--you groaned and said <em>"why'd I forget the /ONLY"</em> or <em>"why does this darn thing behave so randomly"</em>.</p>
-<p>Now a new thing you can ask in many of these moments is: <em><strong>"Why was this value a plain block if I didn't want it to splice??"</strong></em>  It should feel less random, when you have more alternatives.  I'm going to look at my array choices in this new light, and maybe need /ONLY less often as a result.</p>
-<p>Modal parameters are good to have to point people to who aren't on board with splice-by-default.  And I'm willing to accept the burden of using a modal parameter to enter an @ symbol when I want it.  It saves significant evaluation time over APPEND/ONLY, and doesn't require a series node allocation to hold the APPEND and ONLY words.</p>
-<h2>BLOCK! Conversions Needed</h2>
-<p>Because the only way to get splicing is now to have a block, it raises the question of how to get blocks.</p>
-<p>AS BLOCK! is cheap; it doesn't allocate any memory, it just aliases the series as a different cell class.  So it's a good choice if you know what you have is an array.</p>
-<pre><code>&gt;&gt; group: '(d e f)
-&gt;&gt; append [a b c] as block! group
-== [a b c d e f]
-</code></pre>
-<p>If you don't know if you have an array value or not, this is a little harder.  But we can actually turn items into a one-cell BLOCK! <em>without allocating any memory</em>.  This is a new trick which was called mirroring, but the mechanism is changed to where it needs a new name.  The new block is read only, but that is okay for the purposes of this append since it's gone after the splice.</p>
-<p>The name for the operation I had in mind was BLOCKIFY (though it's not using the mirroring mechanism at the moment, only the PATH! trick is, which proves it does work).</p>
-<pre><code>&gt;&gt; value: '(d e f)
-&gt;&gt; append [a b c] blockify value  ; [d e f]
-== [a b c d e f]
-
-&gt;&gt; value: 1020
-&gt;&gt; append [a b c] blockify value  ; [1]
-== 1020
-</code></pre>
-<p>But that's a weird looking word, and I hate having to have lists of things like this (groupify?  set-groupify?)  The concept from the other day of FORCE might be interesting</p>
-<pre><code>append [a b c] force block! value
-</code></pre>
-<p>That's at least generic, and it kind of conveys "I want a block, if it's a block then great, if not then change it".  But that makes it sound like its <em>changing</em> the input value to be a block, vs. wrapping it.</p>
-<p>But maybe AS can wing it, and say that if you give it a non-block it can just do the wrapping in a block anyway and give you something read-only?  :-/  I mean, the user doesn't know that every single-valued item doesn't secretly live in a 1-element array in the implementation...it might.  Hmmm.</p>
-<p>Anyway, this name looks like the only missing piece.  What do you call something that doesn't do any memory allocation but just makes a light 1-element wrapper that can live in a cell, to keep us from having to add more crazy refinements?</p>
-<p>It's not a super high priority as most cases are known to be AS (in the form known today)</p>
-<h2>Speak Up or Hold Your Peace</h2>
-<p>Like I say, I think I've probably had all the thoughts.  There aren't any more to be had.  If you want to prove me wrong, post it here...but do it soon.</p>
-            <p><small>13 posts - 5 participants</small></p>
-            <p><a href="https://forum.rebol.info/t/every-thought-on-array-splicing-has-been-had/1332">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/every-thought-on-array-splicing-has-been-had/1332</link>
-          <pubDate>Sat, 19 Sep 2020 21:02:38 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>Yes</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-1332</guid>
-          <source url="https://forum.rebol.info/t/every-thought-on-array-splicing-has-been-had/1332.rss">Every Thought On Array Splicing Has Been Had :exploding_head:</source>
         </item>
   </channel>
 </rss>
