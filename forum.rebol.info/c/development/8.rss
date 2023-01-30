@@ -5,8 +5,151 @@
     <link>https://forum.rebol.info/c/development/8</link>
     <description>Topics in the &#39;Development&#39; category Discussion of the development of Rebol itself: language design, implementation and standard library.</description>
     
-      <lastBuildDate>Sun, 08 Jan 2023 21:18:39 +0000</lastBuildDate>
+      <lastBuildDate>Thu, 26 Jan 2023 18:42:40 +0000</lastBuildDate>
       <atom:link href="https://forum.rebol.info/c/development/8.rss" rel="self" type="application/rss+xml" />
+        <item>
+          <title>Should Quasiform Parameters Accept as the Plain Form?</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Datatypes</category>
+          <description><![CDATA[
+            <p><strong><a href="https://forum.rebol.info/t/attack-of-the-activated-actions/1900">I'm very confident of the goodness of "isotopic actions"</a></strong>.</p>
+<p>Not being able to put them in blocks gives us the <a href="https://forum.rebol.info/t/the-canonical-list-of-non-negotiables/1244/9">nice, mechanical invariant</a> of being able to manipulate blocks without inadvertently running functions in the process.  It opens the doors to other guardrails against isotopes being in variables when it might surprise you.</p>
+<p>But what happens when you write something like SPECIALIZE, with a spec that looks something like:</p>
+<pre><code>//
+//  specialize: native [
+//
+//  {Create a new action through partial or full specialization of another}
+//
+//      return: [~action!~]  ; ~ notation since an isotopic action is returned
+//      action "Function whose parameters will be set to fixed values"
+//          [action!]
+//      def "Definition for FRAME! fields for args and refinements"
+//          [block!]
+//  ]
+//
+</code></pre>
+<p>Should SPECIALIZE tolerate being passed an isotopic action, maybe with a spec that looks like:</p>
+<pre><code>return: [~action!~]
+action "Function whose parameters will be set to fixed values"
+    [action! ~action!~]
+def "Definition for FRAME! fields for args and refinements"
+    [block!]
+</code></pre>
+<p>This would lead to complexity inside most function, because now if it references the <strong>action</strong> variable it might run.  And this lack of automatic canonization to the inert form creates hassles for both usermode and native code alike.</p>
+<p>Another thing is that the meaning of isotopic actions is potentially <em>very</em> different from that of a plain action.  For instance: <strong><code>find block :even?</code></strong> might know that since blocks cannot contain isotopes, it should interpret it as a function to call to test the items in the block for evenness.</p>
+<p>So this led me to a bit of a thought...</p>
+<h2>What if QUASI!-forms typechecked as the plain form?</h2>
+<p>The idea is that there's an initial type check done.  If that check fails and it's a quasiform, it is tested again as its plain form.  If that passes, the plain form is received.</p>
+<p>Producing a quasiform of an action from an isotope is easy, just use a meta operation.  So <strong><code>^append</code></strong> instead of <strong><code>:append</code></strong>.  All meta forms are inert, so code using the meta is less likely to do wild things.</p>
+<p><em>To me, this feels like a safer exception than letting isotopes pass for plain forms.</em>  Due to their alien-ness, an isotopic form could intend something quite far from a mechanical brick in a block.  But what a quasiform has in common with a plain form is that both are inert.</p>
+<p>Also, even the name "quasi" suggests a possibly loose relationship.  It carries the same payload as the plain form.  What if this were legal:</p>
+<pre><code>&gt;&gt; add first [~1~] first [~2~]
+== 3
+</code></pre>
+<p>I'm suggesting a general-enough mechanism that would work... so long as ADD didn't widen its net to taking actual ANY-VALUE! (which would indicate it had an actual meaning that applied to quasiforms).</p>
+<p>This may not be the most brilliant thought to ever be thunk.  But in this more complex world there need to be succinct answers.  We don't want to have to write things like <strong><code>apply concretize :append [...]</code></strong>, and I feel like glossing over the fact that something is an isotope is a worse move than glossing over that something is a quasiform.</p>
+<p>I even may like <strong><code>apply ^append [...]</code></strong> a bit more than <strong><code>apply :append [...]</code></strong> for looks, too.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/should-quasiform-parameters-accept-as-the-plain-form/2012">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/should-quasiform-parameters-accept-as-the-plain-form/2012</link>
+          <pubDate>Thu, 26 Jan 2023 18:42:40 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2012</guid>
+          <source url="https://forum.rebol.info/t/should-quasiform-parameters-accept-as-the-plain-form/2012.rss">Should Quasiform Parameters Accept as the Plain Form?</source>
+        </item>
+        <item>
+          <title>Axing --breakpoint switch, C-DEBUG-BREAK-AT</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Debugger</category>
+          <description><![CDATA[
+            <p><strong>I'm killing off features for whom their maintenance is not paying off.</strong></p>
+<p>One is the "tick" based usermode <code>--breakpoint</code> feature, implemented on the command line as:</p>
+<pre><code>        "--breakpoint" end (
+            c-debug-break-at to-integer param-or-die "BREAKPOINT"
+        )
+</code></pre>
+<p>The complex problem of taking a "tick" count to break on via a command line switch is that since command line processing is in usermode, you have a kind of observer-affects-the-experiment situation.  The code for adding in the breakpoint messes with the tick count you're trying to reproduce.</p>
+<p>I had ideas to work around this.  So there's the /COMPENSATE feature of C-DEBUG-BREAK, which I don't even know if it works or if my idea is fundamentally flawed:</p>
+<pre><code>; Taking a command-line `--breakpoint NNN` parameter is helpful if a
+; problem is reproducible, and you have a tick count in hand from a
+; panic(), REBSER.tick, Frame.tick, REBVAL.extra.tick, etc.  But there's
+; an entanglement issue, as any otherwise-deterministic tick from a prior
+; run would be thrown off by the **ticks added by the userspace parameter
+; processing of the command-line for `--breakpoint`**!  :-/
+;
+; The /COMPENSATE option addresses this problem.  Pass it a reasonable
+; upper bound for how many ticks you think could have been added to the
+; parse, if `--breakpoint` was processed (even though it might not have
+; been processed).  Regardless of whether the switch was present or not,
+; the tick count rounds up to a reproducible value, using this method:
+;
+; https://math.stackexchange.com/q/2521219/
+;
+; At time of writing, 1000 ticks should be *way* more than enough for both
+; the PARSE steps and the evaluation steps `--breakpoint` adds.  Yet some
+; things could affect this, e.g. a complex userspace TRACE which was
+; run during boot.
+;
+attempt [c-debug-break-at/compensate 1000]  ; fails in release build
+</code></pre>
+<p>Here was more of it:</p>
+<pre><code>  #if !defined(NDEBUG) &amp;&amp; DEBUG_COUNT_TICKS
+    if (REF(compensate)) {
+        //
+        // Imagine two runs of Rebol console initialization.  In the first,
+        // the tick count is 304 when C-DEBUG-BREAK/COMPENSATE is called,
+        // right after command line parsing.  Later on a panic() is hit and
+        // reports tick count 1020 in the crash log.
+        //
+        // Wishing to pick apart the bug before it happens, the Rebol Core
+        // Developer then re-runs the program with `--breakpoint=1020`, hoping
+        // to break at that tick, to catch the downstream appearance of the
+        // tick in the panic().  But since command-line processing is in
+        // usermode, the addition of the parameter throws off the ticks!
+        //
+        // https://en.wikipedia.org/wiki/Observer_effect_(physics)
+        //
+        // Let's say that after the command line processing, it still runs
+        // C-DEBUG-BREAK/COMPENSATE, this time at tick 403.  Imagine our goal
+        // is to make the parameter to /COMPENSATE something that can be used
+        // to conservatively guess the same value to set the tick to, and
+        // that /COMPENSATE ARG(bound) that gives a maximum of how far off we
+        // could possibly be from the "real" tick. (e.g. "argument processing
+        // took no more than 200 additional ticks", which this is consistent
+        // with...since 403-304 = 99).
+        //
+        // The reasoning for why the formula below works for this rounding is
+        // given in this StackExchange question and answer:
+        //
+        // https://math.stackexchange.com/q/2521219/
+        //
+        Tick one = 1; // MSVC gives misguided warning for cast(Tick, 1)
+        TG_tick =
+            (one &lt;&lt; (ceil_log2(TG_tick) + 1))
+            + VAL_INT64(ARG(tick))
+            - 1;
+        return nullptr;
+    }
+</code></pre>
+<p>Also, I've never used the /RELATIVE tick feature, killing that too:</p>
+<pre><code>  if (REF(relative))
+      TG_break_at_tick = frame_-&gt;tick + 1 + VAL_INT64(ARG(tick));
+</code></pre>
+<p><strong>I'm going to be deleting a lot of things, I think, in the pursuit of simplification--now that isotopes are showing the way.</strong></p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/axing-breakpoint-switch-c-debug-break-at/2009">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/axing-breakpoint-switch-c-debug-break-at/2009</link>
+          <pubDate>Tue, 24 Jan 2023 21:57:46 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2009</guid>
+          <source url="https://forum.rebol.info/t/axing-breakpoint-switch-c-debug-break-at/2009.rss">Axing --breakpoint switch, C-DEBUG-BREAK-AT</source>
+        </item>
         <item>
           <title>&quot;Quasiforms&quot;, &quot;Stable/Unstable Isotopes&quot;: Simpler Terminology?</title>
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
@@ -254,7 +397,7 @@ for-each [key ^value] object [...]  ; will give a meta value
 == 10
 </code></pre>
 <p>It's not awful.  Main thing is just to have <em>a</em> name for it while the gears turn.  But as usual, throw out suggestions if you have them...</p>
-            <p><small>4 posts - 3 participants</small></p>
+            <p><small>5 posts - 3 participants</small></p>
             <p><a href="https://forum.rebol.info/t/reify-vs-meta-vs-something/2001">Read full topic</a></p>
           ]]></description>
           <link>https://forum.rebol.info/t/reify-vs-meta-vs-something/2001</link>
@@ -618,7 +761,7 @@ Why not print?  ; seems not so bad, right?
 <p><strong>My general intuition is that from a user's standpoint, it's an uphill battle to teach them isotopic blank is something called "null"... and that the majority of technical problems that are involved in making NULL be a word isotope are problems that have to be tackled anyway with true and false as word isotopes.</strong></p>
 <p>Additionally, I've written about my desire for BLANK!s to serve in dialects as spaces.  That gets very screwed by the (<strong><code>_</code></strong> =&gt; <strong><code>~_~</code>  ; isotope</strong>) evaluation.  Recovering blank for space intent would be good.</p>
 <p>I'm going to likely give it a shot, when I get some programming time again, hopefully soon.</p>
-            <p><small>3 posts - 1 participant</small></p>
+            <p><small>4 posts - 1 participant</small></p>
             <p><a href="https://forum.rebol.info/t/null-word-isotope-vs-blank-isotope-meaning-null/1989">Read full topic</a></p>
           ]]></description>
           <link>https://forum.rebol.info/t/null-word-isotope-vs-blank-isotope-meaning-null/1989</link>
@@ -1444,7 +1587,7 @@ CAT just repeats
     rebol2 --do "print {Hello from Rebol2 Piping Batch Wrapper}"
 </code></pre>
 <p>Of course these days we can pipe into Ren-C and it can be made to work.  But this is a bit lighter weight.</p>
-            <p><small>1 post - 1 participant</small></p>
+            <p><small>2 posts - 2 participants</small></p>
             <p><a href="https://forum.rebol.info/t/getting-output-from-rebol2-on-windows-github-actions/1966">Read full topic</a></p>
           ]]></description>
           <link>https://forum.rebol.info/t/getting-output-from-rebol2-on-windows-github-actions/1966</link>
@@ -1752,107 +1895,6 @@ Will work
           <discourse:topicArchived>No</discourse:topicArchived>
           <guid isPermaLink="false">forum.rebol.info-topic-1961</guid>
           <source url="https://forum.rebol.info/t/revisiting-to-and-thru/1961.rss">Revisiting TO and THRU</source>
-        </item>
-        <item>
-          <title>Applications of Isotopic Objects</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Datatypes</category>
-          <description><![CDATA[
-            <p>Consider the example of a function that might want to have two modes... one that prints out readable information for the console, and another that keeps the data in easily processable form.</p>
-<p>Traditionally you might think of controlling this with a refinement:</p>
-<pre><code>&gt;&gt; stats
--------------------
-Column 1   Column 2
--------------------
-Alpha      10
-Beta       20
-
-&gt;&gt; stats/only
-== [
-    [Alpha 10]
-    [Beta 20
-]
-</code></pre>
-<p>But then I wondered: what if there was only one isotopic result...that wrapped the data with functions?  So long as things stayed isotopic, you'd be able to get at the functions.  But if it reified it would become the data.</p>
-<pre><code>&gt;&gt; ^ stats
-== ~#[object! [... reify: ... form: ...]]~  ; isotope
-
-&gt;&gt; compose [statistics: (spread stats)]
-== [statistics: [Alpha 10] [Beta 20]]
-
-&gt;&gt; stats
--------------------
-Column 1   Column 2
--------------------
-Alpha      10
-Beta       20
-
-&gt;&gt; if true [print stats, &lt;PRINT could react to FORM also&gt;]
--------------------
-Column 1   Column 2
--------------------
-Alpha      10
-Beta       20
-== &lt;PRINT could react to FORM also&gt;
-</code></pre>
-<p>So PRINT would be special, and instead of allowing its argument to reify normally it would specifically examine isotopic arguments to see if they could FORM.</p>
-<p>In this case, the isotopic thing needs to be able to do two things: FORM or REIFY.  But maybe it could do more things, if you asked it?  And maybe no particular methods are mandatory.  Something that doesn't know how to REIFY just won't do that.</p>
-<p><strong>This looks kickass.</strong></p>
-            <p><small>5 posts - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/applications-of-isotopic-objects/1959">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/applications-of-isotopic-objects/1959</link>
-          <pubDate>Sat, 03 Sep 2022 11:48:53 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-1959</guid>
-          <source url="https://forum.rebol.info/t/applications-of-isotopic-objects/1959.rss">Applications of Isotopic Objects</source>
-        </item>
-        <item>
-          <title>Number of Files and Folders: More Is Okay</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Build System</category>
-          <description><![CDATA[
-            <p>In the quest for simplicity, R3-Alpha had an aesthetic that tried to be very minimalist in the source tree.</p>
-<p>The top level had only this:</p>
-<pre><code>make/
-src/
-.gitattributes
-.gitignore
-LICENSE
-NOTICE
-README
-</code></pre>
-<p>The <strong>%make/</strong> directory contained:</p>
-<pre><code>makefile
-makefile.vc
-vcbuild.bat
-</code></pre>
-<p>The <strong>%src/</strong> directory contained:</p>
-<pre><code>boot/       20 files
-core/       95 files
-include/    31 files
-mezz/       31 files
-os/          7 files, with 2 directories of about 10 files each
-tools/      10 files
-</code></pre>
-<p>The files themselves vary in size, but this just gives a perspective of about how many files there are.</p>
-<h2>Ren-C and Red use <em>MANY</em> more files and directories, BUT...</h2>
-<p><em><strong>Largely I think this is okay, moreover can be beneficial to understanding the code.</strong></em></p>
-<p>While we should be skeptical of large amounts of complexity, I don't think there should be a kneejerk reaction to a lot of <em>files</em>.</p>
-<p>Filesystems were invented for a reason: organization.  If arranging things in separate files makes the organization clear, it is good.</p>
-<p>Yet there should be some justification for why a directory exists.  For instance: I think every directory should have a README.md in it, which explains why those files are grouped together.</p>
-            <p><small>1 post - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/number-of-files-and-folders-more-is-okay/1958">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/number-of-files-and-folders-more-is-okay/1958</link>
-          <pubDate>Sat, 03 Sep 2022 10:52:06 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-1958</guid>
-          <source url="https://forum.rebol.info/t/number-of-files-and-folders-more-is-okay/1958.rss">Number of Files and Folders: More Is Okay</source>
         </item>
   </channel>
 </rss>

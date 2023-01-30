@@ -5,8 +5,151 @@
     <link>https://forum.rebol.info/latest</link>
     <description>Latest topics</description>
     
-      <lastBuildDate>Sat, 14 Jan 2023 15:21:04 +0000</lastBuildDate>
+      <lastBuildDate>Thu, 26 Jan 2023 18:42:40 +0000</lastBuildDate>
       <atom:link href="https://forum.rebol.info/latest.rss" rel="self" type="application/rss+xml" />
+        <item>
+          <title>Should Quasiform Parameters Accept as the Plain Form?</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Datatypes</category>
+          <description><![CDATA[
+            <p><strong><a href="https://forum.rebol.info/t/attack-of-the-activated-actions/1900">I'm very confident of the goodness of "isotopic actions"</a></strong>.</p>
+<p>Not being able to put them in blocks gives us the <a href="https://forum.rebol.info/t/the-canonical-list-of-non-negotiables/1244/9">nice, mechanical invariant</a> of being able to manipulate blocks without inadvertently running functions in the process.  It opens the doors to other guardrails against isotopes being in variables when it might surprise you.</p>
+<p>But what happens when you write something like SPECIALIZE, with a spec that looks something like:</p>
+<pre><code>//
+//  specialize: native [
+//
+//  {Create a new action through partial or full specialization of another}
+//
+//      return: [~action!~]  ; ~ notation since an isotopic action is returned
+//      action "Function whose parameters will be set to fixed values"
+//          [action!]
+//      def "Definition for FRAME! fields for args and refinements"
+//          [block!]
+//  ]
+//
+</code></pre>
+<p>Should SPECIALIZE tolerate being passed an isotopic action, maybe with a spec that looks like:</p>
+<pre><code>return: [~action!~]
+action "Function whose parameters will be set to fixed values"
+    [action! ~action!~]
+def "Definition for FRAME! fields for args and refinements"
+    [block!]
+</code></pre>
+<p>This would lead to complexity inside most function, because now if it references the <strong>action</strong> variable it might run.  And this lack of automatic canonization to the inert form creates hassles for both usermode and native code alike.</p>
+<p>Another thing is that the meaning of isotopic actions is potentially <em>very</em> different from that of a plain action.  For instance: <strong><code>find block :even?</code></strong> might know that since blocks cannot contain isotopes, it should interpret it as a function to call to test the items in the block for evenness.</p>
+<p>So this led me to a bit of a thought...</p>
+<h2>What if QUASI!-forms typechecked as the plain form?</h2>
+<p>The idea is that there's an initial type check done.  If that check fails and it's a quasiform, it is tested again as its plain form.  If that passes, the plain form is received.</p>
+<p>Producing a quasiform of an action from an isotope is easy, just use a meta operation.  So <strong><code>^append</code></strong> instead of <strong><code>:append</code></strong>.  All meta forms are inert, so code using the meta is less likely to do wild things.</p>
+<p><em>To me, this feels like a safer exception than letting isotopes pass for plain forms.</em>  Due to their alien-ness, an isotopic form could intend something quite far from a mechanical brick in a block.  But what a quasiform has in common with a plain form is that both are inert.</p>
+<p>Also, even the name "quasi" suggests a possibly loose relationship.  It carries the same payload as the plain form.  What if this were legal:</p>
+<pre><code>&gt;&gt; add first [~1~] first [~2~]
+== 3
+</code></pre>
+<p>I'm suggesting a general-enough mechanism that would work... so long as ADD didn't widen its net to taking actual ANY-VALUE! (which would indicate it had an actual meaning that applied to quasiforms).</p>
+<p>This may not be the most brilliant thought to ever be thunk.  But in this more complex world there need to be succinct answers.  We don't want to have to write things like <strong><code>apply concretize :append [...]</code></strong>, and I feel like glossing over the fact that something is an isotope is a worse move than glossing over that something is a quasiform.</p>
+<p>I even may like <strong><code>apply ^append [...]</code></strong> a bit more than <strong><code>apply :append [...]</code></strong> for looks, too.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/should-quasiform-parameters-accept-as-the-plain-form/2012">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/should-quasiform-parameters-accept-as-the-plain-form/2012</link>
+          <pubDate>Thu, 26 Jan 2023 18:42:40 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2012</guid>
+          <source url="https://forum.rebol.info/t/should-quasiform-parameters-accept-as-the-plain-form/2012.rss">Should Quasiform Parameters Accept as the Plain Form?</source>
+        </item>
+        <item>
+          <title>Axing --breakpoint switch, C-DEBUG-BREAK-AT</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Debugger</category>
+          <description><![CDATA[
+            <p><strong>I'm killing off features for whom their maintenance is not paying off.</strong></p>
+<p>One is the "tick" based usermode <code>--breakpoint</code> feature, implemented on the command line as:</p>
+<pre><code>        "--breakpoint" end (
+            c-debug-break-at to-integer param-or-die "BREAKPOINT"
+        )
+</code></pre>
+<p>The complex problem of taking a "tick" count to break on via a command line switch is that since command line processing is in usermode, you have a kind of observer-affects-the-experiment situation.  The code for adding in the breakpoint messes with the tick count you're trying to reproduce.</p>
+<p>I had ideas to work around this.  So there's the /COMPENSATE feature of C-DEBUG-BREAK, which I don't even know if it works or if my idea is fundamentally flawed:</p>
+<pre><code>; Taking a command-line `--breakpoint NNN` parameter is helpful if a
+; problem is reproducible, and you have a tick count in hand from a
+; panic(), REBSER.tick, Frame.tick, REBVAL.extra.tick, etc.  But there's
+; an entanglement issue, as any otherwise-deterministic tick from a prior
+; run would be thrown off by the **ticks added by the userspace parameter
+; processing of the command-line for `--breakpoint`**!  :-/
+;
+; The /COMPENSATE option addresses this problem.  Pass it a reasonable
+; upper bound for how many ticks you think could have been added to the
+; parse, if `--breakpoint` was processed (even though it might not have
+; been processed).  Regardless of whether the switch was present or not,
+; the tick count rounds up to a reproducible value, using this method:
+;
+; https://math.stackexchange.com/q/2521219/
+;
+; At time of writing, 1000 ticks should be *way* more than enough for both
+; the PARSE steps and the evaluation steps `--breakpoint` adds.  Yet some
+; things could affect this, e.g. a complex userspace TRACE which was
+; run during boot.
+;
+attempt [c-debug-break-at/compensate 1000]  ; fails in release build
+</code></pre>
+<p>Here was more of it:</p>
+<pre><code>  #if !defined(NDEBUG) &amp;&amp; DEBUG_COUNT_TICKS
+    if (REF(compensate)) {
+        //
+        // Imagine two runs of Rebol console initialization.  In the first,
+        // the tick count is 304 when C-DEBUG-BREAK/COMPENSATE is called,
+        // right after command line parsing.  Later on a panic() is hit and
+        // reports tick count 1020 in the crash log.
+        //
+        // Wishing to pick apart the bug before it happens, the Rebol Core
+        // Developer then re-runs the program with `--breakpoint=1020`, hoping
+        // to break at that tick, to catch the downstream appearance of the
+        // tick in the panic().  But since command-line processing is in
+        // usermode, the addition of the parameter throws off the ticks!
+        //
+        // https://en.wikipedia.org/wiki/Observer_effect_(physics)
+        //
+        // Let's say that after the command line processing, it still runs
+        // C-DEBUG-BREAK/COMPENSATE, this time at tick 403.  Imagine our goal
+        // is to make the parameter to /COMPENSATE something that can be used
+        // to conservatively guess the same value to set the tick to, and
+        // that /COMPENSATE ARG(bound) that gives a maximum of how far off we
+        // could possibly be from the "real" tick. (e.g. "argument processing
+        // took no more than 200 additional ticks", which this is consistent
+        // with...since 403-304 = 99).
+        //
+        // The reasoning for why the formula below works for this rounding is
+        // given in this StackExchange question and answer:
+        //
+        // https://math.stackexchange.com/q/2521219/
+        //
+        Tick one = 1; // MSVC gives misguided warning for cast(Tick, 1)
+        TG_tick =
+            (one &lt;&lt; (ceil_log2(TG_tick) + 1))
+            + VAL_INT64(ARG(tick))
+            - 1;
+        return nullptr;
+    }
+</code></pre>
+<p>Also, I've never used the /RELATIVE tick feature, killing that too:</p>
+<pre><code>  if (REF(relative))
+      TG_break_at_tick = frame_-&gt;tick + 1 + VAL_INT64(ARG(tick));
+</code></pre>
+<p><strong>I'm going to be deleting a lot of things, I think, in the pursuit of simplification--now that isotopes are showing the way.</strong></p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/axing-breakpoint-switch-c-debug-break-at/2009">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/axing-breakpoint-switch-c-debug-break-at/2009</link>
+          <pubDate>Tue, 24 Jan 2023 21:57:46 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2009</guid>
+          <source url="https://forum.rebol.info/t/axing-breakpoint-switch-c-debug-break-at/2009.rss">Axing --breakpoint switch, C-DEBUG-BREAK-AT</source>
+        </item>
         <item>
           <title>Working With Truthy BLANK!</title>
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
@@ -326,7 +469,7 @@ for-each [key ^value] object [...]  ; will give a meta value
 == 10
 </code></pre>
 <p>It's not awful.  Main thing is just to have <em>a</em> name for it while the gears turn.  But as usual, throw out suggestions if you have them...</p>
-            <p><small>4 posts - 3 participants</small></p>
+            <p><small>5 posts - 3 participants</small></p>
             <p><a href="https://forum.rebol.info/t/reify-vs-meta-vs-something/2001">Read full topic</a></p>
           ]]></description>
           <link>https://forum.rebol.info/t/reify-vs-meta-vs-something/2001</link>
@@ -462,7 +605,7 @@ it strictly follows the rule: `number-of-segments = 1 + number-of-delimiters", n
 <p>...but I don't think so.  I imagine year-over-year, we're going to see them learning.  I don't know exactly when they'd be able to come up with ideas like what I've been doing for Ren-C.</p>
 <p>But something I did think about is that if they can write code, then giving them a super-expressive medium in which to do it could be very powerful.  If they can come up with the dialect and then use it, then they might be able to write concise programs that wind up being quite legible...whereas other languages might make them trade off length for clarity.</p>
 <p>If you ask ChatGPT an interesting Rebol question, feel free to put it in this thread.</p>
-            <p><small>2 posts - 2 participants</small></p>
+            <p><small>3 posts - 2 participants</small></p>
             <p><a href="https://forum.rebol.info/t/chatgpt-speaking-about-rebol/1997">Read full topic</a></p>
           ]]></description>
           <link>https://forum.rebol.info/t/chatgpt-speaking-about-rebol/1997</link>
@@ -755,7 +898,7 @@ Why not print?  ; seems not so bad, right?
 <p><strong>My general intuition is that from a user's standpoint, it's an uphill battle to teach them isotopic blank is something called "null"... and that the majority of technical problems that are involved in making NULL be a word isotope are problems that have to be tackled anyway with true and false as word isotopes.</strong></p>
 <p>Additionally, I've written about my desire for BLANK!s to serve in dialects as spaces.  That gets very screwed by the (<strong><code>_</code></strong> =&gt; <strong><code>~_~</code>  ; isotope</strong>) evaluation.  Recovering blank for space intent would be good.</p>
 <p>I'm going to likely give it a shot, when I get some programming time again, hopefully soon.</p>
-            <p><small>3 posts - 1 participant</small></p>
+            <p><small>4 posts - 1 participant</small></p>
             <p><a href="https://forum.rebol.info/t/null-word-isotope-vs-blank-isotope-meaning-null/1989">Read full topic</a></p>
           ]]></description>
           <link>https://forum.rebol.info/t/null-word-isotope-vs-blank-isotope-meaning-null/1989</link>
@@ -1796,96 +1939,6 @@ and was greeted with some vague error message.</p>
           <discourse:topicArchived>No</discourse:topicArchived>
           <guid isPermaLink="false">forum.rebol.info-topic-1967</guid>
           <source url="https://forum.rebol.info/t/the-implications-of-meta-producing-quasi-from-isotopes/1967.rss">The Implications of ^META Producing QUASI! from Isotopes</source>
-        </item>
-        <item>
-          <title>Getting Output From Rebol2 on Windows GitHub Actions</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Testing</category>
-          <description><![CDATA[
-            <p>For reasons of comparative testing or otherwise, it can be useful to run Rebol2.exe on something like GitHub Actions.  But it's tricky, since there's not support for interactivity from "plain" consoles...just the GUI.</p>
-<ul>
-<li>
-<p>If you use the --nowindow option you can avoid a GUI Window, and then redirect Rebol2's output to a file.</p>
-<ul>
-<li>But then you don't get the output until it finishes--<em>if</em> it finishes.</li>
-</ul>
-</li>
-<li>
-<p>So the way to get a stream of output into the GitHub Actions log is to use piping.</p>
-</li>
-</ul>
-<h2>But... What Do You Pipe <em>Into</em>?</h2>
-<p>On UNIX you can pipe anything into <code>cat</code>, and it will "con-cat-enate" whatever it gets back to the terminal</p>
-<pre><code>$ echo "CAT just repeats" | cat
-CAT just repeats
-</code></pre>
-<p>Windows doesn't really have an analogue to that, because its seemingly-similar TYPE shell command can't be piped into.</p>
-<p>The trick I came up with offhand was a batch file that pipes into FIND and excludes any line that contains the word "voodoo":</p>
-<pre><code># Note: Writing a line from cmd.exe that contains quotes like this is
-# seemingly impossible...escaping with ^" or "" or \" just don't work.
-# Bash may be ugly, but at least it doesn't have so many glaring holes.
-#
-- name: Download And Wrap Rebol2 Interpreter
-  run: |
-    curl -o rebol2-core.exe -L http://www.rebol.com/downloads/v278/rebol-core-278-3-1.exe
-    echo "rebol2-core.exe --nowindow %* | find /V \"voodoo\"" &gt; rebol2.bat
-</code></pre>
-<p>So that gives you a Rebol2 command that will behave as you would probably expect something on GitHub Actions to act.</p>
-<pre><code># See notes above about why Rebol2 is a batch file that does piping.
-#
-- name: Demonstrate Rebol2 Working
-  shell: cmd
-  run: |
-    rebol2 --do "print {Hello from Rebol2 Piping Batch Wrapper}"
-</code></pre>
-<p>Of course these days we can pipe into Ren-C and it can be made to work.  But this is a bit lighter weight.</p>
-            <p><small>1 post - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/getting-output-from-rebol2-on-windows-github-actions/1966">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/getting-output-from-rebol2-on-windows-github-actions/1966</link>
-          <pubDate>Thu, 15 Sep 2022 07:11:49 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-1966</guid>
-          <source url="https://forum.rebol.info/t/getting-output-from-rebol2-on-windows-github-actions/1966.rss">Getting Output From Rebol2 on Windows GitHub Actions</source>
-        </item>
-        <item>
-          <title>Line Continuation and Arity Bugs: Thoughts?</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Semantics</category>
-          <description><![CDATA[
-            <p>At one point in time, there was no way to pass something to RETURN that represented a VOID.  Because voids completely vanished.  If you had a function that took an argument--and a void thing came after it--the evaluator would just keep retriggering until it found a value or hit the end.</p>
-<p>This led to the only way of being able to return a void to be to have truly nothing after it.  So RETURN became effectively arity-0 or arity-1.  If you passed it no argument, it would consider itself VOID.  It even had the nice property of being able to chain functions that themselves might be void.</p>
-<p>Given that RETURN was doing this, some other functions followed suit.  QUIT could take an argument or not.  CONTINUE could as well.</p>
-<h2>But I Just Got Bit By a Variadic QUIT Bug</h2>
-<p>Without thinking about it, I tried to end some code prematurely by injecting a quit:</p>
-<pre><code> some stuff I wanted to run
-
- quit  ; added this
-
- some stuff I wanted to avoid running
-</code></pre>
-<p>And that QUIT ran the stuff I didn't want to run anyway, because it was variadic.</p>
-<h2>My Kneejerk Reaction Was To Kill The Variadicness</h2>
-<p>The original case of RETURN has changed, because so-called "non-interstitial invisibility" is dead.  You can only make expressions void in their totality--not when used as arguments.  Doing otherwise caused more harm than good.</p>
-<p>Hence <strong><code>return void</code></strong> is a perfectly fine thing to write <em>(or <strong><code>return ~</code></strong> if you prefer the quasiform of void, which you probably don't, but it might come in handy somewhere if you've defined VOID to mean something else)</em></p>
-<p>I'd been thinking that argument-less RETURN would thus go back to returning the default unfriendly value (currently called NONE, a <strong><code>~[]~</code></strong> isotope, e.g. a parameter pack with absolutely no values in it).  But maybe we shouldn't support argument-less RETURN at all.</p>
-<h2>But Variadics Can Be Neat</h2>
-<p>I guess RETURN could always take an argument, and we go back to CONTINUE/WITH and QUIT/WITH.</p>
-<p>But those are uglier.</p>
-<p>We might question the behavior of the system just randomly slurping up arguments from enusing lines?  Especially when APPLY has such a convenient notation now, of <strong>some-func/ [...]</strong></p>
-<p>From a usability perspective, there's certainly a lot of potential for error in getting the arity wrong.  Having it be more strict could catch bugs, and make it more likely that variadic arity is being used correctly.</p>
-            <p><small>1 post - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/line-continuation-and-arity-bugs-thoughts/1965">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/line-continuation-and-arity-bugs-thoughts/1965</link>
-          <pubDate>Wed, 14 Sep 2022 17:08:13 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-1965</guid>
-          <source url="https://forum.rebol.info/t/line-continuation-and-arity-bugs-thoughts/1965.rss">Line Continuation and Arity Bugs: Thoughts?</source>
         </item>
   </channel>
 </rss>
