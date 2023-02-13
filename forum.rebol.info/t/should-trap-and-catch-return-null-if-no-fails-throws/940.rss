@@ -5,7 +5,7 @@
     <link>https://forum.rebol.info/t/should-trap-and-catch-return-null-if-no-fails-throws/940</link>
     <description>R3-Alpha&#39;s TRY added a refinement /EXCEPT for passing in a block or function to act as a handler in the case of an error being raised.  It struck me as a clunky attempt to parrot existing terminology.  TRAP was created to be a seemingly better name than &quot;TRY&quot;.  It appeared to have more parity with CATCH, and TRAP/WITH paralleled CATCH/WITH.
 
-I think the name is an improvement.  And it paved the way for the short word TRY to fill an important role in converting nulls to blanks.
+I think the name is an improvement.  And it paved the way for the short word TRY to fill another important role.
 
 But there&#39;s a pattern in both of these constructs which is that they return a result whether something is caught or trapped or not.
 
@@ -64,9 +64,83 @@ I made ENTRAP to address the problem of distinguishing errors from other values,
 
 I don&#39;t know how that fits into the naming and scheme of things, but mentioning it.</description>
     
-    <lastBuildDate>Fri, 18 Feb 2022 08:27:04 +0000</lastBuildDate>
+    <lastBuildDate>Wed, 01 Feb 2023 11:09:19 +0000</lastBuildDate>
     <category>Internals</category>
     <atom:link href="https://forum.rebol.info/t/should-trap-and-catch-return-null-if-no-fails-throws/940.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Should TRAP and CATCH return null if no fails/throws?</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="6" data-topic="940">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/40/26_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>Looks like we may get the best of both worlds now, with <a href="https://forum.rebol.info/t/forward-to-multiple-return-values-and-return-value-forwarding/1271/2">multiple returns</a>! The TRAP and CATCH could offer a second output which is the value that "falls out" of the evaluation.</p>
+</blockquote>
+</aside>
+<p>So there's a competing application for multi-returns, which is the ability to throw a multi-return... which is more useful:</p>
+<pre><code>&gt;&gt; [x fallthrough?]: catch [
+       if false [throw pack [1 false]]
+       throw pack [2 true]
+   ]
+== 2
+
+&gt;&gt; x
+== 2
+
+&gt;&gt; fallthrough?
+== ~true~  ; isotope
+</code></pre>
+<p>This seems like a much better use of the multi-return ability.  And to my mind, that tips the scales to where you should do a THROW as the last line if you want "the block's result".</p>
+<p>Then if you want to detect whether a result came from the end of the block or somewhere inside it, you can do as I did above and encode that as an extra parameter.</p>
+<h3>So... should CATCH return NULL or NONE if there's no throw?</h3>
+<p><em>Hmmm.</em></p>
+<p>Right now functions that lack a RETURN statement return NONE.  As a reminder, this is a multi-return pack of length zero, that has the special console behavior of printing nothing.</p>
+<pre><code>&gt;&gt; foo: func [] []
+== ~#[action! {foo} []]~  ; isotope
+
+&gt;&gt; foo
+
+&gt;&gt;
+</code></pre>
+<p>If you really want NULL to come back from a CATCH, you can just say that with THROW NULL.  It's more explicit.</p>
+<pre><code>catch [...] else [...]  ; default w/no throw is NONE, would not run ELSE
+
+catch [..., throw null] else [...]  ; would run ELSE
+</code></pre>
+<p><em>Although...we could say that THROW always throws a "heavy null"...and then ELSE really would mean "didn't catch anything".</em>  That does seem kind of cool, that ELSE really would react to nothing being caught.</p>
+<h3>What About Named Throws... How to Know The Name?</h3>
+<p><em>Hmmm.</em></p>
+<p>I'll start by saying I've personally felt a bit skeptical of named throws, compared with "definitional throws".  :-/</p>
+<p>But in any case, if you catch a named throw you might want to know its name.  Though I notice that Red does not tell you:</p>
+<pre><code>red&gt;&gt; catch/name [throw/name 304 'red] [red blue]
+== 304  ; no indication of if blue or red was caught
+</code></pre>
+<p>If we imagine you did want to know which name you caught, then here we have another competing interest for the multi-return ability... the /NAME of the throw.</p>
+<p>In systems like C++ that support throwing, you can actually say what <em>types</em> of throws you want to receive.  Then you receive an object, potentially re-throwing it.</p>
+<p><strong>Maybe this is another opportunity for isotopic objects!</strong>  Recall that isotopic objects can't be stored in variables... they need to have a DECAY method to produce normal values (including potentially a multi-return), or other methods like ELSE and THEN which coerce them.  But they could have a CATCH field which might just be some name or structure.  Then there could be a CATCH/FILTER which would be able to pick over these isotopic objects and decide if the CATCH wanted it or not.</p>
+<p>That sounds pretty interesting... there'd be no THROW/NAME, it would be more like:</p>
+<pre><code>[x y name]: catch/filter [
+    throw isotopic make object! [
+        catch: 'orange
+        decay: does [pack [1 2 'orange]]
+    ]
+] obj -&gt; [  ; only filter on isotopic objects, pass plain object here?
+    did find [orange green] obj.catch
+]
+</code></pre>
+<p>So something like that would wind up giving you <strong>x</strong> as 1 and <strong>y</strong> as 2 and <strong>name</strong> as orange, so I'm showing a way to get the name handed back to you.</p>
+<p><img src="https://forum.rebol.info/images/emoji/twitter/thinking.png?v=9" title=":thinking:" class="emoji only-emoji" alt=":thinking:"></p>
+<p>This would mean isotopic objects with CATCH methods would be special.  It wouldn't be <em>all</em> isotopic objects that got filtered... e.g. you might want to throw a PARSE result which I'm theorizing has special THEN and ELSE methods.</p>
+<p><strong>I like this direction more than I like baking in some particular /NAME mechanism.</strong>  And I really like the concept of being able to THROW and CATCH multi-return packs.  I'm going to fiddle around with this.</p>
+          <p><a href="https://forum.rebol.info/t/should-trap-and-catch-return-null-if-no-fails-throws/940/8">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/should-trap-and-catch-return-null-if-no-fails-throws/940/8</link>
+        <pubDate>Wed, 01 Feb 2023 11:01:08 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-940-8</guid>
+        <source url="https://forum.rebol.info/t/should-trap-and-catch-return-null-if-no-fails-throws/940.rss">Should TRAP and CATCH return null if no fails/throws?</source>
+      </item>
       <item>
         <title>Should TRAP and CATCH return null if no fails/throws?</title>
         <dc:creator><![CDATA[hostilefork]]></dc:creator>
@@ -330,7 +404,7 @@ You have convinced me.</p>
         <dc:creator><![CDATA[hostilefork]]></dc:creator>
         <description><![CDATA[
             <p>R3-Alpha's TRY added a refinement /EXCEPT for passing in a block or function to act as a handler in the case of an error being raised.  It struck me as a clunky attempt to parrot existing terminology.  TRAP was created to be a seemingly better name than "TRY".  It appeared to have more parity with CATCH, and TRAP/WITH paralleled CATCH/WITH.</p>
-<p>I think the name is an improvement.  And it paved the way for the short word TRY to fill an important role in converting nulls to blanks.</p>
+<p>I think the name is an improvement.  And it paved the way for the short word TRY to fill another important role.</p>
 <p>But there's a pattern in both of these constructs which is that they return a result whether something is caught or trapped or not.</p>
 <pre><code>&gt;&gt; catch [10 + 20]
 == 30
