@@ -5,8 +5,85 @@
     <link>https://forum.rebol.info/c/development/semantics/55</link>
     <description>Topics in the &#39;Semantics&#39; category While the &quot;Internals&quot; discusses the bits and bytes of how things are implemented, this category is for discussing things design questions of the language... like what &lt;strong&gt;do []&lt;/strong&gt; should return.</description>
     
-      <lastBuildDate>Fri, 06 Jan 2023 03:16:23 +0000</lastBuildDate>
+      <lastBuildDate>Fri, 03 Mar 2023 21:23:09 +0000</lastBuildDate>
       <atom:link href="https://forum.rebol.info/c/development/semantics/55.rss" rel="self" type="application/rss+xml" />
+        <item>
+          <title>Correct Formulation of ME and MY</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Semantics</category>
+          <description><![CDATA[
+            <p>The ME function is used with enfix to allow you to avoid repeating the name of a variable:</p>
+<pre><code>&gt;&gt; variable: 10
+
+&gt;&gt; variable: me + 1
+== 11
+
+&gt;&gt; variable
+== 11
+</code></pre>
+<p>So that's the same as if you'd written <strong>variable: variable + 1</strong>.</p>
+<p>There's an analogous operation for non-enfix functions called MY.</p>
+<pre><code>&gt;&gt; block: [a b c]
+
+&gt;&gt; block: my next
+== [b c]
+
+&gt;&gt; block
+== [b c]
+</code></pre>
+<p>So the same if you had written <strong>block: next block</strong>.</p>
+<h2>Here Is The "Naive" Macro Implementation of ME</h2>
+<pre><code>me: enfixed macro [
+    'left [set-word! set-tuple!]
+    'right [word! tuple! path!]
+][
+    reduce [left, plain left, right]
+]
+</code></pre>
+<p>So the macro is looking for a SET-WORD! or SET-TUPLE! on the left, and then something indicating the action to run on the right.  It replaces the whole sequence with what was on the left, then a plain WORD! or TUPLE! version of what was on the left, and then what's on the right.</p>
+<p>MY is done similarly, just with <strong>reduce [left, right, plain left]</strong> to put the repeated term after the call.</p>
+<p>This is naive for two reasons:</p>
+<ul>
+<li>
+<p>It doesn't check that what the RIGHT parameter looks up to is an action</p>
+</li>
+<li>
+<p>If the SET-TUPLE! in LEFT has a GROUP! in it, then it will be executed twice.</p>
+</li>
+</ul>
+<h2>Here is A "Non-Naive" Implementation of ME</h2>
+<pre><code>macro [
+    'left [set-word! set-tuple!]
+    'right [word! tuple! path!]
+    &lt;local&gt; value
+][
+    [left value]: resolve left  ; avoid double-evaluation
+    :['set left meta value ensure action! get right]
+]
+</code></pre>
+<p>The RESOLVE function is used to turn a TUPLE! or PATH! with groups in it into an inert representation:</p>
+<pre><code> &gt;&gt; blk: [a b [c d]]
+
+ &gt;&gt; resolve 'blk.(print "hi", 1 + 2).2
+ hi
+ == @[blk 3 2]
+</code></pre>
+<p>GET and SET accept these blocks as an alternative to words/tuples to be used to describe what to set or get.</p>
+<p>It has to use a BLOCK! representation because not all things can be represented in paths that can be used with picking (note this implies you cannot pick with isotopes, otherwise not all blocks would be resolvable).</p>
+<p>So long as RESOLVE is walking the path, you can ask it to give you back the value of what's there.</p>
+<h2>But the non-naive version triggers a binding bug...</h2>
+<p>It's also rather slow.  In trying to prioritize, it may be better to just document the right answer, as I've done here... :-/</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/correct-formulation-of-me-and-my/2020">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/correct-formulation-of-me-and-my/2020</link>
+          <pubDate>Fri, 03 Mar 2023 21:23:09 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2020</guid>
+          <source url="https://forum.rebol.info/t/correct-formulation-of-me-and-my/2020.rss">Correct Formulation of ME and MY</source>
+        </item>
         <item>
           <title>Picking ACTION!s from BLOCK!s In The Age of Isotopes</title>
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
@@ -1717,41 +1794,6 @@ red&gt;&gt; type? while [false] ["whatever"]
           <discourse:topicArchived>No</discourse:topicArchived>
           <guid isPermaLink="false">forum.rebol.info-topic-1426</guid>
           <source url="https://forum.rebol.info/t/what-should-do-of-empty-block-do-do/1426.rss">What should do of empty block (`DO []`) do?</source>
-        </item>
-        <item>
-          <title>Putting Splicing Intent On APPEND&#39;ed Value</title>
-          <dc:creator><![CDATA[rgchris]]></dc:creator>
-          <category>Semantics</category>
-          <description><![CDATA[
-            <blockquote>
-<p><em>Editor's Note: This thread is a heavily curated edit of posts regarding considerations about getting rid of the /ONLY refinement.  It tries to pick out notable steps in reaching the current conclusion, so the reasoning can be followed by future readers.</em></p>
-</blockquote>
-<hr>
-<p>Forgive me if this was mentioned, but if single-element blocks are more efficient than refinements, you could have a function that wrapped a value in a block (like BLOCKIFY, but optimized for single element block and equivalent to what BLOCKIFY/ONLY would do). This would be a little like <code>'[quoting]</code> but could be applied to a word:</p>
-<pre><code class="lang-auto">; calling it ONLY 😈
-&gt;&gt; append [a b c] only block: [d e f]
-== [a b c [d e f]]
-
-&gt;&gt; append [a b c] only block
-== [a b c [d e f]]
-</code></pre>
-<p>Correct me if I'm wrong, but this proposed ONLY function would simply create a single value cell with the block reference, which would seem pretty efficient.</p>
-<p>It'd be very easy to shim:</p>
-<pre><code class="lang-auto">only: func [value][
-    reduce [value]
-]
-</code></pre>
-<p>I'm still fond of ENVELOP over BLOCKIFY as a name. I don't think ONLY would make the cut. Naming is tricky as it is sort of a hack—it's purpose is to make a block a singular value but in actuality it is creating a new value of which the old one just happens to be the only content.</p>
-            <p><small>8 posts - 2 participants</small></p>
-            <p><a href="https://forum.rebol.info/t/putting-splicing-intent-on-appended-value/1873">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/putting-splicing-intent-on-appended-value/1873</link>
-          <pubDate>Wed, 09 Dec 2020 14:18:09 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-1873</guid>
-          <source url="https://forum.rebol.info/t/putting-splicing-intent-on-appended-value/1873.rss">Putting Splicing Intent On APPEND&#39;ed Value</source>
         </item>
   </channel>
 </rss>
