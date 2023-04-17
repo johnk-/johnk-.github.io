@@ -5,8 +5,115 @@
     <link>https://forum.rebol.info/c/domains/15</link>
     <description>Topics in the &#39;Domains&#39; category Applications of Rebol in various specialized subject domains.</description>
     
-      <lastBuildDate>Tue, 28 Feb 2023 22:17:50 +0000</lastBuildDate>
+      <lastBuildDate>Fri, 07 Apr 2023 00:14:18 +0000</lastBuildDate>
       <atom:link href="https://forum.rebol.info/c/domains/15.rss" rel="self" type="application/rss+xml" />
+        <item>
+          <title>The Handling of NULL in UPARSE</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Parsing</category>
+          <description><![CDATA[
+            <p>By design, nulls are handled noisily--right at the moment of fetching the word!--in UPARSE (and PARSE3):</p>
+<pre><code>&gt;&gt; prefix: null, suffix: ")"
+
+&gt;&gt; parse "aaa)" [prefix, some "a", suffix]
+** Error: (prefix is null, and we raise errors for that in parse)
+</code></pre>
+<p>If we didn't raise an error it seems there are only two other options:</p>
+<ol>
+<li>
+<p>Make <strong><code>null</code></strong> always succeed, keeping the parse position where it is (synonym for <strong><code>[]</code></strong>)</p>
+</li>
+<li>
+<p>Make <strong><code>null</code></strong> always be an unsuccessful combinator match, but not cause a failure (synonym for <strong><code>false</code></strong>)</p>
+</li>
+</ol>
+<p>I think (1) feels like a pretty obvious bad idea, because null is supposed to represent a soft failure.  I've suggested that this is a better behavior for void, e.g. <strong><code>parse "ab" ["a" void "b"]</code></strong> would work.</p>
+<p>I'm not too pleased with the idea of (2), and prefer the error as the default.</p>
+<p><em>...that said...</em> it seems there should be some operators or combinators that let you get the other behaviors.</p>
+<h2>What About a "MAYBE" Combinator To Use With Null?</h2>
+<p>In standard code, the policy of "void-in-null-out" has worked well, with MAYBE transforming soft-failure nulls to voids:</p>
+<pre><code> ; non-PARSE handling of NULL via MAYBE
+
+ &gt;&gt; append [a b c] null
+ ** Error: cannot append ~null~ isotope to a block
+
+ &gt;&gt; append [a b c] maybe null
+ == [a b c]
+
+ &gt;&gt; block: null
+
+ &gt;&gt; append maybe block [d e]
+ == ~null~  ; isotope
+</code></pre>
+<p>So if we imagine applying this to the parse example, it would presumably do this:</p>
+<pre><code>&gt;&gt; prefix: null, suffix: ")"
+
+&gt;&gt; parse "aaa)" [maybe prefix, some "a", maybe suffix]
+== ")"
+</code></pre>
+<p>For the above parse to succeed, the combinator made by <strong>maybe prefix</strong> would have to succeed and not advance the input.</p>
+<h2>But It Doesn't Combine Well In Larger Rules</h2>
+<p>What if what you intended was <em>"if there's a prefix, match some non-zero number of instances, but if prefix is null then don't worry about matching"</em>:</p>
+<p>You might try doing that by COMPOSE'ing your rules.  But UPARSE actually lets us write that out literally using GET-GROUP! rule synthesis:</p>
+<pre><code>&gt;&gt; parse "aaa)))" [:(if prefix '[some prefix]), some "a", :(if suffix '[some suffix])]
+== ")"
+</code></pre>
+<p>But what if we tried to do that with MAYBE...could it work?</p>
+<pre><code>&gt;&gt; parse "aaa)))" [some maybe prefix, some "a", some maybe suffix]
+; infinite loop!
+</code></pre>
+<p>No dice.  We've said <strong>maybe prefix</strong> just succeeds and doesn't advance the input when prefix was null.  But if you combine that with <code>some</code> the null case will just match nothing in perpetuity, causing an infinite loop.</p>
+<p>This may look familiar, because if you write <strong>some opt [...anything...]</strong> you'll always get an infinite loop.  But in that case it's just wrong thinking: you know that the repetitive nature of <code>some</code> looking for an eventual non-match meant you must have intended <strong>some [...anything...]</strong> (at least one) or <strong>opt some [...anything...]</strong> (zero or more).</p>
+<p><img src="https://forum.rebol.info/images/emoji/twitter/thinking.png?v=9" title=":thinking:" class="emoji only-emoji" alt=":thinking:"></p>
+<blockquote>
+<h3>NOTE THAT HISTORICAL PARSE HAS NO GOOD ANSWER FOR THIS</h3>
+<p>Rebol2 treats NONE! as a no-op which just succeeds but doesn't advance the input.  So the following gives you an infinite loop:</p>
+<pre><code>rebol2&gt;&gt; prefix: none suffix: ")"
+
+rebol2&gt;&gt; parse "aaa)))" [some prefix some "a" some suffix]   
+; infinite loop
+</code></pre>
+<p>The hackish "must make progress" rules in R3-Alpha actually make the above "work as intended", because the SOME will bail out after one non-advancing match.  I don't consider that a "good" answer--more a random effect.</p>
+</blockquote>
+<h2>Another Problem: MAYBE is a very similar word to OPT</h2>
+<p>Imagine looking at this code:</p>
+<pre><code>&gt;&gt; prefix: "(", suffix: ")"
+
+&gt;&gt; parse "aaa)" [maybe prefix, some "a", maybe suffix]
+== ~null~  ; isotope
+</code></pre>
+<p><em>"But wait"</em>... I can imagine someone saying... <em>"doesn't that mean that if it's not there, you skip the rule"</em>?</p>
+<blockquote>
+<p>I've had some mental back-and-forth about the words <strong><code>try</code></strong>, <strong><code>opt</code></strong>, and <strong><code>maybe</code></strong>...with a general dislike of the word OPT.  The current idea is that TRY was intended to defuse harder definitional errors:</p>
+<pre><code>&gt;&gt; take []
+** Error: you can't take from an empty block (stopping further code)
+
+&gt;&gt; try take []
+== ~null~  ; isotope
+</code></pre>
+</blockquote>
+<h2>An extra barrier to creating MAYBE is mechanical</h2>
+<p>... <em>because the error that NULL generates is the "null combinator" itself</em>.  It is <em>not</em> a definitional error, because those just represent things like "type didn't match".</p>
+<p>The only way I can see a null-disabling MAYBE parse combinator working would be by quoting its argument, doing the rule fetch itself, and turning into a failing combinator if it fetched null.  This breaks the model somewhat.  <img src="https://forum.rebol.info/images/emoji/twitter/frowning.png?v=9" title=":frowning:" class="emoji" alt=":frowning:"></p>
+<h2>Maybe <strong>/prefix</strong> could Mean Optionally-Null variable?</h2>
+<pre><code>&gt;&gt; prefix: null, suffix: ")"
+
+&gt;&gt; parse "aaa)" [/prefix, some "a", /suffix]
+== ")"
+</code></pre>
+<p>It's already the case that paths have to be quoted to match in blocks, but a leading slash could be used to deal with the rules.</p>
+<p>It's a lot to think about on my first day of thinking about Rebol stuff for a while!  But there you go.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/the-handling-of-null-in-uparse/2023">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/the-handling-of-null-in-uparse/2023</link>
+          <pubDate>Fri, 07 Apr 2023 00:14:18 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2023</guid>
+          <source url="https://forum.rebol.info/t/the-handling-of-null-in-uparse/2023.rss">The Handling of NULL in UPARSE</source>
+        </item>
         <item>
           <title>Pikchr Drawing Dialect</title>
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
@@ -1362,30 +1469,6 @@ Matching any two values also counts
           <discourse:topicArchived>No</discourse:topicArchived>
           <guid isPermaLink="false">forum.rebol.info-topic-1867</guid>
           <source url="https://forum.rebol.info/t/a-cry-for-help/1867.rss">A Cry for HELP</source>
-        </item>
-        <item>
-          <title>Rebol2 Desktop... in a ReplPad tab?</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Web</category>
-          <description><![CDATA[
-            <p>In a 2019 demo, <a class="mention" href="/u/rgchris">@rgchris</a> showed off his HTML Rebol2/View-like file browser:</p>
-<div class="onebox lazyYT lazyYT-container" data-youtube-id="sM7uGKCZMl0" data-youtube-title="Chris Ross-Gill's Dialects and Personal Projects in Rebol" data-parameters="feature=oembed&amp;wmode=opaque&amp;start=153">
-  <a href="https://www.youtube.com/watch?v=sM7uGKCZMl0" target="_blank" rel="noopener">
-    <img class="ytp-thumbnail-image" src="https://i.ytimg.com/vi/sM7uGKCZMl0/maxresdefault.jpg" title="Chris Ross-Gill's Dialects and Personal Projects in Rebol" width="690" height="388">
-  </a>
-</div>
-
-<p>With programs like <a href="https://forum.rebol.info/t/enter-the-dungeon-if-you-dare/1865">dungeon.reb</a> running in the browser, it seems we should have a list and let you browse them similarly...!</p>
-            <p><small>1 post - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/rebol2-desktop-in-a-replpad-tab/1866">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/rebol2-desktop-in-a-replpad-tab/1866</link>
-          <pubDate>Wed, 06 Jul 2022 13:30:30 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-1866</guid>
-          <source url="https://forum.rebol.info/t/rebol2-desktop-in-a-replpad-tab/1866.rss">Rebol2 Desktop... in a ReplPad tab?</source>
         </item>
   </channel>
 </rss>

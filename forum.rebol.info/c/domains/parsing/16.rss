@@ -5,8 +5,115 @@
     <link>https://forum.rebol.info/c/domains/parsing/16</link>
     <description>Topics in the &#39;Parsing&#39; category Discussion focusing on parsing data.</description>
     
-      <lastBuildDate>Tue, 20 Sep 2022 02:03:00 +0000</lastBuildDate>
+      <lastBuildDate>Fri, 07 Apr 2023 00:14:18 +0000</lastBuildDate>
       <atom:link href="https://forum.rebol.info/c/domains/parsing/16.rss" rel="self" type="application/rss+xml" />
+        <item>
+          <title>The Handling of NULL in UPARSE</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Parsing</category>
+          <description><![CDATA[
+            <p>By design, nulls are handled noisily--right at the moment of fetching the word!--in UPARSE (and PARSE3):</p>
+<pre><code>&gt;&gt; prefix: null, suffix: ")"
+
+&gt;&gt; parse "aaa)" [prefix, some "a", suffix]
+** Error: (prefix is null, and we raise errors for that in parse)
+</code></pre>
+<p>If we didn't raise an error it seems there are only two other options:</p>
+<ol>
+<li>
+<p>Make <strong><code>null</code></strong> always succeed, keeping the parse position where it is (synonym for <strong><code>[]</code></strong>)</p>
+</li>
+<li>
+<p>Make <strong><code>null</code></strong> always be an unsuccessful combinator match, but not cause a failure (synonym for <strong><code>false</code></strong>)</p>
+</li>
+</ol>
+<p>I think (1) feels like a pretty obvious bad idea, because null is supposed to represent a soft failure.  I've suggested that this is a better behavior for void, e.g. <strong><code>parse "ab" ["a" void "b"]</code></strong> would work.</p>
+<p>I'm not too pleased with the idea of (2), and prefer the error as the default.</p>
+<p><em>...that said...</em> it seems there should be some operators or combinators that let you get the other behaviors.</p>
+<h2>What About a "MAYBE" Combinator To Use With Null?</h2>
+<p>In standard code, the policy of "void-in-null-out" has worked well, with MAYBE transforming soft-failure nulls to voids:</p>
+<pre><code> ; non-PARSE handling of NULL via MAYBE
+
+ &gt;&gt; append [a b c] null
+ ** Error: cannot append ~null~ isotope to a block
+
+ &gt;&gt; append [a b c] maybe null
+ == [a b c]
+
+ &gt;&gt; block: null
+
+ &gt;&gt; append maybe block [d e]
+ == ~null~  ; isotope
+</code></pre>
+<p>So if we imagine applying this to the parse example, it would presumably do this:</p>
+<pre><code>&gt;&gt; prefix: null, suffix: ")"
+
+&gt;&gt; parse "aaa)" [maybe prefix, some "a", maybe suffix]
+== ")"
+</code></pre>
+<p>For the above parse to succeed, the combinator made by <strong>maybe prefix</strong> would have to succeed and not advance the input.</p>
+<h2>But It Doesn't Combine Well In Larger Rules</h2>
+<p>What if what you intended was <em>"if there's a prefix, match some non-zero number of instances, but if prefix is null then don't worry about matching"</em>:</p>
+<p>You might try doing that by COMPOSE'ing your rules.  But UPARSE actually lets us write that out literally using GET-GROUP! rule synthesis:</p>
+<pre><code>&gt;&gt; parse "aaa)))" [:(if prefix '[some prefix]), some "a", :(if suffix '[some suffix])]
+== ")"
+</code></pre>
+<p>But what if we tried to do that with MAYBE...could it work?</p>
+<pre><code>&gt;&gt; parse "aaa)))" [some maybe prefix, some "a", some maybe suffix]
+; infinite loop!
+</code></pre>
+<p>No dice.  We've said <strong>maybe prefix</strong> just succeeds and doesn't advance the input when prefix was null.  But if you combine that with <code>some</code> the null case will just match nothing in perpetuity, causing an infinite loop.</p>
+<p>This may look familiar, because if you write <strong>some opt [...anything...]</strong> you'll always get an infinite loop.  But in that case it's just wrong thinking: you know that the repetitive nature of <code>some</code> looking for an eventual non-match meant you must have intended <strong>some [...anything...]</strong> (at least one) or <strong>opt some [...anything...]</strong> (zero or more).</p>
+<p><img src="https://forum.rebol.info/images/emoji/twitter/thinking.png?v=9" title=":thinking:" class="emoji only-emoji" alt=":thinking:"></p>
+<blockquote>
+<h3>NOTE THAT HISTORICAL PARSE HAS NO GOOD ANSWER FOR THIS</h3>
+<p>Rebol2 treats NONE! as a no-op which just succeeds but doesn't advance the input.  So the following gives you an infinite loop:</p>
+<pre><code>rebol2&gt;&gt; prefix: none suffix: ")"
+
+rebol2&gt;&gt; parse "aaa)))" [some prefix some "a" some suffix]   
+; infinite loop
+</code></pre>
+<p>The hackish "must make progress" rules in R3-Alpha actually make the above "work as intended", because the SOME will bail out after one non-advancing match.  I don't consider that a "good" answer--more a random effect.</p>
+</blockquote>
+<h2>Another Problem: MAYBE is a very similar word to OPT</h2>
+<p>Imagine looking at this code:</p>
+<pre><code>&gt;&gt; prefix: "(", suffix: ")"
+
+&gt;&gt; parse "aaa)" [maybe prefix, some "a", maybe suffix]
+== ~null~  ; isotope
+</code></pre>
+<p><em>"But wait"</em>... I can imagine someone saying... <em>"doesn't that mean that if it's not there, you skip the rule"</em>?</p>
+<blockquote>
+<p>I've had some mental back-and-forth about the words <strong><code>try</code></strong>, <strong><code>opt</code></strong>, and <strong><code>maybe</code></strong>...with a general dislike of the word OPT.  The current idea is that TRY was intended to defuse harder definitional errors:</p>
+<pre><code>&gt;&gt; take []
+** Error: you can't take from an empty block (stopping further code)
+
+&gt;&gt; try take []
+== ~null~  ; isotope
+</code></pre>
+</blockquote>
+<h2>An extra barrier to creating MAYBE is mechanical</h2>
+<p>... <em>because the error that NULL generates is the "null combinator" itself</em>.  It is <em>not</em> a definitional error, because those just represent things like "type didn't match".</p>
+<p>The only way I can see a null-disabling MAYBE parse combinator working would be by quoting its argument, doing the rule fetch itself, and turning into a failing combinator if it fetched null.  This breaks the model somewhat.  <img src="https://forum.rebol.info/images/emoji/twitter/frowning.png?v=9" title=":frowning:" class="emoji" alt=":frowning:"></p>
+<h2>Maybe <strong>/prefix</strong> could Mean Optionally-Null variable?</h2>
+<pre><code>&gt;&gt; prefix: null, suffix: ")"
+
+&gt;&gt; parse "aaa)" [/prefix, some "a", /suffix]
+== ")"
+</code></pre>
+<p>It's already the case that paths have to be quoted to match in blocks, but a leading slash could be used to deal with the rules.</p>
+<p>It's a lot to think about on my first day of thinking about Rebol stuff for a while!  But there you go.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/the-handling-of-null-in-uparse/2023">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/the-handling-of-null-in-uparse/2023</link>
+          <pubDate>Fri, 07 Apr 2023 00:14:18 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2023</guid>
+          <source url="https://forum.rebol.info/t/the-handling-of-null-in-uparse/2023.rss">The Handling of NULL in UPARSE</source>
+        </item>
         <item>
           <title>Series Switching in PARSE</title>
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
@@ -2008,67 +2115,6 @@ if auto [
           <discourse:topicArchived>No</discourse:topicArchived>
           <guid isPermaLink="false">forum.rebol.info-topic-1648</guid>
           <source url="https://forum.rebol.info/t/null-rule-failures-and-a-weird-parse-generator-idea/1648.rss">NULL Rule Failures and a Weird Parse Generator Idea</source>
-        </item>
-        <item>
-          <title>Literal Matching with the @ Types In UPARSE</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Parsing</category>
-          <description><![CDATA[
-            <p>I mentioned that the @ types were slated for use for literal matching.  The most frequent example I have given is:</p>
-<pre><code>&gt;&gt; block: [some "a"]
-
-&gt;&gt; uparse [[some "a"] [some "a"]] [some @block]
-== [some "a"]  ; success gives result of last matching rule
-</code></pre>
-<p>Works with all types:</p>
-<pre><code>&gt;&gt; num: 1
-
-&gt;&gt; uparse [1 1 1] [some @num]
-== 1
-</code></pre>
-<p>I didn't mention things like @(gr o up) but those work too:</p>
-<pre><code>&gt;&gt; uparse [1 1 1] [some @(3 - 2)]
-== 1
-</code></pre>
-<p><strong>I realized I actually do not know how to write the above two cases in Red or Rebol2.</strong>  You can't use the number as a plain variable in Red, since it acts as a repeat rule <em>(UPARSE prohibits that, since it's a rule that takes an argument, you must use REPEAT for such behavior)</em></p>
-<pre><code>red&gt;&gt; num: 1
-
-red&gt;&gt; parse [1 1 1] [some num]
-*** Script Error: PARSE - invalid rule or usage of rule: 1
-</code></pre>
-<p>Also in Red, I'm not clear on why the following isn't an error, since the GROUP! product is just discarded:</p>
-<pre><code>red&gt;&gt; parse [1 1 1] [some (3 - 2)]
-== false
-</code></pre>
-<p>This is something that would work in R3-Alpha, but doesn't in Red or Rebol2:</p>
-<pre><code>red&gt;&gt; parse [1 1 1] [some quote (3 - 2)]
-== false
-</code></pre>
-<p><strong>Your guess is as good as mine.</strong>  Whatever the answer in their world is, it's not obvious.  But I think the @ types give a clean answer in UPARSE.</p>
-<h2>But What About @[bl o ck] ?</h2>
-<p>In the past I suggested that one reason why <code>@[...]</code> might be taken for datatypes is because in cases like this, there'd be no difference between <code>@[bl o ck]</code> and <code>'[block]</code>.  I was imagining these being synonyms, because I couldn't think of anything else (since plain block was already "run rule"):</p>
-<pre><code>&gt;&gt; uparse [[some "a"] [some "a"]] [some '[some "a"]]
-== [some "a"]
-
-&gt;&gt; uparse [[some "a"] [some "a"]] [some @[some "a"]]
-== [some "a"]  ; "wasteful application of @[...], so why not datatype?"
-</code></pre>
-<p>But UPARSE has changed the game for why @[...] and [...] can mean different things...because <em>block rules synthesize values</em>.  And who's to say you might not want to match a rule and use its product as the literal thing to match against?</p>
-<pre><code>&gt;&gt; uparse [1 1 1 2] [@[some '10, (10 + 10) | some '1 (1 + 1)]]
-== 2
-</code></pre>
-<p>In other words your rule can match <em>and</em> provide an answer for the thing to match next.  We have zero experience with how often that might be useful.  But it does have meaning, which I guess is probably the death knell for using the @ types as DATATYPE!.</p>
-<p>So this all looks pretty good.  But back to the drawing board for types.</p>
-            <p><small>5 posts - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/literal-matching-with-the-types-in-uparse/1643">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/literal-matching-with-the-types-in-uparse/1643</link>
-          <pubDate>Mon, 02 Aug 2021 18:58:15 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-1643</guid>
-          <source url="https://forum.rebol.info/t/literal-matching-with-the-types-in-uparse/1643.rss">Literal Matching with the @ Types In UPARSE</source>
         </item>
   </channel>
 </rss>
