@@ -713,6 +713,73 @@ ok!
           <source url="https://forum.rebol.info/t/performance-of-inherit-meta/1619.rss">Performance of INHERIT-META</source>
         </item>
         <item>
+          <title>Rethinking Experiments: from `unstable` to `StackValue(*)`</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Testing</category>
+          <description><![CDATA[
+            <p>As a C program with a lot of mutable state, the interpreter is in constant danger of bugs due to stale pointers.</p>
+<p>For instance: the "data stack" can have any of its pointers moved, whenever stack values are pushed or popped.  You can create problems as easily as this:</p>
+<pre><code> Value(*) item = TOP;  // top of data stack...right now
+ if (IS_WORD(item)) {
+      Init_Integer(PUSH(), 1);  // *may* need to relocate entire stack
+      printf("Pushed a 1 after seeing %s\n", VAL_WORD_UTF8(item));  // !!! BAD
+ }
+</code></pre>
+<p>The problem is that after you did a push, the previous item pointer <em>might</em> be bad.  It usually isn't, because the stack doesn't need to expand on most pushes.  But things that happen "only sometimes" are the most pernicious sorts of bugs.</p>
+<p>It would seem that these stack pointers need to be a fundamentally different type...something that encodes the fact that they go invalid.</p>
+<h2>
+<a name="weird-first-idea-use-volatile-1" class="anchor" href="https://forum.rebol.info#weird-first-idea-use-volatile-1"></a>Weird First Idea: Use <code>volatile</code>
+</h2>
+<p>An odd thought I had some time ago was to leverage the <code>volatile</code> attribute.  This is a feature that operates a bit like <code>const</code>, but it signals that a memory address might change outside of the compiler's awareness...so it can't use caching or registers to optimize around it.  The memory has to be fetched each time.</p>
+<p>Using volatile to mark pointers to stack locations would make it more obvious where the unstable pointers were.  And then, if you had a routine that took unstable pointers or had them around on the stack, you'd know that you couldn't do stack pushes or pops.  You also couldn't call the evaluator (because arbitrary evaluation can potentially call routines that do pushes and pops).</p>
+<p>What seemed nice about this is that volatile--like const--could push its compile time checking transitively through the call graph.  If you have a normal pointer, you can pass it to a routine that accepts either volatile or non-volatile pointers.  But if you have a volatile pointer, you can only pass it to routines that accept volatile pointers.  It would ferret out all the places that shouldn't call the evaluator...</p>
+<p>But one drawback is that since this isn't what volatile is actually <em>for</em>, it has the unintended side-effect of making the pointer accesses slow.  So this couldn't be used in the main build, hence volatile would have to have an alias that could be defined to nothing.  I chose <strong><code>unstable</code></strong>:</p>
+<pre><code>#ifdef DEBUG_CHECK_UNSTABLE_POINTERS
+    #define unstable volatile
+#else
+    #define unstable  // nothing in unchecked builds
+#endif
+</code></pre>
+<p>As clever as this idea was, it made a big mess.  In particular, it suffered from the problem that C has no particularly good way of letting you build this routine pattern:</p>
+<pre><code>  Type1 some_function(Type2 arg, ...)
+
+  unstable Type1 some_function(unstable Type2 arg, ...)
+</code></pre>
+<p>You want the code to be exactly the same, you just don't want it to drop the annotation on the floor...because that defeats the purpose.  There are ways to do it, but they're very ugly.</p>
+<p><strong>...and after all that mess, there's no bug alerts to fire off.</strong></p>
+<p>All this does is make it possible for you to visually inspect a routine and have a little bit more information.  It doesn't intrinsically catch any bugs.</p>
+<h2>
+<a name="taking-another-tactic-a-smart-pointer-class-2" class="anchor" href="https://forum.rebol.info#taking-another-tactic-a-smart-pointer-class-2"></a>Taking Another Tactic: A Smart Pointer Class</h2>
+<p>So I ripped out all the <strong><code>unstable</code></strong> stuff, and looked at it again.  What if in the C++ build, the pointers were actual smart pointer classes, that participated in a global count of how many such pointers were extant?  So the result of operations like TOP would be a class... that would +1 the count on construction, and -1 the count on destruction.  An assert would trigger if you tried to push or pop the stack with any non-zero number of these outstanding.</p>
+<pre><code> StackValue(*) item = TOP;  // result held in pointer class, extant count + 1
+ if (IS_WORD(item)) {
+      Init_Integer(PUSH(), 1);  // asserts since a stack pointer is extant
+      printf("Pushed a 1 after seeing %s\n", VAL_WORD_UTF8(item));  // unreached
+ }
+</code></pre>
+<p>The interesting thing about such classes is that they can implicitly coerce themselves to <code>Value(*)</code>...and also, that C++ is willing to hold an instance live for as long as a callsite runs.  That means that if a function take a <em>value-by-pointer</em>, you can pass it a temporarily constructed <em>stackvalue-by-value</em>:</p>
+<pre><code>Init_Integer(PUSH(), 1);  // generated stackval destructed after Init_Integer()
+</code></pre>
+<p>So ergonomically, it can act very much like it's returning <code>Value(*)</code>.  But to get the benefit, you just have to avoid directly storing the result of <code>TOP</code> or <code>PUSH()</code> in a <code>Value(*)</code> variable.  Always put them in one of these smart pointers.  (There's no particular good way to enforce this -and- be ergonomic, so it just has to be a policy developers making the core have to know about.)</p>
+<p><em><strong>And the C build just defines <code>StackValue(*)</code> as <code>Value(*)</code> and is none the wiser.</strong></em></p>
+<p>There's a bit of a technical problem in that this relies on StackValue(*) having constructor and destructor behavior... e.g. the destructor is where the count gets decremented.  But since the interpreter uses longjmp() when a fail() happens, this can cut across the destructor, generating undefined behavior.  While that can mean "anything" what it generally means is "your destructor does not run", which is fine because we enforce the extant count as zero at each evaluation.  Hence unwinding a frame can just reset the count to zero.  It's reliable enough for a debug feature.</p>
+<h2>
+<a name="and-it-caught-bugs-right-away-3" class="anchor" href="https://forum.rebol.info#and-it-caught-bugs-right-away-3"></a>And It Caught Bugs, Right Away!</h2>
+<p>As expected, there were some instances of potential movability of stacks.  The cases were surprising; not things I would have suspected would be problems, but they were.</p>
+<p>It's good to have this category of bugs have a reliable device for catching them.  All while still remaining compilable as plain old C...</p>
+<p>I'm not sure exactly what the moral of this story is.  But maybe it's that compile-time checking may be great in theory, but you need to have a pretty good ratio of source-contamination-to-bugs-findable.  If you can come up with a good way to catch the majority of things at runtime with a bit of localized code, that may be a better investment.</p>
+            <p><small>2 posts - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/rethinking-experiments-from-unstable-to-stackvalue/1454">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/rethinking-experiments-from-unstable-to-stackvalue/1454</link>
+          <pubDate>Mon, 04 Jan 2021 08:27:30 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-1454</guid>
+          <source url="https://forum.rebol.info/t/rethinking-experiments-from-unstable-to-stackvalue/1454.rss">Rethinking Experiments: from `unstable` to `StackValue(*)`</source>
+        </item>
+        <item>
           <title>Should There Be Distinct Debug/Release Builds?</title>
           <dc:creator><![CDATA[iArnold]]></dc:creator>
           <category>Testing</category>
