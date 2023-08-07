@@ -55,9 +55,215 @@ I&#39;ll point out you have the option to put an entire expression in a group, o
 
 It&#39;s something people can ignore entirely if they want.  Don&#39;t use it if you don&#39;t like it.  But right now, I like it...and I plan to phase out BAR! as an expression barrier in the default.  But the mechanics are such that we know you can build usermode barriers if you want that to behave the same.</description>
     
-    <lastBuildDate>Sat, 28 Nov 2020 16:30:22 +0000</lastBuildDate>
+    <lastBuildDate>Tue, 25 Jul 2023 14:32:33 +0000</lastBuildDate>
     <category>Datatypes</category>
     <atom:link href="https://forum.rebol.info/t/the-language-worlds-weirdest-comma-mechanic/1387.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>The Language World&#39;s Weirdest COMMA! Mechanic</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>Above I mention the idea of "error parity" between comma and reaching the end of a group:</p>
+<aside class="quote no-group quote-modified" data-username="hostilefork" data-post="1" data-topic="1387">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/40/26_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<pre><code>&gt;&gt; all [1 +, 2 3 + 4]
+** Script Error: + is missing its value2 argument
+
+&gt;&gt; all [(1 +) 2 3 + 4]
+** Script Error: + is missing its value2 argument
+</code></pre>
+</blockquote>
+</aside>
+<p>Today we get this equivalence due to a number of complex flags and conditions, in particular BARRIER_HIT:</p>
+<pre><code>//=//// FEED_FLAG_BARRIER_HIT /////////////////////////////////////////////=//
+//
+// Evaluation of arguments can wind up seeing a comma and "consuming" it.
+// But the evaluation will advance the frame.  So if a function has more than
+// one argument it has to remember that one of its arguments saw a "barrier",
+// otherwise it would receive an end signal on an earlier argument yet then
+// get a later argument fulfilled.
+//
+#define FEED_FLAG_BARRIER_HIT \
+    FLAG_LEFT_BIT(3)
+</code></pre>
+<p>So what's going on is:</p>
+<ul>
+<li>
+<p>Explicit commas (as well as specially marked functions) put the evaluator into a BARRIER_HIT state.</p>
+</li>
+<li>
+<p>While in the barrier state, subsequent evaluations trying to gather arguments for the same function are rigged to act the same as end-of-block.</p>
+<ul>
+<li>
+<p>If a function's arguments don't tolerate <strong><code>&lt;end&gt;</code></strong> then this will give an error</p>
+</li>
+<li>
+<p>If it is tolerant of <code>&lt;end&gt;</code> then it will be able to call the function.</p>
+</li>
+</ul>
+</li>
+<li>
+<p>Starting the next fresh evaluation step clears the BARRIER_HIT state.</p>
+</li>
+</ul>
+<h2>
+<a name="an-early-weakness-noted-literal-arguments-1" class="anchor" href="https://forum.rebol.info#an-early-weakness-noted-literal-arguments-1"></a>An Early Weakness Noted: Literal Arguments</h2>
+<p>I quickly spotted the case of taking the next argument literally (remember that <strong>the x</strong> is just <strong>x</strong>):</p>
+<pre><code>the, 1 + 2
+; vs
+(the) 1 + 2
+</code></pre>
+<p>I wasn't sure of the value of protecting people from themselves here, vs. making COMMA! the one datatype you could not pass as quoted.  If it were to be prohibited, we could ask where the right place for the prohibition is:</p>
+<ol>
+<li>
+<p>In the evaluator guts, by simulating an <strong><code>&lt;end&gt;</code></strong> signal for this case</p>
+</li>
+<li>
+<p>Inside of THE, testing for <strong><code>if comma? arg [...]</code></strong> in the implementation</p>
+</li>
+<li>
+<p>In the type checking, via <strong><code>the: native [arg [(non-comma? element?)]]</code></strong></p>
+</li>
+</ol>
+<p>Today we could choose (1), which is what happens for evaluative parameters.  However we don't do this for quoted parameters...so today it is allowed:</p>
+<pre><code>; today's behavior
+&gt;&gt; the,
+== ,
+</code></pre>
+<p>Or it could be an error unless you say <strong>THE/COMMA</strong>, which would force use of (2).</p>
+<h2>
+<a name="but-would-simpler-be-better-2" class="anchor" href="https://forum.rebol.info#but-would-simpler-be-better-2"></a>But... Would Simpler Be Better?</h2>
+<p>The existing designs predate NIHIL (an isotopic empty pack).  One major aspect of nihil is that almost no functions will accept it as a parameter.</p>
+<p>So we might ask how different COMMA! needs to be from reaching a nihil state, e.g. a COMMENT?  Would this be sensible as being equivalent mechanics:</p>
+<pre><code>&gt;&gt; all [1 +, "hi" 2 3 + 4]
+** Script Error: + is missing its value2 argument
+
+&gt;&gt; all [1 + comment "hi" 2 3 + 4]
+** Script Error: + is missing its value2 argument
+</code></pre>
+<p>e.g. <strong>How bad would it be if the BARRIER_HIT mechanics went away, and we simply leveraged the idea that commas evaluated to nihil...and most functions refuse nihil arguments?</strong></p>
+<h2>
+<a name="downside-of-simplicity-behavior-in-pack-3" class="anchor" href="https://forum.rebol.info#downside-of-simplicity-behavior-in-pack-3"></a>Downside of Simplicity: Behavior in PACK!</h2>
+<p>I decided to test this idea of making COMMA! evaluate NIHIL just like a comment would.  But found trouble because I had code that was doing something like this:</p>
+<pre><code>[a b]: pack [1 + 2, 10 + 20]
+</code></pre>
+<p>It didn't work, because PACK was built on top of REDUCE-EACH with a ^META variable.  REDUCE-EACH performed three evaluation steps on the right hand side... the second evaluated the comma and got back a nihil (empty pack):</p>
+<pre><code>&gt;&gt; meta pack [1 + 2, 10 + 20]
+== ~['3 ~[]~ '30]~
+</code></pre>
+<p>The concept here is that if you use REDUCE-EACH with a ^META variable, you have to handle everything--that includes packs and errors.  This needs to be legal in order to do things like multi-returns with unstable isotopes (this is integral to UPARSE, for instance).</p>
+<p>So this means we <em>definitely</em> want this behavior:</p>
+<pre><code>&gt;&gt; meta pack [1 + 2 comment "hi" 10 + 20]
+== ~['3 ~[]~ '30]~
+</code></pre>
+<p><strong>This suggests either that you can't use commas in PACK, -or- that PACK needs to be proactive about skipping over the commas at source level.</strong>  So long as PACK is based on REDUCE-EACH, then that suggests REDUCE-EACH needs to be able to skip commas...because you wouldn't be able to distinguish the cases based on the NIHIL evaluation product alone.</p>
+<p>Something to notice about that idea is that if it's literally looking for commas, that means you can't make your own comma-like construct that acts like a barrier.</p>
+<h2>
+<a name="another-wrinkle-set-block-with-comma-on-right-4" class="anchor" href="https://forum.rebol.info#another-wrinkle-set-block-with-comma-on-right-4"></a>Another Wrinkle: SET-BLOCK! with Comma on Right</h2>
+<p>If you were to write something like this, it wouldn't give an error:</p>
+<pre><code>&gt;&gt; [/a /b]: ,
+== ~null~  ; isotope
+
+&gt;&gt; a
+== ~null~  ; isotope
+
+&gt;&gt; b
+== ~null~  ; isotope
+</code></pre>
+<p>This is because the slashes indicate the results are optional, e.g. a shorter pack is accepted.  If COMMA!'s stopping power in the main evaluator comes only from the idea that it evaluates to an empty pack, it won't complain at the lack of a meaningful expression to its right.</p>
+<p>Things like META which can accept empty packs would also not trigger an error:</p>
+<pre><code>&gt;&gt; meta,
+== ~[]~
+</code></pre>
+<p>These don't offhand seem that bad, and maybe could even be seen as good if you look at it from a certain point of view.  But it does show that the "stopping power" of commas isn't bullteproof.</p>
+<h2>
+<a name="what-about-thenelseetc-5" class="anchor" href="https://forum.rebol.info#what-about-thenelseetc-5"></a>What About THEN/ELSE/etc. ?</h2>
+<p>THEN and ELSE are enfix and treat their left hand side evaluatively:</p>
+<pre><code>(1 + 2, then [print "what happens here?"])
+</code></pre>
+<p>This would wind up acting the same as:</p>
+<pre><code>(1 + 2 comment "hi" then [print "what happens here?"])
+</code></pre>
+<p>It needs to be an error...and it currently is.  The error arises because THEN and ELSE refuse to operate on nihil.  But at the moment this is a distinct case from not having a left hand argument at all.</p>
+<pre><code>(then [print "what happens here?"])
+</code></pre>
+<p>Today, there are mechanics that make the left hand side look like an <code>&lt;end&gt;</code> condition...which falls under the complexity of BARRIER_HIT.</p>
+<h2>
+<a name="alternative-evaluator-skips-over-comma-when-possible-6" class="anchor" href="https://forum.rebol.info#alternative-evaluator-skips-over-comma-when-possible-6"></a>Alternative: Evaluator Skips Over COMMA! When Possible</h2>
+<p>This would mean if you wrote something like:</p>
+<pre><code>&gt;&gt; do/next [, , , 1 + 2, , 10 + 20] 'pos
+== 3
+
+&gt;&gt; pos
+== [, , 10 + 20]  ; or possibly just [10 + 20] if it skipped trailing commas
+</code></pre>
+<p><em>I think this is how things worked long ago before the BARRIER_HIT flag was introduced.</em>  The concept was that a literal barrier (was <strong><code>|</code></strong>, now <strong><code>,</code></strong>) would be greedily consumed in interstitial evaluations, but raise errors otherwise.</p>
+<p>This way, a COMMA! could just stay un-consumed by the evaluator.  Function calls gathering their argument would look ahead and say "hey is there <em>either</em> an end of block or a COMMA!" and if so, not run an evaluation and report an <code>&lt;end&gt;</code> condition.  This could be reported for arbitrarily many arguments...and so long as they were endable you would receive that condition.  In other words: the BARRIER_HIT flag was conveyed merely by a lagging comma that would stick around.</p>
+<p><em>This feels very regressive, because every stepwise evaluating function inherits this complexity.</em>  The nice consequence of saying that COMMA! just evaluates to NIHIL is that it triggers the same handling you would use for COMMENT-like functions.</p>
+<h2>
+<a name="on-balance-i-think-the-barrier_hit-flag-has-to-die-7" class="anchor" href="https://forum.rebol.info#on-balance-i-think-the-barrier_hit-flag-has-to-die-7"></a>On Balance, I Think the BARRIER_HIT Flag Has To Die</h2>
+<p><strong>I'm bullish on COMMA! as a great addition to the language.</strong>  But the various hoops that are jumped through to try and make it mimic the end of a block seem like a bridge too far.</p>
+<p>To me, having commas vaporize is neat tech... and the idea is that if you handle things like COMMENT and ELIDE you get the comma handling for free.  This seems quite elegant to me.</p>
+<p>Maybe functions like REDUCE-EACH need a refinement that lets you detect commas differently:</p>
+<pre><code>&gt;&gt; reduce-each x [1 + 2, (elide print "Hi!") 10 + 20] [probe x]
+3
+Hi!
+30
+== 30
+
+&gt;&gt; reduce-each ^x [1 + 2, (elide print "Hi!") 10 + 20] [probe x]
+'3
+Hi!  ; skipped over comma, by default
+~[]~
+'30
+== '30
+
+&gt;&gt; reduce-each/comma ^x [1 + 2, (elide print "Hi!") 10 + 20] [probe x]
+'3
+~,~  ; isotope
+Hi!
+~[]~
+'30
+== '30
+</code></pre>
+<p>Here I fancifully suggest giving back an isotopic comma to draw attention to it.  Since all other values come back meta'd, this doesn't conflate with any "real" evaluative result.  e.g. <strong><code>[~,~, ~,~]</code></strong> could distinguish "real isotopic commas" from source-level commas that REDUCE-EACH is offering to tell you about.</p>
+<p>That requires commas to be stable isotopes.  But one could also not worry about the conflation, and reduce to an unstable isotope:</p>
+<pre><code>&gt;&gt; ,
+== ~,~  ; isotope
+</code></pre>
+<p>Then instead of people directly testing for NIHIL? most people could test for NOTHING? or VAPOR? which meant either nihil or isotopic comma.  :-/</p>
+<p>Some crazy ideas here, but I think on balance that trying to make commas "bulletproof" leads to more confusion and problems than just making them do whatever comments do, with meta-REDUCE-EACH skipping them by default.</p>
+<h2>
+<a name="this-means-killing-off-user-defined-expression-barriers-8" class="anchor" href="https://forum.rebol.info#this-means-killing-off-user-defined-expression-barriers-8"></a>This Means Killing Off User-Defined Expression Barriers</h2>
+<p>Paring it down such that NIHIL results are "mean" enough to stop evaluations for all practical purposes, the special flag for letting functions cause the BARRIER_HIT flag can be dropped too.  This was made available via the TWEAK function:</p>
+<pre><code>//=//// DETAILS_FLAG_IS_BARRIER ///////////////////////////////////////////=//
+//
+// Special action property set with TWEAK.  Used by |
+//
+// The "expression barrier" was once a built-in type (BAR!) in order to get
+// a property not possible to achieve with functions...that it would error
+// if it was used during FULFILL_ARG and would be transparent in evaluation.
+//
+// Transparency was eventually generalized as "invisibility".  But attempts
+// to intuit the barrier-ness from another property (e.g. "enfix but no args")
+// were confusing.  It seems an orthogonal feature in its own right, so it
+// was added to the TWEAK list pending a notation in function specs.
+//
+#define DETAILS_FLAG_IS_BARRIER \
+    SERIES_FLAG_25
+</code></pre>
+<p><strong>I don't feel any particular qualm about losing this feature, because I've never really used it.</strong></p>
+<p>And under the new concept, you get "barriery-enough" just by evaluating to NIHIL.  You're no better or worse than COMMA!</p>
+<p><em>(Actually that's not quite true, because currently COMMA! doesn't do lookahead, so it can't serve as the left hand side of an enfix function that doesn't quote the left hand side.  But WORD! does do lookahead.  If we wanted to go for full parity, we'd allow the lookahead for evaluative commas...but making comma worse just to give it parity with a WORD! doesn't seem too smart.  If we decided that COMMA! was actually a WORD! that was a synonym for NIHIL and just rendered funny, then it might make sense... but that would wreck other things--like the PACK exception for commas.)</em></p>
+          <p><a href="https://forum.rebol.info/t/the-language-worlds-weirdest-comma-mechanic/1387/6">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/the-language-worlds-weirdest-comma-mechanic/1387/6</link>
+        <pubDate>Mon, 24 Jul 2023 04:47:32 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1387-6</guid>
+        <source url="https://forum.rebol.info/t/the-language-worlds-weirdest-comma-mechanic/1387.rss">The Language World&#39;s Weirdest COMMA! Mechanic</source>
+      </item>
       <item>
         <title>The Language World&#39;s Weirdest COMMA! Mechanic</title>
         <dc:creator><![CDATA[hostilefork]]></dc:creator>

@@ -5,8 +5,106 @@
     <link>https://forum.rebol.info/c/usage/show-and-tell/33</link>
     <description>Topics in the &#39;Show &amp; Tell&#39; category Created something short and syrupy sweet?  Then post your scripts here; not confined to infinite length one-liners!</description>
     
-      <lastBuildDate>Sat, 14 Jan 2023 15:21:04 +0000</lastBuildDate>
+      <lastBuildDate>Thu, 27 Jul 2023 06:23:37 +0000</lastBuildDate>
       <atom:link href="https://forum.rebol.info/c/usage/show-and-tell/33.rss" rel="self" type="application/rss+xml" />
+        <item>
+          <title>Skinning REPLACE with Red&#39;s String PARSE Hack</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Show &amp; Tell</category>
+          <description><![CDATA[
+            <p>Red made an unusual choice with their implementation of REPLACE when you use a pattern that's a block with a string.  Instead of trying to stringify the block, <a href="https://github.com/red/red/blob/40096dd12ca9c3b9b47e9eaa995d425b9faf620b/tests/source/units/replace-test.red#L72">they assume it's a PARSE rule</a>:</p>
+<pre><code>red&gt;&gt; replace/case/all "aAbbabAAAa" ["Ab" | "Aa"] "-"
+== "a-babAA-"
+</code></pre>
+<p>It seems like a bad idea to make the choice to do this based on the input type.  What if you actually want to do this when the input is a BLOCK!?  I'd prefer something like <strong>parse-replace</strong> <em>(or if we ever allow the same word to be a function and a module, maybe <strong>parse.replace</strong>)</em>.</p>
+<p>But honestly, I think that the answer is just to keep pushing on UPARSE itself to be slick enough that you wouldn't feel the need to reach for a shorthand like this.  It's pretty easy to write as is:</p>
+<pre><code>&gt;&gt; parse/case "aAbbabAAAa" [
+       try some thru [change ["Ab" | "Aa"] ("-")]
+       return &lt;input&gt;
+   ]
+== "a-babAA-"
+</code></pre>
+<p>That's probably reaching the limits of how short UPARSE can do an equivalent.  Yet it's more powerful if you want to deviate or customize it, so I would reach for this more often than a limited REPLACE.</p>
+<h2>
+<a name="still-ren-c-does-backflips-and-lets-you-have-it-your-way-1" class="anchor" href="https://forum.rebol.info#still-ren-c-does-backflips-and-lets-you-have-it-your-way-1"></a>Still, Ren-C Does Backflips And Lets You Have It Your Way</h2>
+<p>So you should be able to adapt REPLACE to have Red's behavior if you want it.</p>
+<p>Super easy.  Barely an inconvenience!</p>
+<pre><code>replace: enclose :lib.replace func [
+     f [frame!]
+     &lt;local&gt; head tail rule
+][
+    if not all [
+        match [text! binary!] f.target
+        block? f.pattern
+    ][
+        return do f  ; use normal REPLACE semantics
+    ]
+
+    rule: if activation? :f.replacement '[  ; function generates replacement
+        head: &lt;here&gt;
+        change [f.pattern, tail: &lt;here&gt;] (
+            apply/relax :f.replacement [const head, const tail]
+        )
+    ] else '[  ; replacement can be used as-is
+        change f.pattern (f.replacement)
+    ]
+
+    apply :parse [/case f.case, f.target [
+        while [thru rule] (
+            if not f.all [return f.target]
+        )
+        to &lt;end&gt;
+    ]]
+    return f.target
+]
+</code></pre>
+<h2>
+<a name="it-worked-the-first-time-i-ran-it-2" class="anchor" href="https://forum.rebol.info#it-worked-the-first-time-i-ran-it-2"></a>It worked the first time I ran it!</h2>
+<p>There's so much interesting stuff going on here that it's hard to list it all. I can quickly hit some high points.</p>
+<ul>
+<li>
+<p>You don't have to repeat the interface of REPLACE.  This is an ENCLOSE, so it just passes the frame built for LIB.REPLACE to the wrapper and lets it choose whether to run that frame as-is (or modified), or do its entirely own thing.</p>
+</li>
+<li>
+<p>It uses the <a href="https://forum.rebol.info/t/the-cool-new-repurposing-of-while-in-parse/1875">kickass new arity-2 WHILE combinator</a> to great effect...simply iterating over the replacement rule.</p>
+</li>
+<li>
+<p><a href="https://forum.rebol.info/t/apply-ii-the-revenge/1834">Modern kickass APPLY</a> for PARSE lets you put arguments in any order, and does refinements by name... here we put /CASE first because it's clearer... then passing the series and the rule.</p>
+</li>
+<li>
+<p>It doesn't just run isotopic actions if they are passed, but it also optionally passes them the head and tail of where in the input is matched.  If the function is arity-1, it just receives the head.  If it's arity-0, it doesn't receive either.  (This is due to APPLY's /RELAX that tolerates too many arguments.)</p>
+</li>
+</ul>
+<p>I wrote a little demo of the fancier function invocation:</p>
+<pre><code>&gt;&gt; data: "(real)1020(powerful)0304(magic)"
+
+&gt;&gt; collect [
+       replace/all data [between "(" ")"] func [head tail] [
+            let item: copy/part head tail
+            keep item
+            if item = "(powerful)" [item: copy "(ren-c)"]
+            return uppercase item
+        ]
+    ]
+== ["(real)" "(powerful)" "(magic)"]
+
+&gt;&gt; data
+== "(REAL)1020(REN-C)0304(MAGIC)"
+</code></pre>
+<p>Not only that, but the references to the head and tail of the match are CONST...which prevents the replacement function from messing up the in-progress iteration of the series where the replace is happening.  It only achieves modification by means of what result it synthesizes.</p>
+<p>How about that?</p>
+<p>cc: <a class="mention" href="https://forum.rebol.info/u/brett">@Brett</a>, <a class="mention" href="https://forum.rebol.info/u/rgchris">@rgchris</a>, <a class="mention" href="https://forum.rebol.info/u/johnk">@johnk</a></p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/skinning-replace-with-reds-string-parse-hack/2043">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/skinning-replace-with-reds-string-parse-hack/2043</link>
+          <pubDate>Thu, 27 Jul 2023 06:23:37 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2043</guid>
+          <source url="https://forum.rebol.info/t/skinning-replace-with-reds-string-parse-hack/2043.rss">Skinning REPLACE with Red&#39;s String PARSE Hack</source>
+        </item>
         <item>
           <title>Working With Truthy BLANK! (in SPLIT-PATH Tests)</title>
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
@@ -718,12 +816,8 @@ unset in ctx 'server-iv
 </code></pre>
 <h2>
 <a name="cool-dialecting-twists-3" class="anchor" href="https://forum.rebol.info#cool-dialecting-twists-3"></a>Cool Dialecting Twists</h2>
-<p>It seems to me nice to safeguard that you're not throwing away values:</p>
+<p>The basic premise of multiple returns is that if you don't know about extra values, you don't worry about them... so by default packs with extra values need to just ignore them.</p>
 <pre><code>&gt;&gt; [a b]: pack [1 2 3]
-** Error: Too many values for vars in PACK (use ... if on purpose)
-</code></pre>
-<p>As the error says, though, we could indicate we're fine with this through a special syntax:</p>
-<pre><code>&gt;&gt; [a b ...]: pack [1 2 3]
 == 1
 
 &gt;&gt; a
@@ -732,7 +826,10 @@ unset in ctx 'server-iv
 &gt;&gt; b
 == 2
 </code></pre>
-<p>(It's not as sketchy when you have too few values, because you can set the extra variables to unset...which will presumably trigger awareness of a problem at some point.)</p>
+<p>But for some applications, it might be nice to be able to check that an unpacking is exact:</p>
+<pre><code>&gt;&gt; [a b &lt;end&gt;]: pack [1 2 3]
+** Error: Too many values for vars in PACK (expected &lt;end&gt;)
+</code></pre>
 <p>Borrowing from multi-return: I think the idea of "circling" values to say which is the one you want the overall expression to evaluate to is a neat idea.</p>
 <pre><code>&gt;&gt; [a @b]: pack [1 2]
 == 2
@@ -768,10 +865,10 @@ unset in ctx 'server-iv
         if result' = void' [
             result': either blank? vars.1 [void'] [val']
         ]
-        if tail? vars [
-            fail "Too many values for vars in PACK (use ... if on purpose)"
+        if vars.1 = &lt;end&gt; [
+            fail "Too many values for vars in PACK (expected &lt;end&gt;)"
         ]
-        if vars.1 = '... [
+        if tail? vars [
             continue  ; ignore all other values (but must reduce all)
         ]
         switch/type vars.1 [
@@ -781,9 +878,9 @@ unset in ctx 'server-iv
         ]
         vars: my next
     ]
-    if vars.1 = '... [
+    if vars.1 = &lt;end&gt; [
         if not last? vars [
-            fail "... must appear only at the tail of PACK variable list"
+            fail "&lt;end&gt; must appear only at the tail of PACK variable list"
         ]
     ] else [
         ; We do not error on too few values (such as `[a b c]: [1 2]`) but
@@ -799,7 +896,7 @@ unset in ctx 'server-iv
 </code></pre>
 <p>If the ^ and UNMETA seem confusing, the only thing you need to think about is that the META protocol helps you out when you're trying to deal with a situation of storing a value that can be anything...and you need to differentiate a state.  I'm making the result "meta" so that I can use plain unset to signal that it hasn't been assigned yet.  I could make a separate boolean variable instead, but then I'd have another variable and I'd have to GET/ANY the result...</p>
 <p>I'm sure people will start getting the hang of it!  <img src="https://forum.rebol.info/images/emoji/twitter/slight_smile.png?v=12" title=":slight_smile:" class="emoji" alt=":slight_smile:" loading="lazy" width="20" height="20"></p>
-            <p><small>9 posts - 2 participants</small></p>
+            <p><small>8 posts - 2 participants</small></p>
             <p><a href="https://forum.rebol.info/t/a-lot-to-unpack-replacing-the-set-of-reduce-block-idiom/1634">Read full topic</a></p>
           ]]></description>
           <link>https://forum.rebol.info/t/a-lot-to-unpack-replacing-the-set-of-reduce-block-idiom/1634</link>
@@ -1850,57 +1947,6 @@ REBNATIVE(curve25519)
           <discourse:topicArchived>No</discourse:topicArchived>
           <guid isPermaLink="false">forum.rebol.info-topic-1114</guid>
           <source url="https://forum.rebol.info/t/writing-javascript-natives-to-call-the-github-api/1114.rss">Writing JavaScript natives to call the GitHub API</source>
-        </item>
-        <item>
-          <title>Open Your Mind: A COLLECT in PARSE Meditation</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Show &amp; Tell</category>
-          <description><![CDATA[
-            <p>The first time I used CALL, I griped that it was somewhat unusable (with a complaint that basically everyone else who tried it had, my complaint was far from unique).  I would have thought that if I said <strong>call {r3 --do "print {Hello}"}</strong> that it would "do what I meant".  Instead, what it did was try and find an executable file whose name (including spaces and quotes) was <code>r3 --do "print {Hello}"</code>, and run it.</p>
-<p>As crazy as that interpretation may seem on the surface, it actually came from a desire to not get involved in the details of a technical difference between Windows and POSIX.  To make a long story short: Windows <a href="https://docs.microsoft.com/en-us/windows/desktop/api/processthreadsapi/nf-processthreadsapi-createprocessw">CreateProcess()</a> has a command-line parser built in, so it notices the spaces and does the quote escaping...the call would pick apart and translate something like <code>r3 --do "print \"hi\""</code> for you.  POSIX does not do this, and expects you to pass in an array with elements <code>r3</code>, <code>--do</code>, <code>print "hi"</code> that has already been processed.</p>
-<p>So there was this "scary" proposition of having to write a parser in POSIX to get this to work, and all the risks it entailed.  How would you know you got it right, that you'd turned the <code>\"</code> into regular <code>"</code> and matched everything up right?  CALL was already a daunting jungle of C code, how many points of failure would you want?  <a href="https://github.com/rebol/rebol-issues/issues/2225">Shixin was rightfully fearful</a> (well, skeptical I should say) of getting into that business in C.</p>
-<p><em>But we have Ren-C, and we can call it from C.</em></p>
-<h2>Free Your Mind</h2>
-<p>Here's how we now break those parameters up, if we happen to be on POSIX and /SHELL is not used:</p>
-<pre><code>parse-command-to-argv*: function [
-    {Helper for when POSIX gets a TEXT! and the /SHELL refinement not used}
-    return: [block!]
-    command [text!]
-][
-    quoted-shell-item-rule: [  ; Note: ANY because "" is legal as a quoted arg
-        any [{\"} | not {"} skip]  ; escaped quotes and nonquotes
-    ]
-    unquoted-shell-item-rule: [some [not space skip]]
-
-    parse command [
-        collect result: [any [
-            any space [
-                {"} keep quoted-shell-item-rule {"}
-                | keep unquoted-shell-item-rule
-            ]
-        ]
-        any space end]
-    ] else [
-        fail "Could not parse command line into argv[] block."
-    ]
-    for-each item result [replace/all item {\"} {"}]
-    return result
-]
-</code></pre>
-<p>The C code in the module just calls this helper in the POSIX extension implementing CALL as <strong><code>rebValue("parse-command-to-argv*", command)</code></strong>.  The helper resides in the module and is only visible to it, but the C finds it because when extension natives are loaded, they remember which module they were in, and this information factors into the binding.</p>
-<p>It's a Zen moment, isn't it?</p>
-<p>It may not be perfect (improvements welcome).  And if it lets you down, you can always do what you used to...use CALL/SHELL and defer to the shell to do whatever-it-does with the text as its single argument.  You'd need to anyway, if your call contained any ${ENVIRONMENT_VARIABLES} you wanted to substitute, or if you wanted to invoke "dir" or "echo" or other things that only exist in "sh" or "cmd.exe".  (Of course if you run a program that way, you pay for the overhead of two processes invoked, vs. just one.)</p>
-<p>But I think the main thing is just taking away that fear.  Making the solution match the size of the problem--the so called "essential complexity".  That's the goal of this exercise, and we are getting ever closer to it.</p>
-            <p><small>2 posts - 2 participants</small></p>
-            <p><a href="https://forum.rebol.info/t/open-your-mind-a-collect-in-parse-meditation/1100">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/open-your-mind-a-collect-in-parse-meditation/1100</link>
-          <pubDate>Tue, 05 Mar 2019 14:26:18 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-1100</guid>
-          <source url="https://forum.rebol.info/t/open-your-mind-a-collect-in-parse-meditation/1100.rss">Open Your Mind: A COLLECT in PARSE Meditation</source>
         </item>
   </channel>
 </rss>

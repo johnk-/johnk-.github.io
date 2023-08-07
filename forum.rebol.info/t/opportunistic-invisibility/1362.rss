@@ -3,54 +3,85 @@
   <channel>
     <title>Opportunistic Invisibility</title>
     <link>https://forum.rebol.info/t/opportunistic-invisibility/1362</link>
-    <description>[When &quot;Invisibles&quot; were introduced](https://forum.rebol.info/t/issues-with-invisibles-a-truly-disappearing-comment/405/), a function was either always-invisible or always-not-invisible.  You couldn&#39;t make a function that *&quot;sometimes returned an INTEGER!, and sometimes was invisible.&quot;*
+    <description>When &quot;Invisibles&quot; were introduced, the evaluator had to establish if a function was either always-invisible or always-not-invisible.  You couldn&#39;t make a function that *&quot;sometimes returned an INTEGER!, and sometimes was invisible.&quot;*
 
-Due to changes in the way the evaluator interacts with invisibles, this doesn&#39;t need to be a rule anymore.  There could be functions which decide--perhaps based on their arguments--whether to act invisibly or not.
+This restriction was eventually lifted.  But then raised the question of how a RETURN statement would return invisibly.
 
-This has actually been requested.  Imagine you are dealing with something like DUMP, and you want to call out that you&#39;d like to actually return one of the things you are dumping:
+The idea came along that RETURN would detect whether to return invisibly or not based on whether it was arity-0 or arity-1.  Here is the first version of what opportunistic invisibility looked like:
 
-    all [
-        ...
-        x * 10 + 20  ; want to print this expression and see its evaluated result
-        ...
-    ]
+    &gt;&gt; vanish-if-odd: func [return: [&lt;invisible&gt; integer!] x] [
+           if even? x [return x]
+           return  ; arity-0 return meant invisible
+       ]
 
-    =&gt;
+    &gt;&gt; &lt;test&gt; vanish-if-odd 2
+    == 2
 
-    all [
-        ...
-        -- (x * 10 + 20)  ; now it&#39;s not participating in the ALL anymore
-        ...
+    &gt;&gt; &lt;test&gt; vanish-if-odd 1
+    == &lt;test&gt;
+
+What was clever about the arity mechanic was that it could be chained.  If you RETURN&#39;d the result of an opportunistic invisible, then if it happened to vanish you&#39;d effectively make an arity-0 RETURN.
+
+    &gt;&gt; vanish-if-even: func [return: [&lt;invisible&gt; integer!] y] [
+           return vanish-if-odd y + 1  ; if vanishes, RETURN perceives arity-0
+       ]
+
+    &gt;&gt; &lt;test&gt; vanish-if-even 2
+    == &lt;test&gt;
+
+    &gt;&gt; &lt;test&gt; vanish-if-even 1
+    == 2
+
+## Alas, There Were Problems
+
+One problem is that the variadic return was subject to [line continuation &quot;arity bugs&quot;](https://forum.rebol.info/t/line-continuation-and-arity-bugs-thoughts/1965).
+
+For example, imagine trying to do a return in the middle of a block of code, with the intention to not running the ensuing code:
+
+     foo: func [return: [&lt;invisible&gt; ...]] [
+         ... some code here ...
+         return  ; temporarily insert a return for debugging 
+         ... some more code ...
      ]
 
-@gchiu wanted some way of getting a printout like `-- (x * 10 + 20): 40` but also having the value still returned, without needing to name another operator.  So maybe you could mark this, e.g. with a GET-GROUP! or GET-WORD! in the DUMP dialect.
+A casual reader would think that would return invisibly, when it would actually **return (... some more code ...)**, picking up what&#39;s on the next lines.
 
-*Having this particular debug construct behave in that way may not be the best idea in the world.* 
- But we don&#39;t need to technically prohibit it.
+Even trickier was that invisibility itself--and especially opportunistic invisibility--had the [power to wreck code structure](https://forum.rebol.info/t/issues-with-invisibles-a-truly-disappearing-comment/405/9?u=hostilefork) to where it was completely unpredictable.  The remedy was that invisibility could only apply in &quot;interstitial slots&quot;, meaning that RETURN could not take an invisible as an argument.
 
-This could give an interesting nuance to the difference between **return** and **return void**.  RETURN used alone could just mean literally &quot;return and don&#39;t have any value, not even void&quot;.  It&#39;s certainly a weird idea, but it&#39;s consistent...and we could make sure you knew what you were doing by requiring some kind of invisibility in the type signature of a function before allowing a 0-arg RETURN.  Of course there could be other syntaxes, like **return/invisible**...which would probably fit practice better by leaving plain RETURN as returning void.
+## New Mechanics Build On NIHIL (Isotopic Empty BLOCK!)
 
-There&#39;d need to be a new syntax for saying you could return invisibles, because `return: []` as the indicator wouldn&#39;t allow you to specify it along with other types.
+Years of puzzling over the quirks of how to coherently wrap and process invisible functions led to rebuilding the feature on top of meta-representations and isotopes.  You can read all about that evolution in **[&quot;Invisibility Viewed Through Modern Eyes&quot;](https://forum.rebol.info/t/invisibility-reviewed-through-modern-eyes/2034)**.  :eyes: 
 
-## Worth Doing?
+RETURN uses a special ^META parameter convention to allow it to accept the signal for invisibility as an argument.  (Under this convention it receives the quasiform `~[]~`, which is the meta of an empty unstable isotopic parameter pack used by multi-return.)
 
-The main argument for opportunistic invisibles is to keep you from having to create different names for the invisible and visible forms of a function, when there could be a learnable convention for knowing which it is from the arguments alone.
+So an opportunistically invisible function would now look like this:
 
-The more fanciful argument is creating strange execution patterns in code golf, where you have some kind of &quot;voting&quot; mechanism e.g. inside an ALL and program behavior emerges from things opting out.  This harkens back some to the &quot;null opts out of logical operations&quot; ideas from the early days of null behavior.
+    &gt;&gt; vanish-if-odd: func [return: [&lt;nihil&gt; integer!] x] [
+           if even? x [return x]
+           return nihil
+       ]
 
-Normalizing invisibles to the point of saying that they&#39;re what you get when you just do a plain RETURN is a fairly weird idea, but they&#39;re a pretty powerful feature that might have even more applications than yet thought of.  **most free-form programming language ever created** is still the goal, so... I think this deserves some consideration.</description>
+    &gt;&gt; &lt;test&gt; vanish-if-odd 2
+    == 2
+
+    &gt;&gt; &lt;test&gt; vanish-if-odd 1
+    == &lt;test&gt;
+
+While such constructs can still give rise to tricky situations in code, it&#39;s powerful while being much more under control.</description>
     
-    <lastBuildDate>Thu, 01 Dec 2022 11:06:56 +0000</lastBuildDate>
+    <lastBuildDate>Thu, 27 Jul 2023 17:24:14 +0000</lastBuildDate>
     <category>Functions</category>
     <atom:link href="https://forum.rebol.info/t/opportunistic-invisibility/1362.rss" rel="self" type="application/rss+xml" />
       <item>
         <title>Opportunistic Invisibility</title>
         <dc:creator><![CDATA[hostilefork]]></dc:creator>
         <description><![CDATA[
-            <p>Behold, the first opportunistic invisible:</p>
-<pre><code>&gt;&gt; vanish-if-odd: func [return: [&lt;void&gt; integer!] x] [
+            <p>When "Invisibles" were introduced, the evaluator had to establish if a function was either always-invisible or always-not-invisible.  You couldn't make a function that <em>"sometimes returned an INTEGER!, and sometimes was invisible."</em></p>
+<p>This restriction was eventually lifted.  But then raised the question of how a RETURN statement would return invisibly.</p>
+<p>The idea came along that RETURN would detect whether to return invisibly or not based on whether it was arity-0 or arity-1.  Here is the first version of what opportunistic invisibility looked like:</p>
+<pre><code>&gt;&gt; vanish-if-odd: func [return: [&lt;invisible&gt; integer!] x] [
        if even? x [return x]
-       return void
+       return  ; arity-0 return meant invisible
    ]
 
 &gt;&gt; &lt;test&gt; vanish-if-odd 2
@@ -59,9 +90,9 @@ Normalizing invisibles to the point of saying that they&#39;re what you get when
 &gt;&gt; &lt;test&gt; vanish-if-odd 1
 == &lt;test&gt;
 </code></pre>
-<p>Which was followed immediately by the first chaining opportunistic invisible:</p>
-<pre><code>&gt;&gt; vanish-if-even: func [return: [&lt;void&gt; integer!] y] [
-       return vanish-if-odd y + 1
+<p>What was clever about the arity mechanic was that it could be chained.  If you RETURN'd the result of an opportunistic invisible, then if it happened to vanish you'd effectively make an arity-0 RETURN.</p>
+<pre><code>&gt;&gt; vanish-if-even: func [return: [&lt;invisible&gt; integer!] y] [
+       return vanish-if-odd y + 1  ; if vanishes, RETURN perceives arity-0
    ]
 
 &gt;&gt; &lt;test&gt; vanish-if-even 2
@@ -70,80 +101,35 @@ Normalizing invisibles to the point of saying that they&#39;re what you get when
 &gt;&gt; &lt;test&gt; vanish-if-even 1
 == 2
 </code></pre>
-<p>Like I say...implementation-wise, it's a bit of a mixed bag in terms of making some things simpler and some things more complex.  But as a feature, I think it's something that will open up space for exploration...especially in debug constructs.  Should be very fun for code golf.  <img src="https://forum.rebol.info/images/emoji/twitter/golf.png?v=9" title=":golf:" class="emoji" alt=":golf:"></p>
-          <p><a href="https://forum.rebol.info/t/opportunistic-invisibility/1362/3">Read full topic</a></p>
-        ]]></description>
-        <link>https://forum.rebol.info/t/opportunistic-invisibility/1362/3</link>
-        <pubDate>Wed, 28 Oct 2020 10:31:57 +0000</pubDate>
-        <guid isPermaLink="false">forum.rebol.info-post-1362-3</guid>
-        <source url="https://forum.rebol.info/t/opportunistic-invisibility/1362.rss">Opportunistic Invisibility</source>
-      </item>
-      <item>
-        <title>Opportunistic Invisibility</title>
-        <dc:creator><![CDATA[hostilefork]]></dc:creator>
-        <description><![CDATA[
-            <aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="1362">
-<div class="title">
-<div class="quote-controls"></div>
-<img alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/40/26_2.png" class="avatar"> hostilefork:</div>
-<blockquote>
-<p>Normalizing invisibles to the point of saying that they're what you get when you just do a plain RETURN is a fairly weird idea, but they're a pretty powerful feature that might have even more applications than yet thought of.</p>
-</blockquote>
-</aside>
-<p><strong>On the plus side</strong> of saying that RETURN with no arguments means "invisible" is that it facilitates wrapping.</p>
-<p>Imagine if MAYBE-INVISIBLE is a function that might return a value, or might be invisible.  Then you want to write a wrapper for it:</p>
-<pre><code>wrapper: func [x] [
-    if x = 10 [return 20]
-    return maybe-invisible x
-]
-</code></pre>
-<p>In the event that MAYBE-INVISIBLE vaporizes, this will act like you had written just a plain <code>return</code>.  So if plain RETURN means invisible, then you get an effective pass-through of the invisibility.</p>
-<p><strong>...BUT...On the minus side</strong> is that it doesn't play very well with the idea that a variadic RETURN could be used with multiple return values somehow.  Imagine if <strong>return ret1 ret2</strong> could line up with a callsite that said <strong>[x y]: ...</strong> where x would get ret1, and y would get ret2.</p>
-<h2>That Aside, Opportunistic Invisibility is Almost Implemented</h2>
-<p>It's tricky to write.  But I think of it ultimately as a "simplifying" aspect on the evaluator...as it removes the separate concept of an "invisible function".</p>
-<p>There are some things that can't be done if you don't know a-priori that a function is invisible...and have to wait to find out until after it has run that it is.  But I think few people would notice the subtlety of what that implies.</p>
-<p>This puts some pressure on type specs, because now we have another return state that isn't an ANY-VALUE! besides null.  The <strong><code>return: []</code></strong> is no longer going to work.</p>
-<p>What I have right now is that if you want to say that a function is invisible even if it just drops out of the bottom with no RETURN statement, then you say <strong><code>return: &lt;void&gt;</code></strong>  This is like the <strong><code>return: &lt;none&gt;</code></strong> instruction in that it overrides whatever else would fall out.</p>
-<p>Then there's the question of how to put a non-datatype in the spec list for the return.  This is something that can only apply to RETURN...which makes it a whole-function property more than a</p>
-<p>I've been wondering if ISSUE! is better for these states (<strong><span class="hashtag">#null</span></strong>, <strong><span class="hashtag">#vanish</span></strong>) and using 7 characters or less on 32-bit platforms has a nice savings over <code>&lt;opt&gt;</code> and <code>&lt;invisible&gt;</code>.</p>
-<p>As usual, no shortage of things to think about.  But invisibility has become a core differentiating feature...it's novel and it's powerful.  Embracing it systemically is a good thing.</p>
-          <p><a href="https://forum.rebol.info/t/opportunistic-invisibility/1362/2">Read full topic</a></p>
-        ]]></description>
-        <link>https://forum.rebol.info/t/opportunistic-invisibility/1362/2</link>
-        <pubDate>Mon, 26 Oct 2020 05:02:53 +0000</pubDate>
-        <guid isPermaLink="false">forum.rebol.info-post-1362-2</guid>
-        <source url="https://forum.rebol.info/t/opportunistic-invisibility/1362.rss">Opportunistic Invisibility</source>
-      </item>
-      <item>
-        <title>Opportunistic Invisibility</title>
-        <dc:creator><![CDATA[hostilefork]]></dc:creator>
-        <description><![CDATA[
-            <p><a href="https://forum.rebol.info/t/issues-with-invisibles-a-truly-disappearing-comment/405/">When "Invisibles" were introduced</a>, a function was either always-invisible or always-not-invisible.  You couldn't make a function that <em>"sometimes returned an INTEGER!, and sometimes was invisible."</em></p>
-<p>Due to changes in the way the evaluator interacts with invisibles, this doesn't need to be a rule anymore.  There could be functions which decide--perhaps based on their arguments--whether to act invisibly or not.</p>
-<p>This has actually been requested.  Imagine you are dealing with something like DUMP, and you want to call out that you'd like to actually return one of the things you are dumping:</p>
-<pre><code>all [
-    ...
-    x * 10 + 20  ; want to print this expression and see its evaluated result
-    ...
-]
-
-=&gt;
-
-all [
-    ...
-    -- (x * 10 + 20)  ; now it's not participating in the ALL anymore
-    ...
+<h2>
+<a name="alas-there-were-problems-1" class="anchor" href="https://forum.rebol.info#alas-there-were-problems-1"></a>Alas, There Were Problems</h2>
+<p>One problem is that the variadic return was subject to <a href="https://forum.rebol.info/t/line-continuation-and-arity-bugs-thoughts/1965">line continuation "arity bugs"</a>.</p>
+<p>For example, imagine trying to do a return in the middle of a block of code, with the intention to not running the ensuing code:</p>
+<pre><code> foo: func [return: [&lt;invisible&gt; ...]] [
+     ... some code here ...
+     return  ; temporarily insert a return for debugging 
+     ... some more code ...
  ]
 </code></pre>
-<p><a class="mention" href="https://forum.rebol.info/u/gchiu">@gchiu</a> wanted some way of getting a printout like <code>-- (x * 10 + 20): 40</code> but also having the value still returned, without needing to name another operator.  So maybe you could mark this, e.g. with a GET-GROUP! or GET-WORD! in the DUMP dialect.</p>
-<p><em>Having this particular debug construct behave in that way may not be the best idea in the world.</em><br>
-But we don't need to technically prohibit it.</p>
-<p>This could give an interesting nuance to the difference between <strong>return</strong> and <strong>return void</strong>.  RETURN used alone could just mean literally "return and don't have any value, not even void".  It's certainly a weird idea, but it's consistent...and we could make sure you knew what you were doing by requiring some kind of invisibility in the type signature of a function before allowing a 0-arg RETURN.  Of course there could be other syntaxes, like <strong>return/invisible</strong>...which would probably fit practice better by leaving plain RETURN as returning void.</p>
-<p>There'd need to be a new syntax for saying you could return invisibles, because <code>return: []</code> as the indicator wouldn't allow you to specify it along with other types.</p>
-<h2>Worth Doing?</h2>
-<p>The main argument for opportunistic invisibles is to keep you from having to create different names for the invisible and visible forms of a function, when there could be a learnable convention for knowing which it is from the arguments alone.</p>
-<p>The more fanciful argument is creating strange execution patterns in code golf, where you have some kind of "voting" mechanism e.g. inside an ALL and program behavior emerges from things opting out.  This harkens back some to the "null opts out of logical operations" ideas from the early days of null behavior.</p>
-<p>Normalizing invisibles to the point of saying that they're what you get when you just do a plain RETURN is a fairly weird idea, but they're a pretty powerful feature that might have even more applications than yet thought of.  <strong>most free-form programming language ever created</strong> is still the goal, so... I think this deserves some consideration.</p>
+<p>A casual reader would think that would return invisibly, when it would actually <strong>return (... some more code ...)</strong>, picking up what's on the next lines.</p>
+<p>Even trickier was that invisibility itself--and especially opportunistic invisibility--had the <a href="https://forum.rebol.info/t/issues-with-invisibles-a-truly-disappearing-comment/405/9">power to wreck code structure</a> to where it was completely unpredictable.  The remedy was that invisibility could only apply in "interstitial slots", meaning that RETURN could not take an invisible as an argument.</p>
+<h2>
+<a name="new-mechanics-build-on-nihil-isotopic-empty-block-2" class="anchor" href="https://forum.rebol.info#new-mechanics-build-on-nihil-isotopic-empty-block-2"></a>New Mechanics Build On NIHIL (Isotopic Empty BLOCK!)</h2>
+<p>Years of puzzling over the quirks of how to coherently wrap and process invisible functions led to rebuilding the feature on top of meta-representations and isotopes.  You can read all about that evolution in <strong><a href="https://forum.rebol.info/t/invisibility-reviewed-through-modern-eyes/2034">"Invisibility Viewed Through Modern Eyes"</a></strong>.  <img src="https://forum.rebol.info/images/emoji/twitter/eyes.png?v=12" title=":eyes:" class="emoji" alt=":eyes:" loading="lazy" width="20" height="20"></p>
+<p>RETURN uses a special ^META parameter convention to allow it to accept the signal for invisibility as an argument.  (Under this convention it receives the quasiform <code>~[]~</code>, which is the meta of an empty unstable isotopic parameter pack used by multi-return.)</p>
+<p>So an opportunistically invisible function would now look like this:</p>
+<pre><code>&gt;&gt; vanish-if-odd: func [return: [&lt;nihil&gt; integer!] x] [
+       if even? x [return x]
+       return nihil
+   ]
+
+&gt;&gt; &lt;test&gt; vanish-if-odd 2
+== 2
+
+&gt;&gt; &lt;test&gt; vanish-if-odd 1
+== &lt;test&gt;
+</code></pre>
+<p>While such constructs can still give rise to tricky situations in code, it's powerful while being much more under control.</p>
           <p><a href="https://forum.rebol.info/t/opportunistic-invisibility/1362/1">Read full topic</a></p>
         ]]></description>
         <link>https://forum.rebol.info/t/opportunistic-invisibility/1362/1</link>

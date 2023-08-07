@@ -1,0 +1,190 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Skinning REPLACE with Red&#39;s String PARSE Hack</title>
+    <link>https://forum.rebol.info/t/skinning-replace-with-reds-string-parse-hack/2043</link>
+    <description>Red made an unusual choice with their implementation of REPLACE when you use a pattern that&#39;s a block with a string.  Instead of trying to stringify the block, [they assume it&#39;s a PARSE rule](https://github.com/red/red/blob/40096dd12ca9c3b9b47e9eaa995d425b9faf620b/tests/source/units/replace-test.red#L72):
+
+    red&gt;&gt; replace/case/all &quot;aAbbabAAAa&quot; [&quot;Ab&quot; | &quot;Aa&quot;] &quot;-&quot;
+    == &quot;a-babAA-&quot;
+
+It seems like a bad idea to make the choice to do this based on the input type.  What if you actually want to do this when the input is a BLOCK!?  I&#39;d prefer something like **parse-replace** *(or if we ever allow the same word to be a function and a module, maybe **parse.replace**)*.
+
+But honestly, I think that the answer is just to keep pushing on UPARSE itself to be slick enough that you wouldn&#39;t feel the need to reach for a shorthand like this.  It&#39;s pretty easy to write as is:
+
+    &gt;&gt; parse/case &quot;aAbbabAAAa&quot; [
+           try some thru [change [&quot;Ab&quot; | &quot;Aa&quot;] (&quot;-&quot;)]
+           return &lt;input&gt;
+       ]
+    == &quot;a-babAA-&quot;
+
+That&#39;s probably reaching the limits of how short UPARSE can do an equivalent.  Yet it&#39;s more powerful if you want to deviate or customize it, so I would reach for this more often than a limited REPLACE.
+
+## Still, Ren-C Does Backflips And Lets You Have It Your Way
+
+So you should be able to adapt REPLACE to have Red&#39;s behavior if you want it.
+
+Super easy.  Barely an inconvenience!
+
+    replace: enclose :lib.replace func [
+         f [frame!]
+         &lt;local&gt; head tail rule
+    ][
+        if not all [
+            match [text! binary!] f.target
+            block? f.pattern
+        ][
+            return do f  ; use normal REPLACE semantics
+        ]
+
+        rule: if activation? :f.replacement &#39;[  ; function generates replacement
+            head: &lt;here&gt;
+            change [f.pattern, tail: &lt;here&gt;] (
+                apply/relax :f.replacement [const head, const tail]
+            )
+        ] else &#39;[  ; replacement can be used as-is
+            change f.pattern (f.replacement)
+        ]
+
+        apply :parse [/case f.case, f.target [
+            while [thru rule] (
+                if not f.all [return f.target]
+            )
+            to &lt;end&gt;
+        ]]
+        return f.target
+    ]
+
+## It worked the first time I ran it!
+
+There&#39;s so much interesting stuff going on here that it&#39;s hard to list it all. I can quickly hit some high points.
+
+* You don&#39;t have to repeat the interface of REPLACE.  This is an ENCLOSE, so it just passes the frame built for LIB.REPLACE to the wrapper and lets it choose whether to run that frame as-is (or modified), or do its entirely own thing.
+
+* It uses the [kickass new arity-2 WHILE combinator](https://forum.rebol.info/t/the-cool-new-repurposing-of-while-in-parse/1875) to great effect...simply iterating over the replacement rule.
+
+* [Modern kickass APPLY](https://forum.rebol.info/t/apply-ii-the-revenge/1834) for PARSE lets you put arguments in any order, and does refinements by name... here we put /CASE first because it&#39;s clearer... then passing the series and the rule.
+
+* It doesn&#39;t just run isotopic actions if they are passed, but it also optionally passes them the head and tail of where in the input is matched.  If the function is arity-1, it just receives the head.  If it&#39;s arity-0, it doesn&#39;t receive either.  (This is due to APPLY&#39;s /RELAX that tolerates too many arguments.)
+
+I wrote a little demo of the fancier function invocation:
+
+    &gt;&gt; data: &quot;(real)1020(powerful)0304(magic)&quot;
+    
+    &gt;&gt; collect [
+           replace/all data [between &quot;(&quot; &quot;)&quot;] func [head tail] [
+                let item: copy/part head tail
+                keep item
+                if item = &quot;(powerful)&quot; [item: copy &quot;(ren-c)&quot;]
+                return uppercase item
+            ]
+        ]
+    == [&quot;(real)&quot; &quot;(powerful)&quot; &quot;(magic)&quot;]
+
+    &gt;&gt; data
+    == &quot;(REAL)1020(REN-C)0304(MAGIC)&quot;
+
+Not only that, but the references to the head and tail of the match are CONST...which prevents the replacement function from messing up the in-progress iteration of the series where the replace is happening.  It only achieves modification by means of what result it synthesizes.
+
+How about that?
+
+cc: @Brett, @rgchris, @johnk</description>
+    
+    <lastBuildDate>Thu, 27 Jul 2023 15:29:19 +0000</lastBuildDate>
+    <category>Show &amp; Tell</category>
+    <atom:link href="https://forum.rebol.info/t/skinning-replace-with-reds-string-parse-hack/2043.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Skinning REPLACE with Red&#39;s String PARSE Hack</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>Red made an unusual choice with their implementation of REPLACE when you use a pattern that's a block with a string.  Instead of trying to stringify the block, <a href="https://github.com/red/red/blob/40096dd12ca9c3b9b47e9eaa995d425b9faf620b/tests/source/units/replace-test.red#L72">they assume it's a PARSE rule</a>:</p>
+<pre><code>red&gt;&gt; replace/case/all "aAbbabAAAa" ["Ab" | "Aa"] "-"
+== "a-babAA-"
+</code></pre>
+<p>It seems like a bad idea to make the choice to do this based on the input type.  What if you actually want to do this when the input is a BLOCK!?  I'd prefer something like <strong>parse-replace</strong> <em>(or if we ever allow the same word to be a function and a module, maybe <strong>parse.replace</strong>)</em>.</p>
+<p>But honestly, I think that the answer is just to keep pushing on UPARSE itself to be slick enough that you wouldn't feel the need to reach for a shorthand like this.  It's pretty easy to write as is:</p>
+<pre><code>&gt;&gt; parse/case "aAbbabAAAa" [
+       try some thru [change ["Ab" | "Aa"] ("-")]
+       return &lt;input&gt;
+   ]
+== "a-babAA-"
+</code></pre>
+<p>That's probably reaching the limits of how short UPARSE can do an equivalent.  Yet it's more powerful if you want to deviate or customize it, so I would reach for this more often than a limited REPLACE.</p>
+<h2>
+<a name="still-ren-c-does-backflips-and-lets-you-have-it-your-way-1" class="anchor" href="https://forum.rebol.info#still-ren-c-does-backflips-and-lets-you-have-it-your-way-1"></a>Still, Ren-C Does Backflips And Lets You Have It Your Way</h2>
+<p>So you should be able to adapt REPLACE to have Red's behavior if you want it.</p>
+<p>Super easy.  Barely an inconvenience!</p>
+<pre><code>replace: enclose :lib.replace func [
+     f [frame!]
+     &lt;local&gt; head tail rule
+][
+    if not all [
+        match [text! binary!] f.target
+        block? f.pattern
+    ][
+        return do f  ; use normal REPLACE semantics
+    ]
+
+    rule: if activation? :f.replacement '[  ; function generates replacement
+        head: &lt;here&gt;
+        change [f.pattern, tail: &lt;here&gt;] (
+            apply/relax :f.replacement [const head, const tail]
+        )
+    ] else '[  ; replacement can be used as-is
+        change f.pattern (f.replacement)
+    ]
+
+    apply :parse [/case f.case, f.target [
+        while [thru rule] (
+            if not f.all [return f.target]
+        )
+        to &lt;end&gt;
+    ]]
+    return f.target
+]
+</code></pre>
+<h2>
+<a name="it-worked-the-first-time-i-ran-it-2" class="anchor" href="https://forum.rebol.info#it-worked-the-first-time-i-ran-it-2"></a>It worked the first time I ran it!</h2>
+<p>There's so much interesting stuff going on here that it's hard to list it all. I can quickly hit some high points.</p>
+<ul>
+<li>
+<p>You don't have to repeat the interface of REPLACE.  This is an ENCLOSE, so it just passes the frame built for LIB.REPLACE to the wrapper and lets it choose whether to run that frame as-is (or modified), or do its entirely own thing.</p>
+</li>
+<li>
+<p>It uses the <a href="https://forum.rebol.info/t/the-cool-new-repurposing-of-while-in-parse/1875">kickass new arity-2 WHILE combinator</a> to great effect...simply iterating over the replacement rule.</p>
+</li>
+<li>
+<p><a href="https://forum.rebol.info/t/apply-ii-the-revenge/1834">Modern kickass APPLY</a> for PARSE lets you put arguments in any order, and does refinements by name... here we put /CASE first because it's clearer... then passing the series and the rule.</p>
+</li>
+<li>
+<p>It doesn't just run isotopic actions if they are passed, but it also optionally passes them the head and tail of where in the input is matched.  If the function is arity-1, it just receives the head.  If it's arity-0, it doesn't receive either.  (This is due to APPLY's /RELAX that tolerates too many arguments.)</p>
+</li>
+</ul>
+<p>I wrote a little demo of the fancier function invocation:</p>
+<pre><code>&gt;&gt; data: "(real)1020(powerful)0304(magic)"
+
+&gt;&gt; collect [
+       replace/all data [between "(" ")"] func [head tail] [
+            let item: copy/part head tail
+            keep item
+            if item = "(powerful)" [item: copy "(ren-c)"]
+            return uppercase item
+        ]
+    ]
+== ["(real)" "(powerful)" "(magic)"]
+
+&gt;&gt; data
+== "(REAL)1020(REN-C)0304(MAGIC)"
+</code></pre>
+<p>Not only that, but the references to the head and tail of the match are CONST...which prevents the replacement function from messing up the in-progress iteration of the series where the replace is happening.  It only achieves modification by means of what result it synthesizes.</p>
+<p>How about that?</p>
+<p>cc: <a class="mention" href="https://forum.rebol.info/u/brett">@Brett</a>, <a class="mention" href="https://forum.rebol.info/u/rgchris">@rgchris</a>, <a class="mention" href="https://forum.rebol.info/u/johnk">@johnk</a></p>
+          <p><a href="https://forum.rebol.info/t/skinning-replace-with-reds-string-parse-hack/2043/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/skinning-replace-with-reds-string-parse-hack/2043/1</link>
+        <pubDate>Thu, 27 Jul 2023 06:23:37 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-2043-1</guid>
+        <source url="https://forum.rebol.info/t/skinning-replace-with-reds-string-parse-hack/2043.rss">Skinning REPLACE with Red&#39;s String PARSE Hack</source>
+      </item>
+  </channel>
+</rss>
