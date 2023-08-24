@@ -5,11 +5,167 @@
     <link>https://forum.rebol.info</link>
     <description>Latest posts</description>
       <item>
+        <title>MAYBE IF conditionals went back to returning NULL on Failure?</title>
+        <dc:creator><![CDATA[@hostilefork Hostile Fork]]></dc:creator>
+        <description><![CDATA[ <p>A while ago, I made void more friendly... to say that void variables could be fetched without using GET-WORD! access or other fanfare:</p>
+<pre><code>&gt;&gt; x: void
+
+&gt;&gt; append [a b c] x
+== [a b c]
+</code></pre>
+<p>My rationale was something along the lines of <em>"well, if you make a void variable, then you get what you were asking for"</em>.</p>
+<p>A little bit unsettling is how easy you can make voids if something like your branches in a CASE or SWITCH are not exhaustive.  For instance:</p>
+<pre><code>lib: switch config.platform [
+    'Windows [%windows.lib]
+    'Linux [%linux.a]
+]
+</code></pre>
+<p>You've now got LIB as VOID.  It's a little uncomfortable for me to think about how such casual creation of voids makes a thing that will go around opting out of things, but those opt-outs produce NULL via the void-in-null-out protocol, so you should find out about it eventually.  My other argument was that if you didn't want this, then you should just throw in a FAIL at the ending:</p>
+<pre><code>lib: switch config.platform [
+    'Windows [%windows.lib]
+    'Linux [%linux.a]
+    fail  ; not so hard to do this if you don't want VOIDs
+]
+</code></pre>
+<h2>
+<a name="butwhat-if-you-want-a-null-1" class="anchor" href="https://forum.rebol.info#butwhat-if-you-want-a-null-1"></a>But...What if you <em>WANT</em> a NULL?</h2>
+<p>As it happens, due to the <a href="https://forum.rebol.info/t/the-fallout-from-the-switch-fallout-feature/312">SWITCH and CASE "Fallout" Feature</a>, this also works with things like NULL:</p>
+<pre><code>lib: switch config.platform [
+    'Windows [%windows.lib]
+    'Linux [%linux.a]
+    null
+]
+</code></pre>
+<p>Basically if you give an evaluative clause with no branch, the clause drops out if it is reached.</p>
+<p>It is <em>weird</em>, but it's foreignness doesn't necessarily make it <em>bad</em>.  Though were it a CASE statement, some people might gravitate toward an always-TRUE branch as not violating the structure:</p>
+<pre><code>lib: case [
+    config.platform = 'Windows [%windows.lib]
+    config.platform = 'Linux [%linux.a]
+    true [null]
+]
+</code></pre>
+<p>But SWITCH has no equivalent, so its either the fallout feature or an ELSE (which won't please <a class="mention" href="https://forum.rebol.info/u/rgchris">@rgchris</a> and I think I prefer fallout)</p>
+<pre><code>lib: switch config.platform [
+    'Windows [%windows.lib]
+    'Linux [%linux.a]
+] else [null]
+</code></pre>
+<h2>
+<a name="or-is-this-a-job-for-a-void-to-null-operator-2" class="anchor" href="https://forum.rebol.info#or-is-this-a-job-for-a-void-to-null-operator-2"></a>Or Is This A Job For A VOID-TO-NULL Operator?</h2>
+<p>I thought maybe TRY could nullify-voids, but this creates conflation of disabling raised errors returned by branches.  e.g. what if the Windows branch tried to READ a nonexistent file?</p>
+<pre><code>lib: try switch config.platform [
+    'Windows [read %windowslibname.txt]  ; imagine raises error
+    'Linux [%linux.a]
+]
+</code></pre>
+<p>Not being able to open the file would conflate with not taking a branch--no good.  This shows the use of TRY to convert voids to nulls is clearly a poor idea, and that needs to be a special purpose function.</p>
+<p>So TRY is off the table at this point; it's an ignore-raised-error-and-continue.</p>
+<p>MAYBE makes more sense as NULL-TO-VOID and serves well in that purpose.</p>
+<p>DEVOID is a cryptic name that was actually proposed to turn VOIDs to NIHILs for vaporization in situations that didn't naturally vaporize voids:</p>
+<pre><code>&gt;&gt; 1 + 2 void
+
+&gt;&gt; 1 + 2 devoid void
+== 3
+</code></pre>
+<p>So I will call this something like NULLIFY-IF-VOID until a better idea comes along.  Clearly not great for everyday use.</p>
+<h2>
+<a name="or-is-this-cold-feet-on-void-from-failed-conditionals-3" class="anchor" href="https://forum.rebol.info#or-is-this-cold-feet-on-void-from-failed-conditionals-3"></a>Or... Is This Cold Feet on Void From Failed Conditionals?</h2>
+<p>Production of voids from failed conditionals was motivated almost entirely by wanting IFs to vanish quietly when they don't take their branch.  At first it was just COMPOSE:</p>
+<pre><code> &gt;&gt; compose [&lt;a&gt; (if false [&lt;b&gt;]) &lt;c&gt;]
+ == [&lt;a&gt; &lt;b&gt;]
+</code></pre>
+<p>But this spread to things like REDUCE, ANY, ALL, etc.</p>
+<pre><code>&gt;&gt; reduce [1 + 2 if false [30] 100 + 200]
+== [3 300]
+
+&gt;&gt; all [&lt;a&gt; if false [&lt;b&gt;] if true [&lt;c&gt;]]
+== &lt;c&gt;
+</code></pre>
+<p>In terms of composability and convenience, it's hard for me to think this isn't the right answer.  It feels like they get mutilated if you have to throw in a NULL-TO-VOID (what I've called "MAYBE")</p>
+<pre><code>&gt;&gt; compose [&lt;a&gt; (maybe if false [&lt;b&gt;]) &lt;c&gt;]
+== [&lt;a&gt; &lt;b&gt;]
+
+&gt;&gt; reduce [1 + 2 maybe if false [30] 100 + 200]
+== [3 300]
+
+&gt;&gt; all [&lt;a&gt; maybe if false [&lt;b&gt;] maybe if true [&lt;c&gt;]]
+== &lt;c&gt;
+</code></pre>
+<p>But perhaps it's only a good answer for IF, because it has one branch and you're very aware that it takes its branch or it doesn't?  Maybe twistier constructs like SWITCH and CASE should be more conservative and evaluate to NULL when a branch isn't taken...?  <img src="https://forum.rebol.info/images/emoji/twitter/face_with_raised_eyebrow.png?v=12" title=":face_with_raised_eyebrow:" class="emoji" alt=":face_with_raised_eyebrow:" loading="lazy" width="20" height="20"></p>
+<p>I don't like it for a couple of reasons, but a big one is that it feels like it throws a wrench into equivalencies.  e.g. I'd like:</p>
+<pre><code> unmeta* any [
+     meta* if condition1 [branch1]
+     meta* if condition2 [branch2]
+ ]
+</code></pre>
+<p>...to be the same as:</p>
+<pre><code>case [
+   condition1 [branch1]
+   condition2 [branch2]
+]
+</code></pre>
+<p>Having transformations which relate constructs together means people can build on reliable parts.  The response of ANY when all expressions void out is to give a VOID, and that's by design.</p>
+<p>So, hmm.</p>
+<h2>
+<a name="or-are-void-variables-the-problem-4" class="anchor" href="https://forum.rebol.info#or-are-void-variables-the-problem-4"></a>...Or Are Void Variables The Problem?</h2>
+<p>There could be some kind of rule, that variables are not allowed to hold voids...and if you assign void to a variable it becomes null.</p>
+<pre><code> &gt;&gt; void? x: if false [&lt;a&gt;]
+ == ~true~  ; isotope
+
+ &gt;&gt; x
+ == ~null~  ; isotope
+</code></pre>
+<p>Proposals along these lines have been entertained before.  I don't think I like it, and I feel like void variables should be legal.</p>
+<h2>
+<a name="i-think-im-committed-to-untaken-branches-as-void-5" class="anchor" href="https://forum.rebol.info#i-think-im-committed-to-untaken-branches-as-void-5"></a>I Think I'm Committed To Untaken Branches As VOID...</h2>
+<p>But as with most things here, I think the fun is letting people play language designer and making their own choices.</p>
+<p>If pure VOID means no branch taken, you can pipe the constructs:</p>
+<pre><code>case: chain [:case, :void-to-null]
+</code></pre>
+<p>And that's it.  You could choose to do this for CASE and SWITCH so they'd need a MAYBE to vanish quietly, and leave IF alone.</p>
+<p>But it's important to look at all the angles...!</p> ]]></description>
+        <link>https://forum.rebol.info/t/maybe-if-conditionals-went-back-to-returning-null-on-failure/2047#post_1</link>
+        <pubDate>Mon, 14 Aug 2023 17:08:18 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-6670</guid>
+      </item>
+      <item>
+        <title>TRY PARSE + PARSE EXCEPT : *FAIL* On Mismatch</title>
+        <dc:creator><![CDATA[@hostilefork Hostile Fork]]></dc:creator>
+        <description><![CDATA[ <p>Looking at a parse rule in <a class="mention" href="https://forum.rebol.info/u/gchiu">@gchiu</a>'s Pharmac project, I saw this:</p>
+<pre><code>; get the SAnnnn part of the pdf name
+;
+root: parse pdfname [between &lt;here&gt; ".pdf"]
+</code></pre>
+<p><em>It's a clean, casual usage of the value-synthesizing abilities of UPARSE...</em></p>
+<p><em>...and I think that cleanliness should offer you safety by default.</em></p>
+<p>So it seems that if the filename is <strong><code>aspirin.pdf.zip</code></strong> you should get an error raised to draw your attention to the unexpected circumstance.</p>
+<p>If you didn't want an error, you have a lot of options to craft your rules</p>
+<pre><code>root: parse pdfname [between &lt;here&gt; ".pdf" elide ...]
+
+parse pdfname [root: between &lt;here&gt; ".pdf" ...]
+
+parse pdfname [root: between &lt;here&gt; ".pdf" to &lt;end&gt;]
+
+root: parse pdfname [between &lt;here&gt; ".pdf" &lt;end&gt; | accept (#badfile)]
+</code></pre>
+<p>etc.  UPARSE dances and sings.  <img src="https://forum.rebol.info/images/emoji/twitter/man_dancing.png?v=12" title=":man_dancing:" class="emoji" alt=":man_dancing:" loading="lazy" width="20" height="20"> <img src="https://forum.rebol.info/images/emoji/twitter/studio_microphone.png?v=12" title=":studio_microphone:" class="emoji" alt=":studio_microphone:" loading="lazy" width="20" height="20"></p>
+<p>Or if you just wanted it to ignore success or failure in a "classic" way, use TRY:</p>
+<pre><code>root: try parse pdfname [between &lt;here&gt; ".pdf"]
+</code></pre>
+<p><em>That seems a good enough way to ask for the bad enough thing.</em>  It will give you a NULL if there's no ".pdf" anywhere, and what's before .pdf for anything up-to-and-including <strong><code>something.pdfoobar</code></strong></p>
+<h2>
+<a name="i-say-again-too-good-not-to-be-the-default-1" class="anchor" href="https://forum.rebol.info#i-say-again-too-good-not-to-be-the-default-1"></a>I Say Again: "Too Good Not To Be The Default"</h2>
+<p>...but it's a pretty big change, which will take some figuring.</p> ]]></description>
+        <link>https://forum.rebol.info/t/try-parse-parse-except-fail-on-mismatch/1924#post_2</link>
+        <pubDate>Fri, 11 Aug 2023 14:32:37 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-6669</guid>
+      </item>
+      <item>
         <title>Console Treatment of VOID vs. NONE (isotopic void)</title>
         <dc:creator><![CDATA[@hostilefork Hostile Fork]]></dc:creator>
         <description><![CDATA[ <p>Rebol2 and Red both have a console property that when the console sees an UNSET!, it prints nothing:</p>
 <pre><code>&gt;&gt; block: reduce [&lt;a&gt; #[unset!] &lt;b&gt;]
-== [&lt;a&gt; unset &lt;b&gt;]
+== [&lt;a&gt; unset &lt;b&gt;]  ; bad rendering, conflates #[unset!] with the word `unset`
 
 &gt;&gt; first block
 == &lt;a&gt;
@@ -53,14 +209,15 @@ If PRINT returned void...
 <pre><code>&gt;&gt; print "If PRINT returned nihil"
 If PRINT returned nihil
 
-&gt;&gt; append [a b c] "If PRINT returned void..."
-If PRINT returned void...
+&gt;&gt; append [a b c] "If PRINT returned nihil"
+If PRINT returned nihil
 ** Error: APPEND is missing its VALUE argument
 
-&gt;&gt; 1 + 2 print "If PRINT returned nihil..."
+&gt;&gt; 1 + 2 print "If PRINT returned nihil"
+If PRINT returned nihil
 == 3
 </code></pre>
-<p>So returning NONE makes the most sense to me...it has the right amount of ornery-ness to my tastes:</p>
+<p>So returning NONE mechanically feels like it makes the most sense...it has the right amount of ornery-ness:</p>
 <pre><code>&gt;&gt; print "Mechanically this works best"
 Mechanically this works best
 == ~  ; isotope
@@ -1292,186 +1449,6 @@ branch
         <link>https://forum.rebol.info/t/the-handling-of-null-and-void-in-uparse/2023#post_2</link>
         <pubDate>Fri, 23 Jun 2023 01:00:54 +0000</pubDate>
         <guid isPermaLink="false">forum.rebol.info-post-6621</guid>
-      </item>
-      <item>
-        <title>Shades of Distinction In Non-Valued Intents</title>
-        <dc:creator><![CDATA[@hostilefork Hostile Fork]]></dc:creator>
-        <description><![CDATA[ <aside class="quote no-group quote-modified" data-username="hostilefork" data-post="1" data-topic="1604">
-<div class="title">
-<div class="quote-controls"></div>
-<img loading="lazy" alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/40/26_2.png" class="avatar"> hostilefork:</div>
-<blockquote>
-<p>Void variables were deemed to be something it would be undesirable to have be "too friendly". So they were slated to be mean on WORD!-access...</p>
-<pre><code>[2]  &gt;&gt; void-value
-     ** Error: VOID-VALUE is void (use GET-WORD! or GET/ANY)
-
-     &gt;&gt; append [a b] :void-value
-     == [a b]
-</code></pre>
-</blockquote>
-</aside>
-<p><strong>So... I'm questioning the necessity of making accesses of void variables require a GET-WORD!.</strong></p>
-<p>There's a certain amount of historical bias against "liberal voids" that dates back to the old-timey havoc that voids could wreak on code structure.  They'd just skip the evaluator ahead:</p>
-<pre><code>old-ren-c&gt;&gt; append [a b c] void 'd
-== [a b c d]
-</code></pre>
-<p>Those were the days when it had no way to represent in an object whatsoever.  A bit later, a voided variable meant an <em>unset</em> variable...so it couldn't be too easy to read them.  <a href="https://forum.rebol.info/t/how-became-quoted-void-and-became-quasi-void/1915/5">That was supplanted with the idea that unset variables are actually <em>void isotopes</em>,</a> completely distinct.</p>
-<p>Today voids are meta-representible with a lone apostrophe:</p>
-<pre><code>&gt;&gt; make object! [
-    a: if false [10]
-    b: void
-    c: '
- ]
- == make object! [
-     a: '
-     b: '
-     c: '
- ]
-</code></pre>
-<p>The main point of lingering concern is that void variables might be "too easy to make", and if you assign void to a variable you might wind up opting out of things you didn't mean to opt out of.</p>
-<pre><code>var: case [
-    conditionA [...]
-    conditionB [...]
-]  ; imagine none of the cases run
-
-append [a b c] var  ; is this too easy to be a no-op?
-</code></pre>
-<p>But is that fear really justified, when you could have written:</p>
-<pre><code>append [a b c] case [
-    conditionA [...]
-    conditionB [...]
-]  ; again, imagine none of the cases run, no-op by design
-</code></pre>
-<p><a href="https://forum.rebol.info/t/the-void-in-null-out-protocol/1880">The whole idea of void-in-null-out</a> is designed to limit the issues of error locality that historical "none propagation" had.  The odds of protecting someone are probably lower than interfering with legitimate void intent.</p>
-<p>Some of the most "fearsome" motivating cases are no longer applicable.  For instance, REDUCE was historically used to assign variables itemwise...and a vanishing expression could wreak havoc:</p>
-<pre><code> set [a b c] reduce [expr1 expr2 expr3]
-</code></pre>
-<p>Modern ideas like PACK don't vaporize voids... they preserve them in a meta state:</p>
-<pre><code> &gt;&gt; meta pack [1 void 3]
- == ~['1 ' '3]~
-</code></pre>
-<p><a href="https://forum.rebol.info/t/a-lot-to-unpack-replacing-the-set-of-reduce-block-idiom/1634/10">And the SET-BLOCK! and SET-WORD! unpacking logic is much more clever!</a></p>
-<p>By and large people lobbied for the convenience of REDUCE being able to splice and evaporate expressions.  Cases where an exact number of expressions with no splices or evaporations are needed are less common, and could be handled with REDUCE/EXACT or other routine.</p>
-<p><strong>And if UPARSE became void-friendly it would help with the issue of <a href="https://forum.rebol.info/t/the-handling-of-null-in-uparse/2023">dealing with NULL (and void) in UPARSE</a>.</strong>  Null rules would error, void rules would bypass without advancing the input.</p>
-<p>While you can't skip voids as arguments, interstitial voids do still cause some oddness in the evaluator:</p>
-<pre><code>&gt;&gt; x: if 1 &gt; 2 [print "not run"]
-
-&gt;&gt; 10 + 20 x
-== 30
-</code></pre>
-<p>But this oddness is really just kind of an epicycle of the rest of the oddness of what voids do inside COMPOSE or REDUCE or anything else.  Are these examples any scarier than one another?</p>
-<pre><code> &gt;&gt; do [10 + 20 x]
- == 30
-
- &gt;&gt; reduce [1 + 2 x 10 + 20]
- == [3 30]
-</code></pre>
-<p><strong>Considered in total, I think it's time to be more accepting of the fluidity and power of void variables.</strong>  If you don't like them, don't make them.</p>
-<p><em>(This might mean making constructs like CASE and SWITCH yield null when no branches are taken?  Or that could be a choice people make in their own base library.. to tweak voiding control structures to be nulling when no branches taken... so you'd have to say <strong>maybe case [...]</strong> to get voiding behavior)</em></p> ]]></description>
-        <link>https://forum.rebol.info/t/shades-of-distinction-in-non-valued-intents/1604#post_4</link>
-        <pubDate>Thu, 22 Jun 2023 23:51:19 +0000</pubDate>
-        <guid isPermaLink="false">forum.rebol.info-post-6620</guid>
-      </item>
-      <item>
-        <title>Working With Truthy BLANK! (in SPLIT-PATH Tests)</title>
-        <dc:creator><![CDATA[@hostilefork Hostile Fork]]></dc:creator>
-        <description><![CDATA[ <p>As a further note, <a href="https://github.com/red/red/issues/5024">I borrowed the tests for SPLIT-PATH from a Red issue</a>.</p>
-<p><em>And I want to say how bad historical Rebol/Red SPLIT-PATH seems to be!</em></p>
-<p>Instead of giving you a directory and an optional file, you get the last directory fragment if there is no file part:</p>
-<pre><code>rebol2&gt;&gt; split-path %/c/rebol/tools/test/test.r
-== [%/c/rebol/tools/test/ %test.r]  ; seems reasonable...
-
-rebol2&gt;&gt; split-path %/c/rebol/tools/test/
-== [%/c/rebol/tools/ %test/]  ; what?
-
-rebol2&gt;&gt; split-path http://
-== [http:/ %/]  ; seriously?
-</code></pre>
-<p><a href="https://github.com/red/red/issues/5024#issuecomment-1006032330">hiiamboris sums up my opinion</a>, which is that you should never get a directory back for the file part.</p>
-<p>So that is the Ren-C behavior:</p>
-<pre><code>&gt;&gt; [file dir]: split-path %/c/rebol/tools/test/
-== ~null~  ; isotope
-
-&gt;&gt; file
-== ~null~  ; isotope
-
-&gt;&gt; dir
-== %/c/rebol/tools/test/
-</code></pre>
-<p>It uses multiple return values instead of returning a block.  So there had to be a decision about which would be the primary and secondary results.  It's a tough call, but I felt like splitting out the filename as the first result was probably the better option.  You can of course use "circling" to get the directory instead without having to name a variable:</p>
-<pre><code>&gt;&gt; [_ @]: split-path %/c/rebol/tools/test/
-== %/c/rebol/tools/test/
-</code></pre>
-<p>There was some debate about whether a null (none) signifier was better than coming back with an empty file like <strong>%""</strong> to help with joining the parts back together.  Historical #[none] doesn't have the voidability through MAYBE and just tends to create garbage.  Oldes complains about having to remember to write the likes of <strong>any [file %""]</strong> to work around the problems:</p>
-<pre><code>rebol2&gt;&gt; join %/c/rebol/tools/test/ none
-== %/c/rebol/tools/test/none  ; d'oh
-</code></pre>
-<p>But Ren-C has what I believe is just the right mix of caution on this... giving you a null that can be tested for truthiness, as well as alerting you to the absence if you try to use it...all while being able to easily MAYBE it into a void that can systemically act like emptiness:</p>
-<pre><code>&gt;&gt; [file dir]: split-path %/c/rebol/tools/test/
-
-&gt;&gt; combined: join dir file
-** Script Error: Invalid use of ~null~ isotope
-
-&gt;&gt; combined: join dir maybe file
-== %/c/rebol/tools/test/
-
-&gt;&gt; file: join file %".temp"
-** Error: JOIN does not allow null for its BASE argument
-</code></pre> ]]></description>
-        <link>https://forum.rebol.info/t/working-with-truthy-blank-in-split-path-tests/2007#post_2</link>
-        <pubDate>Thu, 22 Jun 2023 20:29:45 +0000</pubDate>
-        <guid isPermaLink="false">forum.rebol.info-post-6619</guid>
-      </item>
-      <item>
-        <title>A Lot To UNPACK: (Replacing the SET of REDUCE BLOCK! Idiom)</title>
-        <dc:creator><![CDATA[@hostilefork Hostile Fork]]></dc:creator>
-        <description><![CDATA[ <aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="1634">
-<div class="title">
-<div class="quote-controls"></div>
-<img loading="lazy" alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/40/26_2.png" class="avatar"> hostilefork:</div>
-<blockquote>
-<p>We can prototype the behavior by making PACK quote a SET-WORD! or SET-BLOCK! on its left, and combine that with the unpacking.</p>
-</blockquote>
-</aside>
-<p>Circa 2023 we now have a PACK! representation simply as isotopic blocks, with the "unpacking" done by the internal implementation of SET-BLOCK!</p>
-<pre><code>&gt;&gt; pack [1 + 2 10 + 20]
-; first in pack of length 2
-== 3
-
-&gt;&gt; a: pack [1 + 2 10 + 20]
-== 3
-
-&gt;&gt; [b c]: pack [1 + 2 10 + 20]
-== 3
-
-&gt;&gt; b
-== 3
-
-&gt;&gt; c
-== 30
-</code></pre>
-<p>It's much more freeform, and can be META'd and UNMETA'd into a quasiform...allowing you to put as much distance between the generation of the pack and the unpacking done by SET-WORD! or SET-BLOCK!</p>
-<pre><code>&gt;&gt; [b c]: (print "No tight coupling of PACK with SET-BLOCK!", pack [1 + 2 10 + 20])
-== 3
-
-&gt;&gt; c
-== 30
-
-&gt;&gt; meta pack [1 + 2 10 + 20]
-== ~['3 '30]~
-</code></pre>
-<p><strong>Hence the PACK! representation now underlies the entirety of multi-return mechanics.</strong>  <a href="https://forum.rebol.info/t/the-history-of-multi-return-in-ren-c/1134/12">This allows wrapping and composability options for multi-return that were not possible with the early implementations.</a></p>
-<p>Due to its generality you can do interesting things that don't involve making a multi-return function at all, such as having some branches of a CASE return packs while others don't:  <em>(The /B indicates optionality, and you're okay with no value in that slot to unpack.)</em></p>
-<pre><code>[a /b]: case [
-    conditionA [1]
-    conditionB [pack [2 3]]
-    conditionC [4]
-]
-</code></pre>
-<p>Neat though all of this is, questions are raised about <a href="https://forum.rebol.info/t/unstable-isotope-conundrums/2033">which constructs must--by necessity--decay packs to their first value</a>.  So there are still dragons to be slain here.</p> ]]></description>
-        <link>https://forum.rebol.info/t/a-lot-to-unpack-replacing-the-set-of-reduce-block-idiom/1634#post_10</link>
-        <pubDate>Thu, 22 Jun 2023 17:16:16 +0000</pubDate>
-        <guid isPermaLink="false">forum.rebol.info-post-6618</guid>
       </item>
       <item>
         <title>Issues with &quot;Invisibles&quot;: a truly disappearing COMMENT</title>

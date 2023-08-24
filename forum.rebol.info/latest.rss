@@ -5,8 +5,141 @@
     <link>https://forum.rebol.info/latest</link>
     <description>Latest topics</description>
     
-      <lastBuildDate>Thu, 03 Aug 2023 22:48:43 +0000</lastBuildDate>
+      <lastBuildDate>Mon, 14 Aug 2023 17:08:18 +0000</lastBuildDate>
       <atom:link href="https://forum.rebol.info/latest.rss" rel="self" type="application/rss+xml" />
+        <item>
+          <title>MAYBE IF conditionals went back to returning NULL on Failure?</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Semantics</category>
+          <description><![CDATA[
+            <p>A while ago, I made void more friendly... to say that void variables could be fetched without using GET-WORD! access or other fanfare:</p>
+<pre><code>&gt;&gt; x: void
+
+&gt;&gt; append [a b c] x
+== [a b c]
+</code></pre>
+<p>My rationale was something along the lines of <em>"well, if you make a void variable, then you get what you were asking for"</em>.</p>
+<p>A little bit unsettling is how easy you can make voids if something like your branches in a CASE or SWITCH are not exhaustive.  For instance:</p>
+<pre><code>lib: switch config.platform [
+    'Windows [%windows.lib]
+    'Linux [%linux.a]
+]
+</code></pre>
+<p>You've now got LIB as VOID.  It's a little uncomfortable for me to think about how such casual creation of voids makes a thing that will go around opting out of things, but those opt-outs produce NULL via the void-in-null-out protocol, so you should find out about it eventually.  My other argument was that if you didn't want this, then you should just throw in a FAIL at the ending:</p>
+<pre><code>lib: switch config.platform [
+    'Windows [%windows.lib]
+    'Linux [%linux.a]
+    fail  ; not so hard to do this if you don't want VOIDs
+]
+</code></pre>
+<h2>
+<a name="butwhat-if-you-want-a-null-1" class="anchor" href="https://forum.rebol.info#butwhat-if-you-want-a-null-1"></a>But...What if you <em>WANT</em> a NULL?</h2>
+<p>As it happens, due to the <a href="https://forum.rebol.info/t/the-fallout-from-the-switch-fallout-feature/312">SWITCH and CASE "Fallout" Feature</a>, this also works with things like NULL:</p>
+<pre><code>lib: switch config.platform [
+    'Windows [%windows.lib]
+    'Linux [%linux.a]
+    null
+]
+</code></pre>
+<p>Basically if you give an evaluative clause with no branch, the clause drops out if it is reached.</p>
+<p>It is <em>weird</em>, but it's foreignness doesn't necessarily make it <em>bad</em>.  Though were it a CASE statement, some people might gravitate toward an always-TRUE branch as not violating the structure:</p>
+<pre><code>lib: case [
+    config.platform = 'Windows [%windows.lib]
+    config.platform = 'Linux [%linux.a]
+    true [null]
+]
+</code></pre>
+<p>But SWITCH has no equivalent, so its either the fallout feature or an ELSE (which won't please <a class="mention" href="https://forum.rebol.info/u/rgchris">@rgchris</a> and I think I prefer fallout)</p>
+<pre><code>lib: switch config.platform [
+    'Windows [%windows.lib]
+    'Linux [%linux.a]
+] else [null]
+</code></pre>
+<h2>
+<a name="or-is-this-a-job-for-a-void-to-null-operator-2" class="anchor" href="https://forum.rebol.info#or-is-this-a-job-for-a-void-to-null-operator-2"></a>Or Is This A Job For A VOID-TO-NULL Operator?</h2>
+<p>I thought maybe TRY could nullify-voids, but this creates conflation of disabling raised errors returned by branches.  e.g. what if the Windows branch tried to READ a nonexistent file?</p>
+<pre><code>lib: try switch config.platform [
+    'Windows [read %windowslibname.txt]  ; imagine raises error
+    'Linux [%linux.a]
+]
+</code></pre>
+<p>Not being able to open the file would conflate with not taking a branch--no good.  This shows the use of TRY to convert voids to nulls is clearly a poor idea, and that needs to be a special purpose function.</p>
+<p>So TRY is off the table at this point; it's an ignore-raised-error-and-continue.</p>
+<p>MAYBE makes more sense as NULL-TO-VOID and serves well in that purpose.</p>
+<p>DEVOID is a cryptic name that was actually proposed to turn VOIDs to NIHILs for vaporization in situations that didn't naturally vaporize voids:</p>
+<pre><code>&gt;&gt; 1 + 2 void
+
+&gt;&gt; 1 + 2 devoid void
+== 3
+</code></pre>
+<p>So I will call this something like NULLIFY-IF-VOID until a better idea comes along.  Clearly not great for everyday use.</p>
+<h2>
+<a name="or-is-this-cold-feet-on-void-from-failed-conditionals-3" class="anchor" href="https://forum.rebol.info#or-is-this-cold-feet-on-void-from-failed-conditionals-3"></a>Or... Is This Cold Feet on Void From Failed Conditionals?</h2>
+<p>Production of voids from failed conditionals was motivated almost entirely by wanting IFs to vanish quietly when they don't take their branch.  At first it was just COMPOSE:</p>
+<pre><code> &gt;&gt; compose [&lt;a&gt; (if false [&lt;b&gt;]) &lt;c&gt;]
+ == [&lt;a&gt; &lt;b&gt;]
+</code></pre>
+<p>But this spread to things like REDUCE, ANY, ALL, etc.</p>
+<pre><code>&gt;&gt; reduce [1 + 2 if false [30] 100 + 200]
+== [3 300]
+
+&gt;&gt; all [&lt;a&gt; if false [&lt;b&gt;] if true [&lt;c&gt;]]
+== &lt;c&gt;
+</code></pre>
+<p>In terms of composability and convenience, it's hard for me to think this isn't the right answer.  It feels like they get mutilated if you have to throw in a NULL-TO-VOID (what I've called "MAYBE")</p>
+<pre><code>&gt;&gt; compose [&lt;a&gt; (maybe if false [&lt;b&gt;]) &lt;c&gt;]
+== [&lt;a&gt; &lt;b&gt;]
+
+&gt;&gt; reduce [1 + 2 maybe if false [30] 100 + 200]
+== [3 300]
+
+&gt;&gt; all [&lt;a&gt; maybe if false [&lt;b&gt;] maybe if true [&lt;c&gt;]]
+== &lt;c&gt;
+</code></pre>
+<p>But perhaps it's only a good answer for IF, because it has one branch and you're very aware that it takes its branch or it doesn't?  Maybe twistier constructs like SWITCH and CASE should be more conservative and evaluate to NULL when a branch isn't taken...?  <img src="https://forum.rebol.info/images/emoji/twitter/face_with_raised_eyebrow.png?v=12" title=":face_with_raised_eyebrow:" class="emoji" alt=":face_with_raised_eyebrow:" loading="lazy" width="20" height="20"></p>
+<p>I don't like it for a couple of reasons, but a big one is that it feels like it throws a wrench into equivalencies.  e.g. I'd like:</p>
+<pre><code> unmeta* any [
+     meta* if condition1 [branch1]
+     meta* if condition2 [branch2]
+ ]
+</code></pre>
+<p>...to be the same as:</p>
+<pre><code>case [
+   condition1 [branch1]
+   condition2 [branch2]
+]
+</code></pre>
+<p>Having transformations which relate constructs together means people can build on reliable parts.  The response of ANY when all expressions void out is to give a VOID, and that's by design.</p>
+<p>So, hmm.</p>
+<h2>
+<a name="or-are-void-variables-the-problem-4" class="anchor" href="https://forum.rebol.info#or-are-void-variables-the-problem-4"></a>...Or Are Void Variables The Problem?</h2>
+<p>There could be some kind of rule, that variables are not allowed to hold voids...and if you assign void to a variable it becomes null.</p>
+<pre><code> &gt;&gt; void? x: if false [&lt;a&gt;]
+ == ~true~  ; isotope
+
+ &gt;&gt; x
+ == ~null~  ; isotope
+</code></pre>
+<p>Proposals along these lines have been entertained before.  I don't think I like it, and I feel like void variables should be legal.</p>
+<h2>
+<a name="i-think-im-committed-to-untaken-branches-as-void-5" class="anchor" href="https://forum.rebol.info#i-think-im-committed-to-untaken-branches-as-void-5"></a>I Think I'm Committed To Untaken Branches As VOID...</h2>
+<p>But as with most things here, I think the fun is letting people play language designer and making their own choices.</p>
+<p>If pure VOID means no branch taken, you can pipe the constructs:</p>
+<pre><code>case: chain [:case, :void-to-null]
+</code></pre>
+<p>And that's it.  You could choose to do this for CASE and SWITCH so they'd need a MAYBE to vanish quietly, and leave IF alone.</p>
+<p>But it's important to look at all the angles...!</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/maybe-if-conditionals-went-back-to-returning-null-on-failure/2047">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/maybe-if-conditionals-went-back-to-returning-null-on-failure/2047</link>
+          <pubDate>Mon, 14 Aug 2023 17:08:18 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2047</guid>
+          <source url="https://forum.rebol.info/t/maybe-if-conditionals-went-back-to-returning-null-on-failure/2047.rss">MAYBE IF conditionals went back to returning NULL on Failure?</source>
+        </item>
         <item>
           <title>Console Treatment of VOID vs. NONE (isotopic void)</title>
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
@@ -14,7 +147,7 @@
           <description><![CDATA[
             <p>Rebol2 and Red both have a console property that when the console sees an UNSET!, it prints nothing:</p>
 <pre><code>&gt;&gt; block: reduce [&lt;a&gt; #[unset!] &lt;b&gt;]
-== [&lt;a&gt; unset &lt;b&gt;]
+== [&lt;a&gt; unset &lt;b&gt;]  ; bad rendering, conflates #[unset!] with the word `unset`
 
 &gt;&gt; first block
 == &lt;a&gt;
@@ -58,14 +191,15 @@ If PRINT returned void...
 <pre><code>&gt;&gt; print "If PRINT returned nihil"
 If PRINT returned nihil
 
-&gt;&gt; append [a b c] "If PRINT returned void..."
-If PRINT returned void...
+&gt;&gt; append [a b c] "If PRINT returned nihil"
+If PRINT returned nihil
 ** Error: APPEND is missing its VALUE argument
 
-&gt;&gt; 1 + 2 print "If PRINT returned nihil..."
+&gt;&gt; 1 + 2 print "If PRINT returned nihil"
+If PRINT returned nihil
 == 3
 </code></pre>
-<p>So returning NONE makes the most sense to me...it has the right amount of ornery-ness to my tastes:</p>
+<p>So returning NONE mechanically feels like it makes the most sense...it has the right amount of ornery-ness:</p>
 <pre><code>&gt;&gt; print "Mechanically this works best"
 Mechanically this works best
 == ~  ; isotope
@@ -2038,39 +2172,6 @@ John</p>
           <discourse:topicArchived>No</discourse:topicArchived>
           <guid isPermaLink="false">forum.rebol.info-topic-1999</guid>
           <source url="https://forum.rebol.info/t/rebolbot-future/1999.rss">Rebolbot future</source>
-        </item>
-        <item>
-          <title>SPLIT Semantics</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Semantics</category>
-          <description><![CDATA[
-            <p><a href="https://gitter.im/red/red?at=63523097f00b697fec501c7a">On Red Gitter</a>, it was discussed "which of the following is 'correct'":</p>
-<pre><code>Red&gt; split "" ","
-== [""]
-
-R3&gt; split "" ","
-== []
-</code></pre>
-<p>Rebolek thinks R3 is right.  Boris says:</p>
-<blockquote>
-<p>I don't think there's a correct answer, just choices. I prefer the Red version because:<br>
-it strictly follows the rule: `number-of-segments = 1 + number-of-delimiters", no exceptions, so it's easier to reason about</p>
-<p>it should be able thus to preserve the type in case one wants to rejoin it later (that it doesn't is a bug, try split %"" ",")</p>
-</blockquote>
-<p>So there's a couple of ways to look at it.</p>
-<p>But I have a philosophy about these things where I want edge cases to be "noisy", because usually they require special handling.  I might even say:</p>
-<pre><code>&gt;&gt; split "" ","
-== ~null~  ; isotope</code></pre>
-            <p><small>1 post - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/split-semantics/1998">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/split-semantics/1998</link>
-          <pubDate>Thu, 22 Dec 2022 04:04:52 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-1998</guid>
-          <source url="https://forum.rebol.info/t/split-semantics/1998.rss">SPLIT Semantics</source>
         </item>
   </channel>
 </rss>
