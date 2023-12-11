@@ -5,8 +5,109 @@
     <link>https://forum.rebol.info/c/development/debugger/34</link>
     <description>Topics in the &#39;Debugger&#39; category It&#39;s best to walk before you run!</description>
     
-      <lastBuildDate>Tue, 24 Jan 2023 21:57:46 +0000</lastBuildDate>
+      <lastBuildDate>Tue, 21 Nov 2023 22:52:50 +0000</lastBuildDate>
       <atom:link href="https://forum.rebol.info/c/development/debugger/34.rss" rel="self" type="application/rss+xml" />
+        <item>
+          <title>Why can&#39;t you PROTECT individual cells in an array?</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Debugger</category>
+          <description><![CDATA[
+            <p>You can PROTECT a variable:</p>
+<pre><code>&gt;&gt; x: 10
+
+&gt;&gt; protect 'x
+
+&gt;&gt; x: 20
+** Access Error: variable x locked by PROTECT (see UNPROTECT)
+</code></pre>
+<p>And you can PROTECT an array pointed to by a variable:</p>
+<pre><code>&gt;&gt; array: [&lt;a&gt; b #c]
+
+&gt;&gt; protect array
+
+&gt;&gt; append array ["d"]
+** Access Error: series read-only due to PROTECT (see UNPROTECT)
+
+&gt;&gt; array: [&lt;q&gt; r #s]  ; variable holding array not protected
+
+&gt;&gt; array
+== [&lt;q&gt; r #s]
+</code></pre>
+<p>...but you can't PROTECT a cell resident inside an array:</p>
+<pre><code>&gt;&gt; array: [&lt;a&gt; b #c]
+
+&gt;&gt; protect 'array.2  ; this doesn't work
+
+&gt;&gt; array.2: "z"
+; you'd expect an error here if it did work
+
+&gt;&gt; array.3: 1020
+; you'd expect no error here if it did work
+</code></pre>
+<p>R3-Alpha didn't have the feature, and Ren-C hasn't added it.  Why?</p>
+<h2>
+<a name="making-this-work-would-add-significant-complexity-1" class="anchor" href="https://forum.rebol.info#making-this-work-would-add-significant-complexity-1"></a>Making This Work Would Add Significant Complexity</h2>
+<p>Your first thought (well, mine) would be that this is about efficiency.  e.g. if you were going to write something like <strong>clear block</strong>, the existence of PROTECT'd cells inside that block would mean you'd have to visit all the cells before knowing if it was okay to clear it.  Other code that already has to visit the cells in order to copy them would still pay a little more too... like <strong>take/part</strong>.</p>
+<p><em>But that's not where the real problem is.</em>  Paying a little more for mutating operations is only slightly relevant.  The real problem has to do with a pointer to a cell not being able to answer the question of its own mutability--since it can't speak for the container's protection status.</p>
+<p>In more detail:</p>
+<p>Ren-C's clever management of immutability uses the C <code>const</code> designator.  What the const means on a <em>series</em> is that the series may be mutable, but hasn't had a runtime check yet to flip it over to being readable.  And what the const means on <em>cells</em> is that the cell was <em>extracted</em> from a series that may be mutable, but hadn't had the runtime check applied.</p>
+<p>This way, casual code that just messes around reading cells and series can be written easily, using const pointers and not paying for runtime checks.  And you can be certain of not skipping the runtime checks in the places where you want to get mutable access.  (R3-Alpha was full of bugs from "just forgetting".)</p>
+<p>The problem with getting a granularity of cell-level mutability is that right now, there's just one runtime check that gives you a mutable cell pointer...done at the array level:</p>
+<pre><code>Cell* tail;
+Cell* cell = VAL_ARRAY_AT_ENSURE_MUTABLE(&amp;tail, block);
+</code></pre>
+<p>There are multiple checks done, here.  The BLOCK! cell passed in may or may not carry a CONST cell bit--which is to say, that particular reference to the BLOCK! might be const (even if the underlying array hasn't been PROTECT'd).  And then, there's the protection status of the array...which can also become protected during enumerations of the array, or if it is executing currently in the evaluator.</p>
+<p>If this code doesn't trigger a failure from discovering a form of mutability, then the non-const <code>Cell*</code> is given back.</p>
+<p>But then...the code will increment that cell pointer to find other cells in the array.  And incrementing a mutable pointer gives you another mutable pointer.</p>
+<p>It may seem we <em>could</em> make <code>Cell(*)</code> in the C++ debug build a smart pointer class that gives you back a <code>Cell(const*)</code> when incremented.  And then say that there's a way to promote a const cell reference to a mutable cell reference with a runtime check.</p>
+<p>But this would be deceptive.  We already know that if you have a const reference to a cell that lives in the middle of an array, that a runtime check of the containing array for that cell hasn't been done yet.</p>
+<p>In other words: once you have your hands on a cell pointer, it's too late to ask about <em>that</em> cell's mutability.  The knowledge is up to the container.</p>
+<p>Trying to solve this would be a mess.  e.g. making a kind of Cell(const*) that was the size of two pointers, but held a reference to the array the cell was resident in...in case you wanted to do the runtime check asking for a promotion to a Cell(*).</p>
+<p>I've been moving in the other direction...paring away complexities in the source where possible.  Something like that doesn't belong in the codebase--especially to implement a feature that I can only vaguely imagine uses for.</p>
+<h2>
+<a name="so-dont-expect-cell-level-protectever-2" class="anchor" href="https://forum.rebol.info#so-dont-expect-cell-level-protectever-2"></a>So Don't Expect Cell-Level PROTECT...Ever</h2>
+<p>Every now and again I've looked at the flag and thought "why does this apply only to variable cells?"  So I wanted to hammer out the reasoning, and confirm that it wasn't just about performance.</p>
+<p>From my point of view, it's about creating a situation of a flag that needs to be checked, and which the code has no (reasonable) systemic way to enforce that checking.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/why-cant-you-protect-individual-cells-in-an-array/2062">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/why-cant-you-protect-individual-cells-in-an-array/2062</link>
+          <pubDate>Tue, 21 Nov 2023 22:52:50 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2062</guid>
+          <source url="https://forum.rebol.info/t/why-cant-you-protect-individual-cells-in-an-array/2062.rss">Why can&#39;t you PROTECT individual cells in an array?</source>
+        </item>
+        <item>
+          <title>ReplPad Visual PARSE Debugger</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Debugger</category>
+          <description><![CDATA[
+            <p>Hey!  I've gotten UPARSE hooked up to a debugger:</p>
+<p><a href="https://www.youtube.com/watch?v=doS7NgajRxI">Ren-C PARSE Hook Demo: Debugging</a></p>
+
+<p>The ability to step in at every level shows just how granular the hook is.  It's not a terrible lot of code:</p>
+<p><a href="https://github.com/hostilefork/replpad-js/blob/eb8a62054d345f798b3b87364943df3534a7b92e/eparse.reb#L334">https://github.com/hostilefork/replpad-js/blob/eb8a62054d345f798b3b87364943df3534a7b92e/eparse.reb#L334</a></p>
+<p>It's barely tested, but it is public on the ReplPad if anyone wants to throw something at it.</p>
+<h2>
+<a name="what-concerns-did-writing-this-raise-1" class="anchor" href="https://forum.rebol.info#what-concerns-did-writing-this-raise-1"></a>What Concerns Did Writing This Raise?</h2>
+<p>Having the debugger in the ReplPad gives an immediate user annoyance: <em>Why can't I type in the console while the debugger is running?</em>  (That's a huge can of worms and requires several posts of its own to talk about.)</p>
+<p>The design of UPARSE is that you can provide your own set of combinators to use.  You can give it a new WORD! combinator that does something besides fetch what the word looks up to and "act like it would if it were written there".  While this simple tracing facility can handle generic interpretations, the generality could subvert the usefulness of higher level tools.</p>
+<p>Beyond that problem of "words may not look things up at all", there's also the problem of "discovery".  Everything is "discovered" as you go along--there's not a list supplied up front.  That may not be a fit for some tools, so they could end up asking you to pass in the names of all the rules of interest even though they don't need to be "instrumented".</p>
+<p>I thought of adding a BREAKPOINT combinator, so you could break in mid-parse.  But I was only building up a list modeling the stack for frames while you were interacting with the buttons.  Having the stack always available at an arbitrary moment would mean that the stack model would have to be updated on every call to the hook.  Effectively this duplicates information held in the "real stack"--the subset of function calls that represent combinators.  So it's tempting to find a way to label stack frames and enumerate them generically, vs. expecting all debuggers like this to maintain their own.</p>
+<p>There's a lot to think about, here.  But as Rebol in the browser goes, this really is the only game in town, and it's holding up pretty well whenever I exercise it!</p>
+            <p><small>3 posts - 3 participants</small></p>
+            <p><a href="https://forum.rebol.info/t/replpad-visual-parse-debugger/2063">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/replpad-visual-parse-debugger/2063</link>
+          <pubDate>Thu, 26 Oct 2023 02:19:17 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2063</guid>
+          <source url="https://forum.rebol.info/t/replpad-visual-parse-debugger/2063.rss">ReplPad Visual PARSE Debugger</source>
+        </item>
         <item>
           <title>Axing --breakpoint switch, C-DEBUG-BREAK-AT</title>
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
@@ -342,7 +443,7 @@ subparse:|1|&gt;&gt; count
 <p><strong>I Could Go On, But...</strong></p>
 <p>...the point is just that there's a lot to think about.  We haven't seen single-stepping of this type in Redbol before this...and it's been decades.  So it would be unrealistic to expect that the first try to be anything but an extremely rough draft.</p>
 <p>But I'd like it to evolve to the point of where we start thinking we can push a pause button and get some kind of debugger up.  So I've gone ahead and included it in the web build--<em>for experimentation and prototyping only</em>.  Do not file bugs against the debugger yet, it doesn't exist.  <img src="https://forum.rebol.info/images/emoji/twitter/ghost.png?v=9" title=":ghost:" class="emoji" alt=":ghost:"></p>
-            <p><small>1 post - 1 participant</small></p>
+            <p><small>2 posts - 1 participant</small></p>
             <p><a href="https://forum.rebol.info/t/very-creaky-but-still-interesting-debug-step-demo/1154">Read full topic</a></p>
           ]]></description>
           <link>https://forum.rebol.info/t/very-creaky-but-still-interesting-debug-step-demo/1154</link>

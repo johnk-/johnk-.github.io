@@ -1,0 +1,140 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Making CALL Raise a (definitional) Error For Bad Exit Codes</title>
+    <link>https://forum.rebol.info/t/making-call-raise-a-definitional-error-for-bad-exit-codes/2068</link>
+    <description>Before definitional errors existed, I noticed that [@gchiu had some uses of CALL](https://forum.rebol.info/t/the-need-to-rethink-error/1371/2?u=hostilefork) that weren&#39;t checking the return code.
+
+    call [
+        gs -sDEVICE=pngmono -o (join root &quot;-%02d.png&quot;) -r600 (pdfname)
+    ]
+
+    call [
+        gs -sDEVICE=eps2write -sPAPERSIZE=a4
+            -o (join root &quot;-%02d.eps&quot;) (pdfname)
+    ]
+
+I wanted the default to raise an error if the **gs** (GhostScript) process did not return a 0 exit code.  But I wanted that error to be a result of CALL... so it would be distinct from other errors (like a typo in the code in the groups inside, `pfdname` instead of `pdfname` or whatever).
+
+`CALL` was already a wrapper on top of an internal `CALL*` function, so I thought &quot;why not expand upon that?&quot;
+
+## A Cool ENCLOSE of an AUGMENT of a SPECIALIZE!
+
+    call: enclose (
+        augment (specialize :call* [wait: #]) [
+            /relax &quot;If exit code is non-zero, return the integer vs. raising error&quot;
+        ]
+    ) func [f [frame!]] [
+        let relax: f.relax
+        let result: do f
+        if relax or (result = 0) [
+            return result
+        ]
+        return raise make error! compose [
+            message: [&quot;Process returned non-zero exit code:&quot; exit-code]
+            exit-code: (result)
+        ]
+    ]
+
+I think that&#39;s pretty neat.
+
+It twists the CALL* function so that it always waits (vs. spawn a separate process and return a process ID to wait on).
+
+Then it offers a /RELAX setting for getting the exit code back, if you don&#39;t want the definitional error behavior.
+
+But then, by default it will RAISE an error.   You can get that error via EXCEPT or you can do TRY CALL if you just want to ignore any errors.
+
+## Issue Exposed: Who&#39;s Actually To Blame?
+
+While making this I noticed that there were actually several points of failure:
+
+* The guts of CALL might not be able to find the file you&#39;re asking to execute
+
+* The executable may run, but return a non-zero exit code
+
+* If you&#39;re running through CALL/SHELL and delegating to it to call a process, then the shell may have its own exit status distinct from the process you tried to call
+
+It seems there&#39;s not really any great way to untangle the return results of a shell from that of a process it executes.  [Here&#39;s some of the informal conventions of UNIX shells](https://en.wikipedia.org/wiki/Exit_status):
+
+&gt; *&quot;When a command is terminated by a signal whose number is N, a shell sets the variable $? to a value greater than 128. Most shells use 128+N, while ksh93 uses 256+N.&quot;*
+&gt;
+&gt; *&quot;If a command is not found, the shell should return a status of 127. If a command is found but is not executable, the return status should be 126.&quot;*
+
+So I&#39;m a little shaky on what exactly a TRY CALL should be ignoring.  It&#39;s one thing to ignore a program&#39;s exit status, and another to ignore whether the program was on disk at all.
+
+TAKE of a BLOCK only has a definitional failure when the block is empty, so you know what TRY TAKE means.  But it may be that you should more or less never say TRY CALL, and always specifically handle the errors that arise from it.  I think this may be a common theme of definitional errors coming out of complicated functions which have more than a single way to fail.
+
+But... in any case, it&#39;s progress.  Because we&#39;re not conflating typos or other incidental errors to those that are coming from CALL.  And I like the default that it has an error on non-zero exit statuses.</description>
+    
+    <lastBuildDate>Fri, 08 Dec 2023 02:49:41 +0000</lastBuildDate>
+    <category>Show &amp; Tell</category>
+    <atom:link href="https://forum.rebol.info/t/making-call-raise-a-definitional-error-for-bad-exit-codes/2068.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Making CALL Raise a (definitional) Error For Bad Exit Codes</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>Before definitional errors existed, I noticed that <a href="https://forum.rebol.info/t/the-need-to-rethink-error/1371/2">@gchiu had some uses of CALL</a> that weren't checking the return code.</p>
+<pre><code>call [
+    gs -sDEVICE=pngmono -o (join root "-%02d.png") -r600 (pdfname)
+]
+
+call [
+    gs -sDEVICE=eps2write -sPAPERSIZE=a4
+        -o (join root "-%02d.eps") (pdfname)
+]
+</code></pre>
+<p>I wanted the default to raise an error if the <strong>gs</strong> (GhostScript) process did not return a 0 exit code.  But I wanted that error to be a result of CALL... so it would be distinct from other errors (like a typo in the code in the groups inside, <code>pfdname</code> instead of <code>pdfname</code> or whatever).</p>
+<p><code>CALL</code> was already a wrapper on top of an internal <code>CALL*</code> function, so I thought "why not expand upon that?"</p>
+<h2>
+<a name="a-cool-enclose-of-an-augment-of-a-specialize-1" class="anchor" href="https://forum.rebol.info#a-cool-enclose-of-an-augment-of-a-specialize-1"></a>A Cool ENCLOSE of an AUGMENT of a SPECIALIZE!</h2>
+<pre><code>call: enclose (
+    augment (specialize :call* [wait: #]) [
+        /relax "If exit code is non-zero, return the integer vs. raising error"
+    ]
+) func [f [frame!]] [
+    let relax: f.relax
+    let result: do f
+    if relax or (result = 0) [
+        return result
+    ]
+    return raise make error! compose [
+        message: ["Process returned non-zero exit code:" exit-code]
+        exit-code: (result)
+    ]
+]
+</code></pre>
+<p>I think that's pretty neat.</p>
+<p>It twists the CALL* function so that it always waits (vs. spawn a separate process and return a process ID to wait on).</p>
+<p>Then it offers a /RELAX setting for getting the exit code back, if you don't want the definitional error behavior.</p>
+<p>But then, by default it will RAISE an error.   You can get that error via EXCEPT or you can do TRY CALL if you just want to ignore any errors.</p>
+<h2>
+<a name="issue-exposed-whos-actually-to-blame-2" class="anchor" href="https://forum.rebol.info#issue-exposed-whos-actually-to-blame-2"></a>Issue Exposed: Who's Actually To Blame?</h2>
+<p>While making this I noticed that there were actually several points of failure:</p>
+<ul>
+<li>
+<p>The guts of CALL might not be able to find the file you're asking to execute</p>
+</li>
+<li>
+<p>The executable may run, but return a non-zero exit code</p>
+</li>
+<li>
+<p>If you're running through CALL/SHELL and delegating to it to call a process, then the shell may have its own exit status distinct from the process you tried to call</p>
+</li>
+</ul>
+<p>It seems there's not really any great way to untangle the return results of a shell from that of a process it executes.  <a href="https://en.wikipedia.org/wiki/Exit_status">Here's some of the informal conventions of UNIX shells</a>:</p>
+<blockquote>
+<p><em>"When a command is terminated by a signal whose number is N, a shell sets the variable $? to a value greater than 128. Most shells use 128+N, while ksh93 uses 256+N."</em></p>
+<p><em>"If a command is not found, the shell should return a status of 127. If a command is found but is not executable, the return status should be 126."</em></p>
+</blockquote>
+<p>So I'm a little shaky on what exactly a TRY CALL should be ignoring.  It's one thing to ignore a program's exit status, and another to ignore whether the program was on disk at all.</p>
+<p>TAKE of a BLOCK only has a definitional failure when the block is empty, so you know what TRY TAKE means.  But it may be that you should more or less never say TRY CALL, and always specifically handle the errors that arise from it.  I think this may be a common theme of definitional errors coming out of complicated functions which have more than a single way to fail.</p>
+<p>But... in any case, it's progress.  Because we're not conflating typos or other incidental errors to those that are coming from CALL.  And I like the default that it has an error on non-zero exit statuses.</p>
+          <p><a href="https://forum.rebol.info/t/making-call-raise-a-definitional-error-for-bad-exit-codes/2068/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/making-call-raise-a-definitional-error-for-bad-exit-codes/2068/1</link>
+        <pubDate>Fri, 08 Dec 2023 02:49:41 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-2068-1</guid>
+        <source url="https://forum.rebol.info/t/making-call-raise-a-definitional-error-for-bad-exit-codes/2068.rss">Making CALL Raise a (definitional) Error For Bad Exit Codes</source>
+      </item>
+  </channel>
+</rss>

@@ -1,0 +1,374 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Value (vs. Series) Modification Bit: CONST and MUTABLE</title>
+    <link>https://forum.rebol.info/t/value-vs-series-modification-bit-const-and-mutable/976</link>
+    <description>Every newbie to Rebol (and every experienced user too!) gets bitten by the intrinsic mutability of source series.   A common misunderstanding/mistake might look like:
+
+     blockify: func [x] [
+        block: []
+        append block x
+        return block
+     ]
+
+     &gt;&gt; blockify 10
+     == [10]
+
+     &gt;&gt; blockify 20
+     == [10 20]  ; !!! why didn&#39;t `block: []` reset the block?
+
+Some have deemed it easy enough to learn to say **`block: copy []`**.  But consider the following:
+
+    symbol-name: func [symbol [word!]] [
+         switch symbol [
+             &#39;+ [&quot;plus&quot;]
+             &#39;? [&quot;question-mark&quot;]
+             ...
+         ]
+    ]
+    ...
+    filename: append (symbol-name &#39;+) &quot;.dat&quot;
+
+This innocent-looking piece of code has a terrible bug.  *The string you return lives in the SWITCH, so the APPEND is actually mutating the string inside the SWITCH.*  Every subsequent call to SYMBOL-NAME will be affected.
+
+I feel like it shouldn&#39;t be controversial to say **it should not be this easy to write self-modifying code on accident.**  Something equivalent to this (but trickier) caused a problem in the build system that took me hours to find.
+
+If Rebol is supposed to be more than a toy, it needs answers for usage problems like this--where it is notably much more brittle than other languages.
+
+## The APPENDs Above Must Fail, But By What Means?
+
+I want those examples to cause errors, vs. silently modify the blocks or strings resident in the bodies of functions.
+
+Yet a lot of off-the-cuff scripting (and test code) relies on the mutability of source, e.g.:
+
+    &gt;&gt; append [a b] &#39;c
+    == [a b c]
+
+R3-Alpha had the concept of being able to PROTECT a series so that all references to it would be immutable.  But if we were to make a rule that all source series were permanently locked, that would be a heavy-handed policy that wouldn&#39;t permit alternate styles of coding *ever*.
+
+I concluded that **we needed another--lighter--form of lock**...something that doesn&#39;t make *all* views of a series have to be unchanging for all time, but that different views of a series be read or write.  And constructs could fiddle this bit as they saw appropriate.
+
+## Meet CONST and MUTABLE
+
+Ren-C&#39;s pioneering new feature is of *values* being able to be read only or not.  You can flip the bit yourself with the CONST and MUTABLE functions:
+
+    &gt;&gt; data: [a b c]
+    == [a b c]
+
+    &gt;&gt; data-readonly: const data
+    == [a b c]
+
+    &gt;&gt; append data-readonly &#39;d
+    ** Access Error: value is CONST (see MUTABLE): [a b c]
+
+    &gt;&gt; append data &#39;d
+    == [a b c d]
+
+    &gt;&gt; data-readonly
+    == [a b c d]
+
+    &gt;&gt; append mutable data-readonly &#39;e
+    == [a b c d e]
+
+It&#39;s quite different from locking a series.  For instance: you can keep write access for yourself, while giving out const access to subroutines you don&#39;t want to be doing casual modifications.
+
+But the real win here is that the execution of code defaults to putting a wave of constness on any slots the evaluator fills from &quot;literals&quot;...be those blocks or strings.  You see it catching the bug I introduced at the beginning of the post, of the string being changed inside the switch:
+
+    &gt;&gt; filename: append (symbol-name &#39;+) &quot;.dat&quot;
+    ** Access Error: value is CONST (see MUTABLE): &quot;plus&quot;
+
+## The Constructs Are In Control
+
+In this model, the constness is applied by anything that thinks of its argument as being iterative.
+
+So for example, the WHILE loop takes its body (and condition) as a `&lt;const&gt;`-marked parameter.
+
+    input: [a b c]
+
+    output: []  ; want to get [[a] [b] [c]]
+
+    while [item: try take input] [
+        block: []
+        append block item
+        append output block
+    ]
+
+You&#39;ll get an error on the APPEND to BLOCK of **`&quot;CONST or iterative value&quot;`**.  
+
+By comparison, DO does not take its block argument as a const parameter, so this works without complaining about the appends to data:
+
+    &gt;&gt; do [data: [], append data &lt;1&gt;, append data &lt;2&gt;]
+    == [&lt;1&gt; &lt;2&gt;]
+
+*But* it&#39;s inherited, so a DO inside of a WHILE would have the block it received to do as const, due to the WHILE&#39;s influence.
+
+Predicting that functions are likely to be called more than once, FUNC takes its body as CONST...and that constness propagates as the wave of evaluation proceeds through the body.
+
+But notice that as long as the underlying series isn&#39;t immutable (due to things like PROTECT), you can subvert the const bit with MUTABLE:
+
+     accumulate: func [x] [
+         accumulator: mutable []
+         return append accumulator x
+     ]
+
+     &gt;&gt; accumulate 10
+     == [10]
+
+     &gt;&gt; accumulate 20
+     == [10 20]
+
+Emulating historical Rebol2/R3-Alpha/Red conventions just means tweaking the specs for things like FUNC and WHILE.  Instead of taking their body parameters as **`&lt;const&gt;`**, take them normally.
+
+## Should Modules Be Stricter By Default?
+
+The SWITCH case I opened with shows why I absolutely think that constness-on-func-bodies is the right choice.  That&#39;s in addition to addressing the speedbump every new user has when they write **repeat 10 [block: [] ...]** and expect block to be reinitialized each time through the loop.
+
+But what should the default be for code that&#39;s not in a function or a loop?
+
+Certainly in the console mutability has been the status quo.  If modules enforced constness for their top-level code (despite being run only once) but the console didn&#39;t, would that be a good tradeoff...or just confusing?
+
+I don&#39;t think saying MUTABLE [...] is much of a burden to get deep mutable access to a series when you mean that.  I feel it&#39;s better to teach good habits early on.  But who knows.</description>
+    
+    <lastBuildDate>Fri, 08 Dec 2023 00:48:50 +0000</lastBuildDate>
+    <category>Internals</category>
+    <atom:link href="https://forum.rebol.info/t/value-vs-series-modification-bit-const-and-mutable/976.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Value (vs. Series) Modification Bit: CONST and MUTABLE</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="976">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/40/26_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>I feel like it shouldn't be controversial to say <strong>it should not be this easy to write self-modifying code on accident.</strong></p>
+</blockquote>
+</aside>
+<p>CONST and MUTABLE have been around for a while now, and I think the chosen balance has worked out rather well.</p>
+<p>One historical problem point with these mutability features is that there was no compile-time checks to make sure code wasn't violating it.  <em>There were tons of cases of PROTECT bits not being honored, simply because there wasn't a check for mutability in some routine.</em>  The person hacking on the C code to REVERSE or SORT a series would have to explicitly remember to think that was a mutating operation and check the bit.</p>
+<p>The obvious-sounding way to stop these problems from creeping in would be to leverage the <code>const</code> annotation in C and C++.  All the routines that modified series would require the caller to have a non-const pointer in their hand...while routines that could be done on read-only series could take either a const or non-const pointer.</p>
+<p>So consider the simple example of getting an element at a position in an array:</p>
+<pre><code> Cell* Array_At(Array* array, Index n)
+     { ...lots of code... }
+</code></pre>
+<p>Historically this would take in a mutable Array (the only kind there was) and give back a mutable Cell.  But what we want is for mutable arrays to give back mutable cells, and const arrays to give const cells.  So we could simply create a wrapper that calls into the mutable implementation but reskins the result as const for const input:</p>
+<pre><code> Cell* Array_At(Array* array, Index n)
+     { ...lots of code... }
+
+ inline const Cell* Array_At(const Array* array, Index n)
+     { return Array_At(m_cast(Array*, array), n); }
+</code></pre>
+<p>There's just one problem... <strong>C doesn't support overloading.</strong>  You can't have two functions with the same name and different signatures and have the compiler pick between them.  There'd have to be two different names:</p>
+<pre><code> Cell* mutable_Array_At(Array* array, Index n)
+   { ...lots of code... }
+
+ inline const Cell* Array_At(const Array* array, Index n)
+   { return mutable_Array_At(m_cast(Array*, array), n); }
+</code></pre>
+<p>This might not seem like that big a deal, <em>but</em> the combinatorics add up.  Because now you can't write a generic macro that speaks about array positions...you have to have macros with different names that call the differently named accessors.  And consider there are <em>lots</em> of these routines (Array_Head, Array_Tail, Array_Last... Binary_Head, Binary_Tail... Series_Data, etc. etc. etc.)  It's pretty horrific when you start having this explode with mutable_XXX variations and mutable_XXX variations of everything that calls them.</p>
+<p><strong>I came up with a trick to get around it.</strong>  Basically, the trick is to sacrifice some amount of const checking in C.  First, define a macro for something that resolves to <code>const</code> in C but vaporizes in C++:</p>
+<pre><code>#ifdef __cplusplus
+    #define const_if_c
+#else
+    #define const_if_c const
+#endif
+</code></pre>
+<p>Then, define the functions like this:</p>
+<pre><code>Cell* Array_At(const_if_c Array* array, Index n)
+  { ...lots of code... }
+
+#ifdef __cplusplus
+    inline const Cell* Array_At(const Array* array, Index n)
+         { return Array_At(m_cast(Array*, array), n); }
+#endif
+</code></pre>
+<p>So the C build will give you back a mutable array no matter whether your input array was const or not.  But the C++ build only gives back const arrays for const input.</p>
+<p><strong>This makes systemic enforcement of mutability checking practical.</strong>  If you're inside the implementation with a <code>const</code> array, string, or binary... you won't be able to make a call to a C routine that will mutate it.  The only way you can get mutable arrays is through specific entry points that extract the array with a runtime check to make sure it's mutable.</p>
+<p>It's all in the implementation guts...so it only affects those using the core API, not libRebol.  The only thing you need to do is make sure you at some point build the code with a C++ compiler, and it will tell you where any problems are.</p>
+          <p><a href="https://forum.rebol.info/t/value-vs-series-modification-bit-const-and-mutable/976/5">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/value-vs-series-modification-bit-const-and-mutable/976/5</link>
+        <pubDate>Tue, 15 Sep 2020 03:28:33 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-976-5</guid>
+        <source url="https://forum.rebol.info/t/value-vs-series-modification-bit-const-and-mutable/976.rss">Value (vs. Series) Modification Bit: CONST and MUTABLE</source>
+      </item>
+      <item>
+        <title>Value (vs. Series) Modification Bit: CONST and MUTABLE</title>
+        <dc:creator><![CDATA[BlackATTR]]></dc:creator>
+        <description><![CDATA[
+            <p>I think this gets to the question of robustness of the language. If this helps Rebol get beyond the perception of being unserious for real development work, then I'm in favor as it seems like a worthy tradeoff. It would need to be documented/taught but I think the additional rigor would lead to better programming practices.</p>
+          <p><a href="https://forum.rebol.info/t/value-vs-series-modification-bit-const-and-mutable/976/4">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/value-vs-series-modification-bit-const-and-mutable/976/4</link>
+        <pubDate>Wed, 26 Dec 2018 17:16:46 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-976-4</guid>
+        <source url="https://forum.rebol.info/t/value-vs-series-modification-bit-const-and-mutable/976.rss">Value (vs. Series) Modification Bit: CONST and MUTABLE</source>
+      </item>
+      <item>
+        <title>Value (vs. Series) Modification Bit: CONST and MUTABLE</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group quote-modified" data-username="IngoHohmann" data-post="2" data-topic="976">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/ingohohmann/40/195_2.png" class="avatar"> IngoHohmann:</div>
+<blockquote>
+<p>"If modules enforced it by default but the console didn’t, would that be a good tradeoff" =&gt; Yes, I think it would be.</p>
+</blockquote>
+</aside>
+<p>There may be more options than just binary ones here, so it's likely best to get some experience.</p>
+<p>I really believe that not being consistent between the console and scripts running should be heavily weighed.  The console is kind of the place where you try out things and use as a sanity check when debugging.</p>
+<aside class="quote no-group" data-username="IngoHohmann" data-post="2" data-topic="976">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/ingohohmann/40/195_2.png" class="avatar"> IngoHohmann:</div>
+<blockquote>
+<p>if a function hands out const access to a value, is the the receiver able to change it to a mutable value</p>
+</blockquote>
+</aside>
+<p>Perhaps there could be a difference between explicit const (irrevocable on that value once applied) and an implicit one, the evaluator just put on itself from a frame.  That mechanic may not be too difficult.</p>
+<p>But in their current incarnation, const and mutable are "suggestions" and there's no level of privilege escalation.  If you want to lock something so no one can get write access on it, you have to LOCK it.</p>
+<p>Locking is still necessary for things like using blocks for keys in MAP!, and something more lock-like is probably the only way to imagine safe multithreading.</p>
+          <p><a href="https://forum.rebol.info/t/value-vs-series-modification-bit-const-and-mutable/976/3">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/value-vs-series-modification-bit-const-and-mutable/976/3</link>
+        <pubDate>Tue, 25 Dec 2018 23:59:23 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-976-3</guid>
+        <source url="https://forum.rebol.info/t/value-vs-series-modification-bit-const-and-mutable/976.rss">Value (vs. Series) Modification Bit: CONST and MUTABLE</source>
+      </item>
+      <item>
+        <title>Value (vs. Series) Modification Bit: CONST and MUTABLE</title>
+        <dc:creator><![CDATA[IngoHohmann]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group quote-modified" data-post="1" data-topic="976">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="20" height="20" src="//forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/40/26_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>If modules enforced it by default but the console didn’t, would that be a good tradeoff</p>
+</blockquote>
+</aside>
+<p>Yes, I think it would be.</p>
+<p>One question, if a function hands out const access to a value, is the the receiver able to change it to a mutable value? Should this be possible?</p>
+          <p><a href="https://forum.rebol.info/t/value-vs-series-modification-bit-const-and-mutable/976/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/value-vs-series-modification-bit-const-and-mutable/976/2</link>
+        <pubDate>Tue, 25 Dec 2018 23:42:41 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-976-2</guid>
+        <source url="https://forum.rebol.info/t/value-vs-series-modification-bit-const-and-mutable/976.rss">Value (vs. Series) Modification Bit: CONST and MUTABLE</source>
+      </item>
+      <item>
+        <title>Value (vs. Series) Modification Bit: CONST and MUTABLE</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>Every newbie to Rebol (and every experienced user too!) gets bitten by the intrinsic mutability of source series.   A common misunderstanding/mistake might look like:</p>
+<pre><code> blockify: func [x] [
+    block: []
+    append block x
+    return block
+ ]
+
+ &gt;&gt; blockify 10
+ == [10]
+
+ &gt;&gt; blockify 20
+ == [10 20]  ; !!! why didn't `block: []` reset the block?
+</code></pre>
+<p>Some have deemed it easy enough to learn to say <strong><code>block: copy []</code></strong>.  But consider the following:</p>
+<pre><code>symbol-name: func [symbol [word!]] [
+     switch symbol [
+         '+ ["plus"]
+         '? ["question-mark"]
+         ...
+     ]
+]
+...
+filename: append (symbol-name '+) ".dat"
+</code></pre>
+<p>This innocent-looking piece of code has a terrible bug.  <em>The string you return lives in the SWITCH, so the APPEND is actually mutating the string inside the SWITCH.</em>  Every subsequent call to SYMBOL-NAME will be affected.</p>
+<p>I feel like it shouldn't be controversial to say <strong>it should not be this easy to write self-modifying code on accident.</strong>  Something equivalent to this (but trickier) caused a problem in the build system that took me hours to find.</p>
+<p>If Rebol is supposed to be more than a toy, it needs answers for usage problems like this--where it is notably much more brittle than other languages.</p>
+<h2>
+<a name="the-appends-above-must-fail-but-by-what-means-1" class="anchor" href="https://forum.rebol.info#the-appends-above-must-fail-but-by-what-means-1"></a>The APPENDs Above Must Fail, But By What Means?</h2>
+<p>I want those examples to cause errors, vs. silently modify the blocks or strings resident in the bodies of functions.</p>
+<p>Yet a lot of off-the-cuff scripting (and test code) relies on the mutability of source, e.g.:</p>
+<pre><code>&gt;&gt; append [a b] 'c
+== [a b c]
+</code></pre>
+<p>R3-Alpha had the concept of being able to PROTECT a series so that all references to it would be immutable.  But if we were to make a rule that all source series were permanently locked, that would be a heavy-handed policy that wouldn't permit alternate styles of coding <em>ever</em>.</p>
+<p>I concluded that <strong>we needed another--lighter--form of lock</strong>...something that doesn't make <em>all</em> views of a series have to be unchanging for all time, but that different views of a series be read or write.  And constructs could fiddle this bit as they saw appropriate.</p>
+<h2>
+<a name="meet-const-and-mutable-2" class="anchor" href="https://forum.rebol.info#meet-const-and-mutable-2"></a>Meet CONST and MUTABLE</h2>
+<p>Ren-C's pioneering new feature is of <em>values</em> being able to be read only or not.  You can flip the bit yourself with the CONST and MUTABLE functions:</p>
+<pre><code>&gt;&gt; data: [a b c]
+== [a b c]
+
+&gt;&gt; data-readonly: const data
+== [a b c]
+
+&gt;&gt; append data-readonly 'd
+** Access Error: value is CONST (see MUTABLE): [a b c]
+
+&gt;&gt; append data 'd
+== [a b c d]
+
+&gt;&gt; data-readonly
+== [a b c d]
+
+&gt;&gt; append mutable data-readonly 'e
+== [a b c d e]
+</code></pre>
+<p>It's quite different from locking a series.  For instance: you can keep write access for yourself, while giving out const access to subroutines you don't want to be doing casual modifications.</p>
+<p>But the real win here is that the execution of code defaults to putting a wave of constness on any slots the evaluator fills from "literals"...be those blocks or strings.  You see it catching the bug I introduced at the beginning of the post, of the string being changed inside the switch:</p>
+<pre><code>&gt;&gt; filename: append (symbol-name '+) ".dat"
+** Access Error: value is CONST (see MUTABLE): "plus"
+</code></pre>
+<h2>
+<a name="the-constructs-are-in-control-3" class="anchor" href="https://forum.rebol.info#the-constructs-are-in-control-3"></a>The Constructs Are In Control</h2>
+<p>In this model, the constness is applied by anything that thinks of its argument as being iterative.</p>
+<p>So for example, the WHILE loop takes its body (and condition) as a <code>&lt;const&gt;</code>-marked parameter.</p>
+<pre><code>input: [a b c]
+
+output: []  ; want to get [[a] [b] [c]]
+
+while [item: try take input] [
+    block: []
+    append block item
+    append output block
+]
+</code></pre>
+<p>You'll get an error on the APPEND to BLOCK of <strong><code>"CONST or iterative value"</code></strong>.</p>
+<p>By comparison, DO does not take its block argument as a const parameter, so this works without complaining about the appends to data:</p>
+<pre><code>&gt;&gt; do [data: [], append data &lt;1&gt;, append data &lt;2&gt;]
+== [&lt;1&gt; &lt;2&gt;]
+</code></pre>
+<p><em>But</em> it's inherited, so a DO inside of a WHILE would have the block it received to do as const, due to the WHILE's influence.</p>
+<p>Predicting that functions are likely to be called more than once, FUNC takes its body as CONST...and that constness propagates as the wave of evaluation proceeds through the body.</p>
+<p>But notice that as long as the underlying series isn't immutable (due to things like PROTECT), you can subvert the const bit with MUTABLE:</p>
+<pre><code> accumulate: func [x] [
+     accumulator: mutable []
+     return append accumulator x
+ ]
+
+ &gt;&gt; accumulate 10
+ == [10]
+
+ &gt;&gt; accumulate 20
+ == [10 20]
+</code></pre>
+<p>Emulating historical Rebol2/R3-Alpha/Red conventions just means tweaking the specs for things like FUNC and WHILE.  Instead of taking their body parameters as <strong><code>&lt;const&gt;</code></strong>, take them normally.</p>
+<h2>
+<a name="should-modules-be-stricter-by-default-4" class="anchor" href="https://forum.rebol.info#should-modules-be-stricter-by-default-4"></a>Should Modules Be Stricter By Default?</h2>
+<p>The SWITCH case I opened with shows why I absolutely think that constness-on-func-bodies is the right choice.  That's in addition to addressing the speedbump every new user has when they write <strong>repeat 10 [block: [] ...]</strong> and expect block to be reinitialized each time through the loop.</p>
+<p>But what should the default be for code that's not in a function or a loop?</p>
+<p>Certainly in the console mutability has been the status quo.  If modules enforced constness for their top-level code (despite being run only once) but the console didn't, would that be a good tradeoff...or just confusing?</p>
+<p>I don't think saying MUTABLE [...] is much of a burden to get deep mutable access to a series when you mean that.  I feel it's better to teach good habits early on.  But who knows.</p>
+          <p><a href="https://forum.rebol.info/t/value-vs-series-modification-bit-const-and-mutable/976/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/value-vs-series-modification-bit-const-and-mutable/976/1</link>
+        <pubDate>Tue, 25 Dec 2018 20:07:35 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-976-1</guid>
+        <source url="https://forum.rebol.info/t/value-vs-series-modification-bit-const-and-mutable/976.rss">Value (vs. Series) Modification Bit: CONST and MUTABLE</source>
+      </item>
+  </channel>
+</rss>

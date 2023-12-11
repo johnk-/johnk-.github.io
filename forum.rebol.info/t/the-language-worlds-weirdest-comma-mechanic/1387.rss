@@ -20,7 +20,7 @@
     &gt;&gt; all [(1 +) 2 3 + 4]  ; error parity
     ** Script Error: + is missing its value2 argument
 
-I also did a quick patch of the feature into PARSE (it is difficult with how parse is written to do a &quot;good&quot; job of this, pointing to a conceptual problem with how parse is written, so a rewrite would hopefully address that):
+I also added the feature to UPARSE and made a patch of the feature into PARSE3 (it is difficult with how parse3 is written to do a &quot;good&quot; job of this):
 
     &gt;&gt; parse &quot;aaabbb&quot; [some &quot;a&quot;, some &quot;b&quot;]
     == &quot;aaabbb&quot;
@@ -53,11 +53,74 @@ I&#39;ll point out you have the option to put an entire expression in a group, o
         2 + 3
     ]
 
-It&#39;s something people can ignore entirely if they want.  Don&#39;t use it if you don&#39;t like it.  But right now, I like it...and I plan to phase out BAR! as an expression barrier in the default.  But the mechanics are such that we know you can build usermode barriers if you want that to behave the same.</description>
+It&#39;s something people can ignore entirely if they want.  Don&#39;t use it if you don&#39;t like it!</description>
     
-    <lastBuildDate>Tue, 25 Jul 2023 14:32:33 +0000</lastBuildDate>
+    <lastBuildDate>Thu, 02 Nov 2023 19:05:18 +0000</lastBuildDate>
     <category>Datatypes</category>
     <atom:link href="https://forum.rebol.info/t/the-language-worlds-weirdest-comma-mechanic/1387.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>The Language World&#39;s Weirdest COMMA! Mechanic</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="6" data-topic="1387">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/40/26_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>e.g. <em>How bad would it be if the BARRIER_HIT mechanics went away, and we simply leveraged the idea that commas evaluated to nihil...and most functions refuse nihil arguments?</em></p>
+</blockquote>
+</aside>
+<h2>
+<a name="so-the-bad-news-is-i-dont-think-this-holds-water-1" class="anchor" href="https://forum.rebol.info#so-the-bad-news-is-i-dont-think-this-holds-water-1"></a>So the <em>Bad</em> news is, I don't think this holds water...</h2>
+<p>If you have functions that can take a varying number of arguments, and <strong>(foo 10)</strong> means something different and legitimately distinct from <strong>(foo)</strong>...</p>
+<p>... then you probably want <strong>(foo, foo)</strong> to act equivalently to <strong>((foo) (foo))</strong>, and not give an error.</p>
+<p>And if you try to accomplish that by saying COMMA! vaporizes as NIHIL, but then establish that anything evaluating to NIHIL acts as an expression barrier, it's bad.  Worse now <a href="https://forum.rebol.info/t/why-doesnt-print-return-void-or-vaporize-via-nihil/1466/5">in a world where PRINT returns NIHIL</a>...</p>
+<p>Why worse?  Because it means <strong>foo print "Hi"</strong> will act like <strong>(foo) print "Hi"</strong>.  That's not intuitive, if you think of foo as a function that generally takes arguments.  PRINT doesn't seem like something that has this magic "stopping power" of things on its left (or right) from consuming arguments.</p>
+<p>So do I have to bring back those clunky and non-configurable internal BARRIER_HIT mechanics?  <strong>NO</strong>...because....</p>
+<h2>
+<a name="the-good-news-is-a-new-isotope-can-solve-it-atom_symbol-2" class="anchor" href="https://forum.rebol.info#the-good-news-is-a-new-isotope-can-solve-it-atom_symbol-2"></a>The <em>Good</em> News is, A New Isotope Can Solve It!  <img src="https://forum.rebol.info/images/emoji/twitter/atom_symbol.png?v=12" title=":atom_symbol:" class="emoji" alt=":atom_symbol:" loading="lazy" width="20" height="20">
+</h2>
+<p>We essentially just need a way for constructs to generate an isotope which disappears in interstitals like an empty pack (nihil)... <em>but</em> represents the additional nuance of expression-barrier-ness with simulating <code>&lt;end&gt;</code> and curtailing lookahead.</p>
+<p><strong>COMMA! Isotopes Are Up For The Job!</strong></p>
+<p>If we let commas evaluate to comma isotopes and give them this behavior, then anyone who wants to mimic it can simply have their function return an isotopic comma...and they'll act like a barrier too.  So let's call a comma isotope a BARRIER.</p>
+<p>It may sound like a headache to check for another type.  But having a test which checks for either NIHIL? or BARRIER? is easy enough to make for if you don't care about the difference.  I chose to call that ELISION? because trying to find another word that means nothing (e.g. well, NOTHING?) would throw in a fair bit of confusion with whether that subsumed VOIDs or NONEs.</p>
+<h2>
+<a name="it-gets-rid-of-this-weird-workaround-3" class="anchor" href="https://forum.rebol.info#it-gets-rid-of-this-weird-workaround-3"></a>It Gets Rid Of This Weird Workaround</h2>
+<p>I mentioned how PACK was built on REDUCE-EACH and was having trouble putting nihils in packs with commas.  That problem goes away now, so this is no longer necessary:</p>
+<pre><code>; REDUCE-EACH is the basis of functions like PACK, and hence by default it
+; wants to skip over commas.  However, there's an option which will give you
+; the isotopic word ~comma~ when it gets a barrier.  This will be conflated
+; with evaluations that produce ~comma~ unless ^META variable used.
+[
+    (['3 '30 ~comma~] = collect [
+        reduce-each x [1 + 2, 10 + 20 ~comma~] [keep ^x]
+    ])
+    (['3 ~comma~ '30 ~comma~] = collect [
+        reduce-each/commas x [1 + 2, 10 + 20 ~comma~] [keep ^x]
+    ])
+
+    ([''3 ''30 '~comma~] = collect [
+        reduce-each ^x [1 + 2, 10 + 20 ~comma~] [keep ^x]
+    ])
+    ([''3 ~comma~ ''30 '~comma~] = collect [
+        reduce-each/commas ^x [1 + 2, 10 + 20 ~comma~] [keep ^x]
+    ])
+]
+</code></pre>
+<h2>
+<a name="but-is-this-too-many-moving-parts-face_with_spiral_eyes-4" class="anchor" href="https://forum.rebol.info#but-is-this-too-many-moving-parts-face_with_spiral_eyes-4"></a>But Is This Too Many Moving Parts?  <img src="https://forum.rebol.info/images/emoji/twitter/face_with_spiral_eyes.png?v=12" title=":face_with_spiral_eyes:" class="emoji" alt=":face_with_spiral_eyes:" loading="lazy" width="20" height="20">
+</h2>
+<p><strong>I'm pretty sure it isn't.</strong></p>
+<p>The reason I say this is simply because flags like FEED_FLAG_BARRIER_HIT were instituted a long, long time ago.  They were products of necessity, because I've always felt that Rebol without some kind of expression barrier concept was downright unreadable.</p>
+<p>But my tries to implement this have always represented a thorn in terms of hidden state.  I had to imagine strange places to represent the barrier-ness, like <em>"what if that's what being enfix but taking no arguments meant"</em>.</p>
+<p>This brings it all out in the open.  Some routines will hide it, and others won't.  It's already showing much more promise than what it was replacing.</p>
+          <p><a href="https://forum.rebol.info/t/the-language-worlds-weirdest-comma-mechanic/1387/7">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/the-language-worlds-weirdest-comma-mechanic/1387/7</link>
+        <pubDate>Thu, 02 Nov 2023 17:47:12 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1387-7</guid>
+        <source url="https://forum.rebol.info/t/the-language-worlds-weirdest-comma-mechanic/1387.rss">The Language World&#39;s Weirdest COMMA! Mechanic</source>
+      </item>
       <item>
         <title>The Language World&#39;s Weirdest COMMA! Mechanic</title>
         <dc:creator><![CDATA[hostilefork]]></dc:creator>
@@ -376,7 +439,7 @@ background: rgba(255,0,0,0.4) url('top image') repeat-x center top, url('bottom 
 &gt;&gt; all [(1 +) 2 3 + 4]  ; error parity
 ** Script Error: + is missing its value2 argument
 </code></pre>
-<p>I also did a quick patch of the feature into PARSE (it is difficult with how parse is written to do a "good" job of this, pointing to a conceptual problem with how parse is written, so a rewrite would hopefully address that):</p>
+<p>I also added the feature to UPARSE and made a patch of the feature into PARSE3 (it is difficult with how parse3 is written to do a "good" job of this):</p>
 <pre><code>&gt;&gt; parse "aaabbb" [some "a", some "b"]
 == "aaabbb"
 
@@ -386,7 +449,8 @@ background: rgba(255,0,0,0.4) url('top image') repeat-x center top, url('bottom 
 <p>Beyond the expression barrier feature--which I have always believed to be important--having comma available in dialects is powerful.</p>
 <p>Note that I left in support for 1,1 being a synonym for 1.0 based on the idea of space significance.  This means you'll have less ability to copy/paste data from other contexts directly, like (1,2,3) ... but it's not clear how much gain there is from allowing that when so many other things won't work (especially in plan -4, where <code>foo(a, b c)</code> isn't loadable either).</p>
 <p>At least for the moment, this breaks the idea of supporting commas in URL!s directly.  While it might be possible to say that <strong><code>http://a,b</code></strong> is legal but <code>http://a,</code> is not, how such things are scanned needs to be redesigned so there's not so much sporadic code all over the place.  I'm open to the idea...just not assuming it as a foregone conclusion.</p>
-<h2>I Actually Like It</h2>
+<h2>
+<a name="i-actually-like-it-1" class="anchor" href="https://forum.rebol.info#i-actually-like-it-1"></a>I Actually Like It</h2>
 <p>Many years ago when expression barriers were first being cooked up, I had been mostly swayed by the "commas and periods are too hard to tell apart" idea...to say that the only purpose they should have in the language would be as synonyms.</p>
 <p>If this idea is taken to extremes, we would also say that the number <strong>1</strong> and lowercase <strong>L</strong> and the uppercase <strong>i</strong> and the vertical bar all have to be the same, due to <strong>I1l|</strong>. being too hard to differentiate.  <em>(Though fonts and syntax highlighting choices can go a long way in that.)</em></p>
 <p>Today my thinking is that you don't necessarily control this kind of thing from the language level.  You give people choices, and they write their code as it feels good to them.  If they've got a certain mix of data and don't like comma with it, they should use another arrangement.  Put things in groups, or on newlines, or whatever.</p>
@@ -400,7 +464,7 @@ background: rgba(255,0,0,0.4) url('top image') repeat-x center top, url('bottom 
     2 + 3
 ]
 </code></pre>
-<p>It's something people can ignore entirely if they want.  Don't use it if you don't like it.  But right now, I like it...and I plan to phase out BAR! as an expression barrier in the default.  But the mechanics are such that we know you can build usermode barriers if you want that to behave the same.</p>
+<p>It's something people can ignore entirely if they want.  Don't use it if you don't like it!</p>
           <p><a href="https://forum.rebol.info/t/the-language-worlds-weirdest-comma-mechanic/1387/1">Read full topic</a></p>
         ]]></description>
         <link>https://forum.rebol.info/t/the-language-worlds-weirdest-comma-mechanic/1387/1</link>

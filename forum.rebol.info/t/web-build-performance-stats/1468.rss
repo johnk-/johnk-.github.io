@@ -80,9 +80,81 @@ There&#39;s likely a lot that could be done to help the desktop build (such as o
 
 * **Avoid optimizing things before you&#39;re sure if they&#39;re right.**  I&#39;m guilty as anyone of fiddling with things for optimization reasons just because it&#39;s cool or I get curious of whether something can work or not.  Programmers are tinkerers and that&#39;s just how it is.  But it&#39;s definitely not time to go over things with a fine-toothed comb when so many design issues are not worked out.</description>
     
-    <lastBuildDate>Wed, 03 Feb 2021 06:20:58 +0000</lastBuildDate>
+    <lastBuildDate>Fri, 08 Dec 2023 19:04:25 +0000</lastBuildDate>
     <category>Optimization</category>
     <atom:link href="https://forum.rebol.info/t/web-build-performance-stats/1468.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Web Build Performance Stats</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>Circa January 2021, I did a capture of some statistics about the web build.  It looked like this right after booting the console:</p>
+<aside class="quote no-group quote-modified" data-username="hostilefork" data-post="1" data-topic="1468">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/40/26_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<pre><code>ren-c/web&gt;&gt; stats/profile
+== make object! [
+    evals: 65422
+    series-made: 28569
+    series-freed: 11160
+    series-expanded: 419
+    series-bytes: 1731611
+    series-recycled: 8669
+    made-blocks: 16447
+    made-objects: 109
+    recycles: 1
+]
+</code></pre>
+</blockquote>
+</aside>
+<p>I thought I might run it again here 3 years later.  And I was a bit shocked initially, because <em>at first glance it seems like things have gotten completely out of hand</em>:</p>
+<pre><code>&gt;&gt; stats/profile
+== make object! [
+    evals: 3277865
+    series-made: 928871
+    series-freed: 646233
+    series-expanded: 6312
+    series-bytes: 6159217
+    series-recycled: 196735
+    blocks-made: 86893
+    objects-made: 220
+    recycles: 13
+]
+</code></pre>
+<p>That's a factor of 50 more "evals"... with a factor of 32 more series... just to boot the web console, what the heck happened?</p>
+<h2>
+<a name="series-count-is-misleading-1" class="anchor" href="https://forum.rebol.info#series-count-is-misleading-1"></a>Series Count Is Misleading</h2>
+<p>The first thing to notice is that the console doesn't take 50x as long to load as it used to.  That should be a hint that something about the statistics may have gotten thrown off.</p>
+<p>One thing that's grossly overinflating the "series" count is that <a href="https://forum.rebol.info/t/the-sea-of-words/1564">Sea of Words</a> invented a new mechanism for binding in modules.  This method makes tiny series "stubs" that get linked onto canon symbols to hold indices during a binding operation.  They're very cheap to make and to destroy and aren't involved in GC.  They account for at least 1/3 of those "series" being made.</p>
+<p>These statistics need to be adjusted somehow to break those out differently.</p>
+<h2>
+<a name="eval-count-is-misleading-2" class="anchor" href="https://forum.rebol.info#eval-count-is-misleading-2"></a>Eval Count Is Misleading</h2>
+<p>Due to stackless processing, what counts as an "eval tick" has multiplied by a lot.  It used to be that something like a REDUCE operation would count as one tick, and then each eval step it did would be a tick.  Now each time the REDUCE yields to the evaluator to ask for another evaluation, that's a tick...then the evaluator ticks.</p>
+<p><em>(While these added steps may sound like a burden, it actually accelerates the web build.  Because it means we're building an unwindable stack that can yield to the browser's event loop, without relying on a crutch like binaryen that would bloat up the entire runtime with "stackless emulation"...that would fail anyway on deep stacks.  For a reminder of why this is necessary: <a href="https://forum.rebol.info/t/switching-to-stackless-why-this-why-now/1247">"Switching to Stackless: Why This, Why Now?"</a>)</em></p>
+<p>Also, parsing got subsumed into the tick count.  Even PARSE3 breaks its operations down into ticks now.  So if you say <strong>parse3 "aaaabbbb" [some ["a" | b"]]</strong> that's not one tick, it's at least 8 * 3 or 24.</p>
+<h2>
+<a name="the-real-villain-uparse-3" class="anchor" href="https://forum.rebol.info#the-real-villain-uparse-3"></a>The Real "Villain": UPARSE</h2>
+<p>Once you've cut out some basic accounting anomalies, there's still certainly a lot of work to do.  But reading between the lines, there's a clear central source of resource usage going through the roof...which is quite simply, UPARSE.</p>
+<p>Not that the web console uses it all that terribly much.  But using it pretty much <em>at all</em> will explode the amount of interpreter code that runs, quickly eclipsing everything else.</p>
+<p>I don't think the best way to frame it is negative.  <strong>The way I see this is as a big, real, challenge for the system.</strong>  UPARSE is the most real, most powerful, <a href="https://github.com/metaeducation/ren-c/tree/master/tests/parse">and most tested</a> dialect implementation that the Redbol world has ever seen.</p>
+<h2>
+<a name="so-what-can-be-done-4" class="anchor" href="https://forum.rebol.info#so-what-can-be-done-4"></a>So... What Can Be Done?</h2>
+<p>Counting up all the ways in which UPARSE pays the price for its current all-usermode implementation is to big for this post.  But it's important to realize that the costly mechanisms it uses all have motivations.  Meeting those needs with more efficient tools means other dialects can use those tools too.</p>
+<p>To name an example off the top of my head, would be how every combinator function is pre-hooked with code enclosing each call with a test for <em>"are we hooked, if so call the hook with the frame, otherwise just call the frame."</em>  That's screaming for some kind of generalized answer where you don't have to hook in advance, but be able to inject the hooks later on some category of functions.  But using the massively inefficient approach is how we can test the viability of something like the <a href="https://forum.rebol.info/t/replpad-visual-parse-debugger/2063">Stepwise PARSE Debugger</a>.</p>
+<p>But at the end of the day, it does come down to the fact that parsing is just too general-purpose and useful to be done with usermode code.  It would be nice if we had a language like Red/System to write the combinators in...which could be compiled to WebAssembly in the browser and x86 or ARM on the desktop.  Yet the option on the table right now is hand-coding C for the combinators and the combinating processes.</p>
+<h2>
+<a name="prioritization-is-difficult-5" class="anchor" href="https://forum.rebol.info#prioritization-is-difficult-5"></a>Prioritization Is Difficult</h2>
+<p>While UPARSE clearly needs to be reviewed and nativized, I'm still not sure if this is the next item of business in the priority queue.  Binding casts a dark shadow over the entire system--and has its own performance quandaries.  Not to mention that it hasn't been figured out how variables can be instantiated in mid-parse with something like a "LET combinator".</p>
+<p>Any investments in making UPARSE faster that also make it harder to modify and test under new designs has to be considered carefully.  Also, being written in usermode exposes pitfalls that you wouldn't see otherwise--<a href="https://forum.rebol.info/t/definitional-break-and-continue-the-time-is-now/2066">like the need for definitional CONTINUE</a> that was exposed.</p>
+<p>Anyway... data is data, and wanted to look at it.  This is where things are at the moment.</p>
+          <p><a href="https://forum.rebol.info/t/web-build-performance-stats/1468/3">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/web-build-performance-stats/1468/3</link>
+        <pubDate>Fri, 08 Dec 2023 19:04:25 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1468-3</guid>
+        <source url="https://forum.rebol.info/t/web-build-performance-stats/1468.rss">Web Build Performance Stats</source>
+      </item>
       <item>
         <title>Web Build Performance Stats</title>
         <dc:creator><![CDATA[hostilefork]]></dc:creator>

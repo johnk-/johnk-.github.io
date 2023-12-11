@@ -5,8 +5,138 @@
     <link>https://forum.rebol.info/c/development/optimization/53</link>
     <description>Topics in the &#39;Optimization&#39; category This is a category for discussing performance and optimization ideas.</description>
     
-      <lastBuildDate>Thu, 27 Jul 2023 23:20:14 +0000</lastBuildDate>
+      <lastBuildDate>Tue, 21 Nov 2023 05:02:05 +0000</lastBuildDate>
       <atom:link href="https://forum.rebol.info/c/development/optimization/53.rss" rel="self" type="application/rss+xml" />
+        <item>
+          <title>Executable Size circa 2023...and tweaking INLINE</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Optimization</category>
+          <description><![CDATA[
+            <p>A modern Ren-C non-debug executable on Linux--with https and the libuv filesystem and networking code (which supports asynchronous file I/O etc.) is about 1.7 MB when it is built at an O2 level of optimization (optimize for speed).</p>
+<p>When built at Os optimization it's about 1.2 MB, sacrificing 40% of the speed to get the compression.  (In the modern era, most people would say that the extra size isn't a big deal to get that much of a speed improvement.)</p>
+<p>By comparison, an R3-Alpha Linux executable is about 0.56 MB at O2.  And a Red CLI-only binary on Linux is about 1.0 MB.</p>
+<h2>
+<a name="why-has-size-gone-up-1" class="anchor" href="https://forum.rebol.info#why-has-size-gone-up-1"></a>Why Has Size Gone Up?</h2>
+<p>I've looked under the hood at the differences with R3-Alpha to see what accounts for the disparity with modern Ren-C.  libuv accounts for a couple 100k, and is worth it--it would be especially so if taking advantage of things like the async file I/O.</p>
+<p>But the rest just generally comes down to the fact that it's about twice as much code.  If you enjoy using ADAPT or ENCLOSE or SPECIALIZE, well, there's code that implements it.  And it's a deeper, safer, far more advanced codebase that just does more.</p>
+<h2>
+<a name="i-actually-pared-out-about-600k-by-tweaking-inlining-2" class="anchor" href="https://forum.rebol.info#i-actually-pared-out-about-600k-by-tweaking-inlining-2"></a>I Actually Pared Out About 600K By Tweaking Inlining</h2>
+<p>When I started looking at size, the O2 binary was like 2.4 MB.  That was more than I expected, so I decided to look under the hood into why.</p>
+<p>I used Google's tool <a href="https://github.com/google/bloaty">Bloaty McBloatface</a> to get some insight, and to my surprise...some rather small functions had a disproportionate amount of code attributed to them.</p>
+<p>It turned out that this was due to putting functions in header files and inlining them with <code>static inline</code>.  When I moved 5 of these functions into the .c files instead of the .h files, that saved 400k in one blow... and the executable only got 0.4% slower (four tenths of a percent) as a result.</p>
+<p>Then I managed to make it so the C++ build was about 140K lighter by changing the <code>static inline</code> on the remaining functions to a macro of INLINE that's either <code>inline</code> in the C++ build, or <code>static inline</code> in the C build.</p>
+<p>I guess the takeaway here is that even if you notice that something is getting bigger due to good reasons of having more code, it always pays to look under the hood a bit when you can.  A few hours of work can get some low-hanging fruit.</p>
+<p>(Another takeaway is that being able to build a C codebase as C++--if you want to--continuously pays dividends...)</p>
+<p>Here's some notes on the INLINE macro:</p>
+<pre><code class="lang-auto">
+//=//// INLINE MACRO FOR LEVERAGING C++ OPTIMIZATIONS /////////////////////=//
+//
+// "inline" has a long history in C/C++ of being different on different
+// compilers, and took a long time to get into the standard.  Once it was in
+// the standard it essentially didn't mean anything in particular about
+// inlining--just "this function is legal to appear in a header file and be
+// included in multiple source files without generating conflicts."  The
+// compiler makes no particular promises about actually inlining the code.
+//
+// R3-Alpha had few inline functions, but mostly used macros--in unsafe ways
+// (repeating arguments, risking double evaluations, lacking typechecking.)
+// Ren-C reworked the code to use inline functions fairly liberally, even
+// putting fairly large functions in header files to give the compiler the
+// opportunity to not need to push or pop registers to make a call.
+//
+// However, GCC in C99 mode requires you to say `static inline` or else you'll
+// get errors at link time.  This means that every translation unit has its
+// own copy of the code.  A study of the pathology of putting larger functions
+// in headers as inline with `static inline` on them found that about five
+// functions were getting inlined often enough to add 400K to the executable.
+// Moving them out of .h files and into .c files dropped that size, and was
+// only about *0.4%* slower (!) making it an obvious win to un-inline them.
+//
+// This led to experimentation with C++ builds just using `inline`, which
+// saved a not-insignificant 8% of space in an -O2 build, as well as being ever
+// so slightly faster.  Even if link-time-optimization was used, it still
+// saved 3% on space.
+//
+// The long story short here is that plain `inline` is better if you can use
+// it, but you can't use it in gcc in C99 mode (and probably not other places
+// like TinyC compiler or variants). So this clunky INLINE macro actually
+// isn't some pre-standards anachronism...it has concrete benefits.
+//
+#if CPLUSPLUS_11
+    #define INLINE inline
+#else
+    #define INLINE static inline
+#endif
+</code></pre>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/executable-size-circa-2023-and-tweaking-inline/2061">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/executable-size-circa-2023-and-tweaking-inline/2061</link>
+          <pubDate>Tue, 21 Nov 2023 05:02:05 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2061</guid>
+          <source url="https://forum.rebol.info/t/executable-size-circa-2023-and-tweaking-inline/2061.rss">Executable Size circa 2023...and tweaking INLINE</source>
+        </item>
+        <item>
+          <title>Intrinsics: Functions without Frames</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Optimization</category>
+          <description><![CDATA[
+            <p>Redbol's historical type system really had only one design point: <em>be fast</em>.  There were 64 fundamental datatypes, and parameters of a function could either accept each datatype or not.  So a simple bitset of 64 bits was stored alongside each parameter, and checked when the function was called.  That was it.</p>
+<p>Ren-C's richer design explodes the number of "types" in the system.  Isotopes like <strong><code>~null~</code></strong> are variations on WORD!, but you don't want every function that takes a WORD! to take nulls...and you don't want to have the type checking be so broad as to take <strong><code>[isotope!]</code></strong> just because you want to be able to take nulls (because that would include splices, packs, etc.)</p>
+<p>It's not just this reason that Redbol's type checking was too simple, but it forced my hand in coming up with some sort of answer.  <em>I couldn't think of any better idea than Lisp, which does type checking via functions ("predicates").</em>  So I rigged it up where if you want to say a function can take an integer or null, you can write <strong><code>[null? integer!]</code></strong>  You can freely mix LOGIC-returning functions with fundamental types, and we're no longer stuck with the 64 fundamental type limit.</p>
+<h2>
+<a name="isnt-it-slow-to-call-a-list-of-functions-for-typechecking-1" class="anchor" href="https://forum.rebol.info#isnt-it-slow-to-call-a-list-of-functions-for-typechecking-1"></a>Isn't It Slow To Call A List of Functions For Typechecking?</h2>
+<p>It can be.  And in particular, it can be if you have to go through calling those functions twice.</p>
+<p>Why twice?  Because of "coercion".  For example, if you pass a pack to a function that expects packs, you'll get the meta-pack:</p>
+<pre><code>&gt;&gt; foo: func [^x [pack?]] [probe x]
+
+&gt;&gt; foo pack [1 "hi"]
+~['1 '"hi"]~
+</code></pre>
+<p>But if your function didn't want packs, but wanted the type the pack decays to, it has to work for that as well:</p>
+<pre><code>&gt;&gt; bar: func [^x [integer?]] [probe x]
+
+&gt;&gt; bar pack [1 "hi"]
+'1 
+</code></pre>
+<p><em>Did the function want the meta form or the meta-decayed form?</em>  There's no way of knowing for sure in advance.  The method chosen is to offer the meta form first, and if that doesn't match then the decayed form is offered.</p>
+<p>It didn't know before walking through the block of functions to typecheck that a pack wouldn't have been accepted.  So it had to go through offering the pack, and then offering the integer.</p>
+<h2>
+<a name="but-i-noticed-something-about-these-functions-2" class="anchor" href="https://forum.rebol.info#but-i-noticed-something-about-these-functions-2"></a>But I Noticed Something About These Functions...</h2>
+<p>Typically these functions are very simple:</p>
+<ul>
+<li>
+<p>They take one argument.</p>
+</li>
+<li>
+<p>They can't fail.</p>
+</li>
+<li>
+<p>They don't require recursive invocations of the evaluator.</p>
+</li>
+</ul>
+<p>This led me to wonder how hard it would be to define a class of actions whose implementations were a simple C function with an input value and output value.  If you weren't in a scenario where you needed a full FRAME!, you could reach into the ACTION!'s definition and grab the simple C function out of it.  All these functions would use the same dispatcher--that would be a simple matter of proxying the first argument of a built frame to pass it to this C function.</p>
+<p>I decided to call these <strong>"intrinsics"</strong>, which is named after a <a href="https://en.wikipedia.org/wiki/Intrinsic_function">trick compilers use</a> when they see certain function calls that they implement those functions via direct code inlining.  It's not a perfect analogy, but it's similar in spirit.</p>
+<h2>
+<a name="it-wasnt-all-that-hard-to-implement-relatively-speaking-roll_eyes-3" class="anchor" href="https://forum.rebol.info#it-wasnt-all-that-hard-to-implement-relatively-speaking-roll_eyes-3"></a>It Wasn't All That Hard To Implement (relatively speaking <img src="https://forum.rebol.info/images/emoji/twitter/roll_eyes.png?v=12" title=":roll_eyes:" class="emoji" alt=":roll_eyes:" loading="lazy" width="20" height="20"> )</h2>
+<p>All of the native function implementations were assumed to have the same type signature, taking a frame as an argument.  I took away that assumption and added an /INTRINSIC refinement to the NATIVE function generator.  If it was an intrinsic, then the C function in the native table would take a single value argument and an output slot to write to.</p>
+<p>So it's still one C function per native.  But if it's an intrinsic, then the function is not a dispatcher... the Intrinsic_Dispatcher() is used, and the C function is poked into the properties of the function.</p>
+<p>Callsites that want to optimize for intrinsics just look to see if an action has the Intrinsic_Dispatcher(), and if so they have to take responsibility for procuring an argument and type checking it.  But if they do, they can just call the C function directly with no frame overhead.</p>
+<p><strong>This helps make the switchover to functions in type spec blocks much more palatable.</strong>  It's never going to be as fast as the bitset checking, but it's fast enough to allow things to make progress.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/intrinsics-functions-without-frames/2050">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/intrinsics-functions-without-frames/2050</link>
+          <pubDate>Sun, 15 Oct 2023 17:25:32 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2050</guid>
+          <source url="https://forum.rebol.info/t/intrinsics-functions-without-frames/2050.rss">Intrinsics: Functions without Frames</source>
+        </item>
         <item>
           <title>Is The Script Compression Feature Necessary?</title>
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
@@ -1405,7 +1535,7 @@ orange
 <p><strong>Avoid optimizing things before you're sure if they're right.</strong>  I'm guilty as anyone of fiddling with things for optimization reasons just because it's cool or I get curious of whether something can work or not.  Programmers are tinkerers and that's just how it is.  But it's definitely not time to go over things with a fine-toothed comb when so many design issues are not worked out.</p>
 </li>
 </ul>
-            <p><small>2 posts - 1 participant</small></p>
+            <p><small>3 posts - 1 participant</small></p>
             <p><a href="https://forum.rebol.info/t/web-build-performance-stats/1468">Read full topic</a></p>
           ]]></description>
           <link>https://forum.rebol.info/t/web-build-performance-stats/1468</link>
@@ -1421,11 +1551,11 @@ orange
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
           <category>Optimization</category>
           <description><![CDATA[
-            <p>Ren-C preserved an idea from R3-Alpha...which was that there would be a cell type byte reserved to signal the end of an array.  This is a bit like how null terminators are used with C strings.  However, arrays also tracked their length.  So it was somewhat redundant information.</p>
+            <p>Ren-C preserved an idea from R3-Alpha...which was that there would be a cell type byte reserved to signal the end of an array.  This is a bit like how null terminators are used with C strings.  However, arrays also tracked their length.  So it was redundant information.</p>
 <p>In R3-Alpha, the special cells were given the END! datatype.  Sometimes you would see bugs that would leak the existence of this internal type to the user.  Ren-C hid it more effectively, by not making it an actual "type".</p>
 <p>On the plus side, this provides a clean-looking way to walk through the values in an array:</p>
-<pre><code>Cell(*) item = ARR_HEAD(array);  // first cell pointer in the array
-for (; NOT_END(item); ++item) {
+<pre><code>Cell* item = Array_Head(array);  // first cell pointer in the array
+for (; Not_End(item); ++item) {
     ...
 }
 </code></pre>
@@ -1447,16 +1577,16 @@ for (; NOT_END(item); ++item) {
 <p><strong>But I think the time has come to demote termination to a debug-build-only practice.</strong>  It's gotten in the way of too many interesting optimizations.</p>
 <p>Data point: Red doesn't do it.  They just store the pointer to the tail of the data (in the slot where R3-Alpha stored the length).  It works either way since you can calculate the length by subtracting the head from the tail...or calculate the tail by adding the length to the head.  I'd imagine the tail is needed more often.</p>
 <p>The code isn't usually that much worse:</p>
-<pre><code>Cell(*) item = ARR_HEAD(array);
-Cell(*) tail = ARR_TAIL(array);
+<pre><code>Cell* item = Array_Head(array);
+Cell* tail = Array_Tail(array);
 for (; item != tail; ++item) {
     ...
 }
 </code></pre>
-<p>But sometimes there were cases that a function would be passed a Cell(*) resident in an array, without passing the array also.  And then it would enumerate that value forward until it reached an end.  Such routines aren't all that common, but a few do exist.  They'd need to be revisited.</p>
+<p>But sometimes there were cases that a function would be passed a Cell* resident in an array, without passing the array also.  And then it would enumerate that value forward until it reached an end.  Such routines aren't all that common, but a few do exist.  They'd need to be revisited.</p>
 <p>It's not that huge a deal, and kind of trivial in the scheme of things.  But it would touch a lot of code.  <img src="https://forum.rebol.info/images/emoji/twitter/frowning.png?v=12" title=":frowning:" class="emoji" alt=":frowning:" loading="lazy" width="20" height="20">  But, as usual in Ren-C...the asserts can keep it running.</p>
 <h2>
-<a name="end-cells-would-still-exist-2" class="anchor" href="https://forum.rebol.info#end-cells-would-still-exist-2"></a>END cells would still exist</h2>
+<a name="end-signals-would-still-exist-2" class="anchor" href="https://forum.rebol.info#end-signals-would-still-exist-2"></a>END signals would still exist</h2>
 <p>The END cell type is important for other reasons.  It's used in rebEND as a terminator for C va_list arguments, and that's not going away.  There are other applications which are beyond the scope of this post to explain.</p>
 <p>And as I say, termination of some kind would probably continue in debug builds.  So they might over-allocate to have enough room at the tail to put an end cell, just to get errors to trigger if you went past the limit.</p>
 <p>So let's not malign the END marker too much.  It has been a valuable contributor.  <img src="https://forum.rebol.info/images/emoji/twitter/medal_sports.png?v=12" title=":medal_sports:" class="emoji" alt=":medal_sports:" loading="lazy" width="20" height="20"></p>
@@ -1616,7 +1746,7 @@ for (; item != tail; ++item) {
 <h2>It's All Been Working Great</h2>
 <p>Immutable PATH! and TUPLE! are clearly good, and they permit this optimization.</p>
 <p>This has tied down <a href="http://forum.rebol.info/t/taming-the-pathology-of-path/1006">some of the more egregious ambiguities in PATH!</a>, making it a solid and reliable part for dialecting--something it has certainly not been in the past.  If we can kill off things like <strong><code>a/:b:</code></strong> in favor of <strong><code>a/(b):</code></strong> and pay no more for it, we very well may should.</p>
-            <p><small>1 post - 1 participant</small></p>
+            <p><small>2 posts - 1 participant</small></p>
             <p><a href="https://forum.rebol.info/t/path-and-tuple-compression-explained/1008">Read full topic</a></p>
           ]]></description>
           <link>https://forum.rebol.info/t/path-and-tuple-compression-explained/1008</link>

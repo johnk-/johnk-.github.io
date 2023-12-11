@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Intrinsics: Functions without Frames</title>
+    <link>https://forum.rebol.info/t/intrinsics-functions-without-frames/2050</link>
+    <description>Redbol&#39;s historical type system really had only one design point: *be fast*.  There were 64 fundamental datatypes, and parameters of a function could either accept each datatype or not.  So a simple bitset of 64 bits was stored alongside each parameter, and checked when the function was called.  That was it.
+
+Ren-C&#39;s richer design explodes the number of &quot;types&quot; in the system.  Isotopes like **`~null~`** are variations on WORD!, but you don&#39;t want every function that takes a WORD! to take nulls...and you don&#39;t want to have the type checking be so broad as to take **`[isotope!]`** just because you want to be able to take nulls (because that would include splices, packs, etc.)
+
+It&#39;s not just this reason that Redbol&#39;s type checking was too simple, but it forced my hand in coming up with some sort of answer.  *I couldn&#39;t think of any better idea than Lisp, which does type checking via functions (&quot;predicates&quot;).*  So I rigged it up where if you want to say a function can take an integer or null, you can write **`[null? integer!]`**  You can freely mix LOGIC-returning functions with fundamental types, and we&#39;re no longer stuck with the 64 fundamental type limit.
+
+## Isn&#39;t It Slow To Call A List of Functions For Typechecking?
+
+It can be.  And in particular, it can be if you have to go through calling those functions twice.
+
+Why twice?  Because of &quot;coercion&quot;.  For example, if you pass a pack to a function that expects packs, you&#39;ll get the meta-pack:
+
+    &gt;&gt; foo: func [^x [pack?]] [probe x]
+
+    &gt;&gt; foo pack [1 &quot;hi&quot;]
+    ~[&#39;1 &#39;&quot;hi&quot;]~
+
+But if your function didn&#39;t want packs, but wanted the type the pack decays to, it has to work for that as well:
+
+    &gt;&gt; bar: func [^x [integer?]] [probe x]
+
+    &gt;&gt; bar pack [1 &quot;hi&quot;]
+    &#39;1 
+
+*Did the function want the meta form or the meta-decayed form?*  There&#39;s no way of knowing for sure in advance.  The method chosen is to offer the meta form first, and if that doesn&#39;t match then the decayed form is offered.
+
+It didn&#39;t know before walking through the block of functions to typecheck that a pack wouldn&#39;t have been accepted.  So it had to go through offering the pack, and then offering the integer.
+
+## But I Noticed Something About These Functions...
+
+Typically these functions are very simple:
+
+* They take one argument.
+
+* They can&#39;t fail.
+
+* They don&#39;t require recursive invocations of the evaluator.
+
+This led me to wonder how hard it would be to define a class of actions whose implementations were a simple C function with an input value and output value.  If you weren&#39;t in a scenario where you needed a full FRAME!, you could reach into the ACTION!&#39;s definition and grab the simple C function out of it.  All these functions would use the same dispatcher--that would be a simple matter of proxying the first argument of a built frame to pass it to this C function.
+
+I decided to call these **&quot;intrinsics&quot;**, which is named after a [trick compilers use](https://en.wikipedia.org/wiki/Intrinsic_function) when they see certain function calls that they implement those functions via direct code inlining.  It&#39;s not a perfect analogy, but it&#39;s similar in spirit.
+
+## It Wasn&#39;t All That Hard To Implement (relatively speaking :roll_eyes: )
+
+All of the native function implementations were assumed to have the same type signature, taking a frame as an argument.  I took away that assumption and added an /INTRINSIC refinement to the NATIVE function generator.  If it was an intrinsic, then the C function in the native table would take a single value argument and an output slot to write to.
+
+So it&#39;s still one C function per native.  But if it&#39;s an intrinsic, then the function is not a dispatcher... the Intrinsic_Dispatcher() is used, and the C function is poked into the properties of the function.
+
+Callsites that want to optimize for intrinsics just look to see if an action has the Intrinsic_Dispatcher(), and if so they have to take responsibility for procuring an argument and type checking it.  But if they do, they can just call the C function directly with no frame overhead.
+
+**This helps make the switchover to functions in type spec blocks much more palatable.**  It&#39;s never going to be as fast as the bitset checking, but it&#39;s fast enough to allow things to make progress.</description>
+    
+    <lastBuildDate>Sun, 15 Oct 2023 17:25:32 +0000</lastBuildDate>
+    <category>Optimization</category>
+    <atom:link href="https://forum.rebol.info/t/intrinsics-functions-without-frames/2050.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Intrinsics: Functions without Frames</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>Redbol's historical type system really had only one design point: <em>be fast</em>.  There were 64 fundamental datatypes, and parameters of a function could either accept each datatype or not.  So a simple bitset of 64 bits was stored alongside each parameter, and checked when the function was called.  That was it.</p>
+<p>Ren-C's richer design explodes the number of "types" in the system.  Isotopes like <strong><code>~null~</code></strong> are variations on WORD!, but you don't want every function that takes a WORD! to take nulls...and you don't want to have the type checking be so broad as to take <strong><code>[isotope!]</code></strong> just because you want to be able to take nulls (because that would include splices, packs, etc.)</p>
+<p>It's not just this reason that Redbol's type checking was too simple, but it forced my hand in coming up with some sort of answer.  <em>I couldn't think of any better idea than Lisp, which does type checking via functions ("predicates").</em>  So I rigged it up where if you want to say a function can take an integer or null, you can write <strong><code>[null? integer!]</code></strong>  You can freely mix LOGIC-returning functions with fundamental types, and we're no longer stuck with the 64 fundamental type limit.</p>
+<h2>
+<a name="isnt-it-slow-to-call-a-list-of-functions-for-typechecking-1" class="anchor" href="https://forum.rebol.info#isnt-it-slow-to-call-a-list-of-functions-for-typechecking-1"></a>Isn't It Slow To Call A List of Functions For Typechecking?</h2>
+<p>It can be.  And in particular, it can be if you have to go through calling those functions twice.</p>
+<p>Why twice?  Because of "coercion".  For example, if you pass a pack to a function that expects packs, you'll get the meta-pack:</p>
+<pre><code>&gt;&gt; foo: func [^x [pack?]] [probe x]
+
+&gt;&gt; foo pack [1 "hi"]
+~['1 '"hi"]~
+</code></pre>
+<p>But if your function didn't want packs, but wanted the type the pack decays to, it has to work for that as well:</p>
+<pre><code>&gt;&gt; bar: func [^x [integer?]] [probe x]
+
+&gt;&gt; bar pack [1 "hi"]
+'1 
+</code></pre>
+<p><em>Did the function want the meta form or the meta-decayed form?</em>  There's no way of knowing for sure in advance.  The method chosen is to offer the meta form first, and if that doesn't match then the decayed form is offered.</p>
+<p>It didn't know before walking through the block of functions to typecheck that a pack wouldn't have been accepted.  So it had to go through offering the pack, and then offering the integer.</p>
+<h2>
+<a name="but-i-noticed-something-about-these-functions-2" class="anchor" href="https://forum.rebol.info#but-i-noticed-something-about-these-functions-2"></a>But I Noticed Something About These Functions...</h2>
+<p>Typically these functions are very simple:</p>
+<ul>
+<li>
+<p>They take one argument.</p>
+</li>
+<li>
+<p>They can't fail.</p>
+</li>
+<li>
+<p>They don't require recursive invocations of the evaluator.</p>
+</li>
+</ul>
+<p>This led me to wonder how hard it would be to define a class of actions whose implementations were a simple C function with an input value and output value.  If you weren't in a scenario where you needed a full FRAME!, you could reach into the ACTION!'s definition and grab the simple C function out of it.  All these functions would use the same dispatcher--that would be a simple matter of proxying the first argument of a built frame to pass it to this C function.</p>
+<p>I decided to call these <strong>"intrinsics"</strong>, which is named after a <a href="https://en.wikipedia.org/wiki/Intrinsic_function">trick compilers use</a> when they see certain function calls that they implement those functions via direct code inlining.  It's not a perfect analogy, but it's similar in spirit.</p>
+<h2>
+<a name="it-wasnt-all-that-hard-to-implement-relatively-speaking-roll_eyes-3" class="anchor" href="https://forum.rebol.info#it-wasnt-all-that-hard-to-implement-relatively-speaking-roll_eyes-3"></a>It Wasn't All That Hard To Implement (relatively speaking <img src="https://forum.rebol.info/images/emoji/twitter/roll_eyes.png?v=12" title=":roll_eyes:" class="emoji" alt=":roll_eyes:" loading="lazy" width="20" height="20"> )</h2>
+<p>All of the native function implementations were assumed to have the same type signature, taking a frame as an argument.  I took away that assumption and added an /INTRINSIC refinement to the NATIVE function generator.  If it was an intrinsic, then the C function in the native table would take a single value argument and an output slot to write to.</p>
+<p>So it's still one C function per native.  But if it's an intrinsic, then the function is not a dispatcher... the Intrinsic_Dispatcher() is used, and the C function is poked into the properties of the function.</p>
+<p>Callsites that want to optimize for intrinsics just look to see if an action has the Intrinsic_Dispatcher(), and if so they have to take responsibility for procuring an argument and type checking it.  But if they do, they can just call the C function directly with no frame overhead.</p>
+<p><strong>This helps make the switchover to functions in type spec blocks much more palatable.</strong>  It's never going to be as fast as the bitset checking, but it's fast enough to allow things to make progress.</p>
+          <p><a href="https://forum.rebol.info/t/intrinsics-functions-without-frames/2050/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/intrinsics-functions-without-frames/2050/1</link>
+        <pubDate>Sun, 15 Oct 2023 17:25:32 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-2050-1</guid>
+        <source url="https://forum.rebol.info/t/intrinsics-functions-without-frames/2050.rss">Intrinsics: Functions without Frames</source>
+      </item>
+  </channel>
+</rss>

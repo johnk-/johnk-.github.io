@@ -5,8 +5,838 @@
     <link>https://forum.rebol.info/c/development/8</link>
     <description>Topics in the &#39;Development&#39; category Discussion of the development of Rebol itself: language design, implementation and standard library.</description>
     
-      <lastBuildDate>Mon, 14 Aug 2023 17:08:18 +0000</lastBuildDate>
+      <lastBuildDate>Thu, 07 Dec 2023 18:40:22 +0000</lastBuildDate>
       <atom:link href="https://forum.rebol.info/c/development/8.rss" rel="self" type="application/rss+xml" />
+        <item>
+          <title>Accepting the availability of stdint.h and stdbool.h</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Build System</category>
+          <description><![CDATA[
+            <p>One of Carl's comments in R3-Alpha complained about the lack of a standardization of integer sizes in C:</p>
+<blockquote>
+<p><em>"One of the biggest flaws in the C language was not to indicate bitranges of integers. So, we do that here.  You cannot 'abstractly remove' the range of a number.  It is a critical part of its definition."</em></p>
+</blockquote>
+<p>So he did some empirical platform detection to define things like REBI32 for a signed 32-bit integer, REBU64 for an unsigned 64-bit integer, etc.</p>
+<p>But once C99 arrived, the file &lt;stdint.h&gt; offered several basic types, and basically covered the needs with types that had names like <strong>int32_t</strong> and <strong>uint64_t</strong>:</p>
+<p><a href="http://en.cppreference.com/w/c/types/integer" class="inline-onebox">Fixed width integer types (since C99) - cppreference.com</a></p>
+<p>So Ren-C was changed to use the C99 names and include <code>&lt;stdint.h&gt;</code>.  For pre-C99 compilers, it used a portable shim called "pstdint", which it maintained its own copy of in the repository:</p>
+<p><strong><a href="https://github.com/metaeducation/ren-c/blob/e6e3e7fe0fcff165557f9ffc3de3e6713a50f99a/src/include/pstdint.h">src/include/pstdint.h</a></strong></p>
+<p>By similar reasoning, booleans were shimmed with another found-file:</p>
+<p><strong><a href="https://github.com/metaeducation/ren-c/blob/e6e3e7fe0fcff165557f9ffc3de3e6713a50f99a/src/include/pstdbool.h">src/include/pstdbool.h</a></strong></p>
+<h2>
+<a name="ren-c-has-embraced-c99-so-why-keep-these-shims-1" class="anchor" href="https://forum.rebol.info#ren-c-has-embraced-c99-so-why-keep-these-shims-1"></a>Ren-C Has Embraced C99, So Why Keep These Shims?</h2>
+<p>C99 is now a prerequisite for building the system.</p>
+<p>It may be that some pre-C99 standards compiler <em>could</em> still build Ren-C with these shims, though it would need variadic macro support.  The odds of a compiler having that support yet lacking things like <strong>bool</strong> and <strong>int32_t</strong> are fairly slim.</p>
+<p>In any case, these esoteric compilation environments could be "shimmed" by hacking in versions of stdint.h and stdbool.h to their include directories.  I feel like that's the responsibility of the build environment at this point... and that the Ren-C codebase need not be carrying the baggage.</p>
+<p>So I'm pulling the files out.  If anyone is on an esoteric platform and trying to build but finds these definitions being missing is the only problem, then they should dig up pstdint and pstdbool.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/accepting-the-availability-of-stdint-h-and-stdbool-h/2067">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/accepting-the-availability-of-stdint-h-and-stdbool-h/2067</link>
+          <pubDate>Thu, 07 Dec 2023 18:40:22 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2067</guid>
+          <source url="https://forum.rebol.info/t/accepting-the-availability-of-stdint-h-and-stdbool-h/2067.rss">Accepting the availability of stdint.h and stdbool.h</source>
+        </item>
+        <item>
+          <title>Definitional Break and Continue... the Time is Now</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Semantics</category>
+          <description><![CDATA[
+            <p>I was writing what I thought to be a clever bit of code, <a href="https://forum.rebol.info/t/deceptive-incomplete-parsing-a-common-problem/2065">discussed here</a></p>
+<pre><code>for-each file ... [
+    parse file [thru any [".reb" ".r"] &lt;end&gt; | (continue)]
+    ...
+]
+</code></pre>
+<p>I thought it was pleasing to have the CONTINUE in the rules themselves.</p>
+<p>Pleasing, except... a bit displeasing considering <strong>it didn't work.</strong></p>
+<p>BREAK and CONTINUE would break or continue the first loop they found above them in the stack.  Since PARSE is currently written in usermode code, it uses loops in its implementation (to loop over the rules).  <em>so you wind up continuing some arbitrary loop inside the combinators, having random effects</em>!</p>
+<p>Happily Ren-C has pioneered answers to this kind of problem with definitional returns.  But loops just have to get with the program and make CONTINUE and BREAK definitional in their bodies.</p>
+<p>So I did it!  And most things appeared to work (like the motivating example).</p>
+<h2>
+<a name="still-complexity-for-loops-implemented-without-loops-1" class="anchor" href="https://forum.rebol.info#still-complexity-for-loops-implemented-without-loops-1"></a>Still Complexity For Loops Implemented Without "Loops"</h2>
+<p>In bootstrap, there was some code implementing FOR-EACH-PLATFORM.  Hand-waving a bit, it initially looked like this:</p>
+<pre><code> for-each-platform: func ['var [word! tuple!] body [block!]] [
+     parse platforms-table [
+         while [not &lt;end&gt;] [
+              ...  ; rules that build up an OBJECT! 
+              (set var obj, do body)
+         ]
+     ]
+ ]
+</code></pre>
+<p>But that didn't make CONTINUE work:</p>
+<pre><code> for-each-platform p [
+     if p.name = 'HaikuOS [continue]
+     ...
+ ]
+</code></pre>
+<p>So I'd hacked up something at one point in history which looked like this monstrosity:</p>
+<pre><code>    completed*: false
+    running*: false
+    while [true] [  ; must be in loop for BREAK or CONTINUE
+        if running* [  ; must have had a CONTINUE
+            completed*: true
+            break
+        ]
+        running*: true
+        do body
+        completed*: true
+        break
+    ]
+    if not completed* [return null] 
+</code></pre>
+<p>That depended on non-definitional CONTINUE happening inside BODY finding the enclosing WHILE.</p>
+<p>But now, that CONTINUE isn't definitionally bound anywhere.  So that CONTINUE is just a reference to a default CONTINUE function in LIB, which will error telling you there are no loops providing continue available.</p>
+<p>For the modern world, this <em>works</em>:</p>
+<pre><code> repeat 1 body else [return null]
+</code></pre>
+<p>Reserving the pure NULL return value for BREAK means you can get that communication of when BREAK was encountered out of the return result.  And in this case, CONTINUE is just supposed to bypass the remainder of code in BODY and go on parsing.  So it works.</p>
+<p>But it's suboptimal as the binding of the body to BREAK and CONTINUE happens on each run instead of once.  Doing that more efficiently would need some new techniques and case studies.</p>
+<p>Overall though, it's progress...in the sense that there's an answer that works slowly, vs. not working at all!</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/definitional-break-and-continue-the-time-is-now/2066">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/definitional-break-and-continue-the-time-is-now/2066</link>
+          <pubDate>Thu, 07 Dec 2023 16:29:35 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2066</guid>
+          <source url="https://forum.rebol.info/t/definitional-break-and-continue-the-time-is-now/2066.rss">Definitional Break and Continue... the Time is Now</source>
+        </item>
+        <item>
+          <title>Dialect Meaning of Non-Words in Function Parameter Spec Blocks</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Functions</category>
+          <description><![CDATA[
+            <p>Historical Redbol only had WORD!s in the BLOCK! that came after a parameter:</p>
+<pre><code>foo: func [
+    arg [block! word! number!]  ;  all words in block
+] ...
+</code></pre>
+<p>But when Ren-C introduced the paradigm-breaking NULL that could not be put in arrays, that meant there was no <code>null!</code> datatype.  To fill the gap, the tag <code>&lt;opt&gt;</code> was chosen to indicate the parameter as optional--hence possibly null:</p>
+<pre><code>foo: func [
+    arg [&lt;opt&gt; block! word! number!]  ;  now it's WORD!s and TAG!s
+] ...
+</code></pre>
+<p>I liked using a TAG! for how it stood out (though in retrospect I'd have probably chosen <code>&lt;null&gt;</code>, but everything was named differently then).  Other quirky ideas were floated, like being able to put a leading slash on the typeset block:</p>
+<pre><code>foo: func [
+    arg /[block! word! number!]  ; like a refinement, but on the types
+] ...
+</code></pre>
+<p>That didn't gain traction, and probably shouldn't have.</p>
+<p>Then when early efforts faced another value state that couldn't be put in a block and didn't have a type, <strong><code>&lt;void&gt;</code></strong> came onto the scene...because as with there being no NULL!, there was no VOID! datatype.</p>
+<h2>
+<a name="tag-modifiers-which-werent-type-checkers-showed-up-1" class="anchor" href="https://forum.rebol.info#tag-modifiers-which-werent-type-checkers-showed-up-1"></a>Tag Modifiers Which Weren't Type Checkers Showed Up</h2>
+<p>The ability to take a parameter but get an immutable view of it was added as <strong><code>&lt;const&gt;</code></strong>.</p>
+<p>Parameters that would accept being at the end of input and evaluate to null in that case were <strong><code>&lt;end&gt;</code></strong></p>
+<p><strong><code>&lt;variadic&gt;</code></strong> and <strong><code>&lt;skippable&gt;</code></strong> came into existence.</p>
+<p>These "parameter-control tags" seemed to me to be a distinct category from typecheckers like <strong><code>&lt;opt&gt;</code></strong> and <strong><code>&lt;void&gt;</code></strong>.   Having them all use TAG! felt like <em>too many tags.</em></p>
+<p>So I mused about splitting the roles, something like:</p>
+<pre><code>[&lt;const&gt; #null type!]
+-or-
+[#const &lt;null&gt; type!]
+</code></pre>
+<p>But I didn't like the look of it enough to move on it.  So things like <strong><code>[&lt;const&gt; &lt;opt&gt; type!]</code></strong> stuck around while I wondered about it.</p>
+<h2>
+<a name="today-you-can-specify-any-type-check-by-function-2" class="anchor" href="https://forum.rebol.info#today-you-can-specify-any-type-check-by-function-2"></a>Today, You Can Specify Any Type Check By Function</h2>
+<p>There's still no NULL! or VOID!.  But with the way things work now, you can use functions as "type predicates" to recognize things that aren't datatypes in their own right:</p>
+<pre><code>foo: func [
+    arg [null? block! word! number!]
+] ...
+</code></pre>
+<p>What's good:</p>
+<ul>
+<li>It leaves TAG! for the properties like <strong><code>&lt;const&gt;</code></strong> that don't have to do with type recognition... but rather controlling the parameter in a more special way.</li>
+</ul>
+<p>What's bad:</p>
+<ul>
+<li>It loses that kind of special look that tags gave to arguments that could take null.  It blurs together, especially with things like SPLICE? and LOGIC? and CHAR? for other non-fundamental datatypes (characters are just single-character issues now, and ~true~ and ~false~ isotopes of WORD! implement logic)</li>
+</ul>
+<h2>
+<a name="a-modern-option-null-for-taking-null-3" class="anchor" href="https://forum.rebol.info#a-modern-option-null-for-taking-null-3"></a>A Modern Option: ~NULL~ for Taking Null</h2>
+<p>I made an experiment so if you used a QUASI-WORD!, then it would match an isotope of that form.</p>
+<p>It's a kind of pleasingly distinct look:</p>
+<pre><code>foo: func [
+    arg [~null~ block! word! number!]
+] ...
+</code></pre>
+<p>And it mixes better with the tags:</p>
+<pre><code>foo: func [
+    arg [~null~ &lt;const&gt; block! word! number!]
+] ...
+</code></pre>
+<p>It also works for "nones" (isotopic voids) and doesn't look too bad there, e.g. for RETURN:</p>
+<pre><code>foo: func [
+    return: [~]  ; as opposed to `return: [none?]`
+ ] ...
+</code></pre>
+<p>That doesn't work for voids, and the current idea is that there's no VOID! because TYPE OF VOID gives back NULL.  This is consistent with void-in-null out in general, although it might confuse people who expect to do:</p>
+<pre><code>switch type of value [
+    null [print "This means value was void, not null"]
+    ...
+]
+</code></pre>
+<p>So the idea there was that perhaps TYPE OF NULL is an error, and this guides you to another solution like <strong>switch/type</strong> where you can use <strong>&amp;[null?]</strong> or <strong>&amp;[void?]</strong> as type predicates and get what you actually want.</p>
+<p><em>(I still don't think defining <strong>null!: &amp;[null?]</strong> is a good idea, because it looks like a fundamental datatype, and you cannot <strong>make null! ...</strong> etc.  Maybe <strong>null?!: &amp;[null?]</strong> or something like that would be a bit less noisy at usage sites, enough to be worth it?)</em></p>
+<h2>
+<a name="allowing-null-and-null-as-choices-seems-good-4" class="anchor" href="https://forum.rebol.info#allowing-null-and-null-as-choices-seems-good-4"></a>Allowing NULL? and ~NULL~ As Choices Seems Good</h2>
+<p>I think we can live with <strong>void?</strong> in function specs for functions that deliberately take voids.  It's also more legitimate--voids are more neutral than nulls in the current formulation--e.g. <strong>append [a b c] void</strong> is [a b c].</p>
+<p>I like the option of <strong>~null~</strong> instead of <strong>null?</strong> to call out the more rare-and-alarming idea of accepting null parameters.</p>
+<h2>
+<a name="what-about-return-nihil-and-return-none-5" class="anchor" href="https://forum.rebol.info#what-about-return-nihil-and-return-none-5"></a>What about <code>return: &lt;nihil&gt;</code> and <code>return: &lt;none&gt;</code>
+</h2>
+<p>These two special uses of tag! with no block have been used to say you don't need a RETURN statement at all... the function just gives back none or nihil respectively when the body completes.</p>
+<p>How necessary is it?  Well, you either write things like:</p>
+<pre><code>comment: func [
+    return: [nihil?]
+    discarded [any-value!]
+][
+    return nihil
+]
+</code></pre>
+<p>Or you have the contraction:</p>
+<pre><code>comment: func [
+    return: &lt;nihil&gt;
+    discarded [any-value!]
+][
+]
+</code></pre>
+<p>This style of "don't even worry about writing a RETURN" has the widest applicability to NONE and NIHIL.  We don't strictly need it, but I've gotten used to it.</p>
+<p>I mention <strong>return: [~]</strong> as a possible alternative for saying none is a return type using the quasiform-means-isotope idea.  And since none falls out of function bodies by default with no return, it's not strictly necessary to have <strong><code>return: &lt;none&gt;</code></strong> as any kind of special operation.</p>
+<p>Again, how does that look?</p>
+<pre><code>foo: func [
+    return: [~]
+ ] ...
+</code></pre>
+<p>If you're going to break the pattern and not say <strong><code>return: [none?]</code></strong>  then I may call that a break-even alternative to <strong><code>return: &lt;none&gt;</code></strong>.  A little more symbol-y, but doesn't break the rhythm of type specs being blocks.</p>
+<p>This leaves the nihil case.  We could say <strong>return: [~[]~]</strong> and have that mean "I return an empty pack" but in that case you'd still need an explicit return:</p>
+<pre><code>comment: func [
+    return: [~[]~]
+    discarded [any-value!]
+][
+    return nihil
+]
+</code></pre>
+<p>But I think I like <strong><code>return: [nihil?]</code></strong> better than that.  Compared to <strong><code>return: [~]</code></strong> the <strong><code>[~[]~]</code></strong> is a bridge too far.</p>
+<p>Anyway, the reason this is a struggle is that <strong><code>return: &lt;none&gt;</code></strong> has just become so pervasive that it's hard to see that changed to <strong><code>return: [none?]</code></strong>.  But standardizing on blocks and moving away from the tags for this application may be the best idea.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/dialect-meaning-of-non-words-in-function-parameter-spec-blocks/2064">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/dialect-meaning-of-non-words-in-function-parameter-spec-blocks/2064</link>
+          <pubDate>Sat, 25 Nov 2023 08:25:56 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2064</guid>
+          <source url="https://forum.rebol.info/t/dialect-meaning-of-non-words-in-function-parameter-spec-blocks/2064.rss">Dialect Meaning of Non-Words in Function Parameter Spec Blocks</source>
+        </item>
+        <item>
+          <title>Why can&#39;t you PROTECT individual cells in an array?</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Debugger</category>
+          <description><![CDATA[
+            <p>You can PROTECT a variable:</p>
+<pre><code>&gt;&gt; x: 10
+
+&gt;&gt; protect 'x
+
+&gt;&gt; x: 20
+** Access Error: variable x locked by PROTECT (see UNPROTECT)
+</code></pre>
+<p>And you can PROTECT an array pointed to by a variable:</p>
+<pre><code>&gt;&gt; array: [&lt;a&gt; b #c]
+
+&gt;&gt; protect array
+
+&gt;&gt; append array ["d"]
+** Access Error: series read-only due to PROTECT (see UNPROTECT)
+
+&gt;&gt; array: [&lt;q&gt; r #s]  ; variable holding array not protected
+
+&gt;&gt; array
+== [&lt;q&gt; r #s]
+</code></pre>
+<p>...but you can't PROTECT a cell resident inside an array:</p>
+<pre><code>&gt;&gt; array: [&lt;a&gt; b #c]
+
+&gt;&gt; protect 'array.2  ; this doesn't work
+
+&gt;&gt; array.2: "z"
+; you'd expect an error here if it did work
+
+&gt;&gt; array.3: 1020
+; you'd expect no error here if it did work
+</code></pre>
+<p>R3-Alpha didn't have the feature, and Ren-C hasn't added it.  Why?</p>
+<h2>
+<a name="making-this-work-would-add-significant-complexity-1" class="anchor" href="https://forum.rebol.info#making-this-work-would-add-significant-complexity-1"></a>Making This Work Would Add Significant Complexity</h2>
+<p>Your first thought (well, mine) would be that this is about efficiency.  e.g. if you were going to write something like <strong>clear block</strong>, the existence of PROTECT'd cells inside that block would mean you'd have to visit all the cells before knowing if it was okay to clear it.  Other code that already has to visit the cells in order to copy them would still pay a little more too... like <strong>take/part</strong>.</p>
+<p><em>But that's not where the real problem is.</em>  Paying a little more for mutating operations is only slightly relevant.  The real problem has to do with a pointer to a cell not being able to answer the question of its own mutability--since it can't speak for the container's protection status.</p>
+<p>In more detail:</p>
+<p>Ren-C's clever management of immutability uses the C <code>const</code> designator.  What the const means on a <em>series</em> is that the series may be mutable, but hasn't had a runtime check yet to flip it over to being readable.  And what the const means on <em>cells</em> is that the cell was <em>extracted</em> from a series that may be mutable, but hadn't had the runtime check applied.</p>
+<p>This way, casual code that just messes around reading cells and series can be written easily, using const pointers and not paying for runtime checks.  And you can be certain of not skipping the runtime checks in the places where you want to get mutable access.  (R3-Alpha was full of bugs from "just forgetting".)</p>
+<p>The problem with getting a granularity of cell-level mutability is that right now, there's just one runtime check that gives you a mutable cell pointer...done at the array level:</p>
+<pre><code>Cell* tail;
+Cell* cell = VAL_ARRAY_AT_ENSURE_MUTABLE(&amp;tail, block);
+</code></pre>
+<p>There are multiple checks done, here.  The BLOCK! cell passed in may or may not carry a CONST cell bit--which is to say, that particular reference to the BLOCK! might be const (even if the underlying array hasn't been PROTECT'd).  And then, there's the protection status of the array...which can also become protected during enumerations of the array, or if it is executing currently in the evaluator.</p>
+<p>If this code doesn't trigger a failure from discovering a form of mutability, then the non-const <code>Cell*</code> is given back.</p>
+<p>But then...the code will increment that cell pointer to find other cells in the array.  And incrementing a mutable pointer gives you another mutable pointer.</p>
+<p>It may seem we <em>could</em> make <code>Cell(*)</code> in the C++ debug build a smart pointer class that gives you back a <code>Cell(const*)</code> when incremented.  And then say that there's a way to promote a const cell reference to a mutable cell reference with a runtime check.</p>
+<p>But this would be deceptive.  We already know that if you have a const reference to a cell that lives in the middle of an array, that a runtime check of the containing array for that cell hasn't been done yet.</p>
+<p>In other words: once you have your hands on a cell pointer, it's too late to ask about <em>that</em> cell's mutability.  The knowledge is up to the container.</p>
+<p>Trying to solve this would be a mess.  e.g. making a kind of Cell(const*) that was the size of two pointers, but held a reference to the array the cell was resident in...in case you wanted to do the runtime check asking for a promotion to a Cell(*).</p>
+<p>I've been moving in the other direction...paring away complexities in the source where possible.  Something like that doesn't belong in the codebase--especially to implement a feature that I can only vaguely imagine uses for.</p>
+<h2>
+<a name="so-dont-expect-cell-level-protectever-2" class="anchor" href="https://forum.rebol.info#so-dont-expect-cell-level-protectever-2"></a>So Don't Expect Cell-Level PROTECT...Ever</h2>
+<p>Every now and again I've looked at the flag and thought "why does this apply only to variable cells?"  So I wanted to hammer out the reasoning, and confirm that it wasn't just about performance.</p>
+<p>From my point of view, it's about creating a situation of a flag that needs to be checked, and which the code has no (reasonable) systemic way to enforce that checking.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/why-cant-you-protect-individual-cells-in-an-array/2062">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/why-cant-you-protect-individual-cells-in-an-array/2062</link>
+          <pubDate>Tue, 21 Nov 2023 22:52:50 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2062</guid>
+          <source url="https://forum.rebol.info/t/why-cant-you-protect-individual-cells-in-an-array/2062.rss">Why can&#39;t you PROTECT individual cells in an array?</source>
+        </item>
+        <item>
+          <title>Executable Size circa 2023...and tweaking INLINE</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Optimization</category>
+          <description><![CDATA[
+            <p>A modern Ren-C non-debug executable on Linux--with https and the libuv filesystem and networking code (which supports asynchronous file I/O etc.) is about 1.7 MB when it is built at an O2 level of optimization (optimize for speed).</p>
+<p>When built at Os optimization it's about 1.2 MB, sacrificing 40% of the speed to get the compression.  (In the modern era, most people would say that the extra size isn't a big deal to get that much of a speed improvement.)</p>
+<p>By comparison, an R3-Alpha Linux executable is about 0.56 MB at O2.  And a Red CLI-only binary on Linux is about 1.0 MB.</p>
+<h2>
+<a name="why-has-size-gone-up-1" class="anchor" href="https://forum.rebol.info#why-has-size-gone-up-1"></a>Why Has Size Gone Up?</h2>
+<p>I've looked under the hood at the differences with R3-Alpha to see what accounts for the disparity with modern Ren-C.  libuv accounts for a couple 100k, and is worth it--it would be especially so if taking advantage of things like the async file I/O.</p>
+<p>But the rest just generally comes down to the fact that it's about twice as much code.  If you enjoy using ADAPT or ENCLOSE or SPECIALIZE, well, there's code that implements it.  And it's a deeper, safer, far more advanced codebase that just does more.</p>
+<h2>
+<a name="i-actually-pared-out-about-600k-by-tweaking-inlining-2" class="anchor" href="https://forum.rebol.info#i-actually-pared-out-about-600k-by-tweaking-inlining-2"></a>I Actually Pared Out About 600K By Tweaking Inlining</h2>
+<p>When I started looking at size, the O2 binary was like 2.4 MB.  That was more than I expected, so I decided to look under the hood into why.</p>
+<p>I used Google's tool <a href="https://github.com/google/bloaty">Bloaty McBloatface</a> to get some insight, and to my surprise...some rather small functions had a disproportionate amount of code attributed to them.</p>
+<p>It turned out that this was due to putting functions in header files and inlining them with <code>static inline</code>.  When I moved 5 of these functions into the .c files instead of the .h files, that saved 400k in one blow... and the executable only got 0.4% slower (four tenths of a percent) as a result.</p>
+<p>Then I managed to make it so the C++ build was about 140K lighter by changing the <code>static inline</code> on the remaining functions to a macro of INLINE that's either <code>inline</code> in the C++ build, or <code>static inline</code> in the C build.</p>
+<p>I guess the takeaway here is that even if you notice that something is getting bigger due to good reasons of having more code, it always pays to look under the hood a bit when you can.  A few hours of work can get some low-hanging fruit.</p>
+<p>(Another takeaway is that being able to build a C codebase as C++--if you want to--continuously pays dividends...)</p>
+<p>Here's some notes on the INLINE macro:</p>
+<pre><code class="lang-auto">
+//=//// INLINE MACRO FOR LEVERAGING C++ OPTIMIZATIONS /////////////////////=//
+//
+// "inline" has a long history in C/C++ of being different on different
+// compilers, and took a long time to get into the standard.  Once it was in
+// the standard it essentially didn't mean anything in particular about
+// inlining--just "this function is legal to appear in a header file and be
+// included in multiple source files without generating conflicts."  The
+// compiler makes no particular promises about actually inlining the code.
+//
+// R3-Alpha had few inline functions, but mostly used macros--in unsafe ways
+// (repeating arguments, risking double evaluations, lacking typechecking.)
+// Ren-C reworked the code to use inline functions fairly liberally, even
+// putting fairly large functions in header files to give the compiler the
+// opportunity to not need to push or pop registers to make a call.
+//
+// However, GCC in C99 mode requires you to say `static inline` or else you'll
+// get errors at link time.  This means that every translation unit has its
+// own copy of the code.  A study of the pathology of putting larger functions
+// in headers as inline with `static inline` on them found that about five
+// functions were getting inlined often enough to add 400K to the executable.
+// Moving them out of .h files and into .c files dropped that size, and was
+// only about *0.4%* slower (!) making it an obvious win to un-inline them.
+//
+// This led to experimentation with C++ builds just using `inline`, which
+// saved a not-insignificant 8% of space in an -O2 build, as well as being ever
+// so slightly faster.  Even if link-time-optimization was used, it still
+// saved 3% on space.
+//
+// The long story short here is that plain `inline` is better if you can use
+// it, but you can't use it in gcc in C99 mode (and probably not other places
+// like TinyC compiler or variants). So this clunky INLINE macro actually
+// isn't some pre-standards anachronism...it has concrete benefits.
+//
+#if CPLUSPLUS_11
+    #define INLINE inline
+#else
+    #define INLINE static inline
+#endif
+</code></pre>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/executable-size-circa-2023-and-tweaking-inline/2061">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/executable-size-circa-2023-and-tweaking-inline/2061</link>
+          <pubDate>Tue, 21 Nov 2023 05:02:05 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2061</guid>
+          <source url="https://forum.rebol.info/t/executable-size-circa-2023-and-tweaking-inline/2061.rss">Executable Size circa 2023...and tweaking INLINE</source>
+        </item>
+        <item>
+          <title>Lisps, Kernel, Clojure: limits of &quot;Code is Data and Data is Code&quot;</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Foreign Inspiration</category>
+          <description><![CDATA[
+            <p>I had little-to-no Lisp experience when I encountered Rebol.  I just knew the general concept of "code is data, and data is code", and assumed they were similar.</p>
+<p>But as it turns out, <em>executing arbitrary structures of code constructed at runtime is taboo in most Lisps.</em>  This comes under the umbrella of "EVAL", and <a href="https://stackoverflow.com/questions/2571401/why-exactly-is-eval-evil">warned against for all the reasons that people say it's bad in any language</a>...such as why you wouldn't want to run an arbitrary string of JavaScript code.  About the only exception they seem to consider is the Read-Eval-Print-Loop: <strong><code>(loop (print (eval (read))))</code></strong>.</p>
+<p>There are warnings about the inefficiency of EVAL not being compiled...or the security concerns of running fully arbitrary code that is cobbled together from possibly unsanitized sources (which Rebol deliberately ignores).</p>
+<p>If you're willing to ignore that, you still face the Big Mechanical Problem:</p>
+<blockquote>
+<p><em>"[EVAL] evaluates under the global environment, losing your local context."</em></p>
+</blockquote>
+<h2>
+<a name="but-if-so-how-do-branches-work-in-lisps-1" class="anchor" href="https://forum.rebol.info#but-if-so-how-do-branches-work-in-lisps-1"></a>But If So... How Do Branches Work in Lisps?</h2>
+<p>If you have a branching function like EITHER, and it has two legs of the branch with the intent to only run one of them... doesn't that require selectively running an "EVAL"?  The EITHER receives a condition and then two "blocks" (lists) specifying arbitrary code.  If you lose all your local variables known at the callsite of the EITHER, how can it work?</p>
+<p>The answer depends on which Lisp variation you are using.  If you are using a classical Lisp (or Clojure), it simply has a list of exceptions... or "special forms".  These constructs are treated weirdly by the compiler and it's just swept under the rug.  For example:</p>
+<p><strong><a href="https://clojure.org/reference/special_forms">Special Forms in Clojure</a></strong></p>
+<p>Another possibility would be if there was some kind of environment capture at the callsite, and the EITHER received this environment as a parameter.  Then it could pass that environment to EVAL...so the eval would happen as if it were at the callsite.</p>
+<p>Were that written in a Rebol-like syntax, it would be quoting all its arguments and look like:</p>
+<pre><code> either: func [
+     'condition [group!]  ; conditions would have to be grouped
+     'true_branch [block!]
+     'false_branch [block!]
+     &lt;environment&gt; env  ; implicit capture of environment at callsite
+ ][
+     if do/environment condition env [  ; let's say IF is a native
+         return do/environment true_branch env
+     ]
+     return do/environment false_branch env
+ ]
+</code></pre>
+<p>Now that you're familiar with the idea, here is that written in how the <a href="https://web.cs.wpi.edu/~jshutt/kernel.html">"Kernel" Lisp Variant</a> does it:</p>
+<pre><code>($define! $either
+   ($vau (condition true_branch false_branch) env
+       ($if (&gt;=? (eval condition env) 0)
+           (eval true_branch env)
+           (eval false_branch env))))
+</code></pre>
+<p>Notably, <strong>Kernel is considered a very experimental black-sheep of the Lisp world</strong>, due to how much slower this generalized method of thinking is.  Special forms understood by the compiler are the norm.</p>
+<p>However, being able to pass environments to EVAL is <a href="https://www.gnu.org/software/texinfo/gsoc-2017-js-example/kawa/Eval-and-Environments.html">seemingly endorsed in modern Scheme</a>.  But that's not a feature of Clojure.</p>
+<h2>
+<a name="macros-cover-some-monkeying-with-code-structure-cases-2" class="anchor" href="https://forum.rebol.info#macros-cover-some-monkeying-with-code-structure-cases-2"></a>Macros Cover Some Monkeying-With-Code-Structure Cases</h2>
+<p>Lisp Macros can be used for source-to-source transformations, manipulating structure in the free-wheeling way we might think of doing in Rebol.  But that transformation happens only once.</p>
+<p>This Reddit question <a href="https://www.reddit.com/r/lisp/comments/13rmllb/difference_between_function_with_quoted_arguments/">asks about the difference between macros and receiving arguments unevaluated</a>:</p>
+<blockquote>
+<p><em>"If we put a backtick in front of the body of a function and we pass arguments quoted when calling it, wouldn't the function work the same as a macro (except that macros are evaluated in an earlier stage)? What would be the difference in practice? And how does this approach compare to fexpr?"</em></p>
+</blockquote>
+<p>The answers outline the difference... macros just run once, and they don't call EVAL on the code they get... they just return new code which will be evaluated later.  If you wrote something like an EITHER as a macro, you would have to transform it into IFs, and be dependent on the special forms to do the actual "weird" mechanic.</p>
+<h2>
+<a name="isnt-this-kind-of-weak-for-the-data-is-code-mantra-3" class="anchor" href="https://forum.rebol.info#isnt-this-kind-of-weak-for-the-data-is-code-mantra-3"></a>Isn't This Kind of Weak for the "Data is Code" Mantra?</h2>
+<p>It does seem disappointing.  :-/</p>
+<p>But Lisps haven't taken over the world, and maybe this is part of why.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/lisps-kernel-clojure-limits-of-code-is-data-and-data-is-code/2060">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/lisps-kernel-clojure-limits-of-code-is-data-and-data-is-code/2060</link>
+          <pubDate>Sat, 11 Nov 2023 21:52:50 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2060</guid>
+          <source url="https://forum.rebol.info/t/lisps-kernel-clojure-limits-of-code-is-data-and-data-is-code/2060.rss">Lisps, Kernel, Clojure: limits of &quot;Code is Data and Data is Code&quot;</source>
+        </item>
+        <item>
+          <title>ReplPad Visual PARSE Debugger</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Debugger</category>
+          <description><![CDATA[
+            <p>Hey!  I've gotten UPARSE hooked up to a debugger:</p>
+<p><a href="https://www.youtube.com/watch?v=doS7NgajRxI">Ren-C PARSE Hook Demo: Debugging</a></p>
+
+<p>The ability to step in at every level shows just how granular the hook is.  It's not a terrible lot of code:</p>
+<p><a href="https://github.com/hostilefork/replpad-js/blob/eb8a62054d345f798b3b87364943df3534a7b92e/eparse.reb#L334">https://github.com/hostilefork/replpad-js/blob/eb8a62054d345f798b3b87364943df3534a7b92e/eparse.reb#L334</a></p>
+<p>It's barely tested, but it is public on the ReplPad if anyone wants to throw something at it.</p>
+<h2>
+<a name="what-concerns-did-writing-this-raise-1" class="anchor" href="https://forum.rebol.info#what-concerns-did-writing-this-raise-1"></a>What Concerns Did Writing This Raise?</h2>
+<p>Having the debugger in the ReplPad gives an immediate user annoyance: <em>Why can't I type in the console while the debugger is running?</em>  (That's a huge can of worms and requires several posts of its own to talk about.)</p>
+<p>The design of UPARSE is that you can provide your own set of combinators to use.  You can give it a new WORD! combinator that does something besides fetch what the word looks up to and "act like it would if it were written there".  While this simple tracing facility can handle generic interpretations, the generality could subvert the usefulness of higher level tools.</p>
+<p>Beyond that problem of "words may not look things up at all", there's also the problem of "discovery".  Everything is "discovered" as you go along--there's not a list supplied up front.  That may not be a fit for some tools, so they could end up asking you to pass in the names of all the rules of interest even though they don't need to be "instrumented".</p>
+<p>I thought of adding a BREAKPOINT combinator, so you could break in mid-parse.  But I was only building up a list modeling the stack for frames while you were interacting with the buttons.  Having the stack always available at an arbitrary moment would mean that the stack model would have to be updated on every call to the hook.  Effectively this duplicates information held in the "real stack"--the subset of function calls that represent combinators.  So it's tempting to find a way to label stack frames and enumerate them generically, vs. expecting all debuggers like this to maintain their own.</p>
+<p>There's a lot to think about, here.  But as Rebol in the browser goes, this really is the only game in town, and it's holding up pretty well whenever I exercise it!</p>
+            <p><small>3 posts - 3 participants</small></p>
+            <p><a href="https://forum.rebol.info/t/replpad-visual-parse-debugger/2063">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/replpad-visual-parse-debugger/2063</link>
+          <pubDate>Thu, 26 Oct 2023 02:19:17 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2063</guid>
+          <source url="https://forum.rebol.info/t/replpad-visual-parse-debugger/2063.rss">ReplPad Visual PARSE Debugger</source>
+        </item>
+        <item>
+          <title>MOLD/ONLY vs. MOLD SPREAD</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Semantics</category>
+          <description><![CDATA[
+            <p>Historically, the way you would ask to mold an array without its delimiters was with MOLD/ONLY:</p>
+<pre><code>rebol2&gt;&gt; mold [a b c]
+== "[a b c]"
+
+rebol2&gt;&gt; mold/only [a b c]
+== "a b c" 
+</code></pre>
+<p>In Ren-C this raises some existential questions, like how should quoted arrays be handled?</p>
+<pre><code>mold/only first [''(a b c) d e]  ; ???
+</code></pre>
+<p>But I think there's a better answer: <em>use SPREAD and splice isotopes</em>.  If you want to mold the contents of an array, then turning it into a splice seems the natural answer.  And since you can't have splices of quoted things...there's a nice unambiguous answer.</p>
+<pre><code>&gt;&gt; mold [a b c]
+== "[a b c]"
+
+&gt;&gt; mold spread [a b c]
+== "a b c"
+</code></pre>
+<p>It does raise the question of what to do if you have something that might be an array or might not.  How do you tell it to mold as is if it's not an array, or without the delimiters if it is?  That's what MOLD/ONLY did, after all:</p>
+<pre><code>rebol2&gt;&gt; mold/only [b l o c k]
+== "b l o c k"
+
+rebol2&gt;&gt; mold/only &lt;tag&gt;
+== "&lt;tag&gt;"
+</code></pre>
+<p><em>"SPREAD won't SPREAD tags..."</em> you say.  And no, it won't.  But I think this is a rare case... and the neat thing about putting the bit on the value (as opposed to a refinement) is you can make functions like SPREAD-OR-AS-IS.  Or SPREAD-IF-PATH-OR-GROUP.  You can really tweak this however you want.</p>
+<pre><code>&gt;&gt; mold spread-or-as-is &lt;tag&gt;
+== "&lt;tag&gt;"
+
+&gt;&gt; mold spread-or-as-is "[b l o c k]"
+== "b l o c k"
+
+&gt;&gt; spread-if-path-or-group 'p/a/t/h
+== ~(p a t h)~  ; isotope
+
+&gt;&gt; mold spread-if-path-or-group 'p/a/t/h
+== "p a t h"
+</code></pre>
+<p>How about THAT?  All of this hinges on the idea that MOLD doesn't generally know how to mold isotopes, as they have no representation.  It just chooses to interpret the request to mold a splice isotope as "contents matter, no delimiters".</p>
+<p>More control, more clarity, and the death of another /ONLY.  What more could you ask for?</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/mold-only-vs-mold-spread/2059">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/mold-only-vs-mold-spread/2059</link>
+          <pubDate>Sun, 22 Oct 2023 23:59:02 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2059</guid>
+          <source url="https://forum.rebol.info/t/mold-only-vs-mold-spread/2059.rss">MOLD/ONLY vs. MOLD SPREAD</source>
+        </item>
+        <item>
+          <title>UNION, INTERSECT, DIFFERENCE...and Splices</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Semantics</category>
+          <description><![CDATA[
+            <p>There is a pattern that comes up a lot in Query which looks like this:</p>
+<pre><code>if not find qe.clause-list 'update [append qe.clause-list 'update]
+</code></pre>
+<p>You could use an operation like UNION here, but since UNION only works on arrays you'd have to put UPDATE in a block:</p>
+<pre><code>qe.clause-list: union qe.clause-list [update]
+</code></pre>
+<p>If the word to update with was in a variable (e.g. <strong>word: 'update</strong>), you couldn't do that block literally...so you'd need some blockifying function to do it:</p>
+<pre><code>qe.clause-list: union qe.clause-list compose [(word)]
+
+qe.clause-list: union qe.clause-list reduce [word]
+
+qe.clause-list: union qe.clause-list :[word]
+
+qe.clause-list: union qe.clause-list enblock word
+</code></pre>
+<h2>
+<a name="semantics-of-operating-on-arrays-1" class="anchor" href="https://forum.rebol.info#semantics-of-operating-on-arrays-1"></a>Semantics of Operating on Arrays</h2>
+<p>Historical Rebol would only accept BLOCK!s as the second argument to these operations.  I didn't see any reason not to generalize it, so I allowed GROUP!s as well:</p>
+<pre><code>&gt;&gt; intersect [a b c d] '(b c e)
+== [b c]
+
+&gt;&gt; intersect '(a b c d) [b c e]
+== (b c)
+</code></pre>
+<p>But there's a little bit of a question there about the result type.  Both arrays are taken account in terms of the elements, but only the first determines the type.  That's a little bit odd.</p>
+<p>Furthermore, what if you wanted to intersect an array as an item?  The following wouldn't give you what you intended:</p>
+<pre><code>item: [b]
+collection: [[a] [b] [c] [d]]
+
+collection: intersect collection item
+</code></pre>
+<p>You'd have to put the block into another block.  This is another one of those /ONLY style problems...</p>
+<h2>
+<a name="with-spread-we-can-do-this-better-2" class="anchor" href="https://forum.rebol.info#with-spread-we-can-do-this-better-2"></a>With SPREAD, we can do this better!</h2>
+<p>We can make it so that UNION and friends assume you mean just one item by default, and you need to SPREAD the second argument to get it considered itemwise:</p>
+<pre><code>&gt;&gt; union [a b c d] 'e
+== [a b c d e]
+
+&gt;&gt; union [[a] [b] [c] [d]] [e]
+== [[a] [b] [c] [d] [e]]
+
+&gt;&gt; union [[a] [b] [c] [d]] spread [e]
+== [[a] [b] [c] [d] e]
+</code></pre>
+<p>So this means the operation from Query could be a little more succinct:</p>
+<pre><code>if not find qe.clause-list 'update [append qe.clause-list 'update]
+=&gt;
+qe.clause-list: union qe.clause-list 'update
+</code></pre>
+<p>But more importantly, the as-is nature would avoid needing to jump through hoops for single-item operands:</p>
+<pre><code> word: update
+qe.clause-list: union qe.clause-list word
+</code></pre>
+<p>There are some questions about whether there is a guarantee of where the update would be added if it wasn't there... does it matter if it's added at the beginning or the end?</p>
+<p>This is not a new question for these operations... the blocks are being treated as sets, so theoretically multiple answers could be valid:</p>
+<pre><code>&gt;&gt; intersect [a b c d] spread [c b e]
+== [b c]
+
+ &gt;&gt; intersect [a b c d] spread [c b e]
+== [c b]  ; what promises this wouldn't be the answer?
+</code></pre>
+<p>I think it's likely beneficial to make some kind of promise here.</p>
+<h2>
+<a name="should-unionetc-mutate-by-default-3" class="anchor" href="https://forum.rebol.info#should-unionetc-mutate-by-default-3"></a>Should UNION/etc. mutate by default?</h2>
+<p>I point out that you'd have to write:</p>
+<pre><code>qe.clause-list: union qe.clause-list 'update
+</code></pre>
+<p>In the Rebol model, "modify by default" is how things like APPEND or REVERSE work.  That would suggest you could write:</p>
+<pre><code>union qe.clause-list 'update
+</code></pre>
+<p>And if you didn't want to modify qe.clause-list directly, you could copy it:</p>
+<pre><code>result: union copy qe.clause-list 'update
+</code></pre>
+<p>If the interface to these functions was changed to work with splices and treat everything else as-is by default, it seems like a good time to make this change for consistency.</p>
+            <p><small>2 posts - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/union-intersect-difference-and-splices/2058">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/union-intersect-difference-and-splices/2058</link>
+          <pubDate>Sun, 22 Oct 2023 06:06:42 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2058</guid>
+          <source url="https://forum.rebol.info/t/union-intersect-difference-and-splices/2058.rss">UNION, INTERSECT, DIFFERENCE...and Splices</source>
+        </item>
+        <item>
+          <title>Building C++ GUI Code that Calls Ren-C Wasm and Runs in Browser</title>
+          <dc:creator><![CDATA[OneArb]]></dc:creator>
+          <category>WebAssembly</category>
+          <description><![CDATA[
+            <p>There is a quite active <a href="https://github.com/ocornut/imgui" rel="noopener nofollow ugc">Dear ImGui immediate mode GUI library</a> running on Emscript: <a href="https://github.com/jnmaloney/WebGui" rel="noopener nofollow ugc">WebGui</a>.</p>
+<p>Dear ImGui provides just about any widget one might wish for.</p>
+<p><a href="https://jnmaloney.github.io/WebGui/imgui.html" rel="noopener nofollow ugc">Wasm WebGui demo</a> runs at 60 FPS.</p>
+<p>My roadmap is to embed Ren-C and bind the ImGui functions I need. I already have a skeleton parser that converts text into ImGUI function calls.</p>
+<p>The code allows creating / modifying windows along with a few widgets at runtime.</p>
+<p><a href="https://github.com/ocornut/imgui/discussions/3890" rel="noopener nofollow ugc">Dear ImGUI uses a minimal C++ set</a> and remains class and standard container free.</p>
+<p>The only piece I'd be missing is the RPL interpreter if I am comprehending Ren-C feature set.</p>
+<p>I'd also like to be able to grant filesystem access for the Wasm web instance using WASI API.  Here's an example where WASI is already implements accessing an OS directory from a Web instance:</p>
+<p><a href="https://www.perplexity.ai/search/C-example-of-4jA7fNiiQSWtKthpleu2pQ?s=c" rel="noopener nofollow ugc">https://www.perplexity.ai/search/C-example-of-4jA7fNiiQSWtKthpleu2pQ?s=c</a></p>
+<p>The use case can be distributing a chat GUI application launched through a browser running from the Internet using <a href="https://gist.github.com/nus/564e9e57e4c107faa1a45b8332c265b9" rel="noopener nofollow ugc">emscripten WebSocket support</a> or even full TCP UDP connections.</p>
+            <p><small>10 posts - 2 participants</small></p>
+            <p><a href="https://forum.rebol.info/t/building-c-gui-code-that-calls-ren-c-wasm-and-runs-in-browser/2053">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/building-c-gui-code-that-calls-ren-c-wasm-and-runs-in-browser/2053</link>
+          <pubDate>Wed, 18 Oct 2023 01:41:17 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2053</guid>
+          <source url="https://forum.rebol.info/t/building-c-gui-code-that-calls-ren-c-wasm-and-runs-in-browser/2053.rss">Building C++ GUI Code that Calls Ren-C Wasm and Runs in Browser</source>
+        </item>
+        <item>
+          <title>WASI Encap: Embedding Read-Only Filesystems in .wasm Blobs?</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>WebAssembly</category>
+          <description><![CDATA[
+            <p>I found this project which looks promising:</p>
+<p><a href="https://github.com/kateinoigakukun/wasi-vfs" class="inline-onebox">GitHub - kateinoigakukun/wasi-vfs: A virtual filesystem layer for WASI.</a></p>
+<p>It includes a tool which can pack a directory into a .wasm file, and then you can read that directory from within the Wasm code itself.</p>
+<p>Right now it's not a priority to look into, given that I added BASIC-READ and BASIC-WRITE to the WASI build.  If someone can prove the limit to using WASI effectively is that they have to distribute their project as a .zip and grant the runtime directory access (instead of as a single .wasm file) that seems like the time to attack it.</p>
+<p>So... far future.  <img src="https://forum.rebol.info/images/emoji/twitter/slight_smile.png?v=12" title=":slight_smile:" class="emoji" alt=":slight_smile:" loading="lazy" width="20" height="20"></p>
+            <p><small>3 posts - 2 participants</small></p>
+            <p><a href="https://forum.rebol.info/t/wasi-encap-embedding-read-only-filesystems-in-wasm-blobs/2052">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/wasi-encap-embedding-read-only-filesystems-in-wasm-blobs/2052</link>
+          <pubDate>Tue, 17 Oct 2023 13:39:20 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2052</guid>
+          <source url="https://forum.rebol.info/t/wasi-encap-embedding-read-only-filesystems-in-wasm-blobs/2052.rss">WASI Encap: Embedding Read-Only Filesystems in .wasm Blobs?</source>
+        </item>
+        <item>
+          <title>Intrinsics: Functions without Frames</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Optimization</category>
+          <description><![CDATA[
+            <p>Redbol's historical type system really had only one design point: <em>be fast</em>.  There were 64 fundamental datatypes, and parameters of a function could either accept each datatype or not.  So a simple bitset of 64 bits was stored alongside each parameter, and checked when the function was called.  That was it.</p>
+<p>Ren-C's richer design explodes the number of "types" in the system.  Isotopes like <strong><code>~null~</code></strong> are variations on WORD!, but you don't want every function that takes a WORD! to take nulls...and you don't want to have the type checking be so broad as to take <strong><code>[isotope!]</code></strong> just because you want to be able to take nulls (because that would include splices, packs, etc.)</p>
+<p>It's not just this reason that Redbol's type checking was too simple, but it forced my hand in coming up with some sort of answer.  <em>I couldn't think of any better idea than Lisp, which does type checking via functions ("predicates").</em>  So I rigged it up where if you want to say a function can take an integer or null, you can write <strong><code>[null? integer!]</code></strong>  You can freely mix LOGIC-returning functions with fundamental types, and we're no longer stuck with the 64 fundamental type limit.</p>
+<h2>
+<a name="isnt-it-slow-to-call-a-list-of-functions-for-typechecking-1" class="anchor" href="https://forum.rebol.info#isnt-it-slow-to-call-a-list-of-functions-for-typechecking-1"></a>Isn't It Slow To Call A List of Functions For Typechecking?</h2>
+<p>It can be.  And in particular, it can be if you have to go through calling those functions twice.</p>
+<p>Why twice?  Because of "coercion".  For example, if you pass a pack to a function that expects packs, you'll get the meta-pack:</p>
+<pre><code>&gt;&gt; foo: func [^x [pack?]] [probe x]
+
+&gt;&gt; foo pack [1 "hi"]
+~['1 '"hi"]~
+</code></pre>
+<p>But if your function didn't want packs, but wanted the type the pack decays to, it has to work for that as well:</p>
+<pre><code>&gt;&gt; bar: func [^x [integer?]] [probe x]
+
+&gt;&gt; bar pack [1 "hi"]
+'1 
+</code></pre>
+<p><em>Did the function want the meta form or the meta-decayed form?</em>  There's no way of knowing for sure in advance.  The method chosen is to offer the meta form first, and if that doesn't match then the decayed form is offered.</p>
+<p>It didn't know before walking through the block of functions to typecheck that a pack wouldn't have been accepted.  So it had to go through offering the pack, and then offering the integer.</p>
+<h2>
+<a name="but-i-noticed-something-about-these-functions-2" class="anchor" href="https://forum.rebol.info#but-i-noticed-something-about-these-functions-2"></a>But I Noticed Something About These Functions...</h2>
+<p>Typically these functions are very simple:</p>
+<ul>
+<li>
+<p>They take one argument.</p>
+</li>
+<li>
+<p>They can't fail.</p>
+</li>
+<li>
+<p>They don't require recursive invocations of the evaluator.</p>
+</li>
+</ul>
+<p>This led me to wonder how hard it would be to define a class of actions whose implementations were a simple C function with an input value and output value.  If you weren't in a scenario where you needed a full FRAME!, you could reach into the ACTION!'s definition and grab the simple C function out of it.  All these functions would use the same dispatcher--that would be a simple matter of proxying the first argument of a built frame to pass it to this C function.</p>
+<p>I decided to call these <strong>"intrinsics"</strong>, which is named after a <a href="https://en.wikipedia.org/wiki/Intrinsic_function">trick compilers use</a> when they see certain function calls that they implement those functions via direct code inlining.  It's not a perfect analogy, but it's similar in spirit.</p>
+<h2>
+<a name="it-wasnt-all-that-hard-to-implement-relatively-speaking-roll_eyes-3" class="anchor" href="https://forum.rebol.info#it-wasnt-all-that-hard-to-implement-relatively-speaking-roll_eyes-3"></a>It Wasn't All That Hard To Implement (relatively speaking <img src="https://forum.rebol.info/images/emoji/twitter/roll_eyes.png?v=12" title=":roll_eyes:" class="emoji" alt=":roll_eyes:" loading="lazy" width="20" height="20"> )</h2>
+<p>All of the native function implementations were assumed to have the same type signature, taking a frame as an argument.  I took away that assumption and added an /INTRINSIC refinement to the NATIVE function generator.  If it was an intrinsic, then the C function in the native table would take a single value argument and an output slot to write to.</p>
+<p>So it's still one C function per native.  But if it's an intrinsic, then the function is not a dispatcher... the Intrinsic_Dispatcher() is used, and the C function is poked into the properties of the function.</p>
+<p>Callsites that want to optimize for intrinsics just look to see if an action has the Intrinsic_Dispatcher(), and if so they have to take responsibility for procuring an argument and type checking it.  But if they do, they can just call the C function directly with no frame overhead.</p>
+<p><strong>This helps make the switchover to functions in type spec blocks much more palatable.</strong>  It's never going to be as fast as the bitset checking, but it's fast enough to allow things to make progress.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/intrinsics-functions-without-frames/2050">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/intrinsics-functions-without-frames/2050</link>
+          <pubDate>Sun, 15 Oct 2023 17:25:32 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2050</guid>
+          <source url="https://forum.rebol.info/t/intrinsics-functions-without-frames/2050.rss">Intrinsics: Functions without Frames</source>
+        </item>
+        <item>
+          <title>VSCode Files</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Build System</category>
+          <description><![CDATA[
+            <p>There are some not-checked-in files that are used for building and editing in VSCode.  Every now and again, when I wipe out a ren-c clone, this information is lost.</p>
+<p>Posting it here is as good as anywhere:</p>
+<p><strong>.vscode/c_cpp_properties.json</strong></p>
+<pre><code class="lang-auto">{
+    "configurations": [
+        {
+            "name": "Win32",
+            "includePath": [
+                "C:/Projects/ren-c/build/prep/**",
+                "C:/Projects/ren-c/**"
+            ],
+            "defines": [
+                "_DEBUG",
+                "UNICODE",
+                "_UNICODE",
+                "CPLUSPLUS_11=1",
+                "ENDIAN_LITTLE"
+            ],
+            "windowsSdkVersion": "10.0.18362.0",
+            "compilerPath": "C:/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.32.31326/bin/Hostx86/x86/cl.exe",
+            "compilerArgs": [],
+            "cStandard": "c11",
+            "cppStandard": "c++17",
+            "intelliSenseMode": "msvc-x64"
+        }
+    ],
+    "version": 4
+}
+</code></pre>
+<p><strong>.vscode/launch.json</strong></p>
+<pre><code class="lang-auto">{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "(Windows) Launch",
+            "type": "cppvsdbg",
+            //"type": "cppdbg",
+            "request": "launch",
+            //"request": "attach",
+            //"processId": "${command:pickProcess}"
+            "program": "C:/Projects/ren-c/build/r3.exe",
+            //"program": "/home/hostilefork/ren-c-linux/r3",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "C:/Projects/rebol-whitespacers/",
+            //"cwd": "/home/hostilefork/Projects/ren-c/tests/",
+            "environment": [],
+            "console": "newExternalWindow"
+            //"externalConsole": true
+        }
+    ]
+}
+</code></pre>
+<p><strong>.vscode/settings.json</strong></p>
+<pre><code class="lang-auto">{
+    "files.associations": {
+        "*.c": "cpp",
+        "*.r": "plaintext"
+    }
+}
+</code></pre>
+<p><strong>.vscode/tasks.json</strong></p>
+<pre><code class="lang-auto">{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Build With JOM",
+            "type": "shell",
+            // nmake is slow but coherent errors, make is fast with jom
+            "command": "make clean &amp;&amp; make prep &amp;&amp; make folders &amp;&amp; make",
+            "options": {
+                "cwd": "/Projects/ren-c/build/",
+                "shell": {
+                    "executable": "cmd.exe",
+                    "args": [
+                      "/C",
+                      "\"C:/PROGRA~1/Microsoft Visual Studio/2022/Community/Common7/Tools/VsDevCmd.bat\"",
+                      "&amp;&amp;"
+                    ]
+                }
+            },
+            "problemMatcher": {
+                "base": "$msCompile"
+            },
+
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+
+            "presentation": {
+                "clear": true // &lt;-- this line
+            }
+       }
+    ]
+}
+</code></pre>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/vscode-files/2048">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/vscode-files/2048</link>
+          <pubDate>Sun, 17 Sep 2023 09:56:06 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2048</guid>
+          <source url="https://forum.rebol.info/t/vscode-files/2048.rss">VSCode Files</source>
+        </item>
         <item>
           <title>MAYBE IF conditionals went back to returning NULL on Failure?</title>
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
@@ -730,7 +1560,7 @@ var was [a b c]
 <p>Right now I'm going the route of saying ANY-CELL! is the narrower set of values that do not include isotopes.  Is there a better term for saying something can be put into an array vs. not?</p>
 <p><em>"10 is an integer! which is legal to use as a cell, while ~null~ isotopes are not legal as cells, but can be variable values"</em></p>
 <p>It seems shorter and cleaner than ANY-REIFIED!  or something like that.  I don't know any better options.</p>
-            <p><small>2 posts - 1 participant</small></p>
+            <p><small>3 posts - 1 participant</small></p>
             <p><a href="https://forum.rebol.info/t/should-any-value-include-isotopes/2026">Read full topic</a></p>
           ]]></description>
           <link>https://forum.rebol.info/t/should-any-value-include-isotopes/2026</link>
@@ -936,884 +1766,6 @@ all [
           <discourse:topicArchived>No</discourse:topicArchived>
           <guid isPermaLink="false">forum.rebol.info-topic-2016</guid>
           <source url="https://forum.rebol.info/t/kaitai-struct-declarative-language-for-binary-formats/2016.rss">Kaitai Struct Declarative Language for Binary Formats</source>
-        </item>
-        <item>
-          <title>Should SET-WORD!s Have &quot;Raised Error Interception&quot;?</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Errors</category>
-          <description><![CDATA[
-            <p>Division by zero is a simple example of something that produces a "definitional error".  <em>It's considered to be "emitted" by the division</em>, and if you try to "move on" without handling it, the raised error becomes a failure that <a href="https://forum.rebol.info/t/discouraging-use-of-trap/1871">you can only catch at some top level by SYS.UTIL.RESCUE</a>.</p>
-<p>For instance:</p>
-<pre><code>&gt;&gt; 1 / 0, 2 + 0
-** Math Error: attempt to divide by zero
-** Where: / console
-** Near: [1 / 0 **, 2 + ***]
-</code></pre>
-<p>What happened was that <strong>1 / 0</strong> evaluated, but rather than forcing a "hard failure" (e.g. running FAIL) it instead <em>returned a raised error</em>.  There's an opportunity if that raised error were to be intercepted, but in this case it just moseyed along to the next expression... so the raised error was promoted to a failure.</p>
-<p>However a ^META oriented function can trap that, and react to it, allowing you to continue.  EXCEPT is such a function:</p>
-<pre><code>&gt;&gt; 1 / 0 except e -&gt; [print ["The error was" e.id]], 2 + 0
-The error was zero-divide
-== 2
-</code></pre>
-<p>One thing that pretty obviously shouldn't count as "moving on" would be parentheses.  Adding parentheses shouldn't change the situation, they just pass any raised errors through:</p>
-<pre><code>&gt;&gt; (1 / 0) except e -&gt; [print ["The error was" e.id]], 2 + 0
-The error was zero-divide
-== 2
-
-&gt;&gt; ((((1 / 0)))) except e -&gt; [print ["The error was" e.id]], 2 + 0
-The error was zero-divide
-== 2
-</code></pre>
-<p><strong>But what about things like SET-WORD!s?</strong>  Right now, it does not raise an error and just skips the assignment, and lets the code continue:</p>
-<pre><code>&gt;&gt; num: &lt;before&gt;
-
-&gt;&gt; (num: 1 / 0) except e -&gt; [print ["The error was" e.id]], 2 + 0
-The error was zero-divide
-== 2
-
-&gt;&gt; num
-== &lt;before&gt;
-</code></pre>
-<p><strong>This is a useful pattern, but if we do it for SET-WORD!s then we have to ask whether it should be done for SET the function as well...</strong></p>
-<pre><code>&gt;&gt; (set 'num 1 / 0) except e -&gt; [print ["The error was" e.id]], 2 + 0
-The error was zero-divide
-== 2
-</code></pre>
-<p>If we do this then the SET function has to take its argument of the value to assign as a ^META argument.  Because raised errors can't be stored in variables, and function parameters are communicated via variables.</p>
-<p>This does make SET a more complicated function, and any functions like it might also become complicated.  It's a hard decision to condemn all SET-like functions to take their arguments as ^META so they can proxy any errors and not perform the assignment.</p>
-<p>I'll probably have more to say about this, but for the moment both SET and SET-WORD! react to definitional failures by <em>not performing the assignment</em> and <em>propagating the raised error</em>.</p>
-            <p><small>1 post - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/should-set-word-s-have-raised-error-interception/2015">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/should-set-word-s-have-raised-error-interception/2015</link>
-          <pubDate>Tue, 07 Feb 2023 02:52:51 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-2015</guid>
-          <source url="https://forum.rebol.info/t/should-set-word-s-have-raised-error-interception/2015.rss">Should SET-WORD!s Have &quot;Raised Error Interception&quot;?</source>
-        </item>
-        <item>
-          <title>Should Quasiform Parameters Accept as the Plain Form?</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Datatypes</category>
-          <description><![CDATA[
-            <p><strong><a href="https://forum.rebol.info/t/attack-of-the-activated-actions/1900">I'm very confident of the goodness of "isotopic actions"</a></strong>.</p>
-<p>Not being able to put them in blocks gives us the <a href="https://forum.rebol.info/t/the-canonical-list-of-non-negotiables/1244/9">nice, mechanical invariant</a> of being able to manipulate blocks without inadvertently running functions in the process.  It opens the doors to other guardrails against isotopes being in variables when it might surprise you.</p>
-<p>But what happens when you write something like SPECIALIZE, with a spec that looks something like:</p>
-<pre><code>//
-//  specialize: native [
-//
-//  {Create a new action through partial or full specialization of another}
-//
-//      return: [~action!~]  ; ~ notation since an isotopic action is returned
-//      action "Function whose parameters will be set to fixed values"
-//          [action!]
-//      def "Definition for FRAME! fields for args and refinements"
-//          [block!]
-//  ]
-//
-</code></pre>
-<p>Should SPECIALIZE tolerate being passed an isotopic action, maybe with a spec that looks like:</p>
-<pre><code>return: [~action!~]
-action "Function whose parameters will be set to fixed values"
-    [action! ~action!~]
-def "Definition for FRAME! fields for args and refinements"
-    [block!]
-</code></pre>
-<p>This would lead to complexity inside most function, because now if it references the <strong>action</strong> variable it might run.  And this lack of automatic canonization to the inert form creates hassles for both usermode and native code alike.</p>
-<p>Another thing is that the meaning of isotopic actions is potentially <em>very</em> different from that of a plain action.  For instance: <strong><code>find block :even?</code></strong> might know that since blocks cannot contain isotopes, it should interpret it as a function to call to test the items in the block for evenness.</p>
-<p>So this led me to a bit of a thought...</p>
-<h2>What if QUASI!-forms typechecked as the plain form?</h2>
-<p>The idea is that there's an initial type check done.  If that check fails and it's a quasiform, it is tested again as its plain form.  If that passes, the plain form is received.</p>
-<p>Producing a quasiform of an action from an isotope is easy, just use a meta operation.  So <strong><code>^append</code></strong> instead of <strong><code>:append</code></strong>.  All meta forms are inert, so code using the meta is less likely to do wild things.</p>
-<p><em>To me, this feels like a safer exception than letting isotopes pass for plain forms.</em>  Due to their alien-ness, an isotopic form could intend something quite far from a mechanical brick in a block.  But what a quasiform has in common with a plain form is that both are inert.</p>
-<p>Also, even the name "quasi" suggests a possibly loose relationship.  It carries the same payload as the plain form.  What if this were legal:</p>
-<pre><code>&gt;&gt; add first [~1~] first [~2~]
-== 3
-</code></pre>
-<p>I'm suggesting a general-enough mechanism that would work... so long as ADD didn't widen its net to taking actual ANY-VALUE! (which would indicate it had an actual meaning that applied to quasiforms).</p>
-<p>This may not be the most brilliant thought to ever be thunk.  But in this more complex world there need to be succinct answers.  We don't want to have to write things like <strong><code>apply concretize :append [...]</code></strong>, and I feel like glossing over the fact that something is an isotope is a worse move than glossing over that something is a quasiform.</p>
-<p>I even may like <strong><code>apply ^append [...]</code></strong> a bit more than <strong><code>apply :append [...]</code></strong> for looks, too.</p>
-            <p><small>1 post - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/should-quasiform-parameters-accept-as-the-plain-form/2012">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/should-quasiform-parameters-accept-as-the-plain-form/2012</link>
-          <pubDate>Thu, 26 Jan 2023 18:42:40 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-2012</guid>
-          <source url="https://forum.rebol.info/t/should-quasiform-parameters-accept-as-the-plain-form/2012.rss">Should Quasiform Parameters Accept as the Plain Form?</source>
-        </item>
-        <item>
-          <title>Axing --breakpoint switch, C-DEBUG-BREAK-AT</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Debugger</category>
-          <description><![CDATA[
-            <p><strong>I'm killing off features for whom their maintenance is not paying off.</strong></p>
-<p>One is the "tick" based usermode <code>--breakpoint</code> feature, implemented on the command line as:</p>
-<pre><code>        "--breakpoint" end (
-            c-debug-break-at to-integer param-or-die "BREAKPOINT"
-        )
-</code></pre>
-<p>The complex problem of taking a "tick" count to break on via a command line switch is that since command line processing is in usermode, you have a kind of observer-affects-the-experiment situation.  The code for adding in the breakpoint messes with the tick count you're trying to reproduce.</p>
-<p>I had ideas to work around this.  So there's the /COMPENSATE feature of C-DEBUG-BREAK, which I don't even know if it works or if my idea is fundamentally flawed:</p>
-<pre><code>; Taking a command-line `--breakpoint NNN` parameter is helpful if a
-; problem is reproducible, and you have a tick count in hand from a
-; panic(), REBSER.tick, Frame.tick, REBVAL.extra.tick, etc.  But there's
-; an entanglement issue, as any otherwise-deterministic tick from a prior
-; run would be thrown off by the **ticks added by the userspace parameter
-; processing of the command-line for `--breakpoint`**!  :-/
-;
-; The /COMPENSATE option addresses this problem.  Pass it a reasonable
-; upper bound for how many ticks you think could have been added to the
-; parse, if `--breakpoint` was processed (even though it might not have
-; been processed).  Regardless of whether the switch was present or not,
-; the tick count rounds up to a reproducible value, using this method:
-;
-; https://math.stackexchange.com/q/2521219/
-;
-; At time of writing, 1000 ticks should be *way* more than enough for both
-; the PARSE steps and the evaluation steps `--breakpoint` adds.  Yet some
-; things could affect this, e.g. a complex userspace TRACE which was
-; run during boot.
-;
-attempt [c-debug-break-at/compensate 1000]  ; fails in release build
-</code></pre>
-<p>Here was more of it:</p>
-<pre><code>  #if !defined(NDEBUG) &amp;&amp; DEBUG_COUNT_TICKS
-    if (REF(compensate)) {
-        //
-        // Imagine two runs of Rebol console initialization.  In the first,
-        // the tick count is 304 when C-DEBUG-BREAK/COMPENSATE is called,
-        // right after command line parsing.  Later on a panic() is hit and
-        // reports tick count 1020 in the crash log.
-        //
-        // Wishing to pick apart the bug before it happens, the Rebol Core
-        // Developer then re-runs the program with `--breakpoint=1020`, hoping
-        // to break at that tick, to catch the downstream appearance of the
-        // tick in the panic().  But since command-line processing is in
-        // usermode, the addition of the parameter throws off the ticks!
-        //
-        // https://en.wikipedia.org/wiki/Observer_effect_(physics)
-        //
-        // Let's say that after the command line processing, it still runs
-        // C-DEBUG-BREAK/COMPENSATE, this time at tick 403.  Imagine our goal
-        // is to make the parameter to /COMPENSATE something that can be used
-        // to conservatively guess the same value to set the tick to, and
-        // that /COMPENSATE ARG(bound) that gives a maximum of how far off we
-        // could possibly be from the "real" tick. (e.g. "argument processing
-        // took no more than 200 additional ticks", which this is consistent
-        // with...since 403-304 = 99).
-        //
-        // The reasoning for why the formula below works for this rounding is
-        // given in this StackExchange question and answer:
-        //
-        // https://math.stackexchange.com/q/2521219/
-        //
-        Tick one = 1; // MSVC gives misguided warning for cast(Tick, 1)
-        TG_tick =
-            (one &lt;&lt; (ceil_log2(TG_tick) + 1))
-            + VAL_INT64(ARG(tick))
-            - 1;
-        return nullptr;
-    }
-</code></pre>
-<p>Also, I've never used the /RELATIVE tick feature, killing that too:</p>
-<pre><code>  if (REF(relative))
-      TG_break_at_tick = frame_-&gt;tick + 1 + VAL_INT64(ARG(tick));
-</code></pre>
-<p><strong>I'm going to be deleting a lot of things, I think, in the pursuit of simplification--now that isotopes are showing the way.</strong></p>
-            <p><small>1 post - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/axing-breakpoint-switch-c-debug-break-at/2009">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/axing-breakpoint-switch-c-debug-break-at/2009</link>
-          <pubDate>Tue, 24 Jan 2023 21:57:46 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-2009</guid>
-          <source url="https://forum.rebol.info/t/axing-breakpoint-switch-c-debug-break-at/2009.rss">Axing --breakpoint switch, C-DEBUG-BREAK-AT</source>
-        </item>
-        <item>
-          <title>&quot;Quasiforms&quot;, &quot;Stable/Unstable Isotopes&quot;: Simpler Terminology?</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Naming</category>
-          <description><![CDATA[
-            <p>It's no secret that I'm proud of the way the <a href="https://forum.rebol.info/t/a-justification-of-generalized-isotopes/1918">design for generalized isotopes</a> is tearing through classic problems in Rebol.</p>
-<p>At the same time, people's eyes can glaze over when you find yourself writing sentences like:</p>
-<blockquote>
-<p><em>"All quasiforms become isotopic forms when evaluated, and when going the other way through a meta operation on an isotope, you'll get a quasiform back."</em></p>
-</blockquote>
-<p>It all makes sense to me.  But I don't want to overlook better terms, if they exist.</p>
-<h2>How Did "Isotopes" Come To Be Called That?</h2>
-<p>The term isotope originated from the "decaying" behavior, where a special form of null would run a THEN branch.  But this special form would not be something you could store in a variable...it would become an ordinary null at that point.  So getting stored in a variable would cause "decay".</p>
-<pre><code>&gt;&gt; null
-; null
-
-&gt;&gt; if true [null]
-; null isotope
-
-&gt;&gt; x: if true [null]
-; null isotope
-
-&gt;&gt; x
-; null
-</code></pre>
-<p>The decay means variables captured from expressions would have a different behavior when substituted for the expressions.  That was deemed to be an acceptable cost.</p>
-<pre><code>&gt;&gt; if true [print "then", null] else [print "else"]
-then
-
-&gt;&gt; temp: if true [print "then", null]
-then
-
-&gt;&gt; temp else [print "else"]
-else
-</code></pre>
-<p>The parallel with decay of atomic isotopes seemed pretty clear, at least to me.  Many places would see it as a normal null, but a few special sites could use a "sensor" to detect the difference.  ELSE was an example of something that could detect.</p>
-<p>As things moved forward, and when logic variables became ~true~ and ~false~ isotopes, it became clear these isotopic states would need to be able to stored in variables.  That meant there were "unstable isotopes" and "stable isotopes"... e.g. WORD! isotopes were stable, ERROR! isotopes were not.</p>
-<p><em><strong>Having these stable isotopes actually strengthened the analogy.</strong></em>  Because some atomic isotopes are stable, while others are not.</p>
-<h2>How Did "QUASI" Become Called That?</h2>
-<p>Originally, things like <code>~foo~</code> were called "bad words", designed to cause errors when accessed through a variable by default.  They were like an old-school UNSET! where you could give it a custom label.  But eventually everything was generalized so that everything had an isotopic form.</p>
-<p>The fact that these forms stopped conveying an error condition meant considering them "bad" wasn't sensible.  I kind of latched onto "quasi" in part because of the tilde's use in approximation, e.g. (3.0001 ~= 3).</p>
-<p>(It also sounds a little like "queasy" and the squigglies look wavy and maybe a bit uncomfortable.  <img src="https://forum.rebol.info/images/emoji/twitter/nauseated_face.png?v=9" title=":nauseated_face:" class="emoji" alt=":nauseated_face:">)</p>
-<h2>So... Speak Now Or Hold Your Peace?</h2>
-<p>Bad naming can have an impact.  I think calling complex numbers "imaginary" is a good example of a bad name that probably caused a few problems.</p>
-<p>But I think the names here are good.  It's just going to be a matter of figuring out how to teach people to not be afraid of them.</p>
-            <p><small>1 post - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/quasiforms-stable-unstable-isotopes-simpler-terminology/2005">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/quasiforms-stable-unstable-isotopes-simpler-terminology/2005</link>
-          <pubDate>Sun, 08 Jan 2023 21:18:39 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-2005</guid>
-          <source url="https://forum.rebol.info/t/quasiforms-stable-unstable-isotopes-simpler-terminology/2005.rss">&quot;Quasiforms&quot;, &quot;Stable/Unstable Isotopes&quot;: Simpler Terminology?</source>
-        </item>
-        <item>
-          <title>Picking ACTION!s from BLOCK!s In The Age of Isotopes</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Semantics</category>
-          <description><![CDATA[
-            <p>In <strong><a href="https://forum.rebol.info/t/reds-design-issues-wiki/1282">Red's Design Questions wiki</a></strong>, they bring up the issue of why picking functions out of blocks runs them:</p>
-<pre><code>red&gt;&gt; block: reduce [does [print "Evaluated."]]
-  == [func [][print "Evaluated."]]
-
-red&gt;&gt; equal? block/1 first block
-Evaluated.  ; d'oh
-== false
-</code></pre>
-<p><a href="https://gitter.im/red/red?at=5c782ca0c1cab53d6f53dd6d">In the Gitter conversation</a>, Boris calls it a "shady area" that they can't get out of "under the current semantic model".  He suggests it is clear that <strong><code>block/1</code></strong> should not run an action, but possible that <strong>block/word</strong> would mean to.</p>
-<p>They contemplate the idea that <strong>block/1</strong> would not run the action, but pick it:</p>
-<pre><code>red&gt;&gt; block: reduce [does [print "Evaluated."]]
-  == [func [][print "Evaluated."]]
-
-red&gt;&gt; equal? block/1 first block  ; hypothetical behavior
-== false
-</code></pre>
-<p><strong>I will argue this doesn't really help you much, the problem just becomes one step removed.</strong>  Quite often people are picking things out of blocks to put them in variables, and you'll just get bit there instead:</p>
-<pre><code>red&gt;&gt; otherblock: copy []
-== []
-
-red&gt;&gt; temp: block/1
-== func [][print "Evaluated."]
-
-red&gt;&gt; append otherblock temp
-Evaluated.  ; d'oh
-== [unset]  ; double d'oh
-</code></pre>
-<h2>
-<a name="isotopes-bring-the-better-semantic-model-1" class="anchor" href="https://forum.rebol.info#isotopes-bring-the-better-semantic-model-1"></a>Isotopes Bring The Better Semantic Model!</h2>
-<p>In Ren-C's concept (as I'm working on it), the only actions that will run from a word reference are those that are isotopic actions.  And FUNC or DOES creates an isotopic action.</p>
-<p>So you would be stopped from making an illegal block up front:</p>
-<pre><code>&gt;&gt; block: reduce [does [print "Evaluated."]]
-** Script Error: Invalid use of ~#[action! []]~ isotope
-</code></pre>
-<p>You can put quasi-ACTION!s, plain ACTION!s, and quoted actions in blocks.  Just not isotopic ones.</p>
-<p>Whichever you choose, the equality test will work... and picking out a value into a variable will give you an inert variable to work with, that can be used with things like append!</p>
-<pre><code>&gt;&gt; block: reduce [reify does [print "Evaluated."]] 
-== [~#[action! []]~]
-
-&gt;&gt; equal? block.1 first block
-== ~true~  ; isotope  &lt;-- didn't run and print "Evaluated", yay!
-
-&gt;&gt; otherblock: copy []
-== []
-
-red&gt;&gt; temp: block.1
-== ~#[action! []]~
-
-red&gt;&gt; append otherblock temp
-== [~#[action! []]~]   ; &lt;-- didn't run and gave sensible block out
-</code></pre>
-<p>I used REIFY there and got a quasi-action.  BUT which would you rather put in the block: a quasi-action or a plain one?  This depends on what you plan to do with the block.  A plain action will execute when encountered by the evaluator, while a quasi-action will evaluate to an isotopic action--suitable for assigning via SET-WORD! when you meant to make that word dispatch the function when referenced.</p>
-<p>My leaning is to say that either form can be used with APPLY, RUN, or the terminal path form:</p>
-<pre><code>&gt;&gt; block: reduce [reify does [print "Evaluated."]] 
-== [~#[action! []]~]
-
-&gt;&gt; run block.1
-Evaluated.
-
-&gt;&gt; block: reduce [concretize does [print "Evaluated."]] 
-== [#[action! []]]
-
-&gt;&gt; apply block.1 []
-Evaluated.
-</code></pre>
-<p><em>(See post on <a href="https://forum.rebol.info/t/reify-vs-meta-vs-something/2001">difference between REIFY and CONCRETIZE</a>, and the search for a better term...)</em></p>
-<p>If you want to pick an action out of a block and put it into a variable, where it will execute from that variable, there is the RUNS transformer.  It will turn a quasi or plain ACTION! into an action isotope:</p>
-<pre><code> &gt;&gt; active-var: runs block.1
- == ~#[action! {active-var} []]~  ; isotope  &lt;-- note: also cached name, neat!
-
- &gt;&gt; active-var
- Evaluated.
-</code></pre>
-<p><img src="https://forum.rebol.info/images/emoji/twitter/clap.png?v=12" title=":clap:" class="emoji only-emoji" alt=":clap:" loading="lazy" width="20" height="20"></p>
-<p>You can use UNMETA more generically to get an isotope back from any quasi-form (not just actions), or ISOTOPIC to get an isotope from a plain form.</p>
-<h2>
-<a name="the-invariant-is-what-counts-here-2" class="anchor" href="https://forum.rebol.info#the-invariant-is-what-counts-here-2"></a>The Invariant Is What Counts, Here!</h2>
-<p>The mountain that has been climbed is that we can now say that for any block, this is true:</p>
-<pre><code>block2: collect [
-    for-each item block1 [keep item]
-]
-
-assert [equal? block1 block2]
-</code></pre>
-<ul>
-<li>
-<p>I've just covered that there are no isotopic actions to implicitly execute; you'd get an error trying to put them in the block.</p>
-</li>
-<li>
-<p>There are no blocks/groups/paths that will splice into the target, because splicing requires an explicit conversion to an isotope.</p>
-</li>
-<li>
-<p>There are no "unsets" to trip on that you can find in a block, because the state conveying "unsetness" (none) is an isotope.</p>
-</li>
-</ul>
-<p>Of course with objects, it's going to be a different story.  I think we'll still want some safeguards:</p>
-<pre><code>for-each [key value] object [...]  ; will error when value is action
-
-for-each [key :value] object [...]  ; will allow action isotopes as-is
-
-for-each [key ^value] object [...]  ; will give a meta value
-</code></pre>
-<p>A key problem here is I'm wondering how much to cross purposes of GET-WORD! between action disarming and the other isotopic states.  But, it just takes time to work through.</p>
-            <p><small>1 post - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/picking-action-s-from-block-s-in-the-age-of-isotopes/2002">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/picking-action-s-from-block-s-in-the-age-of-isotopes/2002</link>
-          <pubDate>Fri, 06 Jan 2023 03:16:23 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-2002</guid>
-          <source url="https://forum.rebol.info/t/picking-action-s-from-block-s-in-the-age-of-isotopes/2002.rss">Picking ACTION!s from BLOCK!s In The Age of Isotopes</source>
-        </item>
-        <item>
-          <title>REIFY vs. META vs. SOMETHING</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Naming</category>
-          <description><![CDATA[
-            <p>Originally I suggested that REIFY of an isotope would give its plain form, and you would META it if you wanted a quasiform:</p>
-<aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="1989">
-<div class="title">
-<div class="quote-controls"></div>
-<img alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/40/26_2.png" class="avatar"><a href="https://forum.rebol.info/t/null-word-isotope-vs-blank-isotope-meaning-null/1989/1">~null~ WORD! isotope vs. BLANK! isotope ~_~ meaning null</a>
-</div>
-<blockquote>
-<ul>
-<li>The generic and reversible way to make them real it is to META them and get <code>~true~</code> and <code>~false~</code> quasiforms, which you can UNMETA back to the isotopes</li>
-<li>The readable way to make them real is to REIFY them and get <code>true</code> and <code>false</code> as plain WORD!, which only gets turned back into the isotope form if they are bound to variables that hold the isotopes, and you evaluate them.</li>
-</ul>
-</blockquote>
-</aside>
-<p><em>But that's not a full coverage answer.</em></p>
-<ul>
-<li>
-<p>An operator that takes everything "one level up", where isotopes become quasiforms and everything else gets a quote level added.</p>
-<pre><code>&gt;&gt; true
-== ~true~  ; isotope
-
-&gt;&gt; meta true
-== ~true~
-
-&gt;&gt; meta 10
-== '10
-</code></pre>
-</li>
-<li>
-<p>An operator that leaves non-isotopes as they are, but turns isotopes into their quasiforms (and I think this probably is best called REIFY):</p>
-<pre><code>&gt;&gt; true
-== ~true~  ; isotope
-
-&gt;&gt; reify true
-== ~true~
-
-&gt;&gt; reify 10
-== 10
-</code></pre>
-</li>
-<li>
-<p>An operator that leaves non-isotopes as they are, but turns isotopes into their plain forms:</p>
-<pre><code>&gt;&gt; true
-== ~true~  ; isotope
-
-&gt;&gt; something true
-== true
-
-&gt;&gt; something 10
-== 10
-</code></pre>
-</li>
-</ul>
-<p>Specifically for ACTION! isotopes being turned into plain actions, I used an interim term UNRUN, but that's pretty awful.</p>
-<p>Making things into isotopes is done with ISOTOPIC:</p>
-<pre><code>&gt;&gt; isotopic 10
-== ~10~  ; isotope
-</code></pre>
-<p>It could be a refinement to REIFY, like REIFY/PLAIN.  But at that point it could be two steps that might be clearer: NOQUASI REIFY, where NOQUASI would be like NOQUOTE and not complain if the thing you passed it was not a quasiform.</p>
-<p>Maybe... CONCRETIZE?  That sounds like it might do a bit more work than what REIFY does :-/</p>
-<pre><code>&gt;&gt; true
-== ~true~  ; isotope
-
-&gt;&gt; concretize true
-== true
-
-&gt;&gt; concretize 10
-== 10
-</code></pre>
-<p>It's not awful.  Main thing is just to have <em>a</em> name for it while the gears turn.  But as usual, throw out suggestions if you have them...</p>
-            <p><small>5 posts - 3 participants</small></p>
-            <p><a href="https://forum.rebol.info/t/reify-vs-meta-vs-something/2001">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/reify-vs-meta-vs-something/2001</link>
-          <pubDate>Thu, 05 Jan 2023 21:26:08 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-2001</guid>
-          <source url="https://forum.rebol.info/t/reify-vs-meta-vs-something/2001.rss">REIFY vs. META vs. SOMETHING</source>
-        </item>
-        <item>
-          <title>Concept: Filters</title>
-          <dc:creator><![CDATA[rgchris]]></dc:creator>
-          <category>Development</category>
-          <description><![CDATA[
-            <p>Filters are a means of incrementally transcoding data from source to brokered output (bytes/binary! or characters/text!). A goal is to provide a standard API for transcoding that can be implemented and used as efficiently as possible (e.g. extracting a portion of encoded data without extracting the whole; native transcoders for Deflate). A filter could conceivably be implemented as a distinct type that has object-like properties (as the PORT! type does) and could thus be acted upon by the appropriate Rebol actors (COPY/SKIP/NEXT/TAIL, etc.).</p>
-<p><em>I've alluded to a similar idea in <a href="https://forum.rebol.info/t/semantics-of-port-s-vs-streams-vs-iterators/1689/4">an earlier post</a>, however this concept is more focussed on transcoding one series of numbers/characters to another. Filters are NOT scanners/tokenizers/lexers.</em></p>
-<p>A filter source can be:</p>
-<ul>
-<li>BINARY! or TEXT! values</li>
-<li>PORT! values that stream BINARY! or TEXT! (including files/network resources)</li>
-<li>filter values (i.e. filters can be layered)</li>
-</ul>
-<p>Examples of filter types:</p>
-<ul>
-<li>Retrieves binary contained within a file/network resource</li>
-<li>Decodes text encoded as UTF-8, UTF-16, ISO-8859-1, CP-1252, etc. (or even unspecified using something like Chardet)</li>
-<li>Decodes binary compressed per Deflate, LZW, etc.</li>
-<li>Decodes binary encoded as 'text' per Base64, Ascii85, Hexadecimal, etc.</li>
-<li>Decrypts binary encrypted per e.g. Rebol 2 ENCLOAK/DECLOAK (but obviously more)</li>
-<li>Decodes text encoded mostly literally but with escape sequences, e.g. JSON strings, Rebol strings, XML/HTML data sequences/attribute values</li>
-</ul>
-<p>Filters should have at least the following capabilities:</p>
-<ul>
-<li>Copy all encoded data</li>
-<li>Copy part of the encoded data</li>
-<li>Skip part of the encoded data (Deflate could potentially iterate faster if it wasn't emitting simultaneously)</li>
-</ul>
-<p>Filters should possibly have the following capabilities:</p>
-<ul>
-<li>BACK/HEAD/negative SKIP support</li>
-<li>TAKE/REMOVE/CLEAR as a means of clearing buffers</li>
-</ul>
-<p>Functions that consume data should support filters as a pseudo-series type, e.g.</p>
-<ul>
-<li>Parse</li>
-<li>BINARY/READ (from Oldes/Rebol3)</li>
-<li>CONSUME (from <a href="https://forum.rebol.info/t/bincode/1863">rgchris/bincode</a>)</li>
-</ul>
-<p>Filter values are exhausted when:</p>
-<ul>
-<li>An end-of-content signal/delimiter has been found e.g. self-terminating formats such as Deflate; quote marks ending a JSON string</li>
-<li>A filter cap has been reached e.g. the filter has a specified length</li>
-<li>An unrecoverable error occurs (e.g. invalid UTF-8 sequences in strict mode; the 'g' character in a hexadecimal stream)</li>
-<li>The source has been exhausted</li>
-</ul>
-<p>It should be possible to recover the current source at the corresponding index within a filter value though this may require additional state info, e.g. in Deflate or Base64 where a byte within an encoding has information pertaining to more than one decoded byte</p>
-<p>Filter algorithms can be native (e.g. Deflate tied to Zlib, UTF-8) or in user-mode (thus extensible).</p>
-            <p><small>5 posts - 2 participants</small></p>
-            <p><a href="https://forum.rebol.info/t/concept-filters/2000">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/concept-filters/2000</link>
-          <pubDate>Thu, 05 Jan 2023 03:49:47 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-2000</guid>
-          <source url="https://forum.rebol.info/t/concept-filters/2000.rss">Concept: Filters</source>
-        </item>
-        <item>
-          <title>SPLIT Semantics</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Semantics</category>
-          <description><![CDATA[
-            <p><a href="https://gitter.im/red/red?at=63523097f00b697fec501c7a">On Red Gitter</a>, it was discussed "which of the following is 'correct'":</p>
-<pre><code>Red&gt; split "" ","
-== [""]
-
-R3&gt; split "" ","
-== []
-</code></pre>
-<p>Rebolek thinks R3 is right.  Boris says:</p>
-<blockquote>
-<p>I don't think there's a correct answer, just choices. I prefer the Red version because:<br>
-it strictly follows the rule: `number-of-segments = 1 + number-of-delimiters", no exceptions, so it's easier to reason about</p>
-<p>it should be able thus to preserve the type in case one wants to rejoin it later (that it doesn't is a bug, try split %"" ",")</p>
-</blockquote>
-<p>So there's a couple of ways to look at it.</p>
-<p>But I have a philosophy about these things where I want edge cases to be "noisy", because usually they require special handling.  I might even say:</p>
-<pre><code>&gt;&gt; split "" ","
-== ~null~  ; isotope</code></pre>
-            <p><small>1 post - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/split-semantics/1998">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/split-semantics/1998</link>
-          <pubDate>Thu, 22 Dec 2022 04:04:52 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-1998</guid>
-          <source url="https://forum.rebol.info/t/split-semantics/1998.rss">SPLIT Semantics</source>
-        </item>
-        <item>
-          <title>Should Isotopes Be Legal in MAP! (Keys, Values?)</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Datatypes</category>
-          <description><![CDATA[
-            <p>In the pre-isotopic era, there was a concept that MAP! would not allow you to store nulls.  Because null was the signal of not being in a map.  Assigning a key null was a way of removing items from that map.</p>
-<pre><code>&gt;&gt; m: make map! [x 20]
-== make map! [
-    x 20
-]
-
-&gt;&gt; m.x
-== 20
-
-&gt;&gt; m.y
-; null
-
-&gt;&gt; m.x: null
-; null
-
-&gt;&gt; m
-== make map! [
-]
-</code></pre>
-<p>Additionally, NULL was not allowed as a key.</p>
-<h2>How Should This Change In The Isotopic Era?</h2>
-<p>I'll make the point that not allowing you to store isotopes as keys or values isn't a fundamental problem, because you can META a value to put it in, and then UNMETA it when taking it out.</p>
-<p>You wind up with a fundamental issue that actions from a MAP! won't be run implicitly this way, and you can't put any falsey values in a map this way (because false is the ~false~ word isotope, and ~null~ isotopes are representations of not being in the map).</p>
-<p>But that limitation can be a benefit.  I already think of it as a benefit that you cannot run an action by doing access of items out of a block.  e.g. <strong>block.1</strong> could never run a function now (since blocks can't store isotopic actions).  If that was true of <strong>map.key</strong> as well, that could be seen as a good thing... you'd have to APPLY or RUN a plain ACTION! (or QUASI-ACTION!).</p>
-<pre><code>&gt;&gt; m: make map! []
-
-&gt;&gt; m.1: :append
-** Error: Cannot put ACTION! isotope in map
-
-&gt;&gt; m.1: ^append
-== ~#[action! {append} [series value /part /dup /line]]~
-
-&gt;&gt; m.1
-== ~#[action! {append} [series value /part /dup /line]]~
-
-&gt;&gt; run m.1 [a b c] [d e]
-== [a b c [d e]]
-
-&gt;&gt; apply m.1 [[a b c] [d e] /dup 2]
-== [a b c [d e] [d e]
-
-&gt;&gt; m.1/ [[a b c] [d e] /dup 2]
-== [a b c [d e] [d e]
-</code></pre>
-<p>As with the peace of mind using BLOCK!, that seems like a good thing to me.</p>
-<p><em>(I'm not entirely sure if RUN should allow QUASI-ACTION!s, or if you should have to UNQUASI it into a plain ACTION!.  Forcing the canonization might make more sane, so that routines that want to exchange actions as currency would have one standard they spoke.)</em></p>
-<p>I also think it's likely a good thing that false isotopes wouldn't be in the map, only quasi-false and the word false.  So if you're putting logic into a map, you'd wind up writing <strong><code>if map.key = 'true [...]</code></strong> or <strong><code>if map.key = 'false [...]</code></strong> and save the <strong>if map.key</strong> and <strong>if not map.key</strong> for testing things being in the map.</p>
-<h2>This Would Widen The Gap With Objects</h2>
-<p>There have been questions about what the difference is between maps and objects, and this would be another: objects must be able to have members that are isotopes: action isotopes that can run implicitly, logic and null and other word isotopes, and I'm presuming splices and other stable forms as well.</p>
-<p>It would mean a map has more in common with a block.</p>
-<p>This doesn't strike me as being that much of a problem.</p>
-<p><strong>So I'm going to be going ahead with the premise that isotopes can't be stored in maps, as either keys or values.</strong>  We'll see how it goes, but I think this is the right answer.</p>
-            <p><small>2 posts - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/should-isotopes-be-legal-in-map-keys-values/1995">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/should-isotopes-be-legal-in-map-keys-values/1995</link>
-          <pubDate>Fri, 02 Dec 2022 09:28:15 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-1995</guid>
-          <source url="https://forum.rebol.info/t/should-isotopes-be-legal-in-map-keys-values/1995.rss">Should Isotopes Be Legal in MAP! (Keys, Values?)</source>
-        </item>
-        <item>
-          <title>Python Speedup Proposals</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Foreign Inspiration</category>
-          <description><![CDATA[
-            <p>The original "CPython" implementation is in some ways similar to Rebol/Red... though these days Ren-C is more aligned with the stackless Python implementation...which is also written in C, but distinct from CPython.</p>
-<p><em>(But Ren-C's design overall is a lot less comparable to anything, due to the number of very "alien" ideas in it, but that I think are what gives it more notable properties.)</em></p>
-<p>In any case, despite running an interpreter loop and doing kind-of-what-Rebol-does, they've committed themselves to doing some speedup proposals and apparently it's paying off:</p>
-<p><a href="https://devblogs.microsoft.com/python/python-311-faster-cpython-team/" class="inline-onebox">A Team at Microsoft is Helping Make Python Faster - Python</a></p>
-<p>Some of their proposals involve JIT-compiling things (which they know won't work on restrictive platforms like iOS).  But they apparently have done a lot of tweaks besides that which have turned out beneficial.  Because it's a C interpreter there might be something applicable to be learned by looking at their "Stage 1" and "Stage 2" changes.</p>
-<blockquote>
-<h3>Stage 1 -- Python 3.10</h3>
-<p>The key improvement for 3.10 will be an adaptive, specializing interpreter. The interpreter will adapt to types and values during execution, exploiting type stability in the program, without needing runtime code generation.</p>
-<h3>Stage 2 -- Python 3.11</h3>
-<p>This stage will make many improvements to the runtime and key objects. Stage two will be characterized by lots of "tweaks", rather than any "headline" improvement. The planned improvements include:</p>
-<ul>
-<li>Improved performance for integers of less than one machine word.</li>
-<li>Improved peformance for binary operators.</li>
-<li>Faster calls and returns, through better handling of frames.</li>
-<li>Better object memory layout and reduced memory management overhead.</li>
-<li>Zero overhead exception handling.</li>
-<li>Further enhancements to the interpreter</li>
-<li>Other small enhancements.</li>
-</ul>
-<h3>Stage 3 -- Python 3.12 (requires runtime code generation)</h3>
-<p>Simple "JIT" compiler for small regions. Compile small regions of specialized code, using a relatively simple, fast compiler.</p>
-<h3>Stage 4 -- Python 3.13 (requires runtime code generation)</h3>
-<p>Extend regions for compilation. Enhance compiler to generate superior machine code.</p>
-</blockquote>
-            <p><small>1 post - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/python-speedup-proposals/1992">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/python-speedup-proposals/1992</link>
-          <pubDate>Sun, 27 Nov 2022 10:05:19 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-1992</guid>
-          <source url="https://forum.rebol.info/t/python-speedup-proposals/1992.rss">Python Speedup Proposals</source>
-        </item>
-        <item>
-          <title>Should ELSE be FALSE-reactive? (in addition to void and null?)</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Semantics</category>
-          <description><![CDATA[
-            <p>Historically one might have asked why ELSE doesn't think falseness is something worth reacting to:</p>
-<pre><code>&gt;&gt; 1 = 2 else [print "Why not print?"]
-Why not print?  ; seems not so bad, right?
-</code></pre>
-<p>The idea was panned, because <code>#[false]</code> was <em>a value</em> and ELSE's main job was to react to the situation of a branching construct that didn't produce a value:</p>
-<pre><code>&gt;&gt; math-broken: if 1 = 1 [false] else [true]
-== #[false]  ; if this were #[true], math seems broken
-</code></pre>
-<p>But now, the actual falsey <code>~false~</code> state is isotopic.  And some years of struggle with the parallel problem of what to do with branches that returned "non-values" bore curious fruit: a box that could hold a "non-value" like a null.</p>
-<pre><code>&gt;&gt; if false [null]
-== ~null~  ; isotope
-     ^-- there is no result
-
-&gt;&gt; if true [null]
-== ~[~null~]~  ; isotope
-     ^-- there is a result and it is null
-</code></pre>
-<p>Isotopic blocks containing one element will decay to that one element in most situations.  But ELSE is sensitive to the difference via a ^META parameter.  If someone has gone through the effort to box up a null or void vs leave it as a plain isotope, the ELSE assumes it's a meaningful result and should pass it on.  And conditional expressions know to do this; they box up nulls and voids if they are produced by executing branches.</p>
-<p><strong>The same technique could work for false.</strong></p>
-<pre><code>&gt;&gt; if 1 = 1 [false]
-== ~[~false~]~  ; isotope
-
-&gt;&gt; if 1 = 1 [false] else [true]
-== ~[~false~]~  ; isotope
-
-&gt;&gt; math-broken: if 1 = 1 [false] else [true]
-== ~false~  ; isotope
-</code></pre>
-<p>It's barely any additional work for conditionals to do on top of what they're doing already.  Although it can result in branches producing false to cost a small bit more than they do today <em>(I wouldn't worry about it, these single element boxes could be optimized if it was a problem)</em></p>
-<p>But I don't know how useful it would actually be.  <img src="https://forum.rebol.info/images/emoji/twitter/man_shrugging.png?v=9" title=":man_shrugging:" class="emoji" alt=":man_shrugging:">  Just writing down the observation.</p>
-            <p><small>4 posts - 2 participants</small></p>
-            <p><a href="https://forum.rebol.info/t/should-else-be-false-reactive-in-addition-to-void-and-null/1991">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/should-else-be-false-reactive-in-addition-to-void-and-null/1991</link>
-          <pubDate>Sun, 27 Nov 2022 06:00:32 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-1991</guid>
-          <source url="https://forum.rebol.info/t/should-else-be-false-reactive-in-addition-to-void-and-null/1991.rss">Should ELSE be FALSE-reactive? (in addition to void and null?)</source>
-        </item>
-        <item>
-          <title>~null~ WORD! isotope vs. BLANK! isotope ~_~ meaning null</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Naming</category>
-          <description><![CDATA[
-            <p>The concept of having isotopic <strong>~true~</strong> and <strong>~false~</strong> as WORD! isotopes instead of having a distinct LOGIC! type is admittedly somewhat weird.  It means they can't be put in blocks and need some sort of transformation if they're going to be put into blocks.</p>
-<ul>
-<li>
-<p>The generic and reversible way to make them real it is to META them and get <code>~true~</code> and <code>~false~</code> quasiforms, which you can UNMETA back to the isotopes</p>
-</li>
-<li>
-<p>The readable way to make them real is to REIFY them and get <code>true</code> and <code>false</code> as plain WORD!, which only gets turned back into the isotope form if they are bound to variables that hold the isotopes, and you evaluate them.</p>
-</li>
-<li>
-<p>Your circumstance may mean that neither of those choices are what you want when in a situation where the isotopes can't work...maybe it means you have to rethink what you're doing, or maybe you want some other transformation.  It's good to be alerted to the fact that it's dodgy to put what you think of as a "logic" in a reified context.</p>
-</li>
-</ul>
-<p>One should note that Lisp has no false at all, only NIL for false (since everything else is truthy, you could use anything else for true, but they have T predefined).  But their NIL isn't isotopic--so it can appear in lists literally.</p>
-<p>And as I've repeatedly pointed out, Redbol's historical choice to render LOGIC! conflated with the words <code>true</code> and <code>false</code> (instead of <code>#[true]</code> and <code>#[false]</code>) shows a desire to avoid the logic literals "escaping" into the reified consciousness of the user.  Making the logic forms actually impossible to put into blocks without a conscious transformation feels like it's good.</p>
-<p>I know it's a strange choice, but it's seeming like it fits with the territory.  It's a sort of tradeoff you need when you choose to be firm that TRUE and FALSE are redefinable words and not lexical forms of logic constants.</p>
-<h2>So... Why Shouldn't NULL Be Done With <code>~null~</code> isotope ?</h2>
-<p>Right now what I call "null" is isotopic BLANK!.  It is not pretty looking:</p>
-<pre><code>&gt;&gt; null
-== ~_~  ; isotope
-
-&gt;&gt; _
-== ~_~  ; isotope
-</code></pre>
-<p>But what <em>is</em> pretty looking is that if you assign a bunch of variables to null, the fact that blanks evaluate to the null isotope gives a great visibility to where the actual values to pay attention to are:</p>
-<pre><code>obj: make object! [
-    alpha: _
-    beta: _
-    delta: true
-    epsilon: ~
-    gamma: "nutty"
-    rho: _
-    omega: 'now
- ]
-</code></pre>
-<p>If we used a word isotope, then at source level we're writing:</p>
-<pre><code>obj: make object! [
-    alpha: null
-    beta: null
-    delta: true
-    epsilon: ~
-    gamma: "nutty"
-    rho: null
-    omega: 'now
- ]
-</code></pre>
-<p>And if we view it after evaluation that fetches (<code>null</code> =&gt; <code>~null~  ; isotope</code>), it gets uglier:</p>
-<pre><code>make object! [
-    alpha: ~null~
-    beta: ~null~
-    delta: ~true~
-    epsilon: ~
-    gamma: "nutty"
-    rho: ~null~
-    omega: 'now
- ]
-</code></pre>
-<p>We can't show it as the WORD! null because there's no guarantee that word always will evaluate back to the null isotope.  But the concept is that since BLANK! can't be redefined, we can put it in an evaluative context as a substitute for <code>~_~</code> if we want.</p>
-<p>If we were "more honest" and just META'd the isotopic blank, we'd get renders like:</p>
-<pre><code>make object! [
-    alpha: ~_~
-    beta: ~_~
-    delta: ~true~
-    epsilon: ~
-    gamma: "nutty"
-    rho: ~_~
-    omega: 'now
- ]
-</code></pre>
-<p>But I might actually like that less than seeing <strong><code>~null~</code></strong> there.</p>
-<h2>Things To Weigh In This Consideration</h2>
-<p>I'm really torn.  Certainly having people be able to see ~null~ written out as a word corresponds to what we want to refer to the state as.  We aren't going to replace people's vernacular to say "isotopic blank" instead of null.  And trying to teach people "isotopic blank is null" is an uphill battle.</p>
-<p>Let's look back at that seemingly beautiful situation with all the blanks-to-nulls at source level:</p>
-<pre><code>obj: make object! [
-    alpha: _
-    beta: _
-    delta: true
-    epsilon: ~
-    gamma: "nutty"
-    rho: _
-    omega: 'now
- ]
-</code></pre>
-<p>But, hmmm.  The <strong><code>~</code></strong> is now an assignable state meaning variable is not set.  How often will you want to set something to NULL...which won't generate an error on access like being unset would, but is falsey and can't be passed to many routines without a MAYBE?</p>
-<p><strong>Statistically, we might often have a situation where NULL is the minority initialization, more like this:</strong></p>
-<pre><code>obj: make object! [
-    alpha: ~
-    beta: ~
-    delta: true
-    epsilon: null
-    gamma: "nutty"
-    rho: ~
-    omega: 'now
- ]
-</code></pre>
-<p>My point is that intentionally initializing things to null may not be as common as setting to an error-provoking unset state.  And when null happens it may be just as noteworthy to call out as setting something to true or false.</p>
-<h2>Are There Technical Barriers To This?</h2>
-<p>It has some of the same problems as having to deal with the type checking of LOGIC! actually being an isotopic subclass of two words.  It means <code>&lt;opt&gt;</code> is an isotopic subclass of one word, so there's no specific null datatype.  :-/</p>
-<p>I was already saying that TYPE OF NULL was probably an error, and TYPE OF MAYBE NULL would be void... anyway, this fits into some of the same type issues that logic has.</p>
-<p>Previously NULL cells held nothing, so I'd put a payload of the file and line that were in effect in the evaluator.  This was supposed to give better errors about where a null originated from.  This could still be done if NULL was a special case of WORD! isotope that said it was null via a flag vs. storing the symbol, but could be complicated.  None of the better error mechanics were done yet.</p>
-<p><strong>My general intuition is that from a user's standpoint, it's an uphill battle to teach them isotopic blank is something called "null"... and that the majority of technical problems that are involved in making NULL be a word isotope are problems that have to be tackled anyway with true and false as word isotopes.</strong></p>
-<p>Additionally, I've written about my desire for BLANK!s to serve in dialects as spaces.  That gets very screwed by the (<strong><code>_</code></strong> =&gt; <strong><code>~_~</code>  ; isotope</strong>) evaluation.  Recovering blank for space intent would be good.</p>
-<p>I'm going to likely give it a shot, when I get some programming time again, hopefully soon.</p>
-            <p><small>4 posts - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/null-word-isotope-vs-blank-isotope-meaning-null/1989">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/null-word-isotope-vs-blank-isotope-meaning-null/1989</link>
-          <pubDate>Tue, 25 Oct 2022 04:07:17 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-1989</guid>
-          <source url="https://forum.rebol.info/t/null-word-isotope-vs-blank-isotope-meaning-null/1989.rss">~null~ WORD! isotope vs. BLANK! isotope ~_~ meaning null</source>
-        </item>
-        <item>
-          <title>Haskell and Rust Error Handling</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Foreign Inspiration</category>
-          <description><![CDATA[
-            <p>Ren-C is shoring up Rebol's historically problematic exception-based error handling by blending together two mechanics: definitional returns and isotopic errors.  This gives what I'm calling "definitional failures":</p>
-<p><a href="https://forum.rebol.info/t/fail-vs-return-raise-the-new-age-of-definitional-failures/1852" class="inline-onebox">FAIL vs. RETURN RAISE: The New Age of Definitional Failures!</a></p>
-<p>Pivoting to this line of thinking has some non-accidental similarity to <a href="https://hackage.haskell.org/package/base-4.17.0.0/docs/Data-Either.html">Haskell's <code>Either</code></a> and <a href="https://doc.rust-lang.org/std/result/">Rust's <code>Result</code></a>, which I mentioned when first sketching out the motivation for change:</p>
-<p><a href="https://forum.rebol.info/t/the-need-to-rethink-error/1371" class="inline-onebox">The Need To Rethink ERROR!</a></p>
-<p>I thought it would be worth it to make a thread for pointing out similarities and differences, and if there are libraries they use that might have relevant inspiration.</p>
-<h2>An Out-Of-Band State On The Value Is... Like An Isotope?</h2>
-<p>Either is fully generic beyond just allowing errors (and <a href="https://docs.rs/either/latest/either/">Rust has its own generic Either</a> as well).  So you can really say whatever you are returning can come in two forms: the left form vs. the right form.</p>
-<p>But even Rust's <code>Result</code> container will permit you to make an Error class the "valid" result, as well as the "invalid" result.</p>
-<p>So here we see generic way of letting a value carry a bit--independent of what the payload is--saying whether that is a "normal" state or a "weird" state.  Then, the system has an assortment of operations that are designed for directing program flow in different ways reacting to it.</p>
-<p>Ren-C embraces this deeply: effectively saying that every variable and expression product has the potential of being in this "weird" state... and <em>no array can contain a value in the weird state</em>.  But you don't have to do anything special to a value that <em>isn't</em> weird to extract it... you just get runtime errors if you use the weird values where they're not expected.</p>
-<h2>Rust Tackles Low-Hanging Fruit via <code>unwrap()</code> and <code>?</code>
-</h2>
-<p>In Ren-C, if you don't have handling at the callsite when a definitional error happens, it's promoted to being more like a throw--and most code should not intercept it.</p>
-<p>Being more formal by nature, both Haskell and Rust force <em>some</em> handling at the callsite when an error result is possible.  You have to define a code path to take if there's an error, or a code path to take if there's not.</p>
-<p>But Rust has a couple of conveniences.  If you want something like the Ren-C behavior, you can just call the <code>.unwrap()</code> method on the result.  It will give you the ordinary value if the function didn't return, otherwise raise the error as a "panic".</p>
-<p>There's also a cool shortcut with a postfix operator of <strong>?</strong> on the call.  This makes it so that if you call a function that returns a <code>Result</code> type from inside another function that returns a <code>Result</code> type, it will automatically propagate the result if it's an error out of the calling function.</p>
-<p>Getting this behavior is more laborious in Ren-C:</p>
-<pre><code>foo: func [...] [
-    x: bar (...) except e -&gt; [return raise e]
-    ...
-]
-</code></pre>
-<p>Implementing the feature as postfix raises its own problems, so let's just imagine we were trying it prefix:</p>
-<pre><code>foo: func [...] [
-    x: ? bar (...)  ; we want this to act the same as above
-    ...
-]
-</code></pre>
-<p>For this to work under the current system, each FUNC would have to define its own <strong>?</strong> operator... because much like definitional RETURN, it would have to know what it was returning <em>from</em> in case of a raised error.</p>
-<h2>Haskell Has Generic Compositional Smarts</h2>
-<p>As mentioned, the strict compile-time typing in Haskell forces you to be explicit about your reaction when a function returns one of these <code>Either</code> values.</p>
-<p>But because Either fits in with monadic/applicative/functor stuff, you can have higher-order operations that <a href="https://lhbg-book.link/06-errors_and_files/01-either.html">can compose together</a> failure scenarios...and gather up failures from several functions or cascade the failure through to where you want.</p>
-<p>Ren-C can do this kind of thing as well, such as how you can write higher-order functions like ATTEMPT in usermode, or REDUCE a block of values in one pass with META and get the errors, then react to them later.</p>
-<p>But in practice, the lack of a static type system makes this more precarious.</p>
-<h2>Links To Error Handling Libraries</h2>
-<ul>
-<li>Rust's ANYHOW!: <a href="https://docs.rs/anyhow/">https://docs.rs/anyhow/</a>
-</li>
-</ul>
-            <p><small>1 post - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/haskell-and-rust-error-handling/1987">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/haskell-and-rust-error-handling/1987</link>
-          <pubDate>Sun, 16 Oct 2022 02:17:44 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-1987</guid>
-          <source url="https://forum.rebol.info/t/haskell-and-rust-error-handling/1987.rss">Haskell and Rust Error Handling</source>
         </item>
   </channel>
 </rss>

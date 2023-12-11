@@ -1,0 +1,153 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Why can&#39;t you PROTECT individual cells in an array?</title>
+    <link>https://forum.rebol.info/t/why-cant-you-protect-individual-cells-in-an-array/2062</link>
+    <description>You can PROTECT a variable:
+
+    &gt;&gt; x: 10
+
+    &gt;&gt; protect &#39;x
+
+    &gt;&gt; x: 20
+    ** Access Error: variable x locked by PROTECT (see UNPROTECT)
+
+And you can PROTECT an array pointed to by a variable:
+
+    &gt;&gt; array: [&lt;a&gt; b #c]
+
+    &gt;&gt; protect array
+
+    &gt;&gt; append array [&quot;d&quot;]
+    ** Access Error: series read-only due to PROTECT (see UNPROTECT)
+
+    &gt;&gt; array: [&lt;q&gt; r #s]  ; variable holding array not protected
+
+    &gt;&gt; array
+    == [&lt;q&gt; r #s]
+
+...but you can&#39;t PROTECT a cell resident inside an array:
+
+    &gt;&gt; array: [&lt;a&gt; b #c]
+
+    &gt;&gt; protect &#39;array.2  ; this doesn&#39;t work
+
+    &gt;&gt; array.2: &quot;z&quot;
+    ; you&#39;d expect an error here if it did work
+
+    &gt;&gt; array.3: 1020
+    ; you&#39;d expect no error here if it did work
+
+R3-Alpha didn&#39;t have the feature, and Ren-C hasn&#39;t added it.  Why?
+
+## Making This Work Would Add Significant Complexity
+
+Your first thought (well, mine) would be that this is about efficiency.  e.g. if you were going to write something like **clear block**, the existence of PROTECT&#39;d cells inside that block would mean you&#39;d have to visit all the cells before knowing if it was okay to clear it.  Other code that already has to visit the cells in order to copy them would still pay a little more too... like **take/part**.
+
+*But that&#39;s not where the real problem is.*  Paying a little more for mutating operations is only slightly relevant.  The real problem has to do with a pointer to a cell not being able to answer the question of its own mutability--since it can&#39;t speak for the container&#39;s protection status.
+
+In more detail:
+
+Ren-C&#39;s clever management of immutability uses the C `const` designator.  What the const means on a *series* is that the series may be mutable, but hasn&#39;t had a runtime check yet to flip it over to being readable.  And what the const means on *cells* is that the cell was *extracted* from a series that may be mutable, but hadn&#39;t had the runtime check applied.
+
+This way, casual code that just messes around reading cells and series can be written easily, using const pointers and not paying for runtime checks.  And you can be certain of not skipping the runtime checks in the places where you want to get mutable access.  (R3-Alpha was full of bugs from &quot;just forgetting&quot;.)
+
+The problem with getting a granularity of cell-level mutability is that right now, there&#39;s just one runtime check that gives you a mutable cell pointer...done at the array level:
+
+    Cell* tail;
+    Cell* cell = VAL_ARRAY_AT_ENSURE_MUTABLE(&amp;tail, block);
+
+There are multiple checks done, here.  The BLOCK! cell passed in may or may not carry a CONST cell bit--which is to say, that particular reference to the BLOCK! might be const (even if the underlying array hasn&#39;t been PROTECT&#39;d).  And then, there&#39;s the protection status of the array...which can also become protected during enumerations of the array, or if it is executing currently in the evaluator.
+
+If this code doesn&#39;t trigger a failure from discovering a form of mutability, then the non-const `Cell*` is given back.
+
+But then...the code will increment that cell pointer to find other cells in the array.  And incrementing a mutable pointer gives you another mutable pointer.
+
+It may seem we *could* make `Cell(*)` in the C++ debug build a smart pointer class that gives you back a `Cell(const*)` when incremented.  And then say that there&#39;s a way to promote a const cell reference to a mutable cell reference with a runtime check.
+
+But this would be deceptive.  We already know that if you have a const reference to a cell that lives in the middle of an array, that a runtime check of the containing array for that cell hasn&#39;t been done yet.
+
+In other words: once you have your hands on a cell pointer, it&#39;s too late to ask about *that* cell&#39;s mutability.  The knowledge is up to the container.
+
+Trying to solve this would be a mess.  e.g. making a kind of Cell(const*) that was the size of two pointers, but held a reference to the array the cell was resident in...in case you wanted to do the runtime check asking for a promotion to a Cell(*).  
+
+I&#39;ve been moving in the other direction...paring away complexities in the source where possible.  Something like that doesn&#39;t belong in the codebase--especially to implement a feature that I can only vaguely imagine uses for.
+
+## So Don&#39;t Expect Cell-Level PROTECT...Ever
+
+Every now and again I&#39;ve looked at the flag and thought &quot;why does this apply only to variable cells?&quot;  So I wanted to hammer out the reasoning, and confirm that it wasn&#39;t just about performance.
+
+From my point of view, it&#39;s about creating a situation of a flag that needs to be checked, and which the code has no (reasonable) systemic way to enforce that checking.</description>
+    
+    <lastBuildDate>Tue, 21 Nov 2023 23:03:03 +0000</lastBuildDate>
+    <category>Debugger</category>
+    <atom:link href="https://forum.rebol.info/t/why-cant-you-protect-individual-cells-in-an-array/2062.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Why can&#39;t you PROTECT individual cells in an array?</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>You can PROTECT a variable:</p>
+<pre><code>&gt;&gt; x: 10
+
+&gt;&gt; protect 'x
+
+&gt;&gt; x: 20
+** Access Error: variable x locked by PROTECT (see UNPROTECT)
+</code></pre>
+<p>And you can PROTECT an array pointed to by a variable:</p>
+<pre><code>&gt;&gt; array: [&lt;a&gt; b #c]
+
+&gt;&gt; protect array
+
+&gt;&gt; append array ["d"]
+** Access Error: series read-only due to PROTECT (see UNPROTECT)
+
+&gt;&gt; array: [&lt;q&gt; r #s]  ; variable holding array not protected
+
+&gt;&gt; array
+== [&lt;q&gt; r #s]
+</code></pre>
+<p>...but you can't PROTECT a cell resident inside an array:</p>
+<pre><code>&gt;&gt; array: [&lt;a&gt; b #c]
+
+&gt;&gt; protect 'array.2  ; this doesn't work
+
+&gt;&gt; array.2: "z"
+; you'd expect an error here if it did work
+
+&gt;&gt; array.3: 1020
+; you'd expect no error here if it did work
+</code></pre>
+<p>R3-Alpha didn't have the feature, and Ren-C hasn't added it.  Why?</p>
+<h2>
+<a name="making-this-work-would-add-significant-complexity-1" class="anchor" href="https://forum.rebol.info#making-this-work-would-add-significant-complexity-1"></a>Making This Work Would Add Significant Complexity</h2>
+<p>Your first thought (well, mine) would be that this is about efficiency.  e.g. if you were going to write something like <strong>clear block</strong>, the existence of PROTECT'd cells inside that block would mean you'd have to visit all the cells before knowing if it was okay to clear it.  Other code that already has to visit the cells in order to copy them would still pay a little more too... like <strong>take/part</strong>.</p>
+<p><em>But that's not where the real problem is.</em>  Paying a little more for mutating operations is only slightly relevant.  The real problem has to do with a pointer to a cell not being able to answer the question of its own mutability--since it can't speak for the container's protection status.</p>
+<p>In more detail:</p>
+<p>Ren-C's clever management of immutability uses the C <code>const</code> designator.  What the const means on a <em>series</em> is that the series may be mutable, but hasn't had a runtime check yet to flip it over to being readable.  And what the const means on <em>cells</em> is that the cell was <em>extracted</em> from a series that may be mutable, but hadn't had the runtime check applied.</p>
+<p>This way, casual code that just messes around reading cells and series can be written easily, using const pointers and not paying for runtime checks.  And you can be certain of not skipping the runtime checks in the places where you want to get mutable access.  (R3-Alpha was full of bugs from "just forgetting".)</p>
+<p>The problem with getting a granularity of cell-level mutability is that right now, there's just one runtime check that gives you a mutable cell pointer...done at the array level:</p>
+<pre><code>Cell* tail;
+Cell* cell = VAL_ARRAY_AT_ENSURE_MUTABLE(&amp;tail, block);
+</code></pre>
+<p>There are multiple checks done, here.  The BLOCK! cell passed in may or may not carry a CONST cell bit--which is to say, that particular reference to the BLOCK! might be const (even if the underlying array hasn't been PROTECT'd).  And then, there's the protection status of the array...which can also become protected during enumerations of the array, or if it is executing currently in the evaluator.</p>
+<p>If this code doesn't trigger a failure from discovering a form of mutability, then the non-const <code>Cell*</code> is given back.</p>
+<p>But then...the code will increment that cell pointer to find other cells in the array.  And incrementing a mutable pointer gives you another mutable pointer.</p>
+<p>It may seem we <em>could</em> make <code>Cell(*)</code> in the C++ debug build a smart pointer class that gives you back a <code>Cell(const*)</code> when incremented.  And then say that there's a way to promote a const cell reference to a mutable cell reference with a runtime check.</p>
+<p>But this would be deceptive.  We already know that if you have a const reference to a cell that lives in the middle of an array, that a runtime check of the containing array for that cell hasn't been done yet.</p>
+<p>In other words: once you have your hands on a cell pointer, it's too late to ask about <em>that</em> cell's mutability.  The knowledge is up to the container.</p>
+<p>Trying to solve this would be a mess.  e.g. making a kind of Cell(const*) that was the size of two pointers, but held a reference to the array the cell was resident in...in case you wanted to do the runtime check asking for a promotion to a Cell(*).</p>
+<p>I've been moving in the other direction...paring away complexities in the source where possible.  Something like that doesn't belong in the codebase--especially to implement a feature that I can only vaguely imagine uses for.</p>
+<h2>
+<a name="so-dont-expect-cell-level-protectever-2" class="anchor" href="https://forum.rebol.info#so-dont-expect-cell-level-protectever-2"></a>So Don't Expect Cell-Level PROTECT...Ever</h2>
+<p>Every now and again I've looked at the flag and thought "why does this apply only to variable cells?"  So I wanted to hammer out the reasoning, and confirm that it wasn't just about performance.</p>
+<p>From my point of view, it's about creating a situation of a flag that needs to be checked, and which the code has no (reasonable) systemic way to enforce that checking.</p>
+          <p><a href="https://forum.rebol.info/t/why-cant-you-protect-individual-cells-in-an-array/2062/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/why-cant-you-protect-individual-cells-in-an-array/2062/1</link>
+        <pubDate>Tue, 21 Nov 2023 22:52:50 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-2062-1</guid>
+        <source url="https://forum.rebol.info/t/why-cant-you-protect-individual-cells-in-an-array/2062.rss">Why can&#39;t you PROTECT individual cells in an array?</source>
+      </item>
+  </channel>
+</rss>
