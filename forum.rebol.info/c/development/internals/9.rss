@@ -5,8 +5,71 @@
     <link>https://forum.rebol.info/c/development/internals/9</link>
     <description>Topics in the &#39;Internals&#39; category Internals of the Rebol language</description>
     
-      <lastBuildDate>Fri, 23 Jun 2023 17:06:50 +0000</lastBuildDate>
+      <lastBuildDate>Thu, 04 Jan 2024 18:16:58 +0000</lastBuildDate>
       <atom:link href="https://forum.rebol.info/c/development/internals/9.rss" rel="self" type="application/rss+xml" />
+        <item>
+          <title>How &quot;Quoting Levels&quot; are Implemented (Isotope, Normal, Quasi, Quoted)</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Internals</category>
+          <description><![CDATA[
+            <p>The "game" of Rebol is played with cells that are the size of four platform pointers.  So on a 32-bit platform a cell is 16 bytes in size, and on a 64-bit platform they are 32 bytes in size.</p>
+<p>I've illustrated Ren-C's spin on this "game" previously:</p>
+<p></p><div class="lightbox-wrapper"><a class="lightbox" href="https://forum.rebol.info/uploads/default/original/1X/198e92149d15782107ac8c2852d336c9cea200d1.png" data-download-href="https://forum.rebol.info/uploads/default/198e92149d15782107ac8c2852d336c9cea200d1" title="ren-c-cell"><img src="https://forum.rebol.info/uploads/default/optimized/1X/198e92149d15782107ac8c2852d336c9cea200d1_2_690x281.png" alt="ren-c-cell" data-base62-sha1="3E5omo3mg1b0FRQoFVFHU57OGqt" width="690" height="281" srcset="https://forum.rebol.info/uploads/default/optimized/1X/198e92149d15782107ac8c2852d336c9cea200d1_2_690x281.png, https://forum.rebol.info/uploads/default/optimized/1X/198e92149d15782107ac8c2852d336c9cea200d1_2_1035x421.png 1.5x, https://forum.rebol.info/uploads/default/original/1X/198e92149d15782107ac8c2852d336c9cea200d1.png 2x" data-dominant-color="EDEDED"></a></div><p></p>
+<p>The bits and bytes in the header are arranged in a platform-independent way.  Regardless of the endianness of the machine, the bits in the header will be in the same order.  The first byte is chosen with a pattern that specifically will never occur as a leading byte in a UTF-8 sequence...allowing an arbitrary pointer to be discerned as pointing to a cell or to the beginning of a UTF-8 string.</p>
+<p>The "payload" is specifically aligned to a 64-bit boundary on both 32-bit and 64-bit platforms.  This is important if it contains something like a double precision floating point number.  It is also a union, which means that if it has constituent fields, they must be read from exactly the same union definition which was used to assign them.  The "extra" is separate, meaning it is decoupled from the payload and can be assigned and read on its own terms (e.g. BLOCK! and WORD! could have a "binding" in extra that is read and written in common, without invalidating their payloads).</p>
+<p>The HEART_BYTE encodes what we would think of as the underlying datatype, and cues the interpretation of the contents of the cell.  For instance the byte corresponding to a BLOCK! tells us that the payload consists of a pointer to an array of more cells as well as an index into the block.</p>
+<h2>
+<a name="enter-the-quote_byte-1" class="anchor" href="https://forum.rebol.info#enter-the-quote_byte-1"></a>Enter the QUOTE_BYTE</h2>
+<p>Bits in the header are scarce.  And at one time, quoting was implemented by only two bits... for quoting levels of 0, 1, 2, or 3.  Higher quoting levels were achieved by changing the HEART_BYTE to indicate QUOTED!, and then the payload was changed to point to a single-element array that held the quoted cell, and an integer of the quoting level up beyond millions.  It was tricky to do, but it worked.</p>
+<p>Eventually, the complex mechanics behind flipping to a different payload for higher levels of quoting was scrapped, and an entire byte in the header was sacrificed for the quote level.  This permitted from 0-255 levels of quoting, and I decided that was more than enough.</p>
+<p>When isotopes were originally introduced, there was a flag taken to say something was an isotope.  However, I realized that something should not be quoted and be an isotope at the same time.  Hence the isotopic state could be thought of as a special value of the QUOTE_BYTE.</p>
+<p>Initially I chose 255 for isotopes, leaving 0-254 as the ordinary quoting levels.  But the theory of isotopes evolved to where not only were there isotopes, but there needed to be a form of quoting that would produce isotopes under evaluation...so-called <em>quasiforms</em>.  And it began to make sense to think of the isotopic state as being obviously "less" than other quoting levels, so it became 0.</p>
+<p>What it worked out to was:</p>
+<ul>
+<li>
+<p>Quoting byte of 0 is an isotope: <strong><code>#define ISOTOPE_0 0</code></strong></p>
+</li>
+<li>
+<p>Quoting byte of 1 is plain not-quoted: <strong><code>#define UNQUOTED_1 1</code></strong></p>
+</li>
+<li>
+<p>Quoting byte of 2 is a quasiform: <strong><code>#define QUASI_2 2</code></strong></p>
+</li>
+<li>
+<p>Quoting byte of 3 is single quoted plain form: <strong><code>#define ONEQUOTE_3 3</code></strong></p>
+</li>
+</ul>
+<p>A quoting byte of 4 is a single-quoted quasiform.  e.g. there's no such thing as a quasi-quoted, just a quoted-quasi: <strong><code>'~foo~</code></strong> is legal but <strong><code>~'foo~</code></strong> is not.</p>
+<p>So the interpretation of the QUOTE_BYTE proceeds like that.</p>
+<ul>
+<li>
+<p>Quoting byte of 5 is a double quoted plain form</p>
+</li>
+<li>
+<p>Quoting byte of 6 is a double quoted quasiform</p>
+</li>
+<li>
+<p>Quoting byte of 7 is a triple quoted plain form</p>
+</li>
+<li>
+<p>Quoting byte of 8 is a triple quoted quasiform</p>
+</li>
+</ul>
+<p>etc.</p>
+<p>So although mechanically the byte holds a value of 0 for isotopes, it still conceptually is what we'd think of as "negative one".</p>
+<p>Evaluator drops one level of quoting, with the base case that quasiforms produce isotopes and the normal form does whatever its evaluator rule is (WORD! looks up, etc.)</p>
+<p>The QUOTE operator won't work on isotopes and the UNQUOTE operator won't work on quasiforms.  Instead you have to use the META and UNMETA operations, which handle those exceptions but just act like QUOTE and UNQUOTE otherwise.</p>
+            <p><small>3 posts - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/how-quoting-levels-are-implemented-isotope-normal-quasi-quoted/2091">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/how-quoting-levels-are-implemented-isotope-normal-quasi-quoted/2091</link>
+          <pubDate>Thu, 04 Jan 2024 18:16:58 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2091</guid>
+          <source url="https://forum.rebol.info/t/how-quoting-levels-are-implemented-isotope-normal-quasi-quoted/2091.rss">How &quot;Quoting Levels&quot; are Implemented (Isotope, Normal, Quasi, Quoted)</source>
+        </item>
         <item>
           <title>Invisibility Reviewed Through Modern Eyes</title>
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
@@ -923,9 +986,9 @@ x is 10
 ; null
 </code></pre>
 <p>So unlike regular WORD!, it was possible to have a BAD-WORD! that had no UTF-8 representation.  (Yes, this was a sign that something was amiss.)</p>
-<p>However, I liked having <strong><code>~</code></strong> be something that could be reserved by the system, and I thought the "bad-wordness" plus the lack of any associated text made it a good choice for being what we'd call "none"</p>
-<pre><code>&gt;&gt; if none? '~ [print "Yup, that's a none"]
-Yup, that's a none.
+<p>However, I liked having <strong><code>~</code></strong> be something that could be reserved by the system, and I thought the "bad-wordness" plus the lack of any associated text made it a good choice for being what we'd call "trash"</p>
+<pre><code>&gt;&gt; if trash? '~ [print "Yup, that's a trash"]
+Yup, that's a trash.
 
 &gt;&gt; '~  ; console would not show by default
 
@@ -934,7 +997,7 @@ So ~ was the result of things like PRINT
 == "~"
 </code></pre>
 <p><em>(You can re-read my <strong><a href="https://forum.rebol.info/t/why-isnt-print-invisible-void/1466/4">explanation of why void is a bad return value for things like PRINT or HELP.</a></strong>  If you want to communicate to the console that it not print anything, then you need to do that communication through some kind of non-void thing, otherwise that signal is too slippery.)</em></p>
-<p>You could put these BAD-WORD!s in blocks, which made them kind of a lousy choice for the result of a PRINT.  So when isotopes came on the scene, it seemed a much better idea to say that none was the <em>isotopic</em> form of something.</p>
+<p>You could put these BAD-WORD!s in blocks, which made them kind of a lousy choice for the result of a PRINT.  So when isotopes came on the scene, it seemed a much better idea to say that trash was the <em>isotopic</em> form of something.</p>
 <p>So in the first cut of generic isotopes, I said ~ was the quasiform of BLANK! (as opposed to ~_~, which looks pretty bad):</p>
 <pre><code>&gt;&gt; quasi _
 == ~
@@ -945,10 +1008,11 @@ So ~ was the result of things like PRINT
 &gt;&gt; quasi? '~
 == ~true~  ; isotope
 
-&gt;&gt; none? ~
+&gt;&gt; trash? ~
 == ~true~  ; isotope
 </code></pre>
-<h2>But... Would It Make More Sense Related to Void?</h2>
+<h2>
+<a name="but-would-it-make-more-sense-related-to-void-1" class="anchor" href="https://forum.rebol.info#but-would-it-make-more-sense-related-to-void-1"></a>But... Would It Make More Sense Related to Void?</h2>
 <p>Initially I was at something of a loss for how void fit into the isotopic world.</p>
 <p>One of my early reasonings was that VOID was more "etheric" than NULL.  <em>So perhaps void was actually the isotopic form of null,</em> and ~ could be null's quasiform:</p>
 <pre><code> &gt;&gt; quasi null
@@ -1203,7 +1267,7 @@ code: compose [... keep [sum: sum + x] ...]
   ]
 </code></pre>
 <p>How many stack levels you get will depend on the available memory of your platform--not your CPU stack.</p>
-<p>I got this on Chromium on Linux:</p>
+<p>In the WebAssembly build that runs in the browser, I got this on Chromium on Linux:</p>
 <pre><code>&gt;&gt; counter 0
 0
 1000
@@ -1339,14 +1403,15 @@ unter counter counter coun...
           <source url="https://forum.rebol.info/t/is-group-in-path-for-function-invocations-worth-it/1813.rss">Is GROUP! in PATH! for function invocations worth it?</source>
         </item>
         <item>
-          <title>Conflation vs. Safety, RETURN and the Finer Points of ~null~ Isotopes</title>
+          <title>Conflation vs. Safety, RETURN and &quot;Heavy&quot; Void/Null</title>
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
           <category>Internals</category>
           <description><![CDATA[
-            <p><code>~null~</code> isotopes are a novel solution shaped to solve a specific problem.  As a reminder of what the goal is...</p>
-<h1>The Goal is to Please <a class="mention" href="https://forum.rebol.info/u/rgchris">@rgchris</a> <em>AND</em> Please me</h1>
-<p>NULL is the signal of "soft failure".  It's a unique result reserved for when a branch fails, or when a loop is halted by a BREAK, when PARSE fails...etc.</p>
-<p>Its property of not being storable in blocks makes it critical to disambiguating this historical problem:</p>
+            <p>"Heavy" void and null are a novel solution shaped to solve a specific problem.  As a reminder of what the goal is...</p>
+<h1>
+<a name="the-goal-is-to-please-rgchris-and-please-me-1" class="anchor" href="https://forum.rebol.info#the-goal-is-to-please-rgchris-and-please-me-1"></a>The Goal is to Please <a class="mention" href="https://forum.rebol.info/u/rgchris">@rgchris</a> <em>AND</em> Please me</h1>
+<p>NULL is the signal of "soft failure".  It's a unique result when a loop is halted by a BREAK, when PARSE fails...etc.  VOID is the signal of "nothingness", which is the product of conditional expressions that don't take a branch.  Neither can be stored in blocks.</p>
+<p>NULL's property of not being storable in blocks makes it critical to disambiguating this historical problem:</p>
 <pre><code>redbol&gt;&gt; third [a b #[none]]
 == #[none]
 
@@ -1362,8 +1427,9 @@ redbol&gt;&gt; third [a b]
 </code></pre>
 <p>Hence NULL and VOID have taken the place of blank ("none!") in many places.  <em>(See <a href="https://forum.rebol.info/t/blank-2022-revisiting-the-datatype/1942">BLANK! 2022, Revisiting the Datatype</a> for a summary.)</em></p>
 <p>But unlike the elements in a block, a branch that evaluates isn't required to be non-NULL or non-VOID.  Which leads us to the long running question of what to bend these branches to so they don't conflate with the branch-not-taken result.</p>
-<h2>Chris has (rightly) expressed concern</h2>
-<p>At times I've said that it's not that big a deal that branches can't evaluate to NULL and get distorted.  "You didn't have a NULL before, so why get so worked up about control constructs not returning it?"</p>
+<h2>
+<a name="chris-has-rightly-expressed-concern-2" class="anchor" href="https://forum.rebol.info#chris-has-rightly-expressed-concern-2"></a>Chris has (rightly) expressed concern</h2>
+<p>At times I've said that it's not that big a deal that branches can't evaluate to NULL and get distorted.  "You didn't have NULL before at all, so why get so worked up about control constructs not returning it?"</p>
 <p>But the now-pervasive nature of NULL means it can't be avoided.  So:</p>
 <p><em>"How do you express branching code which wants to do some work but also produce NULL as an evaluative product?"</em></p>
 <p>Conflation was not a problem, e.g. in Rebol2:</p>
@@ -1416,35 +1482,33 @@ case branch
 else branch  ; ugh
 </code></pre>
 <p>I don't want the CASE branch to evaluate to NULL just because some expression in the branch was incidentally NULL.  That would mean the ELSE tied to the CASE runs even though the code for the branch ran.</p>
-<h2>Enter Isotopes</h2>
-<p>One thing a ~NULL~ WORD! isotope has in common with NULL is that neither can be put in blocks.  But they have been automatically "decaying" into regular NULL when stored into variables.</p>
-<pre><code>&gt;&gt; ~null~
-== ~null~  ; isotope
+<h2>
+<a name="enter-heavy-forms-packs-with-one-element-3" class="anchor" href="https://forum.rebol.info#enter-heavy-forms-packs-with-one-element-3"></a>Enter Heavy Forms: PACKs with One Element</h2>
+<p>One thing a "heavy" void has in common with a "plain" void is that neither can be put in blocks.  But it automatically "decays" into regular VOID when stored into variables.</p>
+<pre><code>&gt;&gt; if true [void]
+; first in pack of length 1
 
-&gt;&gt; x: ~null~
-== ~null~  ; isotope  &lt;-- note the overall expression is still an isotope
+&gt;&gt; x: if true [void]
 
 &gt;&gt; x
-; null
 </code></pre>
-<p>The twist is that they are <em>different enough</em> from true NULL such that a THEN or an ELSE can consider them a situation where the branch did not run:</p>
+<p>The twist is that the heavy void is <em>different enough</em> from true VOID such that a THEN or an ELSE can consider them a situation where the branch did not run:</p>
 <pre><code>&gt;&gt; if false [&lt;ignored&gt;]
-; null
 
-&gt;&gt; if true [null]
-== ~null~  ; isotope
+&gt;&gt; if true [void]
+; first in pack of length 1
 
-&gt;&gt; if true [null] else [print "This won't run"]
-== ~null~  ; isotope
+&gt;&gt; if true [void] else [print "This won't run"]
 </code></pre>
-<p>The reason functions like ELSE can "see" the isotope is that they don't take an ordinary parameter on their left.  They take a ^META argument.  These can see the distinction between a ~null~ isotope and a "true" NULL.</p>
-<p><strong>I'd largely say this has been working well...certainly better than its conceptual predecessors.</strong>  It makes piping NULL out of branches trivially easy, when the fear of conflation is not a problem.</p>
+<p>The reason functions like ELSE can "see" the isotope is that they don't take an ordinary parameter on their left.  They take a ^META argument.  These can see the distinction between a void in an isotopic pack and a "true" VOID.</p>
+<p><strong>I'd largely say this has been working well...certainly better than its conceptual predecessors.</strong>  It makes piping VOID (or NULL) out of branches trivially easy, when the fear of conflation is not a problem.</p>
 <pre><code>&gt;&gt; x: switch 1 + 2 [
      1 [print "one" 1]
      2 [print "two", &lt;two&gt;]
      3 [print "three", null]
    ]
 three
+; first in pack of length 1
 == ~null~
 
 &gt;&gt; x
@@ -1459,66 +1523,10 @@ three
 three
 ; null
 </code></pre>
-<h1>But <a class="mention" href="https://forum.rebol.info/u/rgchris">@rgchris</a> Would Likely Want any <em>NORMAL</em> arg decay</h1>
-<p>At the very moment I am writing this, ~null~ isotopes are like all other BAD-WORD! isotopes and not accepted as normal parameters.</p>
-<p><strong>They <em>could</em> decay to pure NULL for all normal args.</strong>  But let me explain a bummer of what we lose in that bargain.</p>
-<p>It takes away a safety idea I had with functions like MATCH.</p>
-<pre><code>&gt;&gt; match [&lt;opt&gt; integer!] 3
-== 3
-
-&gt;&gt; match [&lt;opt&gt; integer!] "notaninteger"
-; null
-
-&gt;&gt; match [&lt;opt&gt; integer!] null
-== ~null~  ; isotope
-</code></pre>
-<p>The idea was that it could say "yes, this matched" but if ~null~ isotopes were tested, they'd give an error:</p>
-<pre><code>&gt;&gt; if (match [&lt;opt&gt; integer!] null) [print "Yes it matched!"]
-** Error: IF does not accept ~null~ isotopes without a ^META condition
-</code></pre>
-<p>Were MATCH to have passed through a plain NULL it would have succeeded in the match but not run the branch.  So it's nice to get the warning on the isotope.</p>
-<p><strong>Or it could just return a ~matched~ isotope</strong>.  But this loses the following nice isotopic property:</p>
-<pre><code>&gt;&gt; x: match [&lt;opt&gt; integer!] null else [fail "NO MATCH"]
-== ~null~  ; isotope
-
-&gt;&gt; x
-; null
-</code></pre>
-<p>In fact I instituted other decaying variants for ~blank~ and ~false~</p>
-<pre><code>&gt;&gt; y: match [blank!] _ else [fail "NO MATCH!"]
-== ~blank~  ; isotope
-
-&gt;&gt; y
-== _
-
-&gt;&gt; z: match [logic!] 1 = 2 else [fail "NO MATCH!"]
-== ~false~  ; isotope
-
-&gt;&gt; z
-== #[false]
-</code></pre>
-<h1>So What To Do About MATCH and its bretheren?</h1>
-<p>Seems the options are:</p>
-<ol>
-<li>
-<p><em>Don't worry about it.</em>  If you write <strong>match [logic!] 1 = 2</strong> you get back <strong>#[false]</strong> and should you write an expression like <strong>if (match [logic!] 1 = 2) [print "Match!]</strong> you get what you deserve.</p>
-</li>
-<li>
-<p><em>Use a different isotope.</em>  Let's say that <strong><code>match [&lt;opt&gt;] null</code></strong> is simply <strong>~matched~ (isotope)</strong>.  It wouldn't have the decaying property, but would have the invalidness property.</p>
-</li>
-<li>
-<p><em>Have a MATCH/FALSEY variant.</em>  Let plain <strong>match</strong> on a falsey thing trigger an error and if you write <strong>if match/falsey ...</strong> then you clearly do know what you're doing so it becomes like case (1).</p>
-</li>
-<li>
-<p><em>Make all conditional arguments take ^META arguments for their conditions.</em>  This would put the responsibility for checking for isotopes on them, and they'd uniquely disallow them before UNMETA'ing them and then testing for truth/falsehood.</p>
-</li>
-</ol>
-<p>Option (4) is too taxing...impacting not just the interface to IF but the implementation of CASE and any conditional construct.</p>
-<p><strong>I think I like (3) because it punts the ball down the road a bit.</strong></p>
-<p>But this might still not suit Chris.</p>
-<h1>Should Non-Meta Arguments Decay Null isotopes?</h1>
-<p>The "auto-decay" of ~null~ isotopes means no variable can ever hold a NULL isotope.  And there's also a rule that no <em>normal</em> parameter can ever be passed an isotope, only ^META parameters.</p>
-<p>In the beginning, it seemed useful if normal arguments would automatically decay null isotopes:</p>
+<h1>
+<a name="non-meta-arguments-decay-null-isotopes-4" class="anchor" href="https://forum.rebol.info#non-meta-arguments-decay-null-isotopes-4"></a>Non-Meta Arguments Decay Null isotopes</h1>
+<p>The "auto-decay" of heavy ~null~ means no variable can ever hold one.  And there's also a rule that no <em>normal</em> parameter can ever be passed a "pack" like the heavy forms, only ^META parameters.</p>
+<p>So it seems useful if normal arguments would automatically decay null isotopes:</p>
 <pre><code>&gt;&gt; foo: func [x] [if null? x [print "Yup, it's null"]]
 
 &gt;&gt; foo if true [null]
@@ -1527,7 +1535,7 @@ Yup it's null
 &gt;&gt; metafoo: func [^x] [
     case [
         null? x [print "regular null"]
-        x = '~null~ [print "null isotope"]
+        x = '~[~null~]~ [print "heavy null"]
         true [print "something else"]
      ]
    ]
@@ -1536,43 +1544,19 @@ Yup it's null
 regular null
 
 &gt;&gt; metafoo if true [null]
-null isotope
+heavy null
 </code></pre>
-<p>There is a manual DECAY operator which could be used, but would not meet that wish:</p>
-<pre><code>&gt;&gt; ~null~
+<p>There is a manual DECAY operator which can be used at non-parameter moments where you want to decay a heavy null:</p>
+<pre><code>&gt;&gt; if true [null]
+; first in pack of length 1
 == ~null~  ; isotope
 
-&gt;&gt; decay ~null~
-; null
-
-&gt;&gt; ~blank~
-== ~blank~  ; isotope
-
-&gt;&gt; decay ~blank~
-== _
-
-&gt;&gt; ~false~
-== ~false~  ; isotope
-
-&gt;&gt; decay ~false~
-== #[false]
+&gt;&gt; decay if true [null]
+== ~null~  ; isotope
 </code></pre>
-<h1>Should DECAY Conflation Be A Customization?</h1>
-<p>Another avenue of satisfaction could be to say that you simply customize your environment with some definitions to make auto-decaying constructs:</p>
-<pre><code>switch: chain [:switch | :decay]
-case: chain [:case | :decay]
-...
-
-&gt;&gt; case [true [null]]
-; null
-
-&gt;&gt; case [false [10]]
-; null
-</code></pre>
-<p>I don't like it, but if someone isn't going to use ELSE (or is willing to accept this very easily unintentional conflation if they do) it could be an option.</p>
-<p><strong>I really do believe the ability to tell from outside the construct if a branch has been taken is an interesting property, which even those who think they won't use ELSE or THEN can leverage, especially when building constructs atop each other.</strong>  But this isn't something that can be appreciated without usage, or trying to write something like UPARSE generically in usermode.</p>
-<h1>Should function RETURN decay by default?</h1>
-<p>Continuing along these lines, this has to do with the pattern of:</p>
+<h1>
+<a name="func-return-only-decays-if-you-have-a-return-spec-5" class="anchor" href="https://forum.rebol.info#func-return-only-decays-if-you-have-a-return-spec-5"></a>Func RETURN Only Decays If You Have A RETURN: Spec</h1>
+<p>Consider this pattern:</p>
 <pre><code>foo: func [x] [
     return switch x [
          1 [print "one", #one]
@@ -1583,25 +1567,23 @@ case: chain [:case | :decay]
 
 &gt;&gt; foo 1 + 2
 two
-== ???   ; should this be ~null~ isotope or just NULL
+== ???   ; should this be heavy null or just null?
 </code></pre>
-<p>Also, should it matter whether there's a RETURN there or not?  Is this something the type spec should distinguish?</p>
-<p>Right now there's a refinement called /ISOTOPE on RETURN which asks it not to decay.</p>
-<p><strong>If all non-^META parameters decay by default, then it seems isotopic decay is the right default for RETURN even though it takes a ^META parameter and returns non-decaying isotopes.</strong></p>
-<h2>As Always, A Lot To Think About</h2>
-<p>Want to get this posted because it's preventing me from making new drafts (Discourse won't let you have multiple top-level post drafts in-flight for some reason).</p>
-<p>Will keep mulling it all over.</p>
+<p>Once upon a time, decaying was the default, and there was a refinement called /ISOTOPE on RETURN which asked it not to decay.</p>
+<p>Today, there is no automatic decay <em>unless</em> you have a return spec that doesn't mention PACK?s.  So <strong>return: [any-value?]</strong> would be enough to get the auto-decay.</p>
+<h2>
+<a name="hopefully-it-all-makes-sense-6" class="anchor" href="https://forum.rebol.info#hopefully-it-all-makes-sense-6"></a>Hopefully It All Makes Sense</h2>
 <p><em>"A designer knows he has achieved perfection not when there is nothing left to add, but when there is nothing left to take away."</em></p>
-            <p><small>7 posts - 3 participants</small></p>
-            <p><a href="https://forum.rebol.info/t/conflation-vs-safety-return-and-the-finer-points-of-null-isotopes/1799">Read full topic</a></p>
+            <p><small>4 posts - 2 participants</small></p>
+            <p><a href="https://forum.rebol.info/t/conflation-vs-safety-return-and-heavy-void-null/1799">Read full topic</a></p>
           ]]></description>
-          <link>https://forum.rebol.info/t/conflation-vs-safety-return-and-the-finer-points-of-null-isotopes/1799</link>
+          <link>https://forum.rebol.info/t/conflation-vs-safety-return-and-heavy-void-null/1799</link>
           <pubDate>Thu, 07 Apr 2022 04:14:06 +0000</pubDate>
           <discourse:topicPinned>No</discourse:topicPinned>
           <discourse:topicClosed>No</discourse:topicClosed>
           <discourse:topicArchived>No</discourse:topicArchived>
           <guid isPermaLink="false">forum.rebol.info-topic-1799</guid>
-          <source url="https://forum.rebol.info/t/conflation-vs-safety-return-and-the-finer-points-of-null-isotopes/1799.rss">Conflation vs. Safety, RETURN and the Finer Points of ~null~ Isotopes</source>
+          <source url="https://forum.rebol.info/t/conflation-vs-safety-return-and-heavy-void-null/1799.rss">Conflation vs. Safety, RETURN and &quot;Heavy&quot; Void/Null</source>
         </item>
         <item>
           <title>Should END-able constructs all use ^META parameters?</title>
@@ -2305,53 +2287,6 @@ evaluate [ok ok] =&gt; [ok [ok]]
           <discourse:topicArchived>No</discourse:topicArchived>
           <guid isPermaLink="false">forum.rebol.info-topic-1491</guid>
           <source url="https://forum.rebol.info/t/should-evaluate-bomb-on-an-error/1491.rss">Should EVALUATE bomb on an error?</source>
-        </item>
-        <item>
-          <title>Restoring Case-Insensitive Binding</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Internals</category>
-          <description><![CDATA[
-            <p>I've been working on the frustrating question of how to make case-insensitive binding work without sacrificing the gain of space of a platform pointer per word cell.</p>
-<p>It's rough and not pushed to master yet.  But it's mixing with Virtual Binding:</p>
-<pre><code>&gt;&gt; abba: 304
-&gt;&gt; obj: make object! [abba: 1020]
-&gt;&gt; code: [ABBA 'Abba ''abbA '''aBBa ''''AbbA '''''aBba]
-
-&gt;&gt; do in obj compose [map-each x (code) [get dequote x]]
-== [1020 1020 1020 1020 1020 1020]
-
-&gt;&gt; map-each x code [get dequote x]
-== [304 304 304 304 304 304]
-</code></pre>
-<h2>Strategy: Assume More Than 3 Casing Variations Uncommon</h2>
-<p>The design I've gone with is to assume that there aren't that many case variations of the same word in most situations.  Maybe you have <code>accept-headers</code>, <code>Accept-Headers</code> and <code>ACCEPT-HEADERS</code>.  But you won't go too far beyond that with <code>ACcept-HEAdERS</code> etc.  If you do, then the words start to "cost more".</p>
-<p><strong>Some of this stuff gets pretty vague in terms of whether I'm playing by the "rules" or just twisting code into a pretzel</strong>.</p>
-<p>I've oft-mentioned the "4 platform pointers per cell" baseline.  That's pretty limited.  Also limiting is that R3-Alpha tried to do essentially everything with arrays and linked lists... and this is a far cry from being able to easily pick from any of dozens of vetted data structures to suit your problem.</p>
-<p>So what's going on here is that if you use a "sufficiently weird spelling", then your cell turns into the kind that points to another cell for its content.  This is how QUOTED!s at the higher levels (4 quoting levels or more) work.</p>
-<p><strong>The ramifications are subtle and pervasive.</strong>  A lot of code would assume it could just go and muck with parts of cells, but now that these expanded format cells can be shared you can impact cells you didn't mean to.  If you want to tweak a WORD! cell so that it's a SET-WORD!, you have to worry about whether it's an unusual-spelling word...and if so, you need to make a copy of the shared cell to update its bit patterns.  I've established ways to check some of this at compile-time, but it's kind of hacked together at the moment and needs tuning.</p>
-<p>I'm suspecting that the average program would never need any of these cells (4 levels of quoting or 4 case-variations)...but that makes it all the more important to find ways to test it, by making the uncommon case common.  Basically forcing all words to use the expanded format and seeing what breaks.</p>
-<h2>Object Keys Are Now Canon (Lowercase)</h2>
-<p>This applies to MAKE OBJECT!, and things like function arguments:</p>
-<pre><code>&gt;&gt; make object! [ABC: 10, Def: 20]
-== make object! [
-    abc: 10
-    def: 20
-]
-
-&gt;&gt; func [ABC /Def] [print "Functions too."]
-== #[action! [abc /def]]
-</code></pre>
-<p>I've written about how I believe this is the only sane answer to dealing with it <a href="https://forum.rebol.info/t/case-insensitivity-vs-case-preservation-cant-have-both/1439/14">("Case Insensitivity vs. Case Preservation (can't have both)")</a>.</p>
-            <p><small>1 post - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/restoring-case-insensitive-binding/1472">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/restoring-case-insensitive-binding/1472</link>
-          <pubDate>Sun, 24 Jan 2021 08:58:08 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-1472</guid>
-          <source url="https://forum.rebol.info/t/restoring-case-insensitive-binding/1472.rss">Restoring Case-Insensitive Binding</source>
         </item>
   </channel>
 </rss>

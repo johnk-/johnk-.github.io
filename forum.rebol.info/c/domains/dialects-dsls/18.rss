@@ -5,8 +5,301 @@
     <link>https://forum.rebol.info/c/domains/dialects-dsls/18</link>
     <description>Topics in the &#39;Dialects/DSLs&#39; category Discussion focused on the creation of dialects and DSLs using Rebol. Rebmu talk is appropriate here.</description>
     
-      <lastBuildDate>Wed, 26 Jul 2023 16:30:50 +0000</lastBuildDate>
+      <lastBuildDate>Tue, 30 Jan 2024 21:14:23 +0000</lastBuildDate>
       <atom:link href="https://forum.rebol.info/c/domains/dialects-dsls/18.rss" rel="self" type="application/rss+xml" />
+        <item>
+          <title>hiiamboris&#39;s WITH</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Dialects/DSLs</category>
+          <description><![CDATA[
+            <p>I've mentioned that binding might be helped by a dialect, and it turns out there is some precedent in <strong><a href="https://codeberg.org/hiiamboris/red-common/src/branch/master/with.red">hiiamboris's WITH</a></strong>:</p>
+<blockquote>
+<h3>USAGE SUMMARY</h3>
+<pre><code>with x  [..]          == bind [..] x
+with 'x [..]          == bind [..] 'x
+with :fun [..]        == bind [..] :fun
+with [:fun] [..]      == bind [..] :fun
+with [x y 'z] [..]    == bind bind bind [..] 'z y x
+with [x: 1 y: 2] [..] == bind [..] context [x: 1 y: 2]
+</code></pre>
+<h3>EXAMPLES</h3>
+<h4>omit the path to an object, but work inside it's context:</h4>
+<pre><code>do with face/parent/pane/1 [
+    color: red
+    text: mold color
+    visible?: yes
+]
+
+if true with system/view/fonts [print [serif size]]
+
+f: func [/- /+ /*] [        ;-- redefines important globals locally
+    (do something with local flags)
+    foreach x [set..] with system/words [
+        (do something with global * + -)
+    ]
+]
+</code></pre>
+<h4>create static storage for functions where existing literal forms don't allow you to:</h4>
+<pre><code>factorial: func [x] with [cache: make hash! [0 1]] [
+    any [
+        select/skip cache x 2
+        put cache x x * factorial x - 1
+    ]
+]
+</code></pre>
+<h4>anonymize words used during initialization of the program:</h4>
+<pre><code>first item in the block should be of set-word! type
+
+do with [x: 1 y: 2] [
+    z: x * y
+    ... other code that uses x or y ...
+]
+</code></pre>
+<h4>bind a block to multiple contexts at once (in the list order):</h4>
+<p>First item in the block should be of word!/get-word!, path!/get-path! or lit-word! type</p>
+<ol>
+<li>
+<p>words and paths values are fetched, while lit-words are converted into words<br>
+get-words and get-paths should be used for function context, otherwise they get evaluated</p>
+</li>
+<li>
+<p>if resulting value is a context, block is bound to it<br>
+if resulting value is a word, block is bound to the context of this word</p>
+<p>the following example illustrates usage of words and lit-words:</p>
+<pre><code>a: b: x: y: none
+c: context [
+    a: 1
+    b: 2
+    f: func [x y] [
+       ; calls `with` internally
+       print composite [self 'x] "a=(a) b=(b) x*y=(x * y)"
+       ; equivalent
+       print composite [self :f] "a=(a) b=(b) x*y=(x * y)"
+    ]
+]
+</code></pre>
+</li>
+</ol>
+<p>Thus, <code>with [c]</code> is equivalent to <code>with c</code>, while <code>with ['c]</code> - to <code>with 'c</code>.</p>
+<h3>WHY IS IT DESIGNED LIKE THIS?</h3>
+<ol>
+<li>
+<p>It does not evaluate</p>
+<p><code>with</code> does not evaluate the block, so:</p>
+<ul>
+<li>it can be used after <code>context</code>s, <code>if</code>s, <code>loop</code>s, <code>func</code>s, etc.</li>
+<li>it can be chained <code>with x with y ...</code>
+</li>
+</ul>
+<p>I've found that this makes code much more readable than it would be with <code>bind</code>.<br>
+Prefix it with <code>do</code> if you want immediate evaluation.</p>
+</li>
+<li>
+<p>It accepts blocks</p>
+<p>Design question here was - if we allow block! for <code>ctx</code>, how should we treat it?</p>
+<ul>
+<li>
+<p>convert it to a context? <code>ctx: context ctx</code></p>
+<p>that shortens the <code>with context [locals...] [code]</code> idiom</p>
+</li>
+<li>
+<p>list multiple contexts in a block as a sequence and bind to each one?</p>
+<p>that shortens <code>with this with that [code]</code> idiom</p>
+</li>
+</ul>
+<p>Personally, I've used the 1st at least a few times, but 2nd - never, though I admit there are use cases.<br>
+This can be solved by checking type of the 1st item in the block is a set-word or not <img src="https://forum.rebol.info/images/emoji/twitter/wink.png?v=12" title=":wink:" class="emoji" alt=":wink:" loading="lazy" width="20" height="20"><br>
+But still ambiguous! When <code>with</code> gets a <code>word!</code> argument it can:</p>
+<ul>
+<li>get the value of this word, which should be an <code>object!</code>, and bind to this object</li>
+<li>get the context of this word, and bind to this context</li>
+</ul>
+<p>When inside a context, 2nd option is nice:</p>
+<pre><code>context [
+    a: 1
+    f: func [x y] [
+        with [self x] [x * y * a]
+    ]
+ ]
+</code></pre>
+<p>..where the alternative would be:</p>
+<pre><code>context [
+    a: 1
+    f: func [x y] [
+        with context? 'x with self [x * y * a]
+    ]
+]
+</code></pre>
+<p>When outside of it, 1st option is better:</p>
+<pre><code>x: context [x: 10]
+y: context [y: 20]
+do with [x y] [x * y]
+</code></pre>
+<p>..where the alternative would be:</p>
+<pre><code>x: context [x: 10]
+y: context [y: 20]
+do with in x 'x with in y 'y [x * y]
+</code></pre>
+<p>But this still can be solved: let <code>word!</code>s evaluate to contexts and <code>lit-word!</code>s, same as we have <code>bind code ctx</code> vs <code>bind code 'ctx</code>:</p>
+<pre><code>context [
+    a: 1
+    f: func [x y] [
+        with [self 'x] [x * y * a]
+    ]
+]
+
+x: context [x: 10]
+y: context [y: 20]
+do with [x y] [x * y]
+</code></pre>
+</li>
+</ol>
+</blockquote>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/hiiamboriss-with/2138">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/hiiamboriss-with/2138</link>
+          <pubDate>Tue, 30 Jan 2024 21:14:23 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2138</guid>
+          <source url="https://forum.rebol.info/t/hiiamboriss-with/2138.rss">hiiamboris&#39;s WITH</source>
+        </item>
+        <item>
+          <title>Case-Insensitivity And Dialecting</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Dialects/DSLs</category>
+          <description><![CDATA[
+            <p>Today's Ren-C uses case-sensitive binding.  The topic has been discussed a lot:</p>
+<p><a href="https://forum.rebol.info/t/case-insensitivity-vs-case-preservation-cant-have-both/1439" class="inline-onebox">Case Insensitivity vs. Case-Preservation (can't have both?)</a></p>
+<p>As a discipline, we still are trying to keep the language lowercase, in the standard library at least.</p>
+<p>But one thing that hasn't been discussed much is how case could be used creatively in dialects, when you know the case doesn't matter.  I think that in certain domains, use of case in dialects could be an interesting tool.</p>
+<h2>
+<a name="using-casing-to-imply-uppercase-lowercase-as-is-case-1" class="anchor" href="https://forum.rebol.info#using-casing-to-imply-uppercase-lowercase-as-is-case-1"></a>Using Casing To Imply Uppercase, Lowercase, As-Is Case</h2>
+<p>I've written a little about how the <a href="https://forum.rebol.info/t/usefulness-of-string-interpolation/2114">CScape interpolation tool</a> does casing.  That's strings and not ordinary code.</p>
+<p>The case logic would work in ordinary code something like this:</p>
+<pre><code>&gt;&gt; strings: ["aBc" "dEf" "gHi]
+
+&gt;&gt; cased-print ["For instance:" STRINGS.1 strings.2 Strings.3]
+For instance: ABC def gHi
+</code></pre>
+<p>It might seem silly, but in CScape it turns out to be pretty useful to do that.</p>
+<h2>
+<a name="non-case-related-example-hardening-bindings-2" class="anchor" href="https://forum.rebol.info#non-case-related-example-hardening-bindings-2"></a>Non-Case-Related Example: "Hardening" Bindings</h2>
+<p>We have an issue now that sometimes when you are composing material you want bindings to "stick".  Here we want LET and PASSTHRU to be bound to the same environment as the block given to the COMPOSE (which propagates to the GROUP!s, and then to the blocks evaluated in the groups).  But we want RETURN to be unbound, and pick up its binding from the site where it is composed:</p>
+<pre><code> compose [
+     (in [] 'let) (name): (in [] 'passthru) :return
+ ]
+</code></pre>
+<p>There could be some dialect options for this... a special signal, maybe something you pass:</p>
+<pre><code>compose/harden [
+    &lt;hard&gt; let (name): &lt;hard&gt; passthru :return
+] &lt;hard&gt;
+
+compose/harden [
+    %h let (name): %h passthru :return
+] %h
+
+compose/harden [
+    $ let (name): $ passthru :return
+] $
+</code></pre>
+<p>Since you have groups available, you could get the literal of the thing you're hardening with, e.g. with <code>(&lt;hard&gt;)</code> or <code>(%h)</code> or <code>($)</code></p>
+<p>And of course, you could have an operation that reverses this...so that things were hardened by default but you escaped to leave them unbound.</p>
+<p>But... a weirder idea... what if you used something like the case?</p>
+<pre><code> weird-compose [
+     LET (unbind name): PASSTHRU :return
+ ]
+</code></pre>
+<p>Important to remember is that symbols don't have case.  So you can't use the trick for everything.</p>
+<p>But I present this in juxtaposition to using even the most minimal signal (like $) just to show how much the comprehensibility can benefit.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/case-insensitivity-and-dialecting/2123">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/case-insensitivity-and-dialecting/2123</link>
+          <pubDate>Wed, 17 Jan 2024 22:33:15 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2123</guid>
+          <source url="https://forum.rebol.info/t/case-insensitivity-and-dialecting/2123.rss">Case-Insensitivity And Dialecting</source>
+        </item>
+        <item>
+          <title>A (Lame) Hole-Punch Motivating Dialect</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Dialects/DSLs</category>
+          <description><![CDATA[
+            <blockquote>
+<p><em>Referenced in the explanation of <a href="https://forum.rebol.info/t/what-dialects-need-from-binding/2111/11">"What Dialects Need From Binding"</a></em></p>
+<p><em><strong>This code uses hypothetical mechanisms for a new approach to pure virtual binding that are not yet implemented at time of writing.</strong></em></p>
+</blockquote>
+<hr>
+<p>Let's imagine you have the idea of a dialect which validates the number of some characters in a string.  You give it a list of strings and you match using "keywords" ONE or TWO for the character at hand.  You can also run code in groups if you want:</p>
+<pre><code>&gt;&gt; dialect ["aaaa" "bbbb"] [
+       [#a [one two one (print "rule one match")]]
+       [#b [two one one (print "passed 2 1 1") one (print "rule two match")]]
+   ]
+  rule one match
+  passed 2 1 1
+</code></pre>
+<p>Now imagine a callsite that wants to use this dialect.  Let's say it has its own definition for what TWO means just incidentally defined.  But it knows the dialect's meaning should override that.  However let's say it also has some MESSAGE, that it doesn't want the dialect to override.</p>
+<p>Let's also throw in COLLECT for good measure:</p>
+<pre><code> let two: lambda [body] [repeat 2 body]  ; some incidental definition
+
+ let message: "passed 2 1 1"  ; intended to be seen by the dialect
+
+ let results: collect [
+      dialect ["aaaa" "bbbb"] [
+           [#a [one two one (keep &lt;finished a&gt;)]]
+           [#b [two one one (print message) one (keep &lt;finished b&gt;)]]
+       ]
+ ]
+</code></pre>
+<p>The caller and DIALECT have a common understanding: that ONE and TWO are things that the dialect provides.  But it's the dialect's responsibility to sort that out.  Even though the tip of the block it receives has a definition for TWO, it shouldn't be influenced by that...because all the ONE and TWO are unbound inside that block.</p>
+<p>Now say the plan of attack that the author has is to build upon the PARSE dialect to implement what they're doing.  It seems plausible they should be able to do the following:</p>
+<pre><code> dialect: func [strings [block!] lines [block!]] [
+     for-each line lines [
+        line: in lines line
+        let char: line.1
+        let rule: in line line.2
+        let string: strings.1
+        do compose/deep [
+            let one: (char)
+            let two: [repeat 2 (char)]
+            parse (string) [comment "your code here" (unuse [one two] rule)]
+        ]
+        strings: next strings
+     ]
+ ]
+</code></pre>
+<p>In more detail:</p>
+<ul>
+<li>
+<p>Propagating with IN LINES and IN LINE means that RULE gets the binding of the original LINES block, which is the aggregated chain of bindings (from LIB for things like PRINT, for the LETs, for KEEP).  But it also has that definition of TWO.</p>
+</li>
+<li>
+<p>We want RULE to come out of this as a BLOCK!, not boxed into a function, as PARSE intends to enumerate it.. as well as to be able to DO GROUP!s inside it.</p>
+</li>
+<li>
+<p>We don't want to have to make a copy of that aggregated binding (e.g. an entire copy of LIB to remove any ONE and TWO, and a copy of all the other contexts to remove ONE and TWO).  Beyond inefficiency, we don't want to explode the number of binding environment identities.  Instead, we need an additive means to say <em>"I want everything <em>but</em> ONE and TWO from this binding environment"</em>.  Sort of a <a href="https://hypirion.com/musings/understanding-persistent-vector-pt-1">"persistent-vector"</a> approach.</p>
+</li>
+<li>
+<p>This is what I call a hole-punching instruction... that becomes the new specifier for the embedded rule, pointing at the specifier of rule as a parent.  Later on during the DO of the composed code... when PARSE descends into the block and uses IN, that's where the hole-punched binding is "coalesced" with available definitions of ONE and TWO from PARSE's "current environment" (which it propagated off second parameter it received).</p>
+</li>
+</ul>
+<p>There are many other ways to accomplish this intent--and this particular example does suck (it inadvertently exposes all the features of PARSE even if it didn't want to...among other criticisms).  But I maintain this implementation strategy is analogous to real situations that come up, vs. some imagined thing.</p>
+            <p><small>2 posts - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/a-lame-hole-punch-motivating-dialect/2116">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/a-lame-hole-punch-motivating-dialect/2116</link>
+          <pubDate>Sat, 13 Jan 2024 07:39:58 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2116</guid>
+          <source url="https://forum.rebol.info/t/a-lame-hole-punch-motivating-dialect/2116.rss">A (Lame) Hole-Punch Motivating Dialect</source>
+        </item>
         <item>
           <title>Discouraging Semantics for COMMA! in Dialects</title>
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
@@ -99,177 +392,6 @@ arrow from D1 to D3 chop</code></pre>
           <discourse:topicArchived>No</discourse:topicArchived>
           <guid isPermaLink="false">forum.rebol.info-topic-2018</guid>
           <source url="https://forum.rebol.info/t/pikchr-drawing-dialect/2018.rss">Pikchr Drawing Dialect</source>
-        </item>
-        <item>
-          <title>Future of the MATH Dialect</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Dialects/DSLs</category>
-          <description><![CDATA[
-            <p>It is basically inevitable that people coming to Rebol will ask about its mathematical evaluation being left-to-right, instead of obeying the precedence order that they are used to.  Red just had a new user try to file it as a bug... 3 days ago:</p>
-<p><a href="https://github.com/red/red/issues/5276">https://github.com/red/red/issues/5276</a></p>
-<p><strong>What seemed to make sense to people like me and BrianH was that the core ship with a dialect called MATH.</strong>  The concept was that <strong>math [1 + 2 * 3]</strong> would give <strong>7</strong> and not <strong>9</strong>.  Having something in the box seemed better than having the first line of argument being <em>"you don't want the precedence you think you do"</em>.</p>
-<p>But it turned out to be kind of hard to make pleasing.  One key difficulty which <a class="mention" href="https://forum.rebol.info/u/brett">@Brett</a> and I fretted over at some point was that since Rebol isn't "psychic" regarding arity, does not know a-priori how much code an expression will consume:</p>
-<pre><code>math [1 + 2 * foo baz bar + 3]
-
-; should it be...
-[1 + (2 * (foo baz bar)) + 3]
-
-; or perhaps...
-[(1 + (2 * foo)) ((baz bar) + 3)]
-
-; maybe...
-[(1 + (2 * foo)) baz (bar + 3)]
-</code></pre>
-<p><strong>It started to appear that the user would have to put anything that wasn't a number or a math operator in groups.</strong>  There may be some heuristics which tolerate words that look up to numbers vs. functions, but it feels very slippery.</p>
-<p>As I've said I hate to be dropping things, but MATH is something that Rebol programmers don't really want in the first place--and I don't think non-Rebol programmers would be satisfied by it.  If it's included in the core that suggests support for it, and there are just too many things in play.</p>
-<p>Here is an implementation that was previously included, by Gabriele:</p>
-<pre><code>; This MATH implementation is from Gabrielle Santilli circa 2001, found
-; via http://www.rebol.org/ml-display-thread.r?m=rmlXJHS. It implements the
-; much-requested (by new users) idea of * and / running before + and - in
-; math expressions. Expanded to include functions.
-;
-math: func [
-    {Process expression taking "usual" operator precedence into account.}
-
-    expr [block!]
-        {Block to evaluate}
-    /only
-        {Translate operators to their prefix calls, but don't execute}
-
-    ; !!! This creation of static rules helps avoid creating those rules
-    ; every time, but has the problem that the references to what should
-    ; be locals are bound to statics as well (e.g. everything below which
-    ; is assigned with BLANK! really should be relatively bound to the
-    ; function, so that it will refer to the specific call.)  It's not
-    ; technically obvious how to do that, not the least of the problem is
-    ; that statics are currently a usermode feature...and injecting relative
-    ; binding information into something that's not the function body itself
-    ; isn't implemented.
-
-    &lt;static&gt;
-
-    slash (the /)
-
-    expr-val (_)
-
-    expr-op (_)
-
-    expression  ([
-        term (expr-val: term-val)
-        opt some [
-            ['+ (expr-op: 'add) | '- (expr-op: 'subtract)]
-            term (expr-val: compose [(expr-op) (expr-val) (term-val)])
-        ]
-        &lt;end&gt;
-    ])
-
-    term-val (_)
-
-    term-op (_)
-
-    term ([
-        pow (term-val: power-val)
-        opt some [
-            ['* (term-op: 'multiply) | slash (term-op: 'divide)]
-            pow (term-val: compose [(term-op) (term-val) (power-val)])
-        ]
-    ])
-
-    power-val (_)
-
-    pow ([
-        unary (power-val: unary-val)
-        opt ['** unary (power-val: compose [power (power-val) (unary-val)])]
-    ])
-
-    unary-val (_)
-
-    pre-uop (_)
-
-    post-uop (_)
-
-    unary ([
-        (post-uop: pre-uop: [])
-        opt ['- (pre-uop: 'negate)]
-        primary
-        opt ['! (post-uop: 'factorial)]
-        (unary-val: compose [(post-uop) (pre-uop) (prim-val)])
-    ])
-
-    prim-val (_)
-
-    primary ([
-        set prim-val any-number!
-        | set prim-val [word! | path!] (prim-val: reduce [prim-val])
-            ; might be a funtion call, looking for arguments
-            opt some [
-                nested-expression (append prim-val take nested-expr-val)
-            ]
-        | ahead group! into nested-expression (prim-val: take nested-expr-val)
-    ])
-
-    p-recursion (_)
-
-    nested-expr-val ([])
-
-    save-vars (func [][
-            p-recursion: reduce [
-                :p-recursion :expr-val :expr-op :term-val :term-op :power-val :unary-val
-                :pre-uop :post-uop :prim-val
-            ]
-        ])
-
-    restore-vars (func [][
-            set [
-                p-recursion expr-val expr-op term-val term-op power-val unary-val
-                pre-uop post-uop prim-val
-            ] p-recursion
-        ])
-
-    nested-expression ([
-            ;all of the static variables have to be saved
-            (save-vars)
-            expression
-            (
-                ; This rule can be recursively called as well,
-                ; so result has to be passed via a stack
-                insert nested-expr-val expr-val
-                restore-vars
-            )
-            ; vars could be changed even it failed, so restore them and fail
-            | (restore-vars) fail
-
-    ])
-][
-    clear nested-expr-val
-    let res: either parse3 expr expression [expr-val] [blank]
-
-    either only [
-        return res
-    ][
-        ret: reduce res
-        all [
-            1 = length of ret
-            any-number? ret.1
-        ] else [
-            fail [
-                unspaced ["Cannot be REDUCED to a number (" mold ret ")"]
-                ":" mold res
-            ]
-        ]
-        return ret.1
-    ]
-]</code></pre>
-            <p><small>2 posts - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/future-of-the-math-dialect/2013">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/future-of-the-math-dialect/2013</link>
-          <pubDate>Tue, 31 Jan 2023 19:08:42 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-2013</guid>
-          <source url="https://forum.rebol.info/t/future-of-the-math-dialect/2013.rss">Future of the MATH Dialect</source>
         </item>
         <item>
           <title>Dialecting With Quasiforms</title>
@@ -488,22 +610,22 @@ Two: apple banana
    ]
 Words and more stuff: apple banana
 </code></pre>
-<h2>A Crazy Short Implementation!</h2>
+<h2>
+<a name="a-crazy-short-implementation-1" class="anchor" href="https://forum.rebol.info#a-crazy-short-implementation-1"></a>A Crazy Short Implementation!</h2>
 <p>I'm sure it will receive some enhancements, but... this is pretty badass for something I wrote that worked more or less the first time!</p>
 <pre><code>destructure: func [
     input [any-series!]
     dialect [block!]
     /multi "Run multiple branches"
-    &lt;local&gt; result' name rule pattern branch combinators
 ][
-    result': '~
-    combinators: copy default-combinators
+    let result': void'
+    let combinators: copy default-combinators
     parse dialect [while [not &lt;end&gt;] [
-        name: to-word/ set-word!, rule: block! (
-            combinators.(name): compose [(name): (rule)]
+        let set-word: set-word!, let rule: block! (
+            combinators.(to word! set-word): compose [(set-word) (rule)]
         )
         |
-        pattern: block!, '=&gt;, branch: block!
+        let pattern: block!, '=&gt;, let branch: block!
         (
             parse/combinators input pattern combinators then (
                 branch
@@ -520,11 +642,12 @@ Words and more stuff: apple banana
     return unmeta result'
 ]
 </code></pre>
-<h2>And It's Composable, Too!</h2>
+<h2>
+<a name="and-its-composable-too-2" class="anchor" href="https://forum.rebol.info#and-its-composable-too-2"></a>And It's Composable, Too!</h2>
 <p>That's right... you can use DESTRUCTURE with ELSE and THEN.</p>
-<p>It follows the rules; a destructure that does not match anything is void!</p>
-<pre><code>&gt;&gt; 1 + 2 destructure [a] [[integer!] =&gt; [print "Not happening"]]
-== 3
+<p>It follows the rules; a destructure that does not match anything is void</p>
+<pre><code>&gt;&gt; void? destructure [a] [[integer!] =&gt; [print "Not happening"]]
+== ~true~  ; anti
 </code></pre>
 <p>Notice I even threw a /MULTI feature in there, so you can match multiple ways!</p>
 <pre><code>&gt;&gt; destructure/multi [apple banana] [
@@ -539,9 +662,9 @@ Matching any two values also counts
 </code></pre>
 <hr>
 <h1>
-<img src="https://forum.rebol.info/images/emoji/twitter/boom.png?v=9" title=":boom:" class="emoji" alt=":boom:"> <img src="https://forum.rebol.info/images/emoji/twitter/raised_hand_with_fingers_splayed.png?v=9" title=":raised_hand_with_fingers_splayed:" class="emoji" alt=":raised_hand_with_fingers_splayed:"> <img src="https://forum.rebol.info/images/emoji/twitter/electric_plug.png?v=9" title=":electric_plug:" class="emoji" alt=":electric_plug:">  POWER, IN YOUR HANDS! <img src="https://forum.rebol.info/images/emoji/twitter/electric_plug.png?v=9" title=":electric_plug:" class="emoji" alt=":electric_plug:"> <img src="https://forum.rebol.info/images/emoji/twitter/raised_hand_with_fingers_splayed.png?v=9" title=":raised_hand_with_fingers_splayed:" class="emoji" alt=":raised_hand_with_fingers_splayed:">  <img src="https://forum.rebol.info/images/emoji/twitter/boom.png?v=9" title=":boom:" class="emoji" alt=":boom:">
+<a name="boom-raised_hand_with_fingers_splayed-electric_plug-power-in-your-hands-electric_plug-raised_hand_with_fingers_splayed-boom-3" class="anchor" href="https://forum.rebol.info#boom-raised_hand_with_fingers_splayed-electric_plug-power-in-your-hands-electric_plug-raised_hand_with_fingers_splayed-boom-3"></a><img src="https://forum.rebol.info/images/emoji/twitter/boom.png?v=12" title=":boom:" class="emoji" alt=":boom:" loading="lazy" width="20" height="20"> <img src="https://forum.rebol.info/images/emoji/twitter/raised_hand_with_fingers_splayed.png?v=12" title=":raised_hand_with_fingers_splayed:" class="emoji" alt=":raised_hand_with_fingers_splayed:" loading="lazy" width="20" height="20"> <img src="https://forum.rebol.info/images/emoji/twitter/electric_plug.png?v=12" title=":electric_plug:" class="emoji" alt=":electric_plug:" loading="lazy" width="20" height="20">  POWER, IN YOUR HANDS! <img src="https://forum.rebol.info/images/emoji/twitter/electric_plug.png?v=12" title=":electric_plug:" class="emoji" alt=":electric_plug:" loading="lazy" width="20" height="20"> <img src="https://forum.rebol.info/images/emoji/twitter/raised_hand_with_fingers_splayed.png?v=12" title=":raised_hand_with_fingers_splayed:" class="emoji" alt=":raised_hand_with_fingers_splayed:" loading="lazy" width="20" height="20">  <img src="https://forum.rebol.info/images/emoji/twitter/boom.png?v=12" title=":boom:" class="emoji" alt=":boom:" loading="lazy" width="20" height="20">
 </h1>
-            <p><small>2 posts - 2 participants</small></p>
+            <p><small>3 posts - 2 participants</small></p>
             <p><a href="https://forum.rebol.info/t/destructure-dialect/1877">Read full topic</a></p>
           ]]></description>
           <link>https://forum.rebol.info/t/destructure-dialect/1877</link>
@@ -551,78 +674,6 @@ Matching any two values also counts
           <discourse:topicArchived>No</discourse:topicArchived>
           <guid isPermaLink="false">forum.rebol.info-topic-1877</guid>
           <source url="https://forum.rebol.info/t/destructure-dialect/1877.rss">DESTRUCTURE Dialect</source>
-        </item>
-        <item>
-          <title>The CIRCLED Dialect: Example of the Form</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Dialects/DSLs</category>
-          <description><![CDATA[
-            <p>I was looking at this from the emscripten config file:</p>
-<pre><code> ; Right now, either #web or #node (someday #wasm-edge ?)
- ;
- javascript-environment: #web
-</code></pre>
-<p>And I thought to myself: well that's kind of ugly.  The comment is having to list things that would be more obviously shown by just demonstrating the options:</p>
-<pre><code>javascript-environment: circled [(#web) #node]
-</code></pre>
-<p>Being dialected, it could even have visual hints as to whether many options are allowed, or just one.</p>
-<pre><code>extensions: circled [[
-   (javascript)
-   (debugger)
-    view
-    jpeg
-   (crypto)
-]]
-</code></pre>
-<p>Or maybe it uses optional parameters to tell you how many you can have.</p>
-<pre><code>toppings: circled 0..3 [(cheese) tomatoes (pickles) (lettuce) onions]
-</code></pre>
-<p>It could default to NULL if you circled nothing, but you could use MUST to suggest people needed to select something:</p>
-<pre><code>&gt;&gt; number: must circled [#one #two #three]
-** Error: MUST requires argument not to be NULL
-</code></pre>
-<h2>It's Almost <em>Too</em> Easy</h2>
-<p>When it's this easy, who wouldn't whip such things up?</p>
-<p>Ultimately I believe this should work (once PARSE is renamed and there's <a href="https://forum.rebol.info/t/parsing-alternates-should-must-match-to-end-be-considered/1850">Terminal Parse Alternates</a>):</p>
-<pre><code>circled: lambda [block [block!]] [
-    parse block [return [
-         thru into group! [&lt;any&gt; | (fail "Circle One")]
-         maybe [thru group! (fail "Circle One")]
-    ]]
-]
-
-&gt;&gt; circled [a (b) c]
-== b
-
-&gt;&gt; circled [a b c]
-; null
-
-&gt;&gt; circled [(a) b (c)]
-** Error: Circle One
-
-&gt;&gt; circled [a (b c)]
-** Error: Circle One
-</code></pre>
-<p>But of course PARSE is called UPARSE right now, and there's a detail of alternates not being offered in blocks seeking completion before failing...that makes you need <code>elide &lt;end&gt;</code>, so for now:</p>
-<pre><code>circled: lambda [block [block!]] [
-    uparse block [return [
-         thru into group! [&lt;any&gt; elide &lt;end&gt; | (fail "Circle One")]
-         maybe [thru group! (fail "Circle One")]
-    ]]
-]
-</code></pre>
-<p>It finds one group to extract an element from, and extracts it via INTO.  Then it has a second clause that's optional--and if it doesn't match is invisible...but if it <em>does</em> match it fails.</p>
-<p>Remarkable plasticity, and I want to see these weapons come to the code golfing field.  <img src="https://forum.rebol.info/images/emoji/twitter/slight_smile.png?v=9" title=":slight_smile:" class="emoji" alt=":slight_smile:"></p>
-            <p><small>1 post - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/the-circled-dialect-example-of-the-form/1849">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/the-circled-dialect-example-of-the-form/1849</link>
-          <pubDate>Sun, 26 Jun 2022 12:06:47 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-1849</guid>
-          <source url="https://forum.rebol.info/t/the-circled-dialect-example-of-the-form/1849.rss">The CIRCLED Dialect: Example of the Form</source>
         </item>
         <item>
           <title>Dialecting URL!s...Should They Ever Be Strings?</title>
@@ -689,11 +740,192 @@ Matching any two values also counts
           <source url="https://forum.rebol.info/t/dialecting-url-s-should-they-ever-be-strings/1763.rss">Dialecting URL!s...Should They Ever Be Strings?</source>
         </item>
         <item>
+          <title>JSON Envy: Serialization Dialect in Rebol?</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Dialects/DSLs</category>
+          <description><![CDATA[
+            <blockquote>
+<p>Carl's thinking about <a href="https://forum.rebol.info/t/carls-new-projects-altscript-altos/1571">a successor to Rebol's notation called ASON</a> included the idea that braces would be used for object construction--not strings.</p>
+<p>I've panned the notion of "lexical objects", and explained why in a thread outlining an alternative of treating braces as <strong><a href="https://forum.rebol.info/t/rethinking-braces-as-an-array-type/1727">a new array type called FENCE!</a></strong>, which I have come to think is likely well worth it.</p>
+<p><em>But assuming we <strong>don't</strong> have FENCE!</em>, what might Rebol's version of JSON look like?  This was a tangent explored in October 2021 on the fence thread that I've broken into its own topic.</p>
+</blockquote>
+<hr>
+<p>Consider <a href="https://json.org/example.html">this example from json.org</a></p>
+<pre><code>{"glossary": {
+    "title": "example glossary",
+    "GlossDiv": {
+        "title": "S",
+        "GlossList": {
+            "GlossEntry": {
+                "ID": "SGML",
+                "SortAs": "SGML",
+                "GlossTerm": "Standard Generalized Markup Language",
+                "Acronym": "SGML",
+                "Abbrev": "ISO 8879:1986",
+                "GlossDef": {
+                    "para": "A meta-markup language...",
+                    "GlossSeeAlso": ["GML", "XML"]
+                },
+               "GlossSee": "markup"
+            }
+        }
+    }
+}}
+</code></pre>
+<p>I think allowing spaces in the keys is a weakness and not a strength.  And Rebol doesn't have the historical problem of disallowing language "keywords" in the keys, so the quotes wouldn't be necessary (they're not in modern JavaScript either for that reason, but they are if your word has dashes or spaces in it).</p>
+<p>Let's drop the quotes and turn <em>all</em> the braces into brackets.  Commas can be optional now, but let's say we don't care to use them when things are on different lines.</p>
+<pre><code>[glossary: [
+    title: "example glossary"
+    GlossDiv: [
+        title: "S"
+        GlossList: [
+            GlossEntry: [
+                ID: "SGML"
+                SortAs: "SGML"
+                GlossTerm: "Standard Generalized Markup Language",
+                Acronym: "SGML"
+                Abbrev: "ISO 8879:1986"
+                GlossDef: [
+                    para: "A meta-markup language..."
+                    GlossSeeAlso: ["GML", "XML"]  ; can use commas if we want?
+                ]
+                GlossSee: "markup"
+            ]
+        ]
+    ]
+]]
+</code></pre>
+<p>In practice, the serializer/deserializer could say that any block starting with a SET-WORD! is presumed to be an object...and if you have an array that you don't want to get this treatment you use <strong>'[...]</strong></p>
+<pre><code>&gt;&gt; deserialize "[[a: 10 b: 20] '[c: 10 &lt;random stuff&gt; d: 20]]"
+== [
+    #object![a: 10 b: 20]  ; whatever notation
+    [c: 10 &lt;random stuff&gt; d: 20]
+]
+</code></pre>
+<p>A simple rule about SET-WORD!s could give us the same object vs. array distinction in what's being transferred.  It would keep us centered on one nice bracket form to be hitting... allow an escape route for arbitrary BLOCK!s that want SET-WORD!s via quote...and we keep our nice braced strings without the need for nasty escapes.</p>
+<h2>
+<a name="what-about-evaluative-things-in-lists-1" class="anchor" href="https://forum.rebol.info#what-about-evaluative-things-in-lists-1"></a>What About Evaluative Things In Lists?</h2>
+<p>The lightness of unadorned WORD! has a big draw in Rebol, and has caused a lot of headaches...for instance in deciding if we should say <strong>Type: 'module</strong> or <strong>Type: module</strong>.</p>
+<p>While there's no rule that says module headers have to obey the same rules as whatever this operation is, it feels unwise to have them deviate.  So this implies <strong>Type: 'module</strong> or moving to something inert like <strong>Type: <span class="hashtag">#module</span></strong> or <strong>Type: "module"</strong></p>
+<p>The problem expands to lists, where you have <strong>category: [fun script]</strong> needing to mitigate or avoid evaluation one way or another:</p>
+<pre><code>category: '[fun script]
+
+category: ['fun 'script]
+
+category: ["fun" "script"]
+
+category: [#fun #script]
+</code></pre>
+<p>While the first option of putting a quote on the list seems like the cleanest, things trying to generate serializations wouldn't have that choice if it was mixing words and objects:</p>
+<pre><code>mix: ['word-one [a: 10 b: 20] 'word-two]
+</code></pre>
+<p>If the outer block were quoted, then it wouldn't dig in to make the inner block into an object.</p>
+<p>These kinds of odd mixtures of evaluation with objects points out a not-uncommon Rebol problem... if you're doing a deserialization and descending into a block that isn't quoted, you might be seeing BLOCK!s that are arguments to functions along with blocks that are meant to act as objects.  Which wins?</p>
+<p>Code like PRINT goes step by step, as opposed to gathering all the strings ahead of time and assuming it is for itself:</p>
+<pre><code>&gt;&gt; print ["hello" reverse "dlrow"]
+hello world
+</code></pre>
+<p>The deserialization operator could work the same way, though it could effectively COMPOSE the BLOCK!s representing objects in so that any functions would be passed the object.  :-/</p>
+<p>Certainly raises some questions, but, they are fairly common Rebol questions.</p>
+<p><strong>...or...REDUCE requests could be explicit?</strong></p>
+<p>We don't have to make "recurses to look for blocks to instantiate objects" also imply that the arrays themselves are evaluative, but I think it would be confusing.  JavaScript programmers expect the arrays inside objects to be evaluated:</p>
+<pre><code> let x = {label: "object", data: {label: "array", data: [1 + 2, 10 + 20]}}
+</code></pre>
+<p>This gives you a nested structure with <strong><code>data: [3, 30]</code></strong>.  So I feel like this operation should follow suit, reducing blocks unless you suppress that.</p>
+<p>So if your input is:</p>
+<pre><code>[label: "object", data: [label: "array", data: [1 + 2, 10 + 20]]]
+</code></pre>
+<p>I think data should be <strong>[3 30]</strong>, and if your input is:</p>
+<pre><code>[label: "object", data: [label: "array", data: '[1 + 2, 10 + 20]]]
+</code></pre>
+<p>Then data should be <strong>[1 + 2, 10 + 20]</strong>.  The mixing and matching really is where you run into trouble, of an array that contains some blocks and some objects...though everything can be represented thanks to generic quoting, it could get messy.</p>
+<h2>
+<a name="what-if-we-used-groups-in-serialization-2" class="anchor" href="https://forum.rebol.info#what-if-we-used-groups-in-serialization-2"></a>What If We Used GROUP!s in Serialization?</h2>
+<pre><code>&gt;&gt; stuff: reduce [make object! [a: 10 b: 10 + 10]]
+== [object!#[a: 10 b: 20]]  ; or whatever internal representation
+
+&gt;&gt; serialize stuff 
+== [(a: 10 b: 20)]
+
+&gt;&gt; deserialize stuff
+== [object![a: 10 b: 20]]
+</code></pre>
+<p>JSON doesn't use parentheses in this way because it can't.  Parentheses are not reified.</p>
+<p>But if a Rebol system wants to exchange information with another Rebol system "in the style of JSON", GROUP! could be used to represent the key/value objects and BLOCK! could represent plain array/lists...with braces being a handy mode of string representation that can get away with less escaping.</p>
+<p>And with modern COMPOSE you could deserialize and compose, by labeling the compose sites:</p>
+<pre><code>&gt;&gt; deserialize compose &lt;*&gt; [
+    (a: 10 b: 20)  ; deserialize treats as object
+    (&lt;*&gt; reduce [1 + 2 3 + 4])  ; array before deserialize
+ ]
+</code></pre>
+<p>Whatever you call it, having something like COMPOSE which treats nested levels of GROUP!s as object creation requests isn't that crazy an idea.  (Perhaps OBJECTIFY ?)</p>
+            <p><small>2 posts - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/json-envy-serialization-dialect-in-rebol/2140">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/json-envy-serialization-dialect-in-rebol/2140</link>
+          <pubDate>Sat, 23 Oct 2021 06:06:48 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2140</guid>
+          <source url="https://forum.rebol.info/t/json-envy-serialization-dialect-in-rebol/2140.rss">JSON Envy: Serialization Dialect in Rebol?</source>
+        </item>
+        <item>
+          <title>Uses of FENCE! In Dialecting</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Dialects/DSLs</category>
+          <description><![CDATA[
+            <p>I'm now committed to <a href="https://forum.rebol.info/t/rethinking-braces-as-an-array-type/1727">make braces a new array type</a>. Rebol has put itself in a bad position by using that particularly valuable piece of keyboard real-estate for something "superficial" like making strings a little cleaner, sometimes.  :-/</p>
+<h1>
+<a name="block-group-fence-1" class="anchor" href="https://forum.rebol.info#block-group-fence-1"></a><code>[block]</code> <code>•</code>  <code>(group)</code> <code>•</code> <code>{fence}</code>
+</h1>
+<p>It's <em>likely</em> (though not 100% set in stone) that FENCE! will evaluate by running MAKE OBJECT!.  But what might it do in other dialects?</p>
+<ul>
+<li>
+<p><em>"If there's an integer inside of a pair of fences, such as <code>{{10}}</code>, then that represents a citation.  Citations can appear at either the beginning or end of a reference block."</em></p>
+</li>
+<li>
+<p><em>"In the PARSE dialect, blocks are used to represent subrules.  Groups switch over to running ordinary code as with DO.  While fences are used to... (insert your active imagination here)"</em></p>
+</li>
+</ul>
+<h2>
+<a name="if-fence-were-inert-that-would-change-dialecting-possibilities-2" class="anchor" href="https://forum.rebol.info#if-fence-were-inert-that-would-change-dialecting-possibilities-2"></a>If FENCE! Were Inert, That Would Change Dialecting Possibilities</h2>
+<p>Fences don't necessarily have to produce an object under evaluation.  If it wasn't, you could do things like pass it to an arity-1 MAKE:</p>
+<pre><code>&gt;&gt; obj: make {x: 10 y: 20}
+== ...object x: 10 y: 20...  ; whatever literals look like
+</code></pre>
+<p>Switching to an arity-1 MAKE could be dialected, if you needed to slip things like a parent object in:</p>
+<pre><code>&gt;&gt; obj2: make {&lt;parent&gt; obj, x: 30}  ; potential dialect for mentioning parent
+== ...object x: 30 y: 20....
+
+&gt;&gt; obj3: make {{obj} x: 30}  ; weirder but more succinct dialect parent concept
+== ...object x: 30 y: 20...
+</code></pre>
+<p>Less disruptive, we could just say it reduces:</p>
+<pre><code>&gt;&gt; reduce {x: 10 y: 20}
+== make object! [x: 10 y: 20]  ; or whatever
+</code></pre>
+<p>Then GET-FENCE! could do the same:</p>
+<pre><code>&gt;&gt; :{x: 10 y: 20}
+== make object! [x: 10 y: 20]  ; or whatever
+</code></pre>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/uses-of-fence-in-dialecting/1728">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/uses-of-fence-in-dialecting/1728</link>
+          <pubDate>Thu, 30 Sep 2021 11:36:13 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-1728</guid>
+          <source url="https://forum.rebol.info/t/uses-of-fence-in-dialecting/1728.rss">Uses of FENCE! In Dialecting</source>
+        </item>
+        <item>
           <title>USCII Seen With New Eyes</title>
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
           <category>Dialects/DSLs</category>
           <description><![CDATA[
-            <p>In 2008 I used R3-Alpha to make some 5x7 bitmaps out of a stock font I found, plus some data to make symbols for the missing control characters.  The way I defined the missing characters was with blocks of data, like:</p>
+            <p>In 2008 I used R3-Alpha for <a href="http://uscii.hostilefork.com/">USCII</a>, to make some 5x7 bitmaps out of a stock font I found, plus some data to make symbols for the missing control characters.  The way I defined the missing characters was with blocks of data, like:</p>
 <pre><code>[
     code: 10
     name: "Line Feed"
@@ -723,7 +955,8 @@ Matching any two values also counts
 <p>Not that the point was to demo "great Rebol practices", really.  I was just using it as a tool.  <em>(And it was 2008, so I had just found the language...one shouldn't expect much regardless.)</em></p>
 <p><strong>I've gotten it working under Redbol emulation--which is kind of a cool trick in and of itself.</strong>  This involved patching up the bad IMAGE! code well enough to work with the script, but it felt worth it to run the rest of it.</p>
 <p><strong>But the real fun begins moving to modern ideas.</strong>  So I put aside a copy as a historical version to keep as a Redbol test, but then started updating it to the new world...</p>
-<h2>Rethought With UTF-8 and a Dialect</h2>
+<h2>
+<a name="rethought-with-utf-8-and-a-dialect-1" class="anchor" href="https://forum.rebol.info#rethought-with-utf-8-and-a-dialect-1"></a>Rethought With UTF-8 and a Dialect</h2>
 <p>When you take away the BLOCK! and start using the parts in the box, what you get is a lot more remarkable.</p>
 <pre><code>=== LF: Line Feed (10) ===
 
@@ -761,9 +994,10 @@ rating: good
 <p>Since it's a dialect, there's no need to put a tick mark on the rating of "good/fair/poor".</p>
 </li>
 </ul>
-<h2>A Fluid Format that You Transform With UPARSE</h2>
-<p>The first thing I did was to transform the new representation back to the old representation with UPARSE.  <a href="https://forum.rebol.info/t/collect-of-set-word-text-uparse-reduce/1712">I wrote about how it could be better if UPARSE had REDUCE</a>...</p>
-<p>So it's not optimal, and we wouldn't need such a transformation step anyway if processing directly.  You'd use GATHER/EMIT.</p>
+<h2>
+<a name="a-fluid-format-that-you-transform-with-uparse-2" class="anchor" href="https://forum.rebol.info#a-fluid-format-that-you-transform-with-uparse-2"></a>A Fluid Format that You Transform With UPARSE</h2>
+<p>The first thing I did was to transform the new representation back to the old representation with UPARSE.</p>
+<p>So it's not optimal, and we wouldn't need such a transformation step anyway if processing directly.</p>
 <p>But I'm pasting it here just to make the point that in just a couple of minutes I was able to have the old code up and running on the new format:</p>
 <pre><code>override-list: parse load %uscii-5x7-english-c0.reb [
     collect some keep gather [
@@ -778,15 +1012,16 @@ rating: good
 
         emit image: collect repeat 7 [w: word!, keep (as text! w)]
 
-        maybe ['description:, emit description: text!]
-        maybe ['notes:, emit notes: text!]
-        maybe ['rating:, emit rating: word!]
+        try ['description:, emit description: text!]
+        try ['notes:, emit notes: text!]
+        try ['rating:, emit rating: word!]
     ]
-] else [
+] except [
     fail ["Could not parse %uscii-5x7-english-c0.reb"]
 ]
 </code></pre>
-<h2>IMO, This is Rebol's "Deep Lake"</h2>
+<h2>
+<a name="imo-this-is-rebols-deep-lake-3" class="anchor" href="https://forum.rebol.info#imo-this-is-rebols-deep-lake-3"></a>IMO, This is Rebol's "Deep Lake"</h2>
 <p>Breaking free of the JSON mindset and using the parts really makes this work:</p>
 <p><a href="https://github.com/hostilefork/uscii/blob/master/uscii-5x7-english-c0.reb">https://github.com/hostilefork/uscii/blob/master/uscii-5x7-english-c0.reb</a></p>
 <p>Revisiting this and the Whitespace interpreter are just really good examples of the form.</p>
@@ -1068,6 +1303,51 @@ thru
           <discourse:topicArchived>No</discourse:topicArchived>
           <guid isPermaLink="false">forum.rebol.info-topic-1601</guid>
           <source url="https://forum.rebol.info/t/idea-quoted-data-means-for-for-each/1601.rss">Idea: QUOTED! Data Means FOR =&gt; FOR-EACH</source>
+        </item>
+        <item>
+          <title>Are GET-WORD!s Too Ugly? :FOO vs. $FOO</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Dialects/DSLs</category>
+          <description><![CDATA[
+            <p>When looking at bash, you can see it doing things that look nice and light:</p>
+<pre><code># bash code
+echo "Installed Version: $ANDROID_NDK_VERSION for the NDK"
+</code></pre>
+<p>Rebol isn't <em>terrible</em>:</p>
+<pre><code>; Rebol version
+print ["Installed Version:" ANDROID_NDK_VERSION "for the NDK"]
+</code></pre>
+<p>But I'm becoming a believer that we should be thinking about offering versions that start by <a href="https://forum.rebol.info/t/dont-fear-the-word/1549">taking the words you write at face value</a>, and marking the substitutions.  That would suggest perhaps offering an echo like:</p>
+<pre><code>; A Rebol Echo with literal tendencies
+echo [Installed Version: (ANDROID_NDK_VERSION) for the NDK]
+</code></pre>
+<p>But I've mentioned that even GROUP!s might want to be literal in such contexts for the default case (I often use parentheses in writing English, as I'm doing here).  So perhaps a GET-WORD! would be more appropriate:</p>
+<pre><code>echo [Installed Version: :ANDROID_NDK_VERSION for the NDK]
+</code></pre>
+<p>That looks a bit unsatisfying.</p>
+<h2>
+<a name="leading-colon-ive-never-liked-you-1" class="anchor" href="https://forum.rebol.info#leading-colon-ive-never-liked-you-1"></a>Leading colon, I've never liked you...</h2>
+<p>Beyond looking bad, it doesn't really call your attention to the escaping.</p>
+<p>But it raises to my attention something that's just sort of generally true as a whole... <em>GET-WORD! is unsatisfiying.</em></p>
+<p>I've never liked the way <strong>x: :y</strong> looks.  It doesn't have a good vibe...especially when you put a get right after a set like that.</p>
+<p>We don't put colons in front of things in English, like, ever.  While there's some amount of abstract symmetry to <em>"colon in back means set, colon in front means get"</em>, we don't have to be a slave to that.  If pure symbolic reversal were the way to invert meanings we'd use SET to set and TES to get.  :-/</p>
+<p>So for dialecting, I wonder if using VAR-WORD! ($) would be better:</p>
+<pre><code>echo [Installed Version: $ANDROID_NDK_VERSION for the NDK]
+</code></pre>
+<p>And I think it actually looks <em>better</em> than the bash, with the brackets instead of quotes:</p>
+<pre><code>echo "Installed Version: $ANDROID_NDK_VERSION for the NDK"
+</code></pre>
+<p>Thoughts?</p>
+            <p><small>6 posts - 3 participants</small></p>
+            <p><a href="https://forum.rebol.info/t/are-get-word-s-too-ugly-foo-vs-foo/1550">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/are-get-word-s-too-ugly-foo-vs-foo/1550</link>
+          <pubDate>Wed, 10 Mar 2021 04:58:14 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-1550</guid>
+          <source url="https://forum.rebol.info/t/are-get-word-s-too-ugly-foo-vs-foo/1550.rss">Are GET-WORD!s Too Ugly? :FOO vs. $FOO</source>
         </item>
         <item>
           <title>Revisiting The ZIP Dialect</title>
@@ -1432,516 +1712,6 @@ change fragment-length enbin [be + 2] (length of Handshake)  ; error
           <discourse:topicArchived>No</discourse:topicArchived>
           <guid isPermaLink="false">forum.rebol.info-topic-1498</guid>
           <source url="https://forum.rebol.info/t/dissecting-the-tls-emit-dialect/1498.rss">Dissecting the TLS EMIT Dialect</source>
-        </item>
-        <item>
-          <title>Whitespace Interpreter Revisited</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Dialects/DSLs</category>
-          <description><![CDATA[
-            <p>I came across what was near-to-one of my first Rebol programs (the first one using PARSE).</p>
-<p>It was an interpreter for a language called "Whitespace", where all the instructions are made out of tab, space, and newline characters.  My idea was to use PARSE to actually evaluate the code:</p>
-<p><a href="https://github.com/hostilefork/whitespacers/blob/master/rebol/whitespace.reb">https://github.com/hostilefork/whitespacers/blob/master/rebol/whitespace.reb</a></p>
-<p>The idea of using parse as the interpreter is an interesting take...<strong>but the code is far too repetitive.</strong>  It was clearly written before I knew much about COMPOSE or really using the generative side of things.</p>
-<h2>Ideas on Doing it "Right"?</h2>
-<p>Currently there's a split between the specification and the implementation.  That might be desirable in some cases, but I don't think it's desirable here.</p>
-<p>The instructions are grouped together, which lets them "inherit" their leading sequence.  For example, putting <strong>push [space Number]</strong> and <strong>duplicate-top [lf space]</strong> in "Stack-Manipulation" container lets them inherit the leading space common to each instruction.  Otherwise they'd have to be spelled out as <strong>[space space Number]</strong> and <strong>[space lf space]</strong>.</p>
-<p>But beyond that, being inside a grouping pulls them out of "global scope", which means the instructions aren't overwriting the definitions of things like <strong>add</strong> and <strong>subtract</strong> with the whitespace versions.</p>
-<h2>Reducing The Repetition</h2>
-<p>The first thing I think of is merging the functions with the whitespace spec, and doing it more dialect-style:</p>
-<pre><code>    ; The 2010 JavaScript-Like Way
-    ...
-push: [
-	command: [space Number]
-	description: {Push the number onto the stack}
-]
-duplicate-top: [
-	command: [lf space]
-	description: {Duplicate the top item on the stack}
-]
-    ...
-push: func [value [integer!]] [
-    insert stack value
-    return none
-]
-duplicate-top: func [] [
-    insert stack first stack
-    return none
-]
-</code></pre>
-<p>Being relatively liberal in syntax here, we can imagine doing this more like:</p>
-<pre><code>; A Modern Dialected Way
-
-push: ??? [
-    {Push the number onto the stack}
-    space (value &lt;number!&gt;)
-][
-    insert stack value
-    return none
-]
-
-duplicate-top: ??? [
-    {Duplicate the top item on the stack}
-    lf space
-][
-    insert stack first stack
-    return none
-]
-</code></pre>
-<p>This is a little push in the right direction.  But we have some issues to think through.</p>
-<ul>
-<li>
-<p>Whatever we're building here as units of the language need to be "registered" in the complete list of operations.  If they were global declarations run by the evaluator, then one of the things the <code>???</code> operator would have to do would be this registration.  If they are not global, then registration could be done by their container that is invoking them.</p>
-</li>
-<li>
-<p>We still have to inherit the leading space that both of these instructions have.  An interesting point in the PARSE branching is that we benefit from having the knowledge that these all start with space, so that the space can lead into these tests as alternates...e.g. <strong><code>[space [lf space | space &lt;Number&gt;]]</code></strong> will be more efficient than <strong><code>[space lf space | space space &lt;Number&gt;]</code></strong>.</p>
-</li>
-<li>
-<p>If we decide that the container is the boss, then giving a name to <code>???</code> is not really necessary.  But what happens if you leave it off?</p>
-<pre><code>... Stack-Manipulation ... [
-    push: [
-        {Push the number onto the stack}
-        space (value &lt;number!&gt;)
-    ][
-        insert stack value
-        return none
-     ]
-     ...
- ]
-</code></pre>
-<p>This is a counterintuitive mixture of a SET-WORD! with two blocks after it. How do we reconcile the idea of "declaration-like-things" inside of a container like this?  The code needs to be in a block, the other things don't...so other notations are possible...</p>
-<pre><code>... Stack-Manipulation ... [
-    PUSH
-    {Push the number onto the stack}
-    space (value &lt;number!&gt;) [
-        insert stack value
-        return none
-     ]
-     ...
- ]
-</code></pre>
-</li>
-</ul>
-<p>I guess the easiest thing to do is to cave, and just come up with something for ???.  It has the benefit that you can actually run your implementation of Stack-Manipulation through the evaluator and do normal assignments.  So something like <strong>push: instruction [...] [...]</strong></p>
-<p>Yet there's something a bit dissatisfying about having to type INSTRUCTION redundantly each time...where you're also kind of claiming that word so it can't be used other ways.</p>
-<h2>Lots Of Other Questions...</h2>
-<p>I think it would be worthwhile to rework this, but it's worth taking note of how adrift you can get right out of the gate looking at it.  There are lots of big questions that don't really have obvious answers.</p>
-            <p><small>18 posts - 3 participants</small></p>
-            <p><a href="https://forum.rebol.info/t/whitespace-interpreter-revisited/1482">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/whitespace-interpreter-revisited/1482</link>
-          <pubDate>Sat, 30 Jan 2021 17:09:24 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-1482</guid>
-          <source url="https://forum.rebol.info/t/whitespace-interpreter-revisited/1482.rss">Whitespace Interpreter Revisited</source>
-        </item>
-        <item>
-          <title>Function Escapable Literal Parameters... :X or &#39;:X ?</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Dialects/DSLs</category>
-          <description><![CDATA[
-            <h2>Background with GROUP!s (prior to GET-GROUP! existing)</h2>
-<p>Sometimes you don't pass a literal block of code to a conditional, but the callsite runs code that generates the branch--or fetches it out of a variable.</p>
-<p>Historical Rebol has this behavior for GROUP!s in conditionals:</p>
-<pre><code> rebol2&gt;&gt; branches: [[print "Apple"] [print "Banana"]]
-
- rebol2&gt;&gt; either false (print "one" take branches) (print "two" take branches)
- one
- two
- Banana
-</code></pre>
-<p>Doesn't seem ideal.  But having both groups run is the only choice you have if the branches are evaluative parameters.  The GROUP!s are evaluated before EITHER has a chance to say anything about it.</p>
-<p>I pointed out that this was inconsistent with things like historical CASE:</p>
-<pre><code> rebol2&gt;&gt; branches: [[print "Apple"] [print "Banana"]]
-
- rebol2&gt;&gt; case [
-      false (print "one" take branches)
-      true (print "two" take branches)
- ]
- two
- Apple
- == true  ; ignore silly `true` (Ren-C &amp; Red give PRINT's result)
-</code></pre>
-<h2>Ren-C Takes Branches Literally and Was Able To Sync This Up</h2>
-<p>Ren-C had begun requiring branches be single literal values for other reasons, namely to give it access to the quote status of the argument:</p>
-<pre><code>ren-c&gt;&gt; if true 'a
-== a
-
-ren-c&gt;&gt; if true '[a b c]
-== [a b c]
-</code></pre>
-<p>So to provide code you'd have to put it in a group (unless it's a single variable, where you could use a GET-WORD! or GET-PATH!)  For technically fiddly reasons, it also means that <strong>if (...) else (...)</strong> is fully swappable with <strong>either (...) (...)</strong>  when they would not be quite exact replacements otherwise.</p>
-<p><strong>So long as we're going this way, conditionals have the choice to see the GROUP! which would evaluate to produce a branch, yet decide not to run it.</strong>  There were enough <img src="https://forum.rebol.info/images/emoji/twitter/heart.png?v=9" title=":heart:" class="emoji" alt=":heart:"> clicked on the idea to support this, so that's what we have now:</p>
-<pre><code> ren-c&gt;&gt; branches: [[print "Apple"] [print "Banana"]]
-
- ren-c&gt;&gt; either false (print "one" take branches) (print "two" take branches)
- two
- Apple
-</code></pre>
-<p>This goes further into the rabbit-hole of bending parameter conventions to suit the likely intent of usage.  But I think it's a good example of where it's worth it.  It's better than twisting around to get the reverse consistency...forcing CASE to run its GROUP!s regardless of the condition matching.</p>
-<h2>Soft Literal Parameters vs. Hard Literal Parameters</h2>
-<p>Rebol2 introduced the variations of "hard literal" as :X and "soft literal" as 'X.  Hard literals would always give you the callsite value literally...</p>
-<pre><code>rebol2&gt;&gt; hard: func [:x] [print mold x]
-
-rebol2&gt;&gt; var: 'foo
-
-rebol2&gt;&gt; hard var
-== var
-
-rebol2&gt;&gt; hard :var
-== :var
-
-rebol2&gt;&gt; hard (first [foo bar])
-== (first [foo bar])
-</code></pre>
-<p>Soft literals would make GET-WORD!, GET-PATH! evaluative...with everything else literally what was at the callsite:</p>
-<pre><code>rebol2&gt;&gt; soft: func ['x] [print mold x]
-
-rebol2&gt;&gt; var: 'foo
-
-rebol2&gt;&gt; soft var
-== var
-
-rebol2&gt;&gt; soft :var
-== foo
-
-rebol2&gt;&gt; soft (first [foo bar])
-== (first [foo bar])
-</code></pre>
-<p>R3-Alpha added a twist: that soft quotes would evaluate GROUP!s vs. taking them literally:</p>
-<pre><code>r3-alpha&gt;&gt; soft (first [foo bar])
-== foo
-</code></pre>
-<p>Two big points:</p>
-<ul>
-<li>
-<p><strong>This looks backwards for :x and 'x</strong>.  Shouldn't it be that the thing with GET-WORD! in the parameter name is the one that's "colon-reactive"?</p>
-</li>
-<li>
-<p><strong>The picture gets even more consistent if we use GET-GROUP! for the code escape</strong>.  Then all the quoting subversion is colon'd, and regular GROUP!s can go back to not being "soft" as in Rebol2.</p>
-</li>
-</ul>
-<p>This makes the branch quoting example work with soft branches.  SO you get control if you want to get back to the "run the code whether you take the branch or not" situation:</p>
-<pre><code> ren-c&gt;&gt; branches: [[print "Apple"] [print "Banana"]]
-
- ren-c&gt;&gt; either false :(print "one" take branches) :(print "two" take branches)
- one
- two
- Banana
-</code></pre>
-<p>I hope all the above makes sense.  <em>Please speak up if it does not make sense.</em></p>
-<h2>So... Should Escapable Literals Be <code>:param</code> or <code>':param</code> ?</h2>
-<p>One truism is that unless you have a very good reason to need to quote GET-WORD!s, GET-PATH!s, and GET-GROUP!s...your construct should permit escaping to make it easy for callsites to tunnel in what they want without resorting to APPLY.  This likely guided R3-Alpha to make escapability the default behavior for the common <code>'param</code> form.</p>
-<p>So if we're asking people to default all literal parameter callsites to the escapable convention, then <strong>:param</strong> is nicer to look at than <strong>':param</strong>, even if the latter is "more communicative".</p>
-<p>One factor to weigh would be if there were an interesting meaning for <strong>:param</strong> that didn't involve literalness.  Let's review the new escapable literal concept, and pretend for a moment we say it's a quoted get-word!:</p>
-<pre><code> &gt;&gt; soft: func [':param] [print mold param]
-
- &gt;&gt; var: 'foo
-
- &gt;&gt; soft var
- == var
-
- &gt;&gt; soft :var
- == foo
-
- &gt;&gt; soft (first [foo bar])
- == (first [foo bar])
-
- &gt;&gt; soft :(first [foo bar])
- == foo
-</code></pre>
-<p>So is there any meaning for "plain escapable"?</p>
-<pre><code> &gt;&gt; huh: func [:param] [print mold param]
-
- &gt;&gt; huh ... ?
-</code></pre>
-<p>Presumably this would similarly be an instruction to how :x, :x/y, and :(x y) are handled at the callsite.  But if you're not escaping the quoting, what <em>are</em> you escaping?</p>
-<p>It would be silly to say you are "escaping evaluation":</p>
-<pre><code> &gt;&gt; huh :(a)
- == a
-</code></pre>
-<p>That is done more cleanly with quoting, as a generic "escaping evaluation" tool for evaluative parameters...and doesn't raise questions about how to treat <strong>huh :(a b)</strong></p>
-<pre><code>&gt;&gt; huh 'a
-== a
-</code></pre>
-<p>There are some other choices for what it might mean, like "optional".  That's something that doesn't apply to literal parameters (because you can't get NULL literally).</p>
-<pre><code>func [:arg [any-value!]] [...]  &lt;=&gt; func [arg [&lt;opt&gt; any-value!]]
-</code></pre>
-<p>I don't know that it makes a whole lot of sense.  And having a way to recognize NULL in-band in the type block is important:</p>
-<pre><code> &gt;&gt; match [&lt;opt&gt; integer!] null then [print "This should run"]
- This should run
-</code></pre>
-<hr>
-<h2>Brainstorm On One Aspect of Distinction</h2>
-<p>So trying to make the change I tripped up on some edge cases, which suggests that for some functions they are more willing to let soft quoted sites come from the evaluation of more than one cell.</p>
-<p>We might imagine for instance that <strong>':x</strong> or <strong>:x</strong> controls how enfix is handled.  Consider the following:</p>
-<pre><code>&gt;&gt; integer! = type of 1
-== #[true]
-
-&gt;&gt; integer! = :(second [length type]) of 1
-== #[true]
-</code></pre>
-<p>For OF, this is how you want the interaction to shake out when you are midstream in an enfix evaluation... <code>integer! = (type of 1)</code>.  But other constructs might want to consider an in-progress enfix something not to interrupt...and treat it like the left was more-or-less in a GET-GROUP!.</p>
-<p>As an example, consider the <a href="https://forum.rebol.info/t/the-most-vexing-evaluation-lambda-meets-then-else/1361">most vexing evaluation</a>:</p>
-<pre><code>&gt;&gt; if true [&lt;branch&gt;] then x -&gt; [print ["THEN" x]] else [print "ELSE"]
-THEN &lt;branch&gt;
-
-&gt;&gt; if false [&lt;branch&gt;] then x -&gt; [print ["THEN" x]] else [print "ELSE"]
-ELSE
-</code></pre>
-<p>The THEN and ELSE branches want to see their argument literally, e.g. if it's quoted.  But it wants branches to be escapable (so you can use the GET-GROUP! to run the branch regardless), <em>and</em> it wants enfix to be able to overrule it.  That's different from the left argument for OF, which wants escapable literalness but does <em>not</em> want the enfix equality operator to win.</p>
-<p>We might then say that <strong>':x</strong> is the strict form of "only one value on the left is inspected".  e.g. it is quoted, and <em>then</em> it is escaped.  Then <strong>:x</strong> could mean "it's accepted if it's already in mid-evaluation, otherwise it is quoted, then escaped".</p>
-<p>So <strong>:x</strong> would be saying <em>"I don't out-prioritize enfix"</em> while <strong>':x</strong> says <em>"I beat enfix just as 'x would, but then the escaping is automatic so you don't have to do it inside your function body"</em>.</p>
-<p>Continuing the thought experiement...you'd have SOFT</p>
-<pre><code>&gt;&gt; soft: func [:x] [print [mold x], 10]
-
-&gt;&gt; soft add 1 2
-add
-== 2  ; (soft add) 1 2
-
-&gt;&gt; soft 1 + 2
-3
-== 10  ; soft (1 + 2)
-
-&gt;&gt; soft :(1 + 2)
-3
-== 10 
-</code></pre>
-<p>Then MEDIUM</p>
-<pre><code>&gt;&gt; medium: func [':x] [print [mold x], 10]
-
-&gt;&gt; medium add 1 2
-add
-== 2  ; (medium add) 1 2
-
-&gt;&gt; medium 1 + 2
-1
-== 12  ; (medium 1) + 2
-
-&gt;&gt; medium :(1 + 2)
-3
-== 10
-
-&gt;&gt; medium (1 + 2)
-(1 + 2)
-== 10
-</code></pre>
-<p>And HARD would be as you expect, always exactly the callsite parameter.</p>
-<p><em>While I'm admittedly a bit wary of super complex parameter conventions, I also like having full coverage of the potential desires.</em>  What worries me a little is that this feels like the "tight" parameter convention coming up again...though it's backwards and maybe a little more logical, saying the only places you can ask for looseness is in parameters that are "weird" by virtue of quoting.  While it's late and I don't really have a full articulation of why this is more coherent... I think it likely is.</p>
-<p>But...mucking with the code and seeing impact across the system in the tests is the way to test that theory.</p>
-<hr>
-<h2>Bonus Question... what might <strong>:[get blocks]</strong> do with escaping?</h2>
-<p>It seems that if GET-WORD!, GET-PATH!, and GET-GROUP! evaluate for <strong>:SOFT</strong> parameters, then there might be some kind of magic for GET-BLOCK!s.</p>
-<pre><code>&gt;&gt; soft :[what's this for?]
-== ???
-</code></pre>
-<p>Even if we can't think of anything right now, I'd think they should error to reserve for future use (vs. pass the GET-BLOCK! through as if it were any other type).  Or just to keep from seeming inconsistent.</p>
-            <p><small>1 post - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/function-escapable-literal-parameters-x-or-x/1433">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/function-escapable-literal-parameters-x-or-x/1433</link>
-          <pubDate>Sun, 13 Dec 2020 02:08:08 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-1433</guid>
-          <source url="https://forum.rebol.info/t/function-escapable-literal-parameters-x-or-x/1433.rss">Function Escapable Literal Parameters... :X or &#39;:X ?</source>
-        </item>
-        <item>
-          <title>Design Issues for New APPLY</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Dialects/DSLs</category>
-          <description><![CDATA[
-            <blockquote>
-<p><strong>UPDATE 2021/2022:</strong> <a href="https://forum.rebol.info/t/apply-ii-the-revenge/1834">These issues are now all solved: <strong>APPLY II, The Revenge!</strong></a></p>
-<p>And we don't have to worry about APPLY taking its function argument quoted.  Because if you want it to look clean, you don't want the word APPLY in there at all.  This is now the behavior of terminal slash paths!</p>
-<pre><code>  append/ [series value /dup 2]
-</code></pre>
-<p>In any case--APPLY does not quote, and "Worldview <span class="hashtag">#1</span>" below is the winner.</p>
-</blockquote>
-<h2>First Big Question: Quote The Function or Not?</h2>
-<p>This has been on my mind since the beginning: <em>should you have to use a GET-WORD! to name the function to apply, or does it quote by default...and make you put code fragments that returns a function in a group</em>.</p>
-<pre><code> ; Worldview #1
- apply :append [series value /dup 2]
- apply second reduce [:insert :append] [series value /dup 2]  ; will APPLY :APPEND
-
- ; Worldview #2
- apply append [series value /dup 2]
- apply :append [series value /dup 2]  ; still legal if you want
- apply (second reduce [:insert :append]) [series value /dup 2]  ; GROUP! required
-</code></pre>
-<p>We have at least some relief at not having to consider Worldview <span class="hashtag">#3</span>, of <code>apply 'append [series value]</code> so APPLY can capture the name "append" for debug stack purposes.  That's not needed because <code>:append</code> gets an ACTION! that carries the label in its cell.  <a href="https://forum.rebol.info/t/more-comprehensible-errors-with-per-cell-labeling/1357">This has been a change that punches above its weight.</a></p>
-<p>In the beginning I would have said it <em>definitely</em> has to go with Worldview <span class="hashtag">#1</span>, because in the second case you don't get a clear signal that APPEND is not being called on [SERIES VALUE /DUP 2] and the result being passed to APPLY.  If you didn't see the apply or were otherwise distracted, your reading comprehension would be thrown off by breaking from convention.</p>
-<p>Over time I've become more of a believer that the whole premise of the language is to let you bend constructs to predominate use, so the 99% case is pleasing to use.  The now famous case of OF's left-quote, for instance:</p>
-<pre><code>type: 'type of x  ; without OF quoting
-
-type: type of x  ; with OF quoting
-</code></pre>
-<p>The quote mark makes it clearer, but when OF becomes so common that you "just know" then it's a much more pleasing function to use.  How many times do you use OF with a reflector you pick via code?  When is that code a single-arity function you wouldn't have to put in a GROUP! to use with enfix anyway??!</p>
-<p>But does that same philosophy to APPLY, that we come to read <strong>apply append</strong> as one indivisible unit, and feel thankful for not having to reach for the colon key?  It's a little bit different than OF because you read left to right, and you can start reading at the APPEND with no speedbump after it.</p>
-<p>I'll stress that you would still have the choice.  If you were the type of person who thought it clearer to use the colon, you could do so.  You just wouldn't be able to invoke a function-to-generate-the-function unless you put that in a GROUP!.</p>
-<p><em>I can't make up my mind.</em>  So I think I'm going to make the answer Worldview 1.5:</p>
-<pre><code> ; Worldview 1.5
- &gt;&gt; apply second reduce [:insert :append] [series value]
- ** Error: APPLY arguments must be GET-WORD! or GROUP! at the moment
-</code></pre>
-<p>This leaves the door open to interpreting plain WORD! as naming a function in the future.  And it gives time for people to find a really compelling case for where not being able to generate a function without using a GROUP! would be a deal-breaker.</p>
-<h2>Naming Refinements</h2>
-<p>Historical APPLY had a nasty positional nature for refinements, which led to things like this, from the R3-Alpha module code:</p>
-<pre><code>return map-each [mod ver sum name] source [
-    apply :load-module [
-        mod true? ver ver true? sum sum no-share no-lib import true? name name delay
-    ]
-]
-</code></pre>
-<p>You see the combination of <code>true? ver</code> followed by <code>ver</code> as filling in first the refinement slot for /VERSION, and then the value of the refinement argument.</p>
-<p>Then you see "used or not" refinements being supplied to their argument cells by the value alone (<code>no-share</code> signaling not to provide /SHARE, <code>no-lib</code> signaling not to use /LIB)</p>
-<p><strong>But we can now put refinement names in the APPLY dialect!</strong></p>
-<pre><code>apply :load-module [
-    mod /version ver /sum sum
-        /share null /lib null  ; avoids need for "clarifying" `no-share: false`
-        /import import /name name
-        /delay delay
-]
-</code></pre>
-<p>You might ask what was stopping that before.  The issue was that historical Rebol had the problem that if you had an argument that could take on any value...including NONE!...then NONE! could not be used to represent the state of the refinement itself.</p>
-<p>(Imagine if you are specifying an initial value to fill a block with (as in ARRAY/INITIAL).  It may be important to distinguish putting a NONE! in vs. not having a default at all.)</p>
-<p>This is solved in Ren-C by reserving the non-valued NULL state for "refinement not taken".</p>
-<blockquote>
-<p>Note: I'd gone back and forth a while over whether a REFINEMENT-like PATH! would be appropriate to use in this dialect, based on the question of whether they would be evaluator-active or not.  Ideas were floated around like <code>foo</code> would fetch a variable but be an error if it was NULL, while <code>/foo</code> would fetch a variable and allow NULL.</p>
-<p>In the end, inertness for refinements won out.  BLANK!-headed PATH!s and TUPLE!s simply have more dialecting power if they don't overlap what could be a legitimate user intention to fetch variables.  This APPLY situation shows a good example of why inertness is good.)*</p>
-<p>Also, if you want to literally pass a refinement value you can do so.  Just quote it:</p>
-<pre><code>   apply :whatever [/refinement '/refinement]
-</code></pre>
-<p>That will pass /REFINEMENT as the refinement parameter.</p>
-</blockquote>
-<h2>Providing Normal Arguments By Name</h2>
-<p>A neat feature of new APPLY will be not only that you can reorder refinements to put them in any position, but also that you can name normal arguments.</p>
-<p>So things like this would be legal:</p>
-<pre><code>&gt;&gt; apply :append [/dup 2, /value &lt;d&gt;, [a b c]]
-== [a b c &lt;d&gt; &lt;d&gt;]
-</code></pre>
-<p>Everything is streamlined by the idea that refinements represent one (and only one) argument in the frame.  <em>Which has been a critical and elegance-making change.</em></p>
-<p>The concept is that ordered parameters which have not yet been named would be filled in, in the order that they are supplied.  You wouldn't be able to specify something twice, so this would be an error:</p>
-<pre><code>&gt;&gt; apply :append [/series [a b c], [d e f], &lt;g&gt;]
-** Error: Duplicate argument supplied for SERIES
-</code></pre>
-<h2>Can LOGIC! Be Used With Parameterless-Refinements?</h2>
-<p>I have belabored the point of why we don't want low-level FRAME! mechanics getting involved in <a href="https://forum.rebol.info/t/should-refinement-arguments-be-refinement-if-used/735/4">transforming <code>[#[true] #[false]]</code> into <code>[# null]</code></a> for refinements that are "either used or not".</p>
-<p>Those rules don't really "apply" here.  APPLY is its own dialect with its own mechanics, and it can do what's convenient.  It can canonize true and false into # and NULL in the frame.</p>
-<pre><code>foo: func [/usable /logicable [logic!]] [...]
-
-apply :foo [/usable 1 &lt; 2, /logicable 1 &lt; 2]
-; this would give usable of `#`, and logicable of `#[true]`
-
-apply :foo [/usable 1 &gt; 2, /logicable 1 &gt; 2]
-; this would give usable of NULL, and logicable of `#[false]`
-</code></pre>
-<p>Hopefully it makes sense why I think APPLY should be able to do this, while MAKE FRAME! and friends don't.  MAKE FRAME! is the tool for writing <em>APPLY-like-things</em>, and there's no layer between the frame and the evaluator where it's appropriate to put these transformations.  It should be kept pure.</p>
-<h2>Should You Be <em>Able</em> to Provide Refinements By Position?</h2>
-<p>I'm not sure if giving refinements by position is a great idea.  But this hits on a philosophical question of whether refinements have an order that is exposed to the user.</p>
-<p><em>But specialization can shuffle the order.</em>  For instance, what was once a refinement can become a normal argument.</p>
-<pre><code>&gt;&gt; foo: func [x [integer!] /refine1 [integer!] /refine2 [integer!]] [...]
-
-&gt;&gt; parameters of :foo
-== [x /refine1 /refine2]  ; one normal argument
-
-&gt;&gt; foo-2: :foo/refine2
-== [x refine2 /refine1]  ; two normal arguments (e.g. acts like FOO/REFINE2)
-</code></pre>
-<p>This makes things a bit wacky.</p>
-<p>I feel like the safest decision for right now is to say that once you've filled all the ordered arguments, any more arguments in the APPLY with no label causes an error.  The place where this would cause issues would be if BLOCK!s are used to serialize and deserialize frame state generically.  That's a thorny problem in general, which brings us to...</p>
-<h2>Should There Be An APPLY/ONLY</h2>
-<p>The idea behind APPLY/ONLY was that you have the values for a function's arguments already processed, and you don't want to evaluate them again.</p>
-<p>One thing that breaks APPLY/ONLY in Ren-C's world is that this doesn't give a way to supply NULL arguments.  One option would be to let the BAD-WORD! with label <code>~null~</code> be an escape mechanism for this, which might cover a lot of cases (though obviously not accurately capturing a frame that purposefully wanted to pass the ~null~ BAD-WORD!).</p>
-<p><em>Because FRAME!s have come along as a general and pure tool for representing function applications, the pressure is taken off of APPLY to be all things to all people.</em>  I think it should start out as the handy evaluative form, and then wait for motivating scenarios before trying to bend to anything else.  Maybe another operator entirely would be more suitable, or just using FRAME! as it is.</p>
-            <p><small>4 posts - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/design-issues-for-new-apply/1406">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/design-issues-for-new-apply/1406</link>
-          <pubDate>Thu, 19 Nov 2020 11:11:27 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-1406</guid>
-          <source url="https://forum.rebol.info/t/design-issues-for-new-apply/1406.rss">Design Issues for New APPLY</source>
-        </item>
-        <item>
-          <title>The Dialecting Power of NewPath /REF/(INE)/[MENT]</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Dialects/DSLs</category>
-          <description><![CDATA[
-            <p><em>(Note: I have been calling <strong>/FOO/BAR</strong> a "refinement", so <strong>refinement? '/foo/bar</strong> is true)</em></p>
-<hr>
-<p>For a long while, I was hesitant to commit <strong><code>/foo</code></strong> to being inert, because I wondered if there was some greater meaning for it in binding.</p>
-<p>But now I'm resigned to it.  Which gives a somewhat interesting result: a whole category of bound dialecting parts that you know <em>aren't</em> meant as variable references.</p>
-<p>We already see how well this works with TUPLE! and predicates.  If they weren't inert, you'd have to worry that <strong>until .not.even? [...]</strong> should be interpreted as <strong>(until .not.even?), ([...])</strong></p>
-<h2>What Cool Role Could Refinements Have?</h2>
-<p>The original suggestion for predicates actually used refinements.  But <strong>until /not/even? [...]</strong> didn't seem to be as good, so tuple was used.</p>
-<p>But is there a good use at callsites?</p>
-<p>Something I observed today was that <strong><code>/(...)</code></strong> and <strong><code>/[...]</code></strong> open up a new GROUP! and BLOCK! type, at the very least.  What might this mean in PARSE, and could it be connected to a meaning for words like <strong>/rule</strong> or <strong>/obj/member</strong> ?</p>
-<p>The only connotation refinements have right now is "optionality" and...<em>parameter-ness</em>?  The optionality could be one focus:</p>
-<pre><code>&gt;&gt; did parse [a c] ['a /['b] 'c]  ; synonym for `opt ['b]`
-== #[true]
-
-rule: ['b]
-&gt;&gt; did parse [a c] ['a /rule 'c]  ; synonym for `opt rule`
-== #[true]
-</code></pre>
-<p>That's not compelling, clearly.  But I'm just trying to stimulate thoughts on what it might be used for.</p>
-<p>Perhaps it could be the "matches literally, not as a rule" concept?</p>
-<pre><code>&gt;&gt; data: [some integer!]
-
-&gt;&gt; parse [[some integer!] [some integer!]] [2 /data]
-== [[some integer!] [some integer!]]
-</code></pre>
-<p>This could build conceptually on the "more inert" form (as opposed to an active rule).  Though I kind of liked the "as-is" connotation of <span class="mention">@data</span>.  But perhaps this would be easier on the eyes.</p>
-<p><em>This points out something I hadn't thought about...</em> that refinements could have been used for other signals:</p>
-<pre><code>&gt;&gt; append [a b c] [d e]
-== [a b c d e]
-
-&gt;&gt; append [a b c] /[d e]
-== [a b c [d e]]
-
-&gt;&gt; append [a b c] '/[d e]
-== [a b c /[d e]]
-
-&gt;&gt; data: [d e]
-&gt;&gt; append [a b c] /data
-== [a b c [d e]]
-</code></pre>
-<p>I had a vague inkling that it might be used in blaming function parameters:</p>
-<pre><code>&gt;&gt; foo: func [x] [fail /x "Pointing at problem"]
-
- &gt;&gt; foo 10
-** Error: Pointing at problem
-** Where: foo console
-** Near: [foo 10 **]  ; note it indicates callsite, not the FAIL site
-</code></pre>
-<p>That sort of makes sense, because /FOO is likely to be used in the apply dialect to name parameters.  So this could be seen as better than <strong><code>fail @foo</code></strong>.  What makes me a little uncomfortable with it is that paths and URLs will be legal as the error ID, so having a "slashed thing" might seem repetitive in a way that the @ would not.</p>
-<p><em>This is just a brainstorm pointing out the existence of an available new-old-type.</em>  I'd be interested to hear any ideas or feelings on what PARSE might do with it...</p>
-<h2>Then...What About GET and SET Forms?</h2>
-<p>There's four assignment forms to deal with:</p>
-<ul>
-<li><strong><code>.foo.bar:</code></strong></li>
-<li><strong><code>:.foo.bar</code></strong></li>
-<li><strong><code>/foo/bar:</code></strong></li>
-<li><strong><code>:/foo/bar</code></strong></li>
-</ul>
-<p>What would these be for?</p>
-<p>I've proposed terminal slash and dot be a commentary on whether the thing being gotten or assigned is allowed to be an action or not.  Though that seems to make <strong>:foo.bar.</strong> and <strong>foo.bar.</strong> synonymous, as the GET only has impact on actions...and you're assuring it's not one.</p>
-<p>Just more stuff to think about.  My suggestion for anything that doesn't have an interesting novel answer yet is to just make it error...to save it for meaning something in the future.</p>
-            <p><small>1 post - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/the-dialecting-power-of-newpath-ref-ine-ment/1401">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/the-dialecting-power-of-newpath-ref-ine-ment/1401</link>
-          <pubDate>Fri, 13 Nov 2020 11:35:11 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-1401</guid>
-          <source url="https://forum.rebol.info/t/the-dialecting-power-of-newpath-ref-ine-ment/1401.rss">The Dialecting Power of NewPath /REF/(INE)/[MENT]</source>
         </item>
   </channel>
 </rss>

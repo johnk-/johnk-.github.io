@@ -1,0 +1,131 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Functions That Capture the Current &quot;Evaluation Environment&quot;</title>
+    <link>https://forum.rebol.info/t/functions-that-capture-the-current-evaluation-environment/2122</link>
+    <description>[quote=&quot;bradrn, post:11, topic:2093&quot;]
+Indeed, there would have to be a notion of the ‘currently active environment’ from which unbound words lookup their names. (...)  Surely [specifiers](https://forum.rebol.info/t/rebol-and-scopes-well-why-not/1751) require the same kind of concept already?
+[/quote]
+
+This sounds very [Kernel-like](https://forum.rebol.info/t/lisps-kernel-clojure-limits-of-code-is-data-and-data-is-code/2060), e.g.
+
+    foo: func [block &lt;environment&gt; env] [
+        print mold block
+        print [env.x env.y]
+    ]
+ 
+    bar: func [x] [
+       let y: 20
+       foo [x + y]
+    ]
+
+    &gt;&gt; bar 10
+    [x + y]
+    10 20
+
+It&#39;s true that specifiers have been creeping toward being able to offer something like this functionality.  But they were originally made with a particular mix of correctness and optimization in mind for combining FRAME! instances with &quot;relativized&quot; function bodies, so that simple index numbers could be used to find instance variables.  Extending them has been experimental to permit things like LET but they&#39;re fairly brittle at present.
+
+Today&#39;s specifiers narrow the fiddling to literals.  e.g. **if foo [x + y]** would have the specifier influence [x + y], but if you&#39;d written **if foo (block)** the specifier wouldn&#39;t affect the passed-in block...so it&#39;s different from a situation where IF was receiving an environment.
+
+---
+
+**I&#39;m worried about a generalized `&lt;environment&gt;` becoming available... and especially if such an out-of-band parameter sneaks in and affecting the behavior of fundamentals like COMPOSE or EITHER etc.**
+
+Once you have this out of band parameter, you have the problem of what happens when things get a step removed and you need to start making it passed in-band.  (e.g. the difference between a function that calls COMPOSE directly vs. a function that calls a function that calls COMPOSE, where the intended environment of influence comes from the outermost call).
+
+You also start getting some strange combinatorics of how much influence the environment is supposed to have in an operation vs. any existing binding on the passed in items.  So I&#39;d generally been going with the idea that the evolution of binding from being &quot;just on words&quot; to being &quot;on words and arrays&quot; would keep with the spirit that the way to tunnel &quot;environments&quot; through is to use mechanisms that put them granularly on your arguments vs. relying on this parameter.
+
+For the vast majority of code, I like the idea that whatever is done with environments gets those environments pasted onto the values themselves, so that things like GET and COMPOSE remain single-arity in an abstractable way, so that they can also be abstracted as single-arity functions without introducing quandaries from sometimes-implicit environment parameters.</description>
+    
+    <lastBuildDate>Tue, 16 Jan 2024 12:56:57 +0000</lastBuildDate>
+    <category>Binding</category>
+    <atom:link href="https://forum.rebol.info/t/functions-that-capture-the-current-evaluation-environment/2122.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Functions That Capture the Current &quot;Evaluation Environment&quot;</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>Under the design being proposed at time of writing, it seems you could just say:</p>
+<pre><code>in [] 'some-var
+</code></pre>
+<p>And that would effectively be BIND-TO-CURRENT.  It's brief, and can be argued as <em>clear enough</em>, if you've grokked the model.</p>
+<p>It could also be considered important enough to take another evaluator behavior, saying e.g. that <strong><code>.</code></strong> is an empty TUPLE! and means "get the current environment":</p>
+<pre><code>in . 'some-var
+</code></pre>
+<p>But that may be wasteful considering what else <code>.</code> might mean, if <code>[]</code> is good enough.</p>
+<p><em>(actually, if going with my proposal for using <strong><code>.member</code></strong> to denote member references in methods, then <strong><code>.</code></strong> might make more sense as "this"/"self")</em></p>
+<aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="2122">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/40/26_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>I'm worried about a generalized <code>&lt;environment&gt;</code> becoming available... and especially if such an out-of-band parameter sneaks in and affecting the behavior of fundamentals like COMPOSE or EITHER etc.</p>
+</blockquote>
+</aside>
+<p>An example of a place where access to the evaluator's notion of the current environment is needed in particular is the implementation of things like LET, which want to be able to add to the environment and affect the wave of evaluation going forward.</p>
+<p>Right now that's a specific narrow API that just says "extend binding of frame" without telling you what the binding was.</p>
+<p>Exercising a lot of restraint on implicit parameterization to achieve core functions is something I'll advocate for, but it may become inevitable that some functions need the environment without having it passed explicitly.  I want to see how far things can get without it.</p>
+<p><strong>But this does mean that you wouldn't be able to use COMPOSE on quoted blocks:</strong></p>
+<pre><code>&gt;&gt; compose '[a (add 1 2) b]
+** Error: ADD is not bound
+</code></pre>
+<p>I'd like to see answers to that which don't make COMPOSE pick up an environment implicitly.  One would be to use a regular block during the composition, then unbind it (or whatever operator does a shallow unbinding of the "tip", I suggested BINDABLE as another alternative):</p>
+<pre><code>&gt;&gt; unbind compose [a (add 1 2) b]
+== [a 3 b]  ; with A and B unbound
+</code></pre>
+<p>But there's also COMPOSE/PREDICATE where you get the GROUP!s to operate on and can do whatever you want with them.</p>
+<pre><code>&gt;&gt; compose/predicate '[a (add 1 2) b] (group -&gt; [do in [] group])
+== [a 3 b]  ; with A and B unbound
+</code></pre>
+<p>Although that weirdly would make the GROUP local variable in the lambda part of the evaluation environment of the (add 1 2).  So... hm.  It does start making you wonder if <strong><code>do in .. group</code></strong> to ask to sutbtract a level of binding would be a reasonable approach--e.g. <em>"give me the environment of the <code>[do in .. group]</code> block before it had the function locals added."</em></p>
+<p>Anyway, I just wanted to reiterate my hope that this isn't done with a sneaky <code>&lt;environment&gt;</code> argument, which I fear would muddy things considerably.</p>
+          <p><a href="https://forum.rebol.info/t/functions-that-capture-the-current-evaluation-environment/2122/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/functions-that-capture-the-current-evaluation-environment/2122/2</link>
+        <pubDate>Tue, 16 Jan 2024 10:47:37 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-2122-2</guid>
+        <source url="https://forum.rebol.info/t/functions-that-capture-the-current-evaluation-environment/2122.rss">Functions That Capture the Current &quot;Evaluation Environment&quot;</source>
+      </item>
+      <item>
+        <title>Functions That Capture the Current &quot;Evaluation Environment&quot;</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group quote-modified" data-username="bradrn" data-post="11" data-topic="2093">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/bradrn/40/365_2.png" class="avatar"><a href="https://forum.rebol.info/t/custom-function-generator-pitfalls/2093/11">Custom Function Generator Pitfalls</a>
+</div>
+<blockquote>
+<p>Indeed, there would have to be a notion of the ‘currently active environment’ from which unbound words lookup their names. (...)  Surely <a href="https://forum.rebol.info/t/rebol-and-scopes-well-why-not/1751">specifiers</a> require the same kind of concept already?</p>
+</blockquote>
+</aside>
+<p>This sounds very <a href="https://forum.rebol.info/t/lisps-kernel-clojure-limits-of-code-is-data-and-data-is-code/2060">Kernel-like</a>, e.g.</p>
+<pre><code>foo: func [block &lt;environment&gt; env] [
+    print mold block
+    print [env.x env.y]
+]
+
+bar: func [x] [
+   let y: 20
+   foo [x + y]
+]
+
+&gt;&gt; bar 10
+[x + y]
+10 20
+</code></pre>
+<p>It's true that specifiers have been creeping toward being able to offer something like this functionality.  But they were originally made with a particular mix of correctness and optimization in mind for combining FRAME! instances with "relativized" function bodies, so that simple index numbers could be used to find instance variables.  Extending them has been experimental to permit things like LET but they're fairly brittle at present.</p>
+<p>Today's specifiers narrow the fiddling to literals.  e.g. <strong>if foo [x + y]</strong> would have the specifier influence [x + y], but if you'd written <strong>if foo (block)</strong> the specifier wouldn't affect the passed-in block...so it's different from a situation where IF was receiving an environment.</p>
+<hr>
+<p><strong>I'm worried about a generalized <code>&lt;environment&gt;</code> becoming available... and especially if such an out-of-band parameter sneaks in and affecting the behavior of fundamentals like COMPOSE or EITHER etc.</strong></p>
+<p>Once you have this out of band parameter, you have the problem of what happens when things get a step removed and you need to start making it passed in-band.  (e.g. the difference between a function that calls COMPOSE directly vs. a function that calls a function that calls COMPOSE, where the intended environment of influence comes from the outermost call).</p>
+<p>You also start getting some strange combinatorics of how much influence the environment is supposed to have in an operation vs. any existing binding on the passed in items.  So I'd generally been going with the idea that the evolution of binding from being "just on words" to being "on words and arrays" would keep with the spirit that the way to tunnel "environments" through is to use mechanisms that put them granularly on your arguments vs. relying on this parameter.</p>
+<p>For the vast majority of code, I like the idea that whatever is done with environments gets those environments pasted onto the values themselves, so that things like GET and COMPOSE remain single-arity in an abstractable way, so that they can also be abstracted as single-arity functions without introducing quandaries from sometimes-implicit environment parameters.</p>
+          <p><a href="https://forum.rebol.info/t/functions-that-capture-the-current-evaluation-environment/2122/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/functions-that-capture-the-current-evaluation-environment/2122/1</link>
+        <pubDate>Tue, 16 Jan 2024 10:31:44 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-2122-1</guid>
+        <source url="https://forum.rebol.info/t/functions-that-capture-the-current-evaluation-environment/2122.rss">Functions That Capture the Current &quot;Evaluation Environment&quot;</source>
+      </item>
+  </channel>
+</rss>

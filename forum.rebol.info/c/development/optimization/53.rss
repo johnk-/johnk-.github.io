@@ -5,8 +5,236 @@
     <link>https://forum.rebol.info/c/development/optimization/53</link>
     <description>Topics in the &#39;Optimization&#39; category This is a category for discussing performance and optimization ideas.</description>
     
-      <lastBuildDate>Tue, 21 Nov 2023 05:02:05 +0000</lastBuildDate>
+      <lastBuildDate>Thu, 25 Jan 2024 03:27:25 +0000</lastBuildDate>
       <atom:link href="https://forum.rebol.info/c/development/optimization/53.rss" rel="self" type="application/rss+xml" />
+        <item>
+          <title>Optimizing Environment Lookup</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Optimization</category>
+          <description><![CDATA[
+            <h2>
+<a name="object-storage-object-frame-port-error-1" class="anchor" href="https://forum.rebol.info#object-storage-object-frame-port-error-1"></a>Object Storage (OBJECT!, FRAME!, PORT!, ERROR!)</h2>
+<p>Rebol objects were designed as two parallel arrays, which we can call the "keylist" and the "varlist".  Originally these were entire cells, like this:</p>
+<pre><code>obj: make object! [a: 10 b: 20]
+
+            0     1     2
+KEYLIST  [     |  a  |  b  ]   ; 4 platform pointers per cell
+
+            0     1     2
+VARLIST  [self |  10 |  20 ]   ; 4 platform pointers per cell
+</code></pre>
+<p>The idea is that the <code>[0]</code>th cell of the varlist contains an instance of the object itself.  This means if the implementation has a pointer to the varlist in its hand, it also has a cell instance of the object.  This also means you can find out from just the varlist what subtype it is (ERROR!, FRAME!, PORT!, etc.)</p>
+<p>R3-Alpha used full 4-platform-pointer-sized WORD! cells for each element in the keylist, and left the [0]th cell empty.</p>
+<p>Ren-C optimized this to just point to symbols.  So keylists are arrays of single pointers, and there is no [0]th element.</p>
+<pre><code>                  0     1 
+KEYLIST        [  a  |  b  ]   ; 1 platform pointer per cell
+
+            0     1     2
+VARLIST  [self |  10 |  20 ]   ; 4 platform pointers per cell
+</code></pre>
+<p>Keylists are shared among objects that are used as prototypes for each other, e.g. <strong>obj2: make obj [...]</strong>.  They will become un-shared if any of the objects are expanded.</p>
+<p>(Object expansion is allowed in R3-Alpha and Ren-C, but not Rebol2 or Red).</p>
+<h2>
+<a name="module-storage-module-2" class="anchor" href="https://forum.rebol.info#module-storage-module-2"></a>Module Storage (MODULE!)</h2>
+<p>R3-Alpha used the same layout for modules containing hundreds of items as it did for objects.</p>
+<p>Ren-C instead allocates small variable "stubs" for each variable in a module.  Each stub is 8 platform pointers in size.</p>
+<ul>
+<li>4 of those platform pointers are for the cell of the variable's value</li>
+<li>1 pointer is for the symbol of the variable</li>
+<li>1 pointer is to the module the variable is for</li>
+<li>1 pointer to the next stub with the same symbol for another module</li>
+<li>1 pointer-sized slot unused at this time</li>
+</ul>
+<p>These form a linked list of all the same-named variable instances in modules.  This list is pointed to by the symbol itself.</p>
+<p>If we want to check if a WORD! cell has a variable in a module, the cell contains a pointer to the word's symbol.  We follow that, and get to the list of variables.  We can walk that list and see if there is an instance matching the module we are looking for.</p>
+<h2>
+<a name="let-variables-3" class="anchor" href="https://forum.rebol.info#let-variables-3"></a>LET Variables</h2>
+<p>At the moment, LET variables are similar to the stubs holding variables for a module... except they don't have an associated module.</p>
+<h2>
+<a name="specifier-chains-are-linked-lists-of-contexts-or-containers-4" class="anchor" href="https://forum.rebol.info#specifier-chains-are-linked-lists-of-contexts-or-containers-4"></a>Specifier Chains Are Linked Lists Of Contexts -or- Containers</h2>
+<p>Things like FRAME! or OBJECT! or MODULE! have one pointer for their "parent specifier".  So when you do something like:</p>
+<pre><code> let x: 10
+ obj: make object! [y: x + 10, z: x + 20]
+</code></pre>
+<p>The BLOCK! that object receives has a specifier put onto it... in this case, it will be a LET variable.  That LET variable presumably points up to something else (an enclosing function frame, or a module, or whatever).</p>
+<p>The object creates its varlist, and then that varlist has a pointer to the LET.  It uses this as the edited specifier when running the body block of the object.</p>
+<p>But if you later try to leverage that object elsewhere e.g. with <strong>overbind obj [...]</strong>, it wants to chain that object onto some other specifier.  However its parent link is already in use for the other chain.  So this means a little stub USE container is needed... which points at the object and provides a new slot to put a pointer in.</p>
+<h2>
+<a name="looking-up-an-unbound-word-walks-this-chain-5" class="anchor" href="https://forum.rebol.info#looking-up-an-unbound-word-walks-this-chain-5"></a>Looking Up An Unbound Word Walks This Chain</h2>
+<aside class="quote no-group quote-modified" data-username="bradrn" data-post="12" data-topic="1751">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/bradrn/40/365_2.png" class="avatar"><a href="https://forum.rebol.info/t/rebol-and-scopes-well-why-not/1751/12">Rebol And Scopes: Well, Why Not?</a>
+</div>
+<blockquote>
+<p>Though I do spy one low-hanging fruit…</p>
+<aside class="quote no-group" data-username="hostilefork" data-post="11" data-topic="1751">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/40/26_2.png" class="avatar"><a href="https://forum.rebol.info/t/rebol-and-scopes-well-why-not/1751/11">Rebol And Scopes: Well, Why Not?</a>
+</div>
+<blockquote>
+<p>a linked list of objects</p>
+</blockquote>
+</aside>
+<p>Might it not be quicker to use a hashmap or similar data structure?</p>
+</blockquote>
+</aside>
+<p>It's not entirely obvious what to hash, here.  And it's not so much that any particular lookup is all that slow.  It's just that there's lots of them, and you can't reliably cache the answer between runs.</p>
+<p><a href="https://forum.rebol.info/t/semantics-and-optimization-of-copying-function-bodies/2119/2">One thing I cited to exploit</a> was the fact that when you copy a function body, you tend to wind up with elements that look up either in a module or in the frame of that function.</p>
+<ul>
+<li>
+<p>Module lookup is relatively fast because there aren't all that many redundant names (e.g. there's typically only one APPEND and it's in LIB.)</p>
+</li>
+<li>
+<p>Function frames are not allowed to expand.</p>
+</li>
+<li>
+<p>You can use the space in the unbound elements to give an answer to something knowable--like "this isn't defined in the frame for function X" or "this is defined in the frame for function X at offset Y", that can let you skip along to searching in the module or beeline for the pointer to what you want in the frame.</p>
+</li>
+</ul>
+<p>I'm sure this will help.  Will have to see how much.</p>
+<h2>
+<a name="gc-load-is-a-big-problem-6" class="anchor" href="https://forum.rebol.info#gc-load-is-a-big-problem-6"></a>GC Load Is A Big Problem</h2>
+<p>Ren-C's garbage collector has some interesting points, but it's still a mark-and-sweep strategy.</p>
+<p>These specifier chains are being allowed to leak out, with every function call producing tons of them... and function frames have to be GC'd because you can't assume there are no extant references.  (Natives are an exception, they will free their frames when they end, but you can't do that with usermode functions because they use frames as specifiers in the blocks they run... and you don't know what happens to that block).</p>
+<p>LETs are pretty bad too... a LET inside a loop creates a little piece of junk each time that needs to get cleaned up.</p>
+<p>I think reference counting would be helpful, because most of these aren't referenced very long and aren't involved in cycles.  So reaching a 0 refcount would be a moment the memory could be reclaimed.  My guess is it would outweigh the cost of the reference counting by a fair bit.  But it's difficult to do reference counting correctly in C-like code (although having a C++ build variant it could be double-checked).</p>
+            <p><small>4 posts - 2 participants</small></p>
+            <p><a href="https://forum.rebol.info/t/optimizing-environment-lookup/2134">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/optimizing-environment-lookup/2134</link>
+          <pubDate>Thu, 25 Jan 2024 03:27:25 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2134</guid>
+          <source url="https://forum.rebol.info/t/optimizing-environment-lookup/2134.rss">Optimizing Environment Lookup</source>
+        </item>
+        <item>
+          <title>Semantics and Optimization of Copying Function Bodies</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Optimization</category>
+          <description><![CDATA[
+            <p>Part of Rebol's design is that every execution frame has an order to its arguments, represented by an integer.</p>
+<p>So for instance with IF:</p>
+<ul>
+<li>the CONDITION would be in frame <code>cell[1]</code>
+</li>
+<li>the BRANCH would be in frame <code>cell[2]</code>
+</li>
+</ul>
+<h2>
+<a name="native-functions-use-the-ordering-1" class="anchor" href="https://forum.rebol.info#native-functions-use-the-ordering-1"></a>NATIVE Functions Use The Ordering</h2>
+<p>Natives don't have to walk the keys of a frame, e.g. to find a slot that matches the symbol "BRANCH".  They are hardcoded to look directly at the index it should be in.</p>
+<p><em>(R3-Alpha hardcoded these indices, and you can see that as <a href="https://github.com/rebol/rebol/blob/25033f897b2bd466068d7663563cd3ff64740b94/src/core/n-control.c#L620">D_ARG(1) and D_ARG(2)</a> in the implementation of IF.  Ren-C puts the native specs in comments, processed during the build to make macros.  These macros like <a href="https://github.com/metaeducation/ren-c/blob/0d2d7c39733f21e1088240ab2e5c7614072c8059/src/core/n-control.c#L151">ARG(condition) and ARG(branch)</a> resolve to the integers at compile-time.)</em></p>
+<h2>
+<a name="interpreted-func-functions-use-indices-too-but-differently-2" class="anchor" href="https://forum.rebol.info#interpreted-func-functions-use-indices-too-but-differently-2"></a>Interpreted FUNC Functions Use Indices Too, But Differently</h2>
+<p>When a FUNC is being generated, a table is made that maps from symbols for the arguments and locals to the integer for that symbol in the frame.</p>
+<p>Then the BLOCK! passed as a body is walked through to find ANY-WORD!s that reference the arguments and locals, and the index is poked into the cells for those words.  Then, the binding pointer in the cell is set to point at the function definition.</p>
+<p>That isn't enough information to look up the word--because the binding is relative to a function that is not running.  Hence it's called <strong>relative binding</strong>.  You need to somehow connect this to an instance of the function that is running and has its argument and local cells filled.</p>
+<p>Historical Rebol &amp; Red make this connection dynamically by climbing the stack and looking for an instance of the function seen in the binding.  Clearly that doesn't permit indefinite extent (closure) over a local or argument, because when the function isn't running its variables can no longer be found.  But it also can be wrong if recursions interact with material bound to various instances of the same function.</p>
+<p>Ren-C uses a better mechanism of <a href="https://forum.rebol.info/t/relative-binding-and-frame-internals/1344">Specific Binding</a>, where information is slipped through instances of BLOCK!s and other arrays, saying which frame that view of the array is executing on behalf of.</p>
+<h2>
+<a name="conflict-with-new-policy-of-leave-binding-alone-3" class="anchor" href="https://forum.rebol.info#conflict-with-new-policy-of-leave-binding-alone-3"></a>Conflict With New Policy of "Leave Binding Alone"</h2>
+<p>The bias in the new proposal of binding is that any WORD!s already bound will be left-as is, with only some minor surgery on environments of blocks done by things like FUNC or FOR-EACH, to inject some new variables at the head of the lookup.</p>
+<p>That may make it sound like these words which are bound relatively inside function bodies are more trouble than they are worth.  In the model, they're actually supposed to be thought of as unbound--so if they carry a secret binding, that could only be used as an optimization when they are actually intentionally combined with the right frame.</p>
+<h2>
+<a name="the-optimization-is-actually-not-minor-4" class="anchor" href="https://forum.rebol.info#the-optimization-is-actually-not-minor-4"></a>The Optimization is Actually Not Minor</h2>
+<p>Ren-C function frames are unusual, in that a single frame can be reused for several "phases" of a function composition.  e.g. you can ADAPT and SPECIALIZE and AUGMENT a function--even a native--and all these just reuse the same frame.  But during the phase, it only sees the fields of the frame it is supposed to be able to see.</p>
+<p>For instance, if you specialize out the VALUE from append (e.g. by making it always append 5) and then try to ADAPT the resulting function, you won't even know that APPEND has a VALUE at all.  It will seem like it only has a series.</p>
+<p>Being strict about enforcing this information hiding permits you to do unusual things, like once the VALUE is shielded in the inner function... you can AUGMENT the resulting functions with another argument named VALUE.  This process can proceed indefinitely.  There could be dozens of fields named VALUE in the frame, but only one visible at a time.</p>
+<p>So checking whether a value is visible in the frame is more involved than just walking a list of symbols and comparing them (which isn't necessarily fast in and of itself).  The parameter definitions must be consulted also, to see if they line up with the running phase of the function in order to determine the visibility.</p>
+<p>The time of function creation is a good moment to do this work, instead of going through it on every lookup.  And squeaking performance out of pure virtual binding is going to be hard... we need all the tricks we can get.</p>
+<h2>
+<a name="copying-the-function-body-5" class="anchor" href="https://forum.rebol.info#copying-the-function-body-5"></a>Copying The Function Body</h2>
+<p>R3-Alpha actually had a trick during bootstrap, where while loading the library functions it would use a special version of FUNC that did not copy the function body blocks.  It assumed none of them were composed out of parts that were exposed or would change, and if there were exceptions the library authors were supposed to be sophisticated enough to COPY or COPY/DEEP where needed.</p>
+<p>(IIRC, it would contaminate these blocks by putting the relative binding information in them, so they would be seen as corrupt if anyone managed to get access to them.)</p>
+<p>But after bootstrap was over, it would replace FUNC with a version that deeply copied the bodies.</p>
+<p>It invites a lot of accidents in the historical world to have a FUNC that doesn't copy its body deeply.  But there are some new possibilities that might be able to avoid accidents while still covering a lot of cases.  For instance, it could deeply protect the blocks and make them immutable.  This way, if a user ever found themselves bit by it they could add in their own COPY or COPY/DEEP at the relevant places.  But 95% or more of the time, you'd not need to and the system could speed up.</p>
+<p>In any case, it's interesting that the relative binding information wouldn't be corrupting the binding information any longer, because it's just an optimization for unbound values... and any PICKs or FOR-EACHs would see relatively bound words as unbound.</p>
+            <p><small>3 posts - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/semantics-and-optimization-of-copying-function-bodies/2119">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/semantics-and-optimization-of-copying-function-bodies/2119</link>
+          <pubDate>Tue, 16 Jan 2024 09:00:09 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2119</guid>
+          <source url="https://forum.rebol.info/t/semantics-and-optimization-of-copying-function-bodies/2119.rss">Semantics and Optimization of Copying Function Bodies</source>
+        </item>
+        <item>
+          <title>Performance Implications of Isotopic-FRAME!-is-Action</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Optimization</category>
+          <description><![CDATA[
+            <p>Making the isotopic state of frames be <a href="https://forum.rebol.info/t/taking-action-on-function-vs-action/596/6"><em>"interpret this frame as an action when run through a word reference"</em></a> is a deep change.  The implications haven't been fully absorbed, and there are some things I noticed that create troubles for optimization.</p>
+<p>Looking again at a simple example:</p>
+<pre><code>&gt;&gt; f: make frame! :append
+== make frame! [
+    series: ~
+    value: ~
+    part: ~
+    dup: ~
+    line: ~
+]
+
+&gt;&gt; f.value: 5
+
+&gt;&gt; append5: isotopic f
+== ~make frame! [
+    series: ~
+    value: 5
+    part: ~
+    dup: ~
+    line: ~
+]~  ; isotope
+
+&gt;&gt; append5 [a b c]
+== [a b c 5]
+</code></pre>
+<p>That's cool, for sure.  And it removes the number of things we have to name in the system (I was particularly annoyed by having to differentiate "action" and "activation" when there was a separate ACTION! datatype).</p>
+<h2>
+<a name="but-what-if-the-frame-is-modified-1" class="anchor" href="https://forum.rebol.info#but-what-if-the-frame-is-modified-1"></a>But What If The Frame Is Modified...?</h2>
+<p>Say the user writes this:</p>
+<pre><code>&gt;&gt; append5 (f.series: [d e f], [a b c])
+== ???
+</code></pre>
+<p>When running the specialization <strong>append5</strong> we'd already decided that the series parameter wasn't specialized and needed to be fulfilled.  But the user is <em>specializing the series parameter during the fulfillment</em>.</p>
+<p>At best, this is semantically messy (and can manifest as hard-to-comprehend behavior when the example is less obvious than this one).  At worst, the internal bookkeeping of the evaluator gets confused and it crashes due to having the slot it's filling changed out from under it.</p>
+<h2>
+<a name="we-could-snapshot-the-frame-but-snapshots-arent-free-2" class="anchor" href="https://forum.rebol.info#we-could-snapshot-the-frame-but-snapshots-arent-free-2"></a>We Could Snapshot The Frame... But Snapshots Aren't Free</h2>
+<p>If we are forced to make a snapshot of the frame state at the start of execution, then that means making a copy, which takes time and space.</p>
+<p>The space isn't actually the problem...because we can just put the snapshot in the frame space we're already making for the function call.</p>
+<p>Where we pay is that it effectively adds an extra traversal of the arguments.  We're traversing the space to make the copy (with some slots unspecialized and needing to be fulfilled).  Then we're traversing the space again to do the fulfillment of the unspecialized arguments.</p>
+<p>With no snapshot, we could leave the memory for the frame cells completely garbage at the outset... and fill them as we go with either a fulfillment or a specialization.  Empirically, avoiding the snapshot could save as much as 5% of the runtime.</p>
+<h2>
+<a name="another-issue-no-moment-to-cache-optimizations-3" class="anchor" href="https://forum.rebol.info#another-issue-no-moment-to-cache-optimizations-3"></a>Another Issue: No Moment To Cache Optimizations</h2>
+<p>When there was a separate "make an action! out of this frame" step, the action was a way of saying "freeze!" on the arguments, so they could no longer be changed.  So it avoids the problem of changes during fulfillment.</p>
+<p>But it did something else: it meant properties of the arguments could be studied...to remember things like <em>"what's the first unspecialized argument slot"</em>.</p>
+<p>(It might seem that it would be easy to find the first unspecialized argument slot.  But this isn't just a search from the beginning of the frame, because it's possible to reorder arguments or have partial specializations.  So it's tricky.)</p>
+<h2>
+<a name="how-about-just-freezing-the-frames-if-theyre-executed-4" class="anchor" href="https://forum.rebol.info#how-about-just-freezing-the-frames-if-theyre-executed-4"></a>How About Just Freezing The Frames If They're Executed?</h2>
+<p>The simplest idea here is just to say that once you invoke a frame, it's frozen...you can't change its fields anymore.  Then that freezing process can do the caching of properties that accelerate action execution, and all is well.</p>
+<p>If you want to keep a frame mutable, then COPY it before making it isotopic.  The issue is just that changes to the frame won't be seen by the isotope you made.</p>
+<h2>
+<a name="do-technicalities-like-this-make-me-question-frame-as-action-5" class="anchor" href="https://forum.rebol.info#do-technicalities-like-this-make-me-question-frame-as-action-5"></a>Do Technicalities Like This Make Me Question FRAME!-as-Action?</h2>
+<p>Well, it's a delicate balance of choices, and I'm still feeling it out.</p>
+<p>The worry is that the number of concerns being exposed to users is such that the properties of "the kind frame you can run is different enough that you basically have to think of it as a different type".</p>
+<p>To avoid that in this case, it's better to do the freezing implicitly vs. saying that you need a special routine like RUNS to bless a frame as runnable.  This way, RUNS can be understood as simply taking in a plain frame! and giving back an isotopic frame!... something you could easily write yourself.</p>
+<p>Crafting a uniformity of experience with FRAME! so it doesn't feel like it's making up for a missing ACTION! type is certainly something to continue to be mindful of.  But performance needs to be minded too at some point, so I'm doing what I can about that.</p>
+            <p><small>2 posts - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/performance-implications-of-isotopic-frame-is-action/2083">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/performance-implications-of-isotopic-frame-is-action/2083</link>
+          <pubDate>Wed, 20 Dec 2023 02:09:21 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2083</guid>
+          <source url="https://forum.rebol.info/t/performance-implications-of-isotopic-frame-is-action/2083.rss">Performance Implications of Isotopic-FRAME!-is-Action</source>
+        </item>
         <item>
           <title>Executable Size circa 2023...and tweaking INLINE</title>
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
@@ -85,7 +313,7 @@
           <category>Optimization</category>
           <description><![CDATA[
             <p>Redbol's historical type system really had only one design point: <em>be fast</em>.  There were 64 fundamental datatypes, and parameters of a function could either accept each datatype or not.  So a simple bitset of 64 bits was stored alongside each parameter, and checked when the function was called.  That was it.</p>
-<p>Ren-C's richer design explodes the number of "types" in the system.  Isotopes like <strong><code>~null~</code></strong> are variations on WORD!, but you don't want every function that takes a WORD! to take nulls...and you don't want to have the type checking be so broad as to take <strong><code>[isotope!]</code></strong> just because you want to be able to take nulls (because that would include splices, packs, etc.)</p>
+<p>Ren-C's richer design explodes the number of "types" in the system.  Not only are there more fundamental types, but antiform isotopes like <strong><code>~null~</code></strong> are variations on WORD!, but you don't want every function that takes a WORD! to take nulls...and you don't want to have the type checking be so broad as to take <strong><code>[antiform!]</code></strong> just because you want to be able to take nulls (because that would include splices, packs, etc.)</p>
 <p>It's not just this reason that Redbol's type checking was too simple, but it forced my hand in coming up with some sort of answer.  <em>I couldn't think of any better idea than Lisp, which does type checking via functions ("predicates").</em>  So I rigged it up where if you want to say a function can take an integer or null, you can write <strong><code>[null? integer!]</code></strong>  You can freely mix LOGIC-returning functions with fundamental types, and we're no longer stuck with the 64 fundamental type limit.</p>
 <h2>
 <a name="isnt-it-slow-to-call-a-list-of-functions-for-typechecking-1" class="anchor" href="https://forum.rebol.info#isnt-it-slow-to-call-a-list-of-functions-for-typechecking-1"></a>Isn't It Slow To Call A List of Functions For Typechecking?</h2>
@@ -118,7 +346,7 @@
 <p>They don't require recursive invocations of the evaluator.</p>
 </li>
 </ul>
-<p>This led me to wonder how hard it would be to define a class of actions whose implementations were a simple C function with an input value and output value.  If you weren't in a scenario where you needed a full FRAME!, you could reach into the ACTION!'s definition and grab the simple C function out of it.  All these functions would use the same dispatcher--that would be a simple matter of proxying the first argument of a built frame to pass it to this C function.</p>
+<p>This led me to wonder how hard it would be to define a class of actions whose implementations were a simple C function with an input value and output value.  If you weren't in a scenario where you needed a full FRAME!, you could reach into the ACTION's definition and grab the simple C function out of it.  All these functions would use the same dispatcher--that would be a simple matter of proxying the first argument of a built frame to pass it to this C function.</p>
 <p>I decided to call these <strong>"intrinsics"</strong>, which is named after a <a href="https://en.wikipedia.org/wiki/Intrinsic_function">trick compilers use</a> when they see certain function calls that they implement those functions via direct code inlining.  It's not a perfect analogy, but it's similar in spirit.</p>
 <h2>
 <a name="it-wasnt-all-that-hard-to-implement-relatively-speaking-roll_eyes-3" class="anchor" href="https://forum.rebol.info#it-wasnt-all-that-hard-to-implement-relatively-speaking-roll_eyes-3"></a>It Wasn't All That Hard To Implement (relatively speaking <img src="https://forum.rebol.info/images/emoji/twitter/roll_eyes.png?v=12" title=":roll_eyes:" class="emoji" alt=":roll_eyes:" loading="lazy" width="20" height="20"> )</h2>
@@ -376,57 +604,50 @@ Will work
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
           <category>Optimization</category>
           <description><![CDATA[
-            <p><strong>Ren-C has a very slick multi-return interface for TRANSCODE.</strong>  The mere request of a "remainder" of data left indicates you're not trying to do a full scan.</p>
-<p>Without the request, you get the whole thing:</p>
+            <p>Ren-C has a multi-return interface for TRANSCODE.  Without /ONE, you get the whole thing:</p>
 <pre><code>&gt;&gt; transcode "abc def"
-== [abc def]
-
-; ...or...
-
-&gt;&gt; value: transcode "abc def"
-== [abc def]
-
-; ...or...
-
-&gt;&gt; [value]: transcode "abc def"
+; first in pack of length 2
 == [abc def]
 </code></pre>
-<p>With the next position request, just one item and a remainder:</p>
+<p>If you ask for a remainder in this case, it will be empty:</p>
 <pre><code>&gt;&gt; [value pos]: transcode "abc def"
-== abc
+== [abc def]
 
 &gt;&gt; pos
-== " def"
-
-; ...or...
-
-&gt;&gt; transcode/next "abc def" 'pos
+== ""
+</code></pre>
+<p>With the /ONE refinement, it will go one item at a time.  Because the main return (value) can come back NULL, there may not be a remainder, so POS needs to be optional:</p>
+<pre><code>&gt;&gt; [value /pos]: transcode/one "abc def"
 == abc
 
 &gt;&gt; pos
 == " def"
 </code></pre>
-<p>You also know that you're at the end of the input when it returns null, with all the benefits of easy reactions to NULL with IF and ELSE and friends:</p>
-<pre><code>&gt;&gt; [value pos]: transcode ""
-; null
+<p>You know that you're at the end of the input when it returns null as a main result, with all the benefits of easy reactions to NULL with IF and ELSE and friends:</p>
+<pre><code>&gt;&gt; [value /pos]: transcode/one ""
+== ~null~  ; anti
+
+&gt;&gt; pos
+== ~null~  ; anti
 </code></pre>
 <p>Writing foolproof loops to process items are a breeze:</p>
 <pre><code>while [true]
-    [item utf8]: transcode utf8 else [break]
+    [item /utf8]: transcode utf8 else [break]
     print mold item
  ]
 
 ; or for the THEN/ELSE haters out there (you know who you are :-P)
 
 while [true]
-    if null? [item utf8]: transcode utf8 [
+    if null? [item /utf8]: transcode utf8 [
         break
     ]
     print mold item
  ]
 </code></pre>
-<p><img src="https://forum.rebol.info/images/emoji/twitter/+1.png?v=9" title=":+1:" class="emoji only-emoji" alt=":+1:"></p>
-<h2>This Runs Circles Around Red and R3-Alpha</h2>
+<p><img src="https://forum.rebol.info/images/emoji/twitter/+1.png?v=12" title=":+1:" class="emoji only-emoji" alt=":+1:" loading="lazy" width="20" height="20"></p>
+<h2>
+<a name="this-runs-circles-around-red-and-r3-alpha-1" class="anchor" href="https://forum.rebol.info#this-runs-circles-around-red-and-r3-alpha-1"></a>This Runs Circles Around Red and R3-Alpha</h2>
 <p>For starters: neither support strings as input--because the scanner is built for reading UTF-8 files...and both R3-Alpha and Red unpack strings into fixed-width encodings.  So if you have string input, you have to pay for a copy encoded as UTF-8 via TO BINARY!.  (<a href="https://forum.rebol.info/t/realistically-migrating-rebol-to-utf8-everywhere/374">Ren-C's UTF-8 Everywhere</a> wins again!)</p>
 <p>R3-Alpha unconditionally returns a block with the last element as a remainder, whether you ask for one item via /NEXT or not:</p>
 <pre><code>r3-alpha&gt;&gt; transcode to binary! "abc def"
@@ -500,15 +721,15 @@ red&gt;&gt; while [not tail? utf8] [
     ]
 ]
 </code></pre>
-<p><em>(Having NULL is clearly better as a non-valued state (with isotope states fleshing out the picture)...and my <a href="https://forum.rebol.info/t/why-or-why-not-have-unset-in-rebol-like-languages/113/2">bafflement at Nenad's blindness</a> when confronted with what should be clear as day is as relevant as it was 6-plus-years ago.  And of course we see they'd actually need SET/ANY to do this right if you were allowing #[unset!]...but Ren-C's design has no need of that.)</em></p>
-<h2>Ren-C Also <em>Thrashes</em> R3-Alpha and Red In Error Handling</h2>
+<h2>
+<a name="ren-c-also-thrashes-r3-alpha-and-red-in-error-handling-2" class="anchor" href="https://forum.rebol.info#ren-c-also-thrashes-r3-alpha-and-red-in-error-handling-2"></a>Ren-C Also <em>Thrashes</em> R3-Alpha and Red In Error Handling</h2>
 <p>Ren-C TRANSCODE has these potential behaviors:</p>
 <ul>
 <li>
 <p>RETURN a BLOCK! (if plain TRANSCODE)</p>
 </li>
 <li>
-<p>RETURN an ANY-VALUE! or NULL (if TRANSCODE/NEXT)</p>
+<p>RETURN an ANY-VALUE! or NULL (if TRANSCODE/ONE)</p>
 </li>
 <li>
 <p>It can do a "hard FAIL"</p>
@@ -551,7 +772,8 @@ Bad input
 </code></pre>
 <p><em><strong>But the input isn't bad!!!</strong></em>  This leads to a nightmare of trying to figure out what was going wrong.  I had just one of those nightmares today in the bootstrap executable when tinkering with the shim implementation of TRANSCODE.  A bug in the shim was leading to silently skipping work that should have been done, because the caller wanted to be tolerant of bad transcode input.</p>
 <p>There's simply no practical way of working on code of any complexity without something like definitional failures, and experience has proven this day after day.</p>
-<h2>Getting Incomplete Results Via R3-Alpha's /ERROR</h2>
+<h2>
+<a name="getting-incomplete-results-via-r3-alphas-error-3" class="anchor" href="https://forum.rebol.info#getting-incomplete-results-via-r3-alphas-error-3"></a>Getting Incomplete Results Via R3-Alpha's /ERROR</h2>
 <p>R3-Alpha offered this feature:</p>
 <pre><code>/error -- Do not cause errors - return error object as value in place
 </code></pre>
@@ -575,7 +797,7 @@ Bad input
 <p>It's clumsy to write the calling code (or to read it...testing to see if the next-to-last-item is an ERROR! and reacting to that.</p>
 <p><em>(Also: What if there was some way to represent ERROR! values literally in source?  This would conflate with such a block that was valid...but just incidentally had an ERROR! and then a BINARY! in the last positions.)</em></p>
 <p>But the thing that had me most confused about it was the remainder.  Notice above you don't get  <code>1&amp;x</code> as the start of the stuff it couldn't understand.</p>
-<p>Was it trying to implement some kind of recoverable scan?  What would that even mean?  <img src="https://forum.rebol.info/images/emoji/twitter/thinking.png?v=9" title=":thinking:" class="emoji" alt=":thinking:"></p>
+<p>Was it trying to implement some kind of recoverable scan?  What would that even mean?  <img src="https://forum.rebol.info/images/emoji/twitter/thinking.png?v=12" title=":thinking:" class="emoji" alt=":thinking:" loading="lazy" width="20" height="20"></p>
 <p><strong>Ultimately I think this was just a leaking of an implementation detail as opposed to any reasonable attempt at recoverable scanner.</strong>  It only didn't tell you where the exact tail of the successfully scanned material was because it did not know.</p>
 <p>The scanning position is based on token consumptions, and so if you started something like a block scan and it saw a <strong>[</strong> then it forgets where it was before that.  Then if something inside the block goes bad, it will just give you a remainder position somewhere inside that--<em>completely forgetting about how many nesting levels it was in</em>.</p>
 <p>So what you were getting was a crappier implementation of scanning one by one, and remembering where you were before the last bad scan:</p>
@@ -593,13 +815,14 @@ block: collect [
 ]
 </code></pre>
 <p>That gives you a proper version, setting error if something happened and giving you the block intact.</p>
-<h2>So Finally... We See It's An Optimization Problem</h2>
+<h2>
+<a name="so-finally-we-see-its-an-optimization-problem-4" class="anchor" href="https://forum.rebol.info#so-finally-we-see-its-an-optimization-problem-4"></a>So Finally... We See It's An Optimization Problem</h2>
 <p>Question is if there's some way of folding this into TRANSCODE, so it's doing the looping and collecting efficiently for you.</p>
 <p>But this interface wants to get back a "remainder".  And I kind of hate to sacrifice the property that TRANSCODE's asking for a remainder means scan one element.  :-/</p>
 <p>I guess we <em>could</em> say that there's a logical process you follow:</p>
 <ul>
 <li>
-<p>The output parameter is called REST (instead of NEXT)</p>
+<p>The output parameter is called REST</p>
 </li>
 <li>
 <p>An additional output parameter is added for ERROR</p>
@@ -663,7 +886,8 @@ block: collect [
 == " def"
 </code></pre>
 <p>That would make me feel grief, as it loses one of the first showcases of return value sensitivity.  <em>And it irks me to think that the beauty is ultimately being given up for the sake of what amounts to an optimization.</em></p>
-<h2>Answer For Now: Kill Off /ERROR</h2>
+<h2>
+<a name="answer-for-now-kill-off-error-5" class="anchor" href="https://forum.rebol.info#answer-for-now-kill-off-error-5"></a>Answer For Now: Kill Off /ERROR</h2>
 <ul>
 <li>
 <p>The answer /ERROR has been giving back in error cases for the remainder is sketchy, and I don't want to figure out how to fix it.</p>

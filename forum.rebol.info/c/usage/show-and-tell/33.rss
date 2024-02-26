@@ -5,79 +5,178 @@
     <link>https://forum.rebol.info/c/usage/show-and-tell/33</link>
     <description>Topics in the &#39;Show &amp; Tell&#39; category Created something short and syrupy sweet?  Then post your scripts here; not confined to infinite length one-liners!</description>
     
-      <lastBuildDate>Fri, 08 Dec 2023 02:49:41 +0000</lastBuildDate>
+      <lastBuildDate>Mon, 15 Jan 2024 01:13:20 +0000</lastBuildDate>
       <atom:link href="https://forum.rebol.info/c/usage/show-and-tell/33.rss" rel="self" type="application/rss+xml" />
         <item>
-          <title>Making CALL Raise a (definitional) Error For Bad Exit Codes</title>
+          <title>Reacting to Definitional Errors: CURTAIL</title>
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
           <category>Show &amp; Tell</category>
           <description><![CDATA[
-            <p>Before definitional errors existed, I noticed that <a href="https://forum.rebol.info/t/the-need-to-rethink-error/1371/2">@gchiu had some uses of CALL</a> that weren't checking the return code.</p>
-<pre><code>call [
-    gs -sDEVICE=pngmono -o (join root "-%02d.png") -r600 (pdfname)
+            <p>Here's a simple <a href="https://forum.rebol.info/t/introducing-reframer-close-cousin-to-enclose/1395">REFRAMER</a> called CURTAIL:</p>
+<pre><code>curtail: reframer function [frame [frame!]] [
+    return do frame except e -&gt; [
+        if e.id == 'need-non-null [return void]
+        raise e
+    ]
 ]
+</code></pre>
+<p>If you don't remember what reframers do, they just have access to a function call before you run it.  Here we are looking for the function we're running to give us a NEED-NON-NULL error.</p>
+<p><em>But we're not looking for just any NEED-NON-NULL error that might go by.</em>  We're only interested in ones that are coming out of the call we're processing.  If that happens, we just vaporize the expression.</p>
+<pre><code>&gt;&gt; compose [(null)]
+** Script Error: non-NULL value required (see MAYBE, TRY, REIFY)
 
-call [
-    gs -sDEVICE=eps2write -sPAPERSIZE=a4
-        -o (join root "-%02d.eps") (pdfname)
-]
+&gt;&gt; curtail compose [(null)]  ; will give back void
 </code></pre>
-<p>I wanted the default to raise an error if the <strong>gs</strong> (GhostScript) process did not return a 0 exit code.  But I wanted that error to be a result of CALL... so it would be distinct from other errors (like a typo in the code in the groups inside, <code>pfdname</code> instead of <code>pdfname</code> or whatever).</p>
-<p><code>CALL</code> was already a wrapper on top of an internal <code>CALL*</code> function, so I thought "why not expand upon that?"</p>
-<h2>
-<a name="a-cool-enclose-of-an-augment-of-a-specialize-1" class="anchor" href="https://forum.rebol.info#a-cool-enclose-of-an-augment-of-a-specialize-1"></a>A Cool ENCLOSE of an AUGMENT of a SPECIALIZE!</h2>
-<pre><code>call: enclose (
-    augment (specialize :call* [wait: #]) [
-        /relax "If exit code is non-zero, return the integer vs. raising error"
-    ]
-) func [f [frame!]] [
-    let relax: f.relax
-    let result: do f
-    if relax or (result = 0) [
-        return result
-    ]
-    return raise make error! compose [
-        message: ["Process returned non-zero exit code:" exit-code]
-        exit-code: (result)
-    ]
-]
+<p>You can see something like this simplifying null checks:</p>
+<pre><code>&gt;&gt; ver: 1.2.3
+&gt;&gt; date: null
+
+&gt;&gt; print [curtail spaced ["Version:" ver] curtail spaced ["Date:" date]]
+Version: 1.2.3
 </code></pre>
-<p>I think that's pretty neat.</p>
-<p>It twists the CALL* function so that it always waits (vs. spawn a separate process and return a process ID to wait on).</p>
-<p>Then it offers a /RELAX setting for getting the exit code back, if you don't want the definitional error behavior.</p>
-<p>But then, by default it will RAISE an error.   You can get that error via EXCEPT or you can do TRY CALL if you just want to ignore any errors.</p>
-<h2>
-<a name="issue-exposed-whos-actually-to-blame-2" class="anchor" href="https://forum.rebol.info#issue-exposed-whos-actually-to-blame-2"></a>Issue Exposed: Who's Actually To Blame?</h2>
-<p>While making this I noticed that there were actually several points of failure:</p>
-<ul>
-<li>
-<p>The guts of CALL might not be able to find the file you're asking to execute</p>
-</li>
-<li>
-<p>The executable may run, but return a non-zero exit code</p>
-</li>
-<li>
-<p>If you're running through CALL/SHELL and delegating to it to call a process, then the shell may have its own exit status distinct from the process you tried to call</p>
-</li>
-</ul>
-<p>It seems there's not really any great way to untangle the return results of a shell from that of a process it executes.  <a href="https://en.wikipedia.org/wiki/Exit_status">Here's some of the informal conventions of UNIX shells</a>:</p>
-<blockquote>
-<p><em>"When a command is terminated by a signal whose number is N, a shell sets the variable $? to a value greater than 128. Most shells use 128+N, while ksh93 uses 256+N."</em></p>
-<p><em>"If a command is not found, the shell should return a status of 127. If a command is found but is not executable, the return status should be 126."</em></p>
-</blockquote>
-<p>So I'm a little shaky on what exactly a TRY CALL should be ignoring.  It's one thing to ignore a program's exit status, and another to ignore whether the program was on disk at all.</p>
-<p>TAKE of a BLOCK only has a definitional failure when the block is empty, so you know what TRY TAKE means.  But it may be that you should more or less never say TRY CALL, and always specifically handle the errors that arise from it.  I think this may be a common theme of definitional errors coming out of complicated functions which have more than a single way to fail.</p>
-<p>But... in any case, it's progress.  Because we're not conflating typos or other incidental errors to those that are coming from CALL.  And I like the default that it has an error on non-zero exit statuses.</p>
+<p><em>But like I said, it's not just any NEED-NON-NULL...</em></p>
+<pre><code>&gt;&gt; a: 1 b: null c: 3
+&gt;&gt; get-ver: func [] [to tuple! reduce [a b c]]
+
+&gt;&gt; print [curtail spaced ["Version:" get-ver] curtail spaced ["Date:" date]]
+** Script Error: non-NULL value required (see MAYBE, TRY, REIFY)
+</code></pre>
             <p><small>1 post - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/making-call-raise-a-definitional-error-for-bad-exit-codes/2068">Read full topic</a></p>
+            <p><a href="https://forum.rebol.info/t/reacting-to-definitional-errors-curtail/2118">Read full topic</a></p>
           ]]></description>
-          <link>https://forum.rebol.info/t/making-call-raise-a-definitional-error-for-bad-exit-codes/2068</link>
-          <pubDate>Fri, 08 Dec 2023 02:49:41 +0000</pubDate>
+          <link>https://forum.rebol.info/t/reacting-to-definitional-errors-curtail/2118</link>
+          <pubDate>Mon, 15 Jan 2024 01:13:20 +0000</pubDate>
           <discourse:topicPinned>No</discourse:topicPinned>
           <discourse:topicClosed>No</discourse:topicClosed>
           <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-2068</guid>
-          <source url="https://forum.rebol.info/t/making-call-raise-a-definitional-error-for-bad-exit-codes/2068.rss">Making CALL Raise a (definitional) Error For Bad Exit Codes</source>
+          <guid isPermaLink="false">forum.rebol.info-topic-2118</guid>
+          <source url="https://forum.rebol.info/t/reacting-to-definitional-errors-curtail/2118.rss">Reacting to Definitional Errors: CURTAIL</source>
+        </item>
+        <item>
+          <title>Variant Of &quot;COLLECT&quot; Without &quot;KEEP&quot;</title>
+          <dc:creator><![CDATA[no-e-in]]></dc:creator>
+          <category>Show &amp; Tell</category>
+          <description><![CDATA[
+            <p>I recently discovered a version of COLLECT by Brett Handley (for R2) that is less general <em>[<a href="https://forum.rebol.info/t/implementing-collect-keep/2099">than what COLLECT has been come to be known as</a>]</em> but avoids nested code.</p>
+<pre><code>collect: func [
+    {Collects block evaluations, use as body in For, Repeat, etc.}
+    block [block!] "Block to evaluate."
+    /initial result [series! datatype!] "Initialise the result."
+    /only "Inserts into result using Only refinement."
+] [
+    if not initial [result: block!]
+    result: any [all [datatype? result make result 1000] result]
+    reduce ['head pick [insert insert/only] not only 'tail result to paren! block]
+]
+</code></pre>
+<p>Examples (running in Rebol2 interpreter):</p>
+<pre><code>&gt;&gt; for i 1 10 2 collect [i * 10]
+== [10 30 50 70 90]
+    
+&gt;&gt; foreach [a b] [1 2 3 4] collect [a + b]
+== [3 7]
+
+&gt;&gt; foreach w [a b c d] collect [w]
+== [a b c d]
+
+&gt;&gt; repeat e [a b c %.txt] collect/initial [e] %file
+== %fileabc.txt
+
+&gt;&gt; iota: func [n [integer!]][repeat i n collect/initial [i] make block! n]
+&gt;&gt; iota 10
+== [1 2 3 4 5 6 7 8 9 10]
+</code></pre>
+            <p><small>6 posts - 3 participants</small></p>
+            <p><a href="https://forum.rebol.info/t/variant-of-collect-without-keep/2110">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/variant-of-collect-without-keep/2110</link>
+          <pubDate>Thu, 11 Jan 2024 10:05:58 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2110</guid>
+          <source url="https://forum.rebol.info/t/variant-of-collect-without-keep/2110.rss">Variant Of &quot;COLLECT&quot; Without &quot;KEEP&quot;</source>
+        </item>
+        <item>
+          <title>Implementing COLLECT + KEEP</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Show &amp; Tell</category>
+          <description><![CDATA[
+            <p>COLLECT allows you to build up a block, without needing to name the block or pass it as a parameter to individual APPEND instructions.  Instead you use KEEP, which appends to the implicit nameless block:</p>
+<pre><code>&gt;&gt; collect [
+       keep 'foo:
+       print "Arbitrary code possible"
+       keep/line [1 2 3]
+       keep spread [Spread #works @(T O O)]
+       repeat 2 [keep &lt;whatever&gt;]
+    ]
+Arbitrary code possible
+== [
+    foo: [1 2 3]
+    Spread #works @(T O O) &lt;whatever&gt; &lt;whatever&gt;]
+</code></pre>
+<h2>
+<a name="leverages-lambda-to-bind-keep-to-code-1" class="anchor" href="https://forum.rebol.info#leverages-lambda-to-bind-keep-to-code-1"></a>Leverages LAMBDA To Bind KEEP To Code</h2>
+<p>The trick is that the body is turned into a function that takes KEEP as a parameter.  This defines the word KEEP for the body.</p>
+<p>To see how this works, imagine this:</p>
+<pre><code>collector: lambda [keep [action?]] [
+    keep 'foo:
+    print "Arbitrary code possible"
+    keep/line [1 2 3]
+    keep spread [Spread #works @(T O O)]
+    repeat 2 [keep &lt;whatever&gt;]
+ ]
+
+ block: copy []
+ keeper: specialize :append [series: block]
+
+ collector :keeper
+</code></pre>
+<p>This code gets the desired result in BLOCK.</p>
+<h2>
+<a name="slight-twist-make-keep-return-its-input-2" class="anchor" href="https://forum.rebol.info#slight-twist-make-keep-return-its-input-2"></a>Slight Twist: Make KEEP Return Its Input</h2>
+<p>APPEND will return the block that you append to.  This would reveal the partially-built temporary block before the collect is complete.  A better and more useful result of KEEP would be to return the value that you pass it.</p>
+<p>To accomplish that, we can ENCLOSE the specialization:</p>
+<pre><code>keeper: enclose (specialize :append [series: block]) func [f [frame!]] [
+    let value: f.value
+    do f
+    return value
+]
+</code></pre>
+<p>We have to capture the value to append before we DO the captured FRAME!, because Rebol functions are permitted to make arbitrary modifications to their arguments during execution.  <em>(To help avoid mistakes, you are not allowed to read a frame's values after a DO is complete.)</em>  It's possible to DO COPY F but that makes a copy of the entire frame, and here we just copy the value we want.</p>
+<p>A more efficient way to do this is to use a LAMBDA for the wrapper function, and ELIDE the DO.  There's no need to type check F (since ENCLOSE only passes the FRAME! built for APPEND, never anything else):</p>
+<pre><code>keeper: enclose (specialize :append [series: block]) lambda [f] [
+    f.value
+    elide do f  ; evaluates to anti-isotope of 0 length block, vanishes
+]
+</code></pre>
+<h2>
+<a name="putting-it-together-3" class="anchor" href="https://forum.rebol.info#putting-it-together-3"></a>Putting It Together</h2>
+<p>Wrapping this up for a working COLLECT implementation:</p>
+<pre><code>collect: func [
+    return: [block!]
+    body [block!]
+][
+    let block: copy []
+    let keeper: enclose (specialize :append [series: block]) lambda [f] [
+        f.value
+        elide do f
+    ]
+    run (lambda [keep] body) :keeper
+    return block
+]
+</code></pre>
+<p>It's a good demonstration of how you can make something impressive that feels like a first-class language feature out of Rebol, with little effort.</p>
+            <p><small>2 posts - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/implementing-collect-keep/2099">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/implementing-collect-keep/2099</link>
+          <pubDate>Wed, 10 Jan 2024 17:20:00 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2099</guid>
+          <source url="https://forum.rebol.info/t/implementing-collect-keep/2099.rss">Implementing COLLECT + KEEP</source>
         </item>
         <item>
           <title>Skinning REPLACE with Red&#39;s String PARSE Hack</title>
@@ -404,6 +503,76 @@ call [
           <source url="https://forum.rebol.info/t/enter-the-dungeon-if-you-dare/1865.rss">Enter the Dungeon 💀 ...if You Dare!</source>
         </item>
         <item>
+          <title>The CIRCLED Dialect: Example of the Form</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Show &amp; Tell</category>
+          <description><![CDATA[
+            <p>I was looking at this from the emscripten config file:</p>
+<pre><code> ; Right now, either #web or #node (someday #wasm-edge ?)
+ ;
+ javascript-environment: #web
+</code></pre>
+<p>And I thought to myself: well that's kind of ugly.  The comment is having to list things that would be more obviously shown by just demonstrating the options:</p>
+<pre><code>javascript-environment: circled [(#web) #node]
+</code></pre>
+<p>It could default to NULL if you circled nothing, but you could use MUST to suggest people needed to select something:</p>
+<pre><code>&gt;&gt; number: must circled [#one #two #three]
+** Error: MUST requires argument not to be NULL
+</code></pre>
+<h2>
+<a name="its-almost-too-easy-1" class="anchor" href="https://forum.rebol.info#its-almost-too-easy-1"></a>It's Almost <em>Too</em> Easy</h2>
+<p>When it's this easy, who wouldn't whip such things up?</p>
+<pre><code>circled: lambda [block [block!] &lt;local&gt; result] [
+    parse block [
+        result: try thru subparse group! [
+            &lt;any&gt; &lt;end&gt; | (fail "Circled Items Must Be Singular")
+        ]
+        try [thru group! (fail "Only One Circle")]
+        accept (result)
+    ]
+]
+
+&gt;&gt; circled [a (b) c]
+== b
+
+&gt;&gt; circled [a b c]
+; null
+
+&gt;&gt; circled [a (b c)]
+** Error: Circled Items Must Be Singular
+
+&gt;&gt; circled [(a) b (c)]
+** Error: Only One Circle
+</code></pre>
+<p>Remarkable plasticity, and I want to see these weapons come to the code golfing field <a href="https://www.youtube.com/watch?v=iDKaz1iB9wQ">once they are adequately Rebmooshed</a>.  <img src="https://forum.rebol.info/images/emoji/twitter/slight_smile.png?v=12" title=":slight_smile:" class="emoji" alt=":slight_smile:" loading="lazy" width="20" height="20"></p>
+<hr>
+<p>This example tipped the balance to where I decided that matching <strong><code>&lt;end&gt;</code></strong> should be invisible.  Because I wanted a way to synthesize the result while doing the end match.  Writing <strong><code>elide &lt;end&gt;</code></strong> is possible, but there's essentially no cases in practice where you don't want to elide the end.</p>
+<pre><code> &gt;&gt; parse [1 2] ['1 &lt;end&gt; | (fail "Not a 1 followed by the end")]
+ ** Error: Not a 1 followed by the end
+
+ &gt;&gt; parse [1] ['1 &lt;end&gt; | (fail "Not a 1 followed by the end")]
+ == 1
+</code></pre>
+<p>The previous result was evaluating the <code>&lt;end&gt;</code> to the input position at that moment of being at the end--so effectively a series at its tail:</p>
+<pre><code> &gt;&gt; parse [1] ['1 &lt;end&gt;]
+ == []  ; old behavior...how often would you want this?
+</code></pre>
+<p>If that's what you actually want (which no one ever did) you can can say <strong><code>&lt;end&gt; &lt;here&gt;</code></strong>.</p>
+<pre><code> &gt;&gt; parse [1] ['1 &lt;end&gt; &lt;here&gt;]
+ == []
+</code></pre>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/the-circled-dialect-example-of-the-form/1849">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/the-circled-dialect-example-of-the-form/1849</link>
+          <pubDate>Sun, 26 Jun 2022 12:06:47 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-1849</guid>
+          <source url="https://forum.rebol.info/t/the-circled-dialect-example-of-the-form/1849.rss">The CIRCLED Dialect: Example of the Form</source>
+        </item>
+        <item>
           <title>Parsing a README.md File To Fill A Folder</title>
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
           <category>Show &amp; Tell</category>
@@ -655,88 +824,6 @@ uparse transdialect [
           <source url="https://forum.rebol.info/t/prettier-tls-state-tables-and-assessing-the-cost/1736.rss">Prettier TLS State Tables (and Assessing the Cost)</source>
         </item>
         <item>
-          <title>Taking Advantage of DELIMIT&#39;s BLOCK! Behavior and GET-BLOCK!</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Show &amp; Tell</category>
-          <description><![CDATA[
-            <p>I finally put my foot down and said that BLOCK! in DELIMIT has the behavior of <em><strong>don't evaluate, just squoosh everything together.</strong></em></p>
-<pre><code>&gt;&gt; spaced ["abc" [d e "f"] "ghi"]
-== "abc def ghi"
-</code></pre>
-<p>You can always REDUCE if you want evaluations, but there's also GET-BLOCK!...</p>
-<pre><code>&gt;&gt; spaced ["abc" :["something" 1 + 2] "ghi"]
-== "abc something3 ghi"
-</code></pre>
-<p>And with the magic of GET-BLOCK! branches, you can even opt in or out of these things!  Don't forget to use COMMA! if you think it will look better...</p>
-<pre><code>&gt;&gt; spaced ["abc" if true :["something" 1 + 2] "ghi"]
-== "abc something3 ghi"
-
-&gt;&gt; spaced ["abc", if false :["something" 1 + 2], "ghi"]
-== "abc ghi"
-</code></pre>
-<h2>Let's Look At What Old Code Had To Do</h2>
-<p>Here's some code for making a log file name from pieces in the tests:</p>
-<pre><code>log-file: log-file-prefix
-
-if code-checksum [
-    append log-file "_"
-    append log-file copy/part skip mold code-checksum 2 6
-]
-
-append log-file "_"
-append log-file copy/part skip mold test-checksum 2 6
-
-append log-file ".log"
-log-file: clean-path log-file
-</code></pre>
-<p>How about we tidy that up?</p>
-<h2>Here Is What We Can Confidently Write In The New Way</h2>
-<pre><code>log-file: clean-path unspaced [
-    log-file-prefix
-        if code-checksum :["_", copy/part (skip mold code-checksum 2) 6]
-        "_", copy/part (skip mold test-checksum 2) 6, ".log"
-]
-</code></pre>
-<p><strong>Not only is it cleaner, it's more efficient!</strong>  This lets us build as we go along, without having to keep expanding string memory on each APPEND...fewer function calls.  It's better all around!</p>
-<p>I think we can make a JOIN using the "REPEND" replacement optimization equally efficient:</p>
-<pre><code>log-file: clean-path join log-file-prefix :[
-    if code-checksum :["_", copy/part (skip mold code-checksum 2) 6]
-    "_", copy/part (skip mold test-checksum 2) 6, ".log"
-]
-</code></pre>
-<h2>It Could Be Even More Efficient, If We Wanted...</h2>
-<p>Given the GET-BLOCK! optimizations, a minor tweak could boost things:</p>
-<pre><code>log-file: clean-path unspaced [
-    log-file-prefix
-        if code-checksum ':["_", copy/part (skip mold code-checksum 2) 6]
-        "_", copy/part (skip mold test-checksum 2) 6, ".log"
-]
-</code></pre>
-<p>It's a subtle difference, but we're having the IF statement evaluate to a GET-BLOCK!...instead of having a branch that evaluates a GET-BLOCK! to make a block.</p>
-<p>We can make DELIMIT evaluate get-blocks as it goes, folding them into the output without generating intermediate series...much like REPEND.</p>
-<p>This could be a little wild, in terms of performing evaluations when you didn't intend them:</p>
-<pre><code>data: [a b c :[format hard drive]]
-
-...
-
-for-each item data [
-    print ["The value is" data]
-]
-</code></pre>
-<p>But that's really just the tip of the iceberg on how many ways the system is not safe against injection attacks.  But if you're working in a secure situation, you could use a guarded layer whenever dealing with external data, to limit execution.  I think that concept (which I have called "Build Your Own Safety") is likely what people who want to use the language in more secure scenarios would have to do.</p>
-<p>(After all, even the most secure programs have to at some point run on an "insecure" CPU.  A flexible and fast Ren-C could be the basis for designing a more secure language on top of it...)</p>
-            <p><small>1 post - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/taking-advantage-of-delimits-block-behavior-and-get-block/1679">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/taking-advantage-of-delimits-block-behavior-and-get-block/1679</link>
-          <pubDate>Mon, 23 Aug 2021 01:10:45 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-1679</guid>
-          <source url="https://forum.rebol.info/t/taking-advantage-of-delimits-block-behavior-and-get-block/1679.rss">Taking Advantage of DELIMIT&#39;s BLOCK! Behavior and GET-BLOCK!</source>
-        </item>
-        <item>
           <title>Isotopic WORD!s For More Informative States in TLS</title>
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
           <category>Show &amp; Tell</category>
@@ -960,6 +1047,89 @@ unset in ctx 'server-iv
           <source url="https://forum.rebol.info/t/a-lot-to-unpack-replacing-the-set-of-reduce-block-idiom/1634.rss">A Lot To UNPACK: (Replacing the SET of REDUCE BLOCK! Idiom)</source>
         </item>
         <item>
+          <title>UPARSE Case Study: Escaping In Strings</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Show &amp; Tell</category>
+          <description><![CDATA[
+            <p>I wanted to make a REWORD variation that would look for escaped parts of strings and extract them as words.  So:</p>
+<pre><code>Input: "abc$(def)ghi"
+Output: ["abc" def "ghi"]
+</code></pre>
+<p>It's a common-seeming and not entirely trivial task.  The first thing I came up with is a bit convoluted...perhaps because I tried to not repeat the "$(" and ")" strings in the rule:</p>
+<pre><code>parse text [
+    collect [
+        try some [
+            not &lt;end&gt;
+            (capturing: false)
+            try keep between &lt;here&gt; ["$(" (capturing: true) | &lt;end&gt;]
+            :(if capturing '[
+                let inner: between &lt;here&gt; ")"
+                keep (as word! inner)
+            ])
+        ]
+    ]
+]
+</code></pre>
+<p>It basically alternates between a capturing mode and a non-capturing mode.  It decides if it needs to run a capture mode with a variable.</p>
+<p>It has to throw in a <a href="https://forum.rebol.info/t/any-vs-while-and-not-end/1572"><code>NOT &lt;END&gt;</code> for reasons I explain in another post</a>.  Because it's running alternating rules that may both opt out.</p>
+<p>I use a GET-GROUP! spliced conditional rule, as UPARSE doesn't have any loop-interrupting constructs yet.  So you can't say "Stop running this rule, but consider it to have matched."  There's only LOGIC! of #[false] which means what FAIL used to mean...e.g. the overall rule did not match (so any collected material would be forgotten).</p>
+<p>Since it can't break out of the rule and report success, it has to have a way to skip over a rule.  So the rule for capturing inside the parentheses conditions itself out with an IF statement and a generated rule.  I could have instead written that as an alternate rule, where if <code>not capturing</code> was true it would bypass normal code:</p>
+<pre><code>parse text [
+    collect [
+        try some [
+            not &lt;end&gt;
+            (capturing: false)
+            try keep between &lt;here&gt; ["$(" (capturing: true) | &lt;end&gt;]
+            [:(not capturing) |
+                let inner: between &lt;here&gt; ")"
+                keep (as word! inner)
+            ]
+        ]
+    ]
+]
+</code></pre>
+<p>That feels more convoluted to me because of the inverse logic of the NOT, though.</p>
+<p>It produces more empty strings than I would like:</p>
+<pre><code>Input: "$(abc)$(def)$(ghi)"
+Output: ["" abc "" def "" ghi]
+</code></pre>
+<p>It would technically be possible for a rule like BETWEEN to succeed and give a NULL result if there were no content, instead of an empty string:</p>
+<pre><code>&gt;&gt; parse "()" [between "(" ")"]
+== ~null~  ; anti
+</code></pre>
+<p>But this then means you can't get a good distinction of what happened in the case of an optional rule.</p>
+<pre><code>&gt;&gt; parse "" [try between "(" ")"]
+== ~null~   ; anti...so were there parentheses or not?
+</code></pre>
+<p>So I guess it's another situation where if you want to filter out the empty strings, you have to capture into a variable and filter it.</p>
+<p><strong>I think UPARSE helps out here...but it's not quite the slam dunk I'd hope for.</strong></p>
+<p>Because it has two rules that may both opt themselves out, it's a thought piece for asking if the NOT END makes sense with TRY SOME.  Or is it better off baking that into the TRY SOME rule and having another construct?  Intuitively I feel like the tax of having two slightly different versions and explaining the use of one vs. the other is worse than just having the more general construct.</p>
+<p>If there were a loop-ending construct that indicated the overall rule was a success (e.g. didn't discard the KEEPs), then we might avoid the capturing flag:</p>
+<pre><code>uparse text [
+    collect [
+        try some [
+            try keep between &lt;here&gt; ["$(" | &lt;end&gt;]
+            [&lt;end&gt; break |
+                let inner: between &lt;here&gt; ")"
+                keep (as word! inner)
+            ]
+        ]
+    ]
+]
+</code></pre>
+<p>But I don't know if BREAK is the right name for a loop-accepting operation (as in DO's while this typically causes most loop operations to return NULL).  So I'd think it would perhaps discard anything kept.  Perhaps STOP would be more consistent, and it could be value-bearing as well (<strong>stop (...)</strong>)</p>
+            <p><small>2 posts - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/uparse-case-study-escaping-in-strings/1573">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/uparse-case-study-escaping-in-strings/1573</link>
+          <pubDate>Sat, 27 Mar 2021 13:44:38 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-1573</guid>
+          <source url="https://forum.rebol.info/t/uparse-case-study-escaping-in-strings/1573.rss">UPARSE Case Study: Escaping In Strings</source>
+        </item>
+        <item>
           <title>Weird Idiom: Labeling Values?</title>
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
           <category>Show &amp; Tell</category>
@@ -994,172 +1164,6 @@ unset in ctx 'server-iv
           <discourse:topicArchived>No</discourse:topicArchived>
           <guid isPermaLink="false">forum.rebol.info-topic-1500</guid>
           <source url="https://forum.rebol.info/t/weird-idiom-labeling-values/1500.rss">Weird Idiom: Labeling Values?</source>
-        </item>
-        <item>
-          <title>Resurrecting REDBOL-APPLY via Type Exposure</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Show &amp; Tell</category>
-          <description><![CDATA[
-            <p>At one point, I had a simulation of the Rebol2/R3-Alpha APPLY working...all written in usermode code.</p>
-<p>As a refresher: this concept of APPLY required you to line up things positionally--even refinements.  You had to look at the parameter order on the interface, and put "truthy" things in the refinement slots you wanted to enable.  Then if the refinement took argument(s), you would have to put that in the next slot.</p>
-<p>So for R3-Alpha's APPEND, the ordered spec is:</p>
-<pre><code>APPEND series value /part length /only /dup count
-</code></pre>
-<p>Let's say you wanted to do something equivalent to <strong>append/part/dup [a b c] [d e f] 2 3</strong>.  You would write:</p>
-<pre><code>r3-alpha&gt;&gt; apply :append [[a b c] [d e f] true 2 false true 3]
-== [a b c d e d e d e]
-</code></pre>
-<p>Here the first TRUE is to say we want to use the /PART...then the length of 2.  Then a FALSE to say we don't want /ONLY.  And then another TRUE to say we want /DUP, with the count as 3.</p>
-<p>It's fairly convoluted, and brittle with respect to rearrangement.  But it offers you the benefit of being able to calculate whether you want to provide a refinement or not.  The block is reduced by default (with an /ONLY option to ask that it not be).</p>
-<p>In the early days of frames, I thought it would be a good test to see if this exact function could be emulated by processing the block... building a FRAME!, and then DO'ing it.  So REDBOL-APPLY was written and added to the tests.</p>
-<h2>Then Ren-C Became <a href="https://forum.rebol.info/t/pure-and-refined-simplifying-refinements-to-one-or-zero-args/1120">Pure and Refined</a>...</h2>
-<p>With the great improvement of refinements becoming their own arguments, came a new puzzle from an interface perspective.  Where it had used to say things like:</p>
-<pre><code>ren-c-before&gt;&gt; parameters of :append
-== [series value /part length /only /dup count]
-</code></pre>
-<p>It would now say:</p>
-<pre><code>ren-c-after&gt;&gt; parameters of :append
-== [series value /part /only /dup]
-</code></pre>
-<p>You might notice a piece of information gets lost there: <strong>which refinements take arguments at the callsite, vs. which ones don't</strong>.  Here the /ONLY looks just like the /PART and /DUP.  If you're going to have a REDBOL-APPLY that splits out the refinement on/off from the argument, you have to know if there is an argument to fill in.</p>
-<p>I'll emphasize here that <strong>whether or not this particular APPLY primitive is desirable or not isn't the point.</strong>  It's a question of whether there's enough information.  And you have to have more than the parameter list above.</p>
-<p>So one place people might have looked to would be the TYPESETS OF reflector, and maybe check to see if the typeset was empty (?)  But the typeset code was never all that good.</p>
-<h2>Enter The New AS FRAME! Aliasing Ability</h2>
-<p>I only just pushed this a bit forward, so it's not stable yet.  But it was enough to get REDBOL-APPLY working.  Here's what the frame alias of APPEND looks like:</p>
-<pre><code>&gt;&gt; as frame! :append
-== #[frame! {append} [
-    return : [any-series! port! map! object! module! bitset!]:
-    series : [any-series! port! map! object! module! bitset!]
-    value : [&lt;opt&gt; any-value!]
-    part : /[any-number! any-series! pair!]
-    only : /[]
-    dup : /[any-number! pair!]
-    line : /[]
-]]
-</code></pre>
-<p>The keys can't hold the information about whether something is a refinement or quoted or not.  So those attributes are moved onto the BLOCK!.  Here we see that PART, ONLY, DUP, and LINE are refinements...while ONLY and LINE have no specified types.</p>
-<h2>And Here's The First Try That Gets The Tests Passing Again</h2>
-<p>It's big and pokey.  And it trips over the weird parameter compaction a little bit... there's still a lot of questions about how you would take something that could either be <strong>':foo</strong> or <strong>/foo</strong> and extract plain <strong>foo</strong> out of it.  (It's not as obvious as you might think that "to word! should just do that".)</p>
-<p>There's plenty of room for improvement.  But clumsy though it is, it shows some of the non-trivial meta-language behavior that I think can be put in the hands of mere mortals...in that Minecraft-of-programming way.  This really is letting people get intimately involved in the design of their own function generators and control structures...</p>
-<pre><code>redbol-apply: func [
-    return: [&lt;opt&gt; any-value!]
-    action [action!]
-    block [block!]
-    /only
-    &lt;local&gt; types arg key frame params mode
-][
-    types: as frame! :action  ; exemplar of types
-    frame: make frame! :action  ; frame we are building
-    params: parameters of :action  ; ordered list of parameters
-    mode: &lt;normal&gt;
-
-    ; Rebol2 and R3-Alpha APPLY would fill in NONE for any parameters that
-    ; were not provided in the apply block:
-    ;
-    ;     rebol2/r3-alpha&gt;&gt; apply func [a b c] [reduce [a b c]] []
-    ;     == [none none none]
-    ;
-    ; This means we need to enumerate and fill in the frame as long as there
-    ; are parameters--not as long as there are block values.
-    ;
-    while [not tail? params] [
-        case [
-            not block [
-                arg: null  ; could also do BLANK! if no more block data
-            ]
-            only [  ; /ONLY means do not evaluate arguments
-                arg: get/any 'block/1
-                block: next block
-            ]
-            true [  ; evaluate (skipping comments and other invisibles)
-                until .not.quoted? [[block arg]: evaluate block]
-            ]
-        ]
-
-        key: to word! dequote params/1
-        all [
-            refinement? params/1
-            elide if not block [break]  ; done if refinements w/no more block
-            mode = &lt;normal&gt;
-        ] then [
-            mode: if arg [#]  ; set mode to either use or don't use next arg
-            if empty? second pick types key [  ; no-arg refine...
-                set (in frame key) mode  ; ...must be # or NULL
-            ] else [
-                continue  ; keep param on the refinement, get next arg
-            ]
-        ] else [
-            if mode [  ; normal or # case will set
-                set (in frame key) get/any 'arg
-            ]
-        ]
-
-        mode: &lt;normal&gt;
-        params: next params
-    ]
-
-    ; Too many arguments was not a problem for R3-alpha's APPLY, it would
-    ; evaluate them all even if not used by the function.  It may or may not
-    ; be better to have it be an error.
-    ;
-    ; https://github.com/metaeducation/rebol-issues/issues/2237
-    ;
-    comment [
-        all [block, not tail? block] then [
-            fail "Too many arguments passed in REDBOL-APPLY block."
-        ]
-    ]
-
-    do frame
-]</code></pre>
-            <p><small>1 post - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/resurrecting-redbol-apply-via-type-exposure/1474">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/resurrecting-redbol-apply-via-type-exposure/1474</link>
-          <pubDate>Mon, 25 Jan 2021 11:50:41 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-1474</guid>
-          <source url="https://forum.rebol.info/t/resurrecting-redbol-apply-via-type-exposure/1474.rss">Resurrecting REDBOL-APPLY via Type Exposure</source>
-        </item>
-        <item>
-          <title>iframe in replpad-js</title>
-          <dc:creator><![CDATA[okram]]></dc:creator>
-          <category>Show &amp; Tell</category>
-          <description><![CDATA[
-            <p>I was thinking about using rebol to automate some tasks on web applications  have to use regularly. Obviously, replpad-js can leverage the browser (which can take care of cookies, etc.). I want the <code>IFRAME</code> to be resizable and I do not want to use any JS for that.</p>
-<pre><code class="lang-auto">inline-css: function [
-    {Provide default CSS for resizing inline frame}
-][
-    css-do {.replpad-resizer { display:flex; margin:0; padding:0; resize:both; overflow:hidden }
-            .replpad-resizer &gt; .replpad-resized { flex-grow:1; margin:0; padding:0; border:0 }
-            .replpad-border { background:gray; border:1px dashed black; }}
-]
-</code></pre>
-<p>The <code>inline</code> function takes the URL and an id and inserts the <code>IFRAME</code> (maybe it should use the original URL as the id?).</p>
-<pre><code class="lang-auto">inline: function [
-    {Provide a browsing context in the replpad}
-    url [url!]
-    name [text!]
-][
-    replpad-write/html unspaced [
-        &lt;div class="replpad-resizer replpad-border"&gt;
-        {&lt;iframe class="replpad-resized" src="} url {" id="} name {"&gt;&lt;/iframe&gt;}
-        &lt;/div&gt;
-    ]
-]
-</code></pre>
-            <p><small>8 posts - 3 participants</small></p>
-            <p><a href="https://forum.rebol.info/t/iframe-in-replpad-js/1449">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/iframe-in-replpad-js/1449</link>
-          <pubDate>Thu, 31 Dec 2020 19:21:46 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-1449</guid>
-          <source url="https://forum.rebol.info/t/iframe-in-replpad-js/1449.rss">iframe in replpad-js</source>
         </item>
         <item>
           <title>YIELDER and GENERATOR (and thinking about Coroutines)</title>
@@ -1367,7 +1371,7 @@ Odd print: World
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
           <category>Show &amp; Tell</category>
           <description><![CDATA[
-            <p>So, this is somewhat trivial.  But what if you wanted a function that instead of RETURN ending the function, it just added to the results and moved on?  <a href="https://www.youtube.com/watch?v=35qsykW3f58" rel="nofollow noopener">We might call this a COLLECTOR</a>.</p>
+            <p>So, this is somewhat trivial.  But what if you wanted a function that instead of RETURN ending the function, it just added to the results and moved on?  <a href="https://www.youtube.com/watch?v=35qsykW3f58">We might call this a COLLECTOR</a>.</p>
 <p>Let's imagine that we like KEEP better than renaming to RETURN</p>
 <pre><code>collector: func [spec block] [return func spec compose [collect (block)]]
 ; ^-- Ren-C semantics for COMPOSE, BLOCK! only splices if ((...))
@@ -1387,7 +1391,6 @@ c: collector [x] [
 &gt;&gt; c 30
 == [31 32 33]
 </code></pre>
-<p><em>(Note: This is an interesting example of the "what do I do with a BLOCK!, splice by default or not?"  I still find this to be a central question.  I'm pretty confident that differentiating the splice case in COMPOSE visually with <code>((...))</code> is a good move.  But I'm still on the fence about what the bigger story is.  Lately my leaning is that we do have modal parameters, e.g. <code>keep @value</code> will act the same as <code>keep/only value</code>, but plain KEEP has the variance in behavior for blocks that it has today...risky though it is.  People just learn to live with it or use @ or /ONLY habitually.)</em></p>
             <p><small>3 posts - 2 participants</small></p>
             <p><a href="https://forum.rebol.info/t/collector-in-disguise/1277">Read full topic</a></p>
           ]]></description>
@@ -1779,78 +1782,6 @@ Total number of solutions for n = 14 is 365596
           <source url="https://forum.rebol.info/t/8-queens-problem/2071.rss">8 Queens Problem</source>
         </item>
         <item>
-          <title>Multiple Return Values Via Enfix</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Show &amp; Tell</category>
-          <description><![CDATA[
-            <blockquote>
-<p>Note: Before multi-returns had an implementation in the C code of the evaluator, I observed they could be implemented by means of enfix and skippable parameters.  This was that implementation.</p>
-<p>It's still cool to look back at just in terms of the wild things you can prototype!</p>
-</blockquote>
-<hr>
-<p>Imagine you want to make something where it returns the sum of two values and the difference...but only the sum if you aren't using a multi-return.</p>
-<pre><code>sum-and-difference: enfixed func [:left [&lt;skip&gt; set-block!] arg1 arg2] [
-    let sum: arg1 + arg2  ; always returned, only calculate once
-    if set? 'left [
-        switch length of left [
-            1 [  ; we have `[x]: ...` act the same as `x: ...` 
-               set left.1 sum
-            ]
-            2 [  ; only calculate difference for multiple returns
-               set left.1 sum
-               set left.2 arg1 - arg2
-            ]
-            fail "sum-and-difference can only return 1 or 2 values"
-        ]
-    ]
-    return sum
-]
-</code></pre>
-<h2>and presto...</h2>
-<pre><code>&gt;&gt; x: sum-and-difference 20 10
-== 30  ; handled by plain evaluator mechanics
-
-&gt;&gt; [y z]: sum-and-difference 20 10
-== 30  ; handled by the enfix quoting
-
-&gt;&gt; y
-== 30
-
-&gt;&gt; z
-== 10
-</code></pre>
-<p>Notice that adopts the principle that it doesn't actually try to return a BLOCK! with the multiple return values, but only the first value.  But the interesting bit is that when you go about it this way, the convention is not really enforced.</p>
-<h2>What's Wrong With Doing It This Way?</h2>
-<p>A disadvantage of this technique is it means you cannot make enfixed functions that have multiple return values (in the sense they've already used their enfixedness for the purpose of the multiple return value itself).</p>
-<p>That may or may not be bad.  :-/  This offers a lot of flexibility to people for designing how their multiple return values work.</p>
-<ul>
-<li>
-<p>They could decide that blanks mean skip the assignment, so for <strong>[_ z]: sum-and-difference 20 10</strong> it could be decided not to calculate the sum at all, and to return the difference.</p>
-<ul>
-<li>UPDATE: The information is not available in the system multi returns to know about whether the <em>main</em> result was requested or not...only the additional returns.  So the enfix function would have this edge.</li>
-</ul>
-</li>
-<li>
-<p>People who disagree with my philosophy about return the first thing could come up with their own rules...returning blocks that voidify, or maybe even the ability to mark which thing to return like <strong>[y <span class="mention">@z</span>]: sum-and-difference 20 10</strong> could calculate both but return the difference.</p>
-<ul>
-<li>UPDATE: <a href="https://forum.rebol.info/t/circling-multi-returns-choose-which-is-expression-result/1587">This feature exists in modern multi-returns offered by the system!</a>
-</li>
-</ul>
-</li>
-</ul>
-<p>Telling people they are their own boss and can design multi return features however they want is a powerful idea that is a bit unnerving.  Though Rebol has a lot of those.  Truly a strange way of looking at multiple return value mechanics!</p>
-            <p><small>1 post - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/multiple-return-values-via-enfix/1257">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/multiple-return-values-via-enfix/1257</link>
-          <pubDate>Sat, 01 Feb 2020 05:04:04 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-1257</guid>
-          <source url="https://forum.rebol.info/t/multiple-return-values-via-enfix/1257.rss">Multiple Return Values Via Enfix</source>
-        </item>
-        <item>
           <title>Displaying Prime Factors</title>
           <dc:creator><![CDATA[iArnold]]></dc:creator>
           <category>Show &amp; Tell</category>
@@ -1890,133 +1821,6 @@ I needs slight <strong>mod</strong> ification to work on REN-C. And with a bit o
           <discourse:topicArchived>No</discourse:topicArchived>
           <guid isPermaLink="false">forum.rebol.info-topic-2072</guid>
           <source url="https://forum.rebol.info/t/displaying-prime-factors/2072.rss">Displaying Prime Factors</source>
-        </item>
-        <item>
-          <title>Looking into a *usermode* POINTFREE</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Show &amp; Tell</category>
-          <description><![CDATA[
-            <p>The concept of <a href="https://en.wikipedia.org/wiki/Tacit_programming">"Point Free" or "Tacit Programming"</a> is that it's a way of relating functions to each other without mentioning their arguments.</p>
-<p>So instead of writing something like:</p>
-<pre><code> append-to-data: function [value] [append data value]
-</code></pre>
-<p>You'd have some way of avoiding the redundancy of having to say "value" twice.  So imagine declaring an identical function with a syntax like:</p>
-<pre><code> append-to-data: pointfree [append data]
-</code></pre>
-<p>That would notice you didn't provide all the parameters to append, so an implicit parameter to the new function would be added.  But what if you wanted instead something like:</p>
-<pre><code>append-10: function [series] [append series 10]
-</code></pre>
-<p>So maybe you would have some syntax in POINTFREE for that where you put a placeholder in spots that you wanted implicitly picked up.  Maybe BLANK! as a default:</p>
-<pre><code>append-10: pointfree [append _ 10]
-</code></pre>
-<p><em>(Note: The name <strong>pointfree</strong> is deliberately chosen as bad, since it won't be taken for other reasons...and also reinforces the term for Rebol programmers unused to FP concepts.  What I'm actually thinking is that this will be folded into lambda as the behavior when you don't use a block.  So <strong>(-&gt; append _ 10)</strong> for example.)</em></p>
-<blockquote>
-<p><strong>UPDATE:</strong> To eliminate potential accidents, it was unbundled from lambda and uses the similar-but-notably-distinct notation <strong><code>&lt;-</code></strong> now.</p>
-</blockquote>
-<h2>Writing This In Usermode In Historical Rebol Is Non-Trivial</h2>
-<p>If you think writing a reliable POINTFREE yourself would be easy in Rebol2/Red, I would invite you to try.  There's a lot to get right with parameter analysis and ordering refinements; beyond the average user.  It doesn't get much easier if you are coding inside the system, either.</p>
-<p>It would also be noticeably slower, using any method in near-reach.  The only mechanisms would involve creating a whole new function spec, where the evaluator would have to pass parameters to that function...then start evaluating again to make a nested call...type checking all over again.</p>
-<p>Ren-C has several tricks up its sleeve, including a new tool introduced today for writing your own specializations.  That's the ability to MAKE ACTION! out of a FRAME! with some of its parameters filled.  And since you can MAKE FRAME! out of an ACTION!, this provides a convenient round-trip:</p>
-<pre><code>&gt;&gt; data: [a b c]
-
-&gt;&gt; f: make frame! :append
-&gt;&gt; f/series: data
-
-&gt;&gt; apd: make action! f
-&gt;&gt; apd [d e f]
-
-&gt;&gt; data
-== [a b c d e f]
-</code></pre>
-<p>There's also a great convenience afforded by Ren-C's smart specialization handling.  Consider:</p>
-<pre><code>&gt;&gt; parameters of :append
-== [series value /part /only /dup /line]
-
-&gt;&gt; apdup: :append/dup
-
-&gt;&gt; parameters of :apdup
-== [series value dup /part /only /line]
-</code></pre>
-<p>So if you have someone writing <strong>pointfree [append/dup ...]</strong> you don't worry...just GET the PATH!, and the function you are handed back doesn't even report DUP as a refinement.  It's a normal parameter now.</p>
-<p>There's also more unlocked by the idea of <a href="https://forum.rebol.info/t/pure-and-refined-simplifying-refinements-to-one-or-zero-args/1120">refinements naming their 0-or-1 arguments</a>.  We've seen it open doors with <a href="https://forum.rebol.info/t/augment-add-parameters-and-refinements-after-the-fact/1216">AUGMENT</a>, but it helps here and elsewhere.</p>
-<h2>A Start on the Vision of POINTFREE</h2>
-<p>This usermode implementation is incomplete and raises some issues (including that I'm not totally thrilled with the <span class="mention">@var</span> skippable syntax in EVALUATE).</p>
-<p>But it shows relatively little code taking care of some rather complex acrobatics.  I'd hope it wouldn't be too far beyond the reach of a novice to write:</p>
-<pre><code>pointfree: func [
-    {Specialize by example: https://en.wikipedia.org/wiki/Tacit_programming}
-
-    return: [action!]
-    block [block!]
-][
-    let action: (match action! any [
-        if match [word! path!] :block/1 [get block/1]
-        :block/1
-    ]) else [
-        fail "POINTFREE requires ACTION! argument at head of block"
-    ]
-    block: next block  ; rest of block is invocation by example
-
-    ; If we did a GET of a PATH! it will come back as a partially specialized
-    ; function, where the refinements are reported as normal args at the
-    ; right spot in the evaluation order.  (e.g. GET 'APPEND/DUP returns a
-    ; function where DUP is a plain WORD! parameter in the third spot).
-    ;
-    ; We prune out any unused refinements for convenience.
-    ;
-    let params: map-each w parameters of :action [
-        match [word! lit-word! get-word!] w  ; !!! what about skippable params?
-    ]
-
-    let frame: make frame! :action  ; all frame fields default to NULL
-
-    ; Step through the block we are given--first looking to see if there is
-    ; a BLANK! in the slot where a parameter was accepted.  If it is blank,
-    ; then leave the parameter null in the frame.  Otherwise take one step
-    ; of evaluation or literal (as appropriate) and put the parameter in the
-    ; frame slot.
-    ;
-    let var
-    iterate params [
-        case [
-            blank? :block/1 [block: next block]
-
-            word? params/1 [
-                if not block: evaluate @var block [
-                    break  ; ran out of args, assume remaining unspecialized
-                ]
-                frame/(params/1): :var
-            ]
-            
-            all [
-                lit-word? params/1
-                match [group! get-word! get-path!] :block/1
-            ][
-                frame/(params/1): reeval :block/1
-                block: next block
-            ]
-
-            default [  ; hard literal argument or non-escaped soft literal
-                frame/(params/1): :block/1
-                block: next block
-            ]
-        ]
-    ]
-
-    ; We now create an action out of the frame.  NULL parameters are taken as
-    ; being unspecialized and gathered at the callsite.
-    ;
-    return make action! :frame
-]</code></pre>
-            <p><small>8 posts - 4 participants</small></p>
-            <p><a href="https://forum.rebol.info/t/looking-into-a-usermode-pointfree/1236">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/looking-into-a-usermode-pointfree/1236</link>
-          <pubDate>Wed, 30 Oct 2019 13:38:19 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-1236</guid>
-          <source url="https://forum.rebol.info/t/looking-into-a-usermode-pointfree/1236.rss">Looking into a *usermode* POINTFREE</source>
         </item>
         <item>
           <title>Stylistic Questions and Soft-Quoted Branching</title>
@@ -2103,6 +1907,63 @@ I needs slight <strong>mod</strong> ification to work on REN-C. And with a bit o
           <discourse:topicArchived>No</discourse:topicArchived>
           <guid isPermaLink="false">forum.rebol.info-topic-1220</guid>
           <source url="https://forum.rebol.info/t/stylistic-questions-and-soft-quoted-branching/1220.rss">Stylistic Questions and Soft-Quoted Branching</source>
+        </item>
+        <item>
+          <title>Compatibility MAP-EACH (and problems therewith)</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Show &amp; Tell</category>
+          <description><![CDATA[
+            <p>In trying to make a shim where MAP-EACH splices and has /ONLY, I thought the easiest way of doing it might be to redo it in terms of a COLLECT of a FOR-EACH.</p>
+<p>This delves some into the ambition of Ren-C to raise the bar for Rebol, so it raises some questions.  First, let's try a naive approach:</p>
+<pre><code>map-each: function [
+    {https://forum.rebol.info/t/1155}
+    return: [block!]
+    'vars [blank! word! block!]
+    data [any-series! any-path! action!]
+    body [block!]
+    /only
+][
+    collect [
+        for-each :vars :data [
+            keep/(only) do body
+        ]
+    ]
+]
+</code></pre>
+<p>One reason this won't work correctly is because BODY is executed via a "link" of DO instead of being embedded into the body of the FOR-EACH.  That means it won't bind to the VARS variables.  And in a definitional-break-and-continue world (which I've been considering) it won't have words like CONTINUE or BREAK bound.</p>
+<p>We can address that by embedding the code in, let's say we just put it in as a GROUP!</p>
+<pre><code>    collect [
+        for-each :vars :data compose [
+            keep/(only) (as group! body)  ; only inside path, not a compose/deep
+        ]
+    ]
+</code></pre>
+<p>This simple implementation supplements the body of the MAP-EACH with additional code.  It does it by composing in the body code as a GROUP!, so that it will pick up any bindings the FOR-EACH would add.</p>
+<p>Fair enough, but it has a couple of problems.  One problem: what if I said <strong>map-each keep [1 2 3] [...]</strong>?  :-/  Our supplemental body adds code that the user doesn't see at the callsite, so they don't know to avoid usage of words that are in that supplemental body for their loop variables.  This gets worse the more supplemental code you have.</p>
+<h2>I think we need to expose something lower-level than FOR-EACH</h2>
+<p>Really it seems like what you need here is a tool that lets you set up whatever binding object a loop is going to use, gives you a chance to bind code to that object, then lets you run the iteration independent of binding.  Something like:</p>
+<pre><code>    collect [
+        [context looper]: make-loop-stuff :vars :data
+        bind body context
+        while [looper] [
+            keep/(only) do body
+        ]
+    ]
+</code></pre>
+<p>The imagined MAKE-LOOP-STUFF would give you two things back: a context to bind any code into that you wanted to see the changes to variables in, and a function you could call that would update the values of those variables as long as there was more data.</p>
+<h2>....Just another epicycle of the binding problems...</h2>
+<p>Binding in Rebol will always be Rube-Goldberg-like, and so the question is how to maximize the fun and minimize the annoyance, while still getting decent performance.  I think if people can think of FOR-EACH as a higher level "macro" which makes a lot of assumptions in order to be ergonomic, they can realize that writing their own loop is going to involve digging deeper.</p>
+<p>Something like the pattern above could be used to implement FOR-EACH, MAP-EACH, or REMOVE-EACH...though they could retain their native optimized versions.  There's still worries about mutating the bindings on passed-in code (the <strong>bind body context</strong> above) so a "good" answer would be something like <strong>body: in context body</strong> where that was understood to not modify the original, but give a rebound "view" at a lower cost.</p>
+            <p><small>5 posts - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/compatibility-map-each-and-problems-therewith/1192">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/compatibility-map-each-and-problems-therewith/1192</link>
+          <pubDate>Fri, 09 Aug 2019 19:21:38 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-1192</guid>
+          <source url="https://forum.rebol.info/t/compatibility-map-each-and-problems-therewith/1192.rss">Compatibility MAP-EACH (and problems therewith)</source>
         </item>
   </channel>
 </rss>

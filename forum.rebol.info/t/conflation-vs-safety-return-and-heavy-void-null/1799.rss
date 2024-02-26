@@ -1,0 +1,417 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Conflation vs. Safety, RETURN and &quot;Heavy&quot; Void/Null</title>
+    <link>https://forum.rebol.info/t/conflation-vs-safety-return-and-heavy-void-null/1799</link>
+    <description>&quot;Heavy&quot; void and null are a novel solution shaped to solve a specific problem.  As a reminder of what the goal is...
+
+# The Goal is to Please @rgchris *AND* Please me
+
+NULL is the signal of &quot;soft failure&quot;.  It&#39;s a unique result when a loop is halted by a BREAK, when PARSE fails...etc.  VOID is the signal of &quot;nothingness&quot;, which is the product of conditional expressions that don&#39;t take a branch.  Neither can be stored in blocks.
+
+NULL&#39;s property of not being storable in blocks makes it critical to disambiguating this historical problem:
+
+    redbol&gt;&gt; third [a b #[none]]
+    == #[none]
+
+    redbol&gt;&gt; third [a b]
+    == #[none]
+
+In a language that prides itself on letting you work with code structure, *this is the tip of the iceberg of the problems that null solves*, and you will find the distinction&#39;s utility across the board (obviously, in tools like COMPOSE).  It facilitates rigorous analysis and rearrangements...without needing to drop to C or write convoluted code:
+
+    &gt;&gt; third [a b _]
+    == _
+
+    &gt;&gt; third [a b]
+    ; null
+
+Hence NULL and VOID have taken the place of blank (&quot;none!&quot;) in many places.  *(See [BLANK! 2022, Revisiting the Datatype](https://forum.rebol.info/t/blank-2022-revisiting-the-datatype/1942) for a summary.)*
+
+But unlike the elements in a block, a branch that evaluates isn&#39;t required to be non-NULL or non-VOID.  Which leads us to the long running question of what to bend these branches to so they don&#39;t conflate with the branch-not-taken result.
+
+## Chris has (rightly) expressed concern
+
+At times I&#39;ve said that it&#39;s not that big a deal that branches can&#39;t evaluate to NULL and get distorted.  &quot;You didn&#39;t have NULL before at all, so why get so worked up about control constructs not returning it?&quot;
+
+But the now-pervasive nature of NULL means it can&#39;t be avoided.  So:
+
+*&quot;How do you express branching code which wants to do some work but also produce NULL as an evaluative product?&quot;*
+
+Conflation was not a problem, e.g. in Rebol2:
+
+    rebol2&gt;&gt; exampler: func [x] [
+         print &quot;returning sample or none if not found&quot;
+         case [
+             x = &lt;string&gt; [print &quot;sample string&quot; {hello}]
+             x = &lt;integer&gt; [print &quot;sample integer&quot; 3]
+             x = &lt;none&gt; [print &quot;sample none&quot; none]
+         ]
+      ]
+
+    rebol2&gt;&gt; exampler &lt;string&gt;
+    returning sample or none if not found
+    sample string
+    == &quot;hello&quot;
+
+    rebol2&gt;&gt; exampler &lt;blatz&gt;
+    returning sample or none if not found
+    == #[none]
+
+    rebol2&gt;&gt; exampler &lt;none&gt;
+    returning sample or none if not found
+    sample none
+    == #[none]
+
+However NULL is now a basic currency of &quot;soft failure&quot;.  As such it would not be uncommon to be in the situation where a branching decision process would want to intentionally return NULL as part of the work it does.
+
+Without a mechanism to address this, unpleasant convolutions would be needed, for instance surrounding anything that wanted to tunnel a NULL with a CATCH and THROW&#39;ing it:
+
+    x: catch [
+        throw switch 1 + 2 [
+            1 [print &quot;one&quot; 1]
+            2 [print &quot;two&quot;, &lt;two&gt;]
+            3 [print &quot;three&quot;, throw null]
+         ]
+    ]
+
+Definitely not good.  But regarding the pleasing-me-part, remember I am trying to avoid this situation:
+
+    &gt;&gt; block [a b]
+
+    &gt;&gt; case [
+         true [
+              print &quot;case branch&quot;
+              item: third block
+         ]
+       ] else [
+         print &quot;else branch&quot;
+       ]
+
+    case branch
+    else branch  ; ugh
+
+I don&#39;t want the CASE branch to evaluate to NULL just because some expression in the branch was incidentally NULL.  That would mean the ELSE tied to the CASE runs even though the code for the branch ran.
+
+## Enter Heavy Forms: PACKs with One Element
+
+One thing a &quot;heavy&quot; void has in common with a &quot;plain&quot; void is that neither can be put in blocks.  But it automatically &quot;decays&quot; into regular VOID when stored into variables.
+
+    &gt;&gt; if true [void]
+    ; first in pack of length 1
+
+    &gt;&gt; x: if true [void]
+
+    &gt;&gt; x
+
+The twist is that the heavy void is *different enough* from true VOID such that a THEN or an ELSE can consider them a situation where the branch did not run:
+
+    &gt;&gt; if false [&lt;ignored&gt;]
+
+    &gt;&gt; if true [void]
+    ; first in pack of length 1
+
+    &gt;&gt; if true [void] else [print &quot;This won&#39;t run&quot;]
+
+The reason functions like ELSE can &quot;see&quot; the isotope is that they don&#39;t take an ordinary parameter on their left.  They take a ^META argument.  These can see the distinction between a void in an isotopic pack and a &quot;true&quot; VOID.
+
+**I&#39;d largely say this has been working well...certainly better than its conceptual predecessors.**  It makes piping VOID (or NULL) out of branches trivially easy, when the fear of conflation is not a problem.
+
+    &gt;&gt; x: switch 1 + 2 [
+         1 [print &quot;one&quot; 1]
+         2 [print &quot;two&quot;, &lt;two&gt;]
+         3 [print &quot;three&quot;, null]
+       ]
+    three
+    ; first in pack of length 1
+    == ~null~
+
+    &gt;&gt; x
+    ; null
+
+The automatic decay in variable storage prevents you from needing an explicit operation to turn ~null~ isotopes into pure nulls:
+
+    &gt;&gt; x: decay switch 1 + 2 [
+         1 [print &quot;one&quot; 1]
+         2 [print &quot;two&quot;, &lt;two&gt;]
+         3 [print &quot;three&quot;, null]
+       ]
+    three
+    ; null
+
+# Non-Meta Arguments Decay Null isotopes
+
+The &quot;auto-decay&quot; of heavy ~null~ means no variable can ever hold one.  And there&#39;s also a rule that no *normal* parameter can ever be passed a &quot;pack&quot; like the heavy forms, only ^META parameters.
+
+So it seems useful if normal arguments would automatically decay null isotopes:
+
+    &gt;&gt; foo: func [x] [if null? x [print &quot;Yup, it&#39;s null&quot;]]
+
+    &gt;&gt; foo if true [null]
+    Yup it&#39;s null
+
+    &gt;&gt; metafoo: func [^x] [
+        case [
+            null? x [print &quot;regular null&quot;]
+            x = &#39;~[~null~]~ [print &quot;heavy null&quot;]
+            true [print &quot;something else&quot;]
+         ]
+       ]
+
+    &gt;&gt; metafoo if false [null]
+    regular null
+
+    &gt;&gt; metafoo if true [null]
+    heavy null
+
+There is a manual DECAY operator which can be used at non-parameter moments where you want to decay a heavy null:
+
+    &gt;&gt; if true [null]
+    ; first in pack of length 1
+    == ~null~  ; isotope
+
+    &gt;&gt; decay if true [null]
+    == ~null~  ; isotope
+
+# Func RETURN Only Decays If You Have A RETURN: Spec
+
+Consider this pattern:
+
+    foo: func [x] [
+        return switch x [
+             1 [print &quot;one&quot;, #one]
+             2 [print &quot;two&quot;, null]
+             3 [print &quot;three&quot;, &lt;three&gt;]
+        ]
+    ]
+
+    &gt;&gt; foo 1 + 2
+    two
+    == ???   ; should this be heavy null or just null?
+
+Once upon a time, decaying was the default, and there was a refinement called /ISOTOPE on RETURN which asked it not to decay.
+
+Today, there is no automatic decay *unless* you have a return spec that doesn&#39;t mention PACK?s.  So **return: [any-value?]** would be enough to get the auto-decay.
+
+## Hopefully It All Makes Sense
+
+*&quot;A designer knows he has achieved perfection not when there is nothing left to add, but when there is nothing left to take away.&quot;*</description>
+    
+    <lastBuildDate>Mon, 29 Aug 2022 16:57:34 +0000</lastBuildDate>
+    <category>Internals</category>
+    <atom:link href="https://forum.rebol.info/t/conflation-vs-safety-return-and-heavy-void-null/1799.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Conflation vs. Safety, RETURN and &quot;Heavy&quot; Void/Null</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>4 posts were split to a new topic: <a href="https://forum.rebol.info/t/handling-match-and-falsey-types/2080">Handling MATCH and "Falsey" Types</a></p>
+          <p><a href="https://forum.rebol.info/t/conflation-vs-safety-return-and-heavy-void-null/1799/3">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/conflation-vs-safety-return-and-heavy-void-null/1799/3</link>
+        <pubDate>Thu, 14 Dec 2023 20:58:25 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1799-3</guid>
+        <source url="https://forum.rebol.info/t/conflation-vs-safety-return-and-heavy-void-null/1799.rss">Conflation vs. Safety, RETURN and &quot;Heavy&quot; Void/Null</source>
+      </item>
+      <item>
+        <title>Conflation vs. Safety, RETURN and &quot;Heavy&quot; Void/Null</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>A post was merged into an existing topic: <a href="https://forum.rebol.info/t/blank-2022-revisiting-the-datatype/1942/2">BLANK! 2022: Revisiting The Datatype</a></p>
+          <p><a href="https://forum.rebol.info/t/conflation-vs-safety-return-and-heavy-void-null/1799/6">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/conflation-vs-safety-return-and-heavy-void-null/1799/6</link>
+        <pubDate>Thu, 25 Aug 2022 17:36:33 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1799-6</guid>
+        <source url="https://forum.rebol.info/t/conflation-vs-safety-return-and-heavy-void-null/1799.rss">Conflation vs. Safety, RETURN and &quot;Heavy&quot; Void/Null</source>
+      </item>
+      <item>
+        <title>Conflation vs. Safety, RETURN and &quot;Heavy&quot; Void/Null</title>
+        <dc:creator><![CDATA[BlackATTR]]></dc:creator>
+        <description><![CDATA[
+            <p>Great refresher and summary of the issues.</p>
+          <p><a href="https://forum.rebol.info/t/conflation-vs-safety-return-and-heavy-void-null/1799/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/conflation-vs-safety-return-and-heavy-void-null/1799/2</link>
+        <pubDate>Thu, 07 Apr 2022 11:58:11 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1799-2</guid>
+        <source url="https://forum.rebol.info/t/conflation-vs-safety-return-and-heavy-void-null/1799.rss">Conflation vs. Safety, RETURN and &quot;Heavy&quot; Void/Null</source>
+      </item>
+      <item>
+        <title>Conflation vs. Safety, RETURN and &quot;Heavy&quot; Void/Null</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>"Heavy" void and null are a novel solution shaped to solve a specific problem.  As a reminder of what the goal is...</p>
+<h1>
+<a name="the-goal-is-to-please-rgchris-and-please-me-1" class="anchor" href="https://forum.rebol.info#the-goal-is-to-please-rgchris-and-please-me-1"></a>The Goal is to Please <a class="mention" href="https://forum.rebol.info/u/rgchris">@rgchris</a> <em>AND</em> Please me</h1>
+<p>NULL is the signal of "soft failure".  It's a unique result when a loop is halted by a BREAK, when PARSE fails...etc.  VOID is the signal of "nothingness", which is the product of conditional expressions that don't take a branch.  Neither can be stored in blocks.</p>
+<p>NULL's property of not being storable in blocks makes it critical to disambiguating this historical problem:</p>
+<pre><code>redbol&gt;&gt; third [a b #[none]]
+== #[none]
+
+redbol&gt;&gt; third [a b]
+== #[none]
+</code></pre>
+<p>In a language that prides itself on letting you work with code structure, <em>this is the tip of the iceberg of the problems that null solves</em>, and you will find the distinction's utility across the board (obviously, in tools like COMPOSE).  It facilitates rigorous analysis and rearrangements...without needing to drop to C or write convoluted code:</p>
+<pre><code>&gt;&gt; third [a b _]
+== _
+
+&gt;&gt; third [a b]
+; null
+</code></pre>
+<p>Hence NULL and VOID have taken the place of blank ("none!") in many places.  <em>(See <a href="https://forum.rebol.info/t/blank-2022-revisiting-the-datatype/1942">BLANK! 2022, Revisiting the Datatype</a> for a summary.)</em></p>
+<p>But unlike the elements in a block, a branch that evaluates isn't required to be non-NULL or non-VOID.  Which leads us to the long running question of what to bend these branches to so they don't conflate with the branch-not-taken result.</p>
+<h2>
+<a name="chris-has-rightly-expressed-concern-2" class="anchor" href="https://forum.rebol.info#chris-has-rightly-expressed-concern-2"></a>Chris has (rightly) expressed concern</h2>
+<p>At times I've said that it's not that big a deal that branches can't evaluate to NULL and get distorted.  "You didn't have NULL before at all, so why get so worked up about control constructs not returning it?"</p>
+<p>But the now-pervasive nature of NULL means it can't be avoided.  So:</p>
+<p><em>"How do you express branching code which wants to do some work but also produce NULL as an evaluative product?"</em></p>
+<p>Conflation was not a problem, e.g. in Rebol2:</p>
+<pre><code>rebol2&gt;&gt; exampler: func [x] [
+     print "returning sample or none if not found"
+     case [
+         x = &lt;string&gt; [print "sample string" {hello}]
+         x = &lt;integer&gt; [print "sample integer" 3]
+         x = &lt;none&gt; [print "sample none" none]
+     ]
+  ]
+
+rebol2&gt;&gt; exampler &lt;string&gt;
+returning sample or none if not found
+sample string
+== "hello"
+
+rebol2&gt;&gt; exampler &lt;blatz&gt;
+returning sample or none if not found
+== #[none]
+
+rebol2&gt;&gt; exampler &lt;none&gt;
+returning sample or none if not found
+sample none
+== #[none]
+</code></pre>
+<p>However NULL is now a basic currency of "soft failure".  As such it would not be uncommon to be in the situation where a branching decision process would want to intentionally return NULL as part of the work it does.</p>
+<p>Without a mechanism to address this, unpleasant convolutions would be needed, for instance surrounding anything that wanted to tunnel a NULL with a CATCH and THROW'ing it:</p>
+<pre><code>x: catch [
+    throw switch 1 + 2 [
+        1 [print "one" 1]
+        2 [print "two", &lt;two&gt;]
+        3 [print "three", throw null]
+     ]
+]
+</code></pre>
+<p>Definitely not good.  But regarding the pleasing-me-part, remember I am trying to avoid this situation:</p>
+<pre><code>&gt;&gt; block [a b]
+
+&gt;&gt; case [
+     true [
+          print "case branch"
+          item: third block
+     ]
+   ] else [
+     print "else branch"
+   ]
+
+case branch
+else branch  ; ugh
+</code></pre>
+<p>I don't want the CASE branch to evaluate to NULL just because some expression in the branch was incidentally NULL.  That would mean the ELSE tied to the CASE runs even though the code for the branch ran.</p>
+<h2>
+<a name="enter-heavy-forms-packs-with-one-element-3" class="anchor" href="https://forum.rebol.info#enter-heavy-forms-packs-with-one-element-3"></a>Enter Heavy Forms: PACKs with One Element</h2>
+<p>One thing a "heavy" void has in common with a "plain" void is that neither can be put in blocks.  But it automatically "decays" into regular VOID when stored into variables.</p>
+<pre><code>&gt;&gt; if true [void]
+; first in pack of length 1
+
+&gt;&gt; x: if true [void]
+
+&gt;&gt; x
+</code></pre>
+<p>The twist is that the heavy void is <em>different enough</em> from true VOID such that a THEN or an ELSE can consider them a situation where the branch did not run:</p>
+<pre><code>&gt;&gt; if false [&lt;ignored&gt;]
+
+&gt;&gt; if true [void]
+; first in pack of length 1
+
+&gt;&gt; if true [void] else [print "This won't run"]
+</code></pre>
+<p>The reason functions like ELSE can "see" the isotope is that they don't take an ordinary parameter on their left.  They take a ^META argument.  These can see the distinction between a void in an isotopic pack and a "true" VOID.</p>
+<p><strong>I'd largely say this has been working well...certainly better than its conceptual predecessors.</strong>  It makes piping VOID (or NULL) out of branches trivially easy, when the fear of conflation is not a problem.</p>
+<pre><code>&gt;&gt; x: switch 1 + 2 [
+     1 [print "one" 1]
+     2 [print "two", &lt;two&gt;]
+     3 [print "three", null]
+   ]
+three
+; first in pack of length 1
+== ~null~
+
+&gt;&gt; x
+; null
+</code></pre>
+<p>The automatic decay in variable storage prevents you from needing an explicit operation to turn ~null~ isotopes into pure nulls:</p>
+<pre><code>&gt;&gt; x: decay switch 1 + 2 [
+     1 [print "one" 1]
+     2 [print "two", &lt;two&gt;]
+     3 [print "three", null]
+   ]
+three
+; null
+</code></pre>
+<h1>
+<a name="non-meta-arguments-decay-null-isotopes-4" class="anchor" href="https://forum.rebol.info#non-meta-arguments-decay-null-isotopes-4"></a>Non-Meta Arguments Decay Null isotopes</h1>
+<p>The "auto-decay" of heavy ~null~ means no variable can ever hold one.  And there's also a rule that no <em>normal</em> parameter can ever be passed a "pack" like the heavy forms, only ^META parameters.</p>
+<p>So it seems useful if normal arguments would automatically decay null isotopes:</p>
+<pre><code>&gt;&gt; foo: func [x] [if null? x [print "Yup, it's null"]]
+
+&gt;&gt; foo if true [null]
+Yup it's null
+
+&gt;&gt; metafoo: func [^x] [
+    case [
+        null? x [print "regular null"]
+        x = '~[~null~]~ [print "heavy null"]
+        true [print "something else"]
+     ]
+   ]
+
+&gt;&gt; metafoo if false [null]
+regular null
+
+&gt;&gt; metafoo if true [null]
+heavy null
+</code></pre>
+<p>There is a manual DECAY operator which can be used at non-parameter moments where you want to decay a heavy null:</p>
+<pre><code>&gt;&gt; if true [null]
+; first in pack of length 1
+== ~null~  ; isotope
+
+&gt;&gt; decay if true [null]
+== ~null~  ; isotope
+</code></pre>
+<h1>
+<a name="func-return-only-decays-if-you-have-a-return-spec-5" class="anchor" href="https://forum.rebol.info#func-return-only-decays-if-you-have-a-return-spec-5"></a>Func RETURN Only Decays If You Have A RETURN: Spec</h1>
+<p>Consider this pattern:</p>
+<pre><code>foo: func [x] [
+    return switch x [
+         1 [print "one", #one]
+         2 [print "two", null]
+         3 [print "three", &lt;three&gt;]
+    ]
+]
+
+&gt;&gt; foo 1 + 2
+two
+== ???   ; should this be heavy null or just null?
+</code></pre>
+<p>Once upon a time, decaying was the default, and there was a refinement called /ISOTOPE on RETURN which asked it not to decay.</p>
+<p>Today, there is no automatic decay <em>unless</em> you have a return spec that doesn't mention PACK?s.  So <strong>return: [any-value?]</strong> would be enough to get the auto-decay.</p>
+<h2>
+<a name="hopefully-it-all-makes-sense-6" class="anchor" href="https://forum.rebol.info#hopefully-it-all-makes-sense-6"></a>Hopefully It All Makes Sense</h2>
+<p><em>"A designer knows he has achieved perfection not when there is nothing left to add, but when there is nothing left to take away."</em></p>
+          <p><a href="https://forum.rebol.info/t/conflation-vs-safety-return-and-heavy-void-null/1799/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/conflation-vs-safety-return-and-heavy-void-null/1799/1</link>
+        <pubDate>Thu, 07 Apr 2022 04:14:06 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1799-1</guid>
+        <source url="https://forum.rebol.info/t/conflation-vs-safety-return-and-heavy-void-null/1799.rss">Conflation vs. Safety, RETURN and &quot;Heavy&quot; Void/Null</source>
+      </item>
+  </channel>
+</rss>

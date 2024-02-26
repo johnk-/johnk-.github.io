@@ -1,0 +1,364 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Tail Calls in Ren-C...Yes, We Have Them</title>
+    <link>https://forum.rebol.info/t/tail-calls-in-ren-c-yes-we-have-them/2082</link>
+    <description>Looking into some of [Joe Marshall&#39;s historical participation in Rebol](https://forum.rebol.info/t/the-sherman-rebol-to-scheme-compiler/2076), he speaks about Rebol 1.0 having &quot;continuations&quot; and &quot;tail calls&quot;.
+
+Ren-C uses continuations to implement [stacklessness, based on a trampoline](https://forum.rebol.info/t/stackless-is-here-today-now/1844).  Trampolines are generally slower than the fiddly technique Joe describes Rebol 1.0 as having used--but such fiddly methods are not standard C, and do not translate well to WebAssembly.  In any case, the outcomes are similar.
+
+Tail calls are a different feature.  But if you have continuations, then your code is likely structured in such a way that tail calls are not that difficult to add.
+
+## So What Is A Tail Call?
+
+When you invoke a function, the interpreter has to allocate some space for its arguments and locals.  This information is then associated with a stack level structure, which also takes some space... and is put in a chain representing the call stack.
+
+If that function calls itself recursively, the recursion will also need new stack space for its arguments and locals...and another stack level structure.
+
+With recursive algorithms where a function calls itself hundreds or thousands of times, you can use up a lot of memory (and/or generate a stack overflow).
+
+Tail calls are based on the observation that right at the moment a function is about to return, it doesn&#39;t need its stack level or arguments/locals anymore.  So if you&#39;re willing to have your call stack suffer some amount of &quot;amnesia&quot; about the &quot;real&quot; stack depth, you can reuse the current call&#39;s stack level for a recursion.
+
+## Ren-C Supports Explicit Tail Calls With RETURN/RUN
+
+There are two forms of tail call we can do in a Rebol-like interpreter.  The first style can call any function (not just the one you&#39;re returning from).  It avoids a recursion level on the stack, but does *not* reuse the memory for arguments and locals.
+
+This is what that looks like:
+
+    foo: func [return: [tag!] n] [
+        if n = 1 [
+            return &lt;success&gt;
+        ]
+        return/run :foo n - 1
+    ]
+
+    &gt;&gt; foo 100
+    == &lt;success&gt;
+
+That triggers 100 calls to FOO, but only using one level of stack depth.
+
+There&#39;s a fairly obvious technical reason why this variation cannot build the invocation for the recursion&#39;s N into the old stack frame&#39;s N argument... *it uses the old N (as `n - 1`) to calculate the new N*.  You can&#39;t calculate new parameters into old parameter slots without winding up referencing your intermediate calculations instead of the old values you wanted.
+
+*(A compiled language could notice when old arguments were used to calculate new ones, and if it happened they could make space for temporary copies just for values that would be overwritten before they were seen...but being interpreted, we have to assume the worst and keep all the old values.)*
+
+If you really want to avoid making a new stack level *and* reuse the memory for the args and locals, you need a different approach.  Mutate the variables in-place before jumping to a restart of the function:
+
+    foo: func [return: [tag!] n] [
+        if n = 1 [
+            return &lt;success&gt;
+        ]
+        n: n - 1
+        return/run @redo
+    ]
+
+    &gt;&gt; foo 100
+    == &lt;success&gt;
+
+Modifying the variables in place means you&#39;re responsible for any dependency issues.  If you overwrite one of your arguments while calculating the next, you wrote the code in sequence and you can see what you did.
+
+## Why RETURN/RUN :FOO vs. RETURN FOO or RERUN FOO
+
+Ren-C&#39;s RETURN construct has special knowledge of what function it returns from.  It is a specialization of a generic DEFINITIONAL-RETURN function, which is specialized with the target FRAME!.  It&#39;s done in a somewhat optimized way, but still has some cost.
+
+If tail calls were done with another construct--e.g. something like RERUN--that function would also need to be specialized with this knowledge.  It&#39;s cheaper to just piggy back on what RETURN already knows and make it a refinement.
+
+As for why it has to take a GET-WORD! vs. plain WORD! for the function to invoke...this is due to RETURN not taking its first argument quoted.  So it&#39;s too late to intercept the mechanics of the call once an evaluation is run.  RETURN would receive the product of the call.
+
+It winds up looking fairly natural, because the RUN construct runs a function that gathers its arguments inline:
+
+    &gt;&gt; run :append [a b c] [d e]
+    == [a b c [d e]]
+
+**Note that even if we could make tail calls implicit, we probably wouldn&#39;t want to.**  Python hasn&#39;t added tail calls at all, based on a philosophical objection to the idea of obscuring the call stack.  It also seems like if an algorithm depends on tail calls for some important optimization reason, there should be something to indicate that fact... so that someone reorganizing the code will be sensitive to it.
+
+## How Important Are Tail Calls?
+
+If your language has a very limited amount of stack, being able to formulate your code to use tail calls so it doesn&#39;t accrue stack could be very important.
+
+But if your language has a decent amount of stack (or is completely &quot;stackless&quot;) it&#39;s not particularly important.
+
+Where it matters are cases where an algorithm can be cleanly expressed in a recursive way, and you don&#39;t want to use an uglier representation that builds data structures which are mimicking what you would be getting naturally from the stack.
+
+Using them in places that don&#39;t matter is likely just going to confuse your stack traces and error messages...like the Python people say.  I&#39;d discourage going around and changing all your RETURN SOMETHING to RETURN/RUN :SOMETHING to try and speed things up.  Only do it if you&#39;re writing an algorithm that would have pathological stack use otherwise.
+
+## RETURN/RUN Had A Precursor... REDO
+
+The original formulation of tail calls wasn&#39;t built into RETURN, but expected you to work with a more generic tool called REDO.  This is what you had to write for the FOO example:
+
+    foo: func [return: [tag!] n] [
+        frame: binding of &#39;n
+        if n = 0 [
+            return &lt;success&gt;
+        ]
+        n: n - 1
+        redo frame
+    ]
+
+This corresponds to the **`return/run @redo`** case, which takes advantage of the fact that RETURN already knows the frame it returns to, and can use that to redo.
+
+But REDO had a shorthand for this case, which was to accept a word from a frame:
+
+    foo: func [return: [tag!] n] [
+        if n = 0 [
+            return &lt;success&gt;
+        ]
+        n: n - 1
+        redo &#39;n
+    ]
+
+This had led me to say *&quot;sure, Ren-C has tail calls&quot;*.  But I realized that didn&#39;t really look like what people would expect, so I made RETURN/RUN.
+
+An added benefit of RETURN/RUN is that if you use it with the function call form (instead of `@redo`) then it offers something that REDO couldn&#39;t do, which is reuse an internal level structure for an arbitrary new function call.  It wasn&#39;t actually that hard to implement, so I went ahead and did it.
+
+REDO is still around.  It can restart *any* frame or phase, and it&#39;s actually rather powerful.  I don&#39;t really use it, but here&#39;s an example of how tricky it can be:
+
+    base: func [return: [text!] n delta /captured-frame [frame!]] [
+        log [{BASE} n delta]
+
+        n: n - delta
+        if n &lt; 0 [return &quot;base less than zero&quot;]
+        if n = 0 [return &quot;base done&quot;]
+        if captured-frame [redo captured-frame]
+        return &quot;base got no frame&quot;
+    ]
+
+    c: chain [
+        adapt :base [
+           log [{C} n delta]
+
+           captured-frame: binding of &#39;n
+           redo/sibling &#39;n :s
+
+           comment {fall through to base}
+        ]
+        lambda [x] [
+            if x = &quot;base done&quot; [
+                &lt;success&gt;
+            ] else [
+                spaced [&quot;base exited with&quot; x]
+            ]
+        ]
+    ]
+
+    s: specialize adapt :base [
+        log [{S} n delta]
+
+        if n = 1 [n: 10]
+    ][
+        delta: 10
+    ]
+
+    &gt;&gt; c 11 0
+    == &lt;success&gt;
+
+With a logging function attached, that gives:
+
+     --- C ---
+     n: =&gt; 11
+     delta: =&gt; 0
+     --- S ---
+     n: =&gt; 11
+     delta: =&gt; 10
+     --- BASE ---
+     n: =&gt; 11
+     delta: =&gt; 10
+     --- C ---
+     n: =&gt; 1
+     delta: =&gt; 10
+     --- S ---
+     n: =&gt; 1
+     delta: =&gt; 10
+     --- BASE ---
+     n: =&gt; 10
+     delta: =&gt; 10
+
+* C is called and captures its frame into F.  Then it uses REDO/SIBLING to reuse the frame to call S.  S gets the variables and args that it knows about as C left them--such as N and a captured frame F--but values it takes for granted are reset, which includes specialized delta of 10.
+
+   *(The need to reset specializations for consistency is similar to how locals must be reset--they&#39;re not part of the interface of the function, so to reach beneath them does something illegal in terms of parameterization.)*
+
+* S doesn&#39;t have any effect besides resetting delta, so it falls through as an adaptation to the base function.  BASE subtracts DELTA from N to get 1, which isn&#39;t an exit condition.  The F frame which was set in C and was preserved as an argument to S is then used by BASE to REDO and get back up to the start of C again.
+
+* Once again C captures its frame and does a REDO to start up S, which now notices that N is 1 so it bumps it up to 10.  (It cannot set DELTA to 1, because as a specialized argument DELTA is not visible to it.)  This time when it falls through to BASE, the subtraction of DELTA from N yields zero so that BASE returns completion.
+
+* Since the function we originally called and built a frame for was a CHAIN, the REDO is effectively REDO-finishing the frame for the adaptation of BASE that sits at the head of the frame.  That delegation has now finished bouncing around on that single frame and come to a completion, which means the chained functions will get that result.  The string is translated to a tag and signals success.
+
+## All Pretty Crazy Stuff You Probably Won&#39;t Use
+
+:crazy_face:
+
+But it&#39;s there, to placate people who think a language has to have tail calls to get respect.</description>
+    
+    <lastBuildDate>Mon, 18 Dec 2023 04:23:33 +0000</lastBuildDate>
+    <category>Functions</category>
+    <atom:link href="https://forum.rebol.info/t/tail-calls-in-ren-c-yes-we-have-them/2082.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Tail Calls in Ren-C...Yes, We Have Them</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>Looking into some of <a href="https://forum.rebol.info/t/the-sherman-rebol-to-scheme-compiler/2076">Joe Marshall's historical participation in Rebol</a>, he speaks about Rebol 1.0 having "continuations" and "tail calls".</p>
+<p>Ren-C uses continuations to implement <a href="https://forum.rebol.info/t/stackless-is-here-today-now/1844">stacklessness, based on a trampoline</a>.  Trampolines are generally slower than the fiddly technique Joe describes Rebol 1.0 as having used--but such fiddly methods are not standard C, and do not translate well to WebAssembly.  In any case, the outcomes are similar.</p>
+<p>Tail calls are a different feature.  But if you have continuations, then your code is likely structured in such a way that tail calls are not that difficult to add.</p>
+<h2>
+<a name="so-what-is-a-tail-call-1" class="anchor" href="https://forum.rebol.info#so-what-is-a-tail-call-1"></a>So What Is A Tail Call?</h2>
+<p>When you invoke a function, the interpreter has to allocate some space for its arguments and locals.  This information is then associated with a stack level structure, which also takes some space... and is put in a chain representing the call stack.</p>
+<p>If that function calls itself recursively, the recursion will also need new stack space for its arguments and locals...and another stack level structure.</p>
+<p>With recursive algorithms where a function calls itself hundreds or thousands of times, you can use up a lot of memory (and/or generate a stack overflow).</p>
+<p>Tail calls are based on the observation that right at the moment a function is about to return, it doesn't need its stack level or arguments/locals anymore.  So if you're willing to have your call stack suffer some amount of "amnesia" about the "real" stack depth, you can reuse the current call's stack level for a recursion.</p>
+<h2>
+<a name="ren-c-supports-explicit-tail-calls-with-returnrun-2" class="anchor" href="https://forum.rebol.info#ren-c-supports-explicit-tail-calls-with-returnrun-2"></a>Ren-C Supports Explicit Tail Calls With RETURN/RUN</h2>
+<p>There are two forms of tail call we can do in a Rebol-like interpreter.  The first style can call any function (not just the one you're returning from).  It avoids a recursion level on the stack, but does <em>not</em> reuse the memory for arguments and locals.</p>
+<p>This is what that looks like:</p>
+<pre><code>foo: func [return: [tag!] n] [
+    if n = 1 [
+        return &lt;success&gt;
+    ]
+    return/run :foo n - 1
+]
+
+&gt;&gt; foo 100
+== &lt;success&gt;
+</code></pre>
+<p>That triggers 100 calls to FOO, but only using one level of stack depth.</p>
+<p>There's a fairly obvious technical reason why this variation cannot build the invocation for the recursion's N into the old stack frame's N argument... <em>it uses the old N (as <code>n - 1</code>) to calculate the new N</em>.  You can't calculate new parameters into old parameter slots without winding up referencing your intermediate calculations instead of the old values you wanted.</p>
+<p><em>(A compiled language could notice when old arguments were used to calculate new ones, and if it happened they could make space for temporary copies just for values that would be overwritten before they were seen...but being interpreted, we have to assume the worst and keep all the old values.)</em></p>
+<p>If you really want to avoid making a new stack level <em>and</em> reuse the memory for the args and locals, you need a different approach.  Mutate the variables in-place before jumping to a restart of the function:</p>
+<pre><code>foo: func [return: [tag!] n] [
+    if n = 1 [
+        return &lt;success&gt;
+    ]
+    n: n - 1
+    return/run @redo
+]
+
+&gt;&gt; foo 100
+== &lt;success&gt;
+</code></pre>
+<p>Modifying the variables in place means you're responsible for any dependency issues.  If you overwrite one of your arguments while calculating the next, you wrote the code in sequence and you can see what you did.</p>
+<h2>
+<a name="why-returnrun-foo-vs-return-foo-or-rerun-foo-3" class="anchor" href="https://forum.rebol.info#why-returnrun-foo-vs-return-foo-or-rerun-foo-3"></a>Why RETURN/RUN :FOO vs. RETURN FOO or RERUN FOO</h2>
+<p>Ren-C's RETURN construct has special knowledge of what function it returns from.  It is a specialization of a generic DEFINITIONAL-RETURN function, which is specialized with the target FRAME!.  It's done in a somewhat optimized way, but still has some cost.</p>
+<p>If tail calls were done with another construct--e.g. something like RERUN--that function would also need to be specialized with this knowledge.  It's cheaper to just piggy back on what RETURN already knows and make it a refinement.</p>
+<p>As for why it has to take a GET-WORD! vs. plain WORD! for the function to invoke...this is due to RETURN not taking its first argument quoted.  So it's too late to intercept the mechanics of the call once an evaluation is run.  RETURN would receive the product of the call.</p>
+<p>It winds up looking fairly natural, because the RUN construct runs a function that gathers its arguments inline:</p>
+<pre><code>&gt;&gt; run :append [a b c] [d e]
+== [a b c [d e]]
+</code></pre>
+<p><strong>Note that even if we could make tail calls implicit, we probably wouldn't want to.</strong>  Python hasn't added tail calls at all, based on a philosophical objection to the idea of obscuring the call stack.  It also seems like if an algorithm depends on tail calls for some important optimization reason, there should be something to indicate that fact... so that someone reorganizing the code will be sensitive to it.</p>
+<h2>
+<a name="how-important-are-tail-calls-4" class="anchor" href="https://forum.rebol.info#how-important-are-tail-calls-4"></a>How Important Are Tail Calls?</h2>
+<p>If your language has a very limited amount of stack, being able to formulate your code to use tail calls so it doesn't accrue stack could be very important.</p>
+<p>But if your language has a decent amount of stack (or is completely "stackless") it's not particularly important.</p>
+<p>Where it matters are cases where an algorithm can be cleanly expressed in a recursive way, and you don't want to use an uglier representation that builds data structures which are mimicking what you would be getting naturally from the stack.</p>
+<p>Using them in places that don't matter is likely just going to confuse your stack traces and error messages...like the Python people say.  I'd discourage going around and changing all your RETURN SOMETHING to RETURN/RUN :SOMETHING to try and speed things up.  Only do it if you're writing an algorithm that would have pathological stack use otherwise.</p>
+<h2>
+<a name="returnrun-had-a-precursor-redo-5" class="anchor" href="https://forum.rebol.info#returnrun-had-a-precursor-redo-5"></a>RETURN/RUN Had A Precursor... REDO</h2>
+<p>The original formulation of tail calls wasn't built into RETURN, but expected you to work with a more generic tool called REDO.  This is what you had to write for the FOO example:</p>
+<pre><code>foo: func [return: [tag!] n] [
+    frame: binding of 'n
+    if n = 0 [
+        return &lt;success&gt;
+    ]
+    n: n - 1
+    redo frame
+]
+</code></pre>
+<p>This corresponds to the <strong><code>return/run @redo</code></strong> case, which takes advantage of the fact that RETURN already knows the frame it returns to, and can use that to redo.</p>
+<p>But REDO had a shorthand for this case, which was to accept a word from a frame:</p>
+<pre><code>foo: func [return: [tag!] n] [
+    if n = 0 [
+        return &lt;success&gt;
+    ]
+    n: n - 1
+    redo 'n
+]
+</code></pre>
+<p>This had led me to say <em>"sure, Ren-C has tail calls"</em>.  But I realized that didn't really look like what people would expect, so I made RETURN/RUN.</p>
+<p>An added benefit of RETURN/RUN is that if you use it with the function call form (instead of <code>@redo</code>) then it offers something that REDO couldn't do, which is reuse an internal level structure for an arbitrary new function call.  It wasn't actually that hard to implement, so I went ahead and did it.</p>
+<p>REDO is still around.  It can restart <em>any</em> frame or phase, and it's actually rather powerful.  I don't really use it, but here's an example of how tricky it can be:</p>
+<pre><code>base: func [return: [text!] n delta /captured-frame [frame!]] [
+    log [{BASE} n delta]
+
+    n: n - delta
+    if n &lt; 0 [return "base less than zero"]
+    if n = 0 [return "base done"]
+    if captured-frame [redo captured-frame]
+    return "base got no frame"
+]
+
+c: chain [
+    adapt :base [
+       log [{C} n delta]
+
+       captured-frame: binding of 'n
+       redo/sibling 'n :s
+
+       comment {fall through to base}
+    ]
+    lambda [x] [
+        if x = "base done" [
+            &lt;success&gt;
+        ] else [
+            spaced ["base exited with" x]
+        ]
+    ]
+]
+
+s: specialize adapt :base [
+    log [{S} n delta]
+
+    if n = 1 [n: 10]
+][
+    delta: 10
+]
+
+&gt;&gt; c 11 0
+== &lt;success&gt;
+</code></pre>
+<p>With a logging function attached, that gives:</p>
+<pre><code> --- C ---
+ n: =&gt; 11
+ delta: =&gt; 0
+ --- S ---
+ n: =&gt; 11
+ delta: =&gt; 10
+ --- BASE ---
+ n: =&gt; 11
+ delta: =&gt; 10
+ --- C ---
+ n: =&gt; 1
+ delta: =&gt; 10
+ --- S ---
+ n: =&gt; 1
+ delta: =&gt; 10
+ --- BASE ---
+ n: =&gt; 10
+ delta: =&gt; 10
+</code></pre>
+<ul>
+<li>
+<p>C is called and captures its frame into F.  Then it uses REDO/SIBLING to reuse the frame to call S.  S gets the variables and args that it knows about as C left them--such as N and a captured frame F--but values it takes for granted are reset, which includes specialized delta of 10.</p>
+<p><em>(The need to reset specializations for consistency is similar to how locals must be reset--they're not part of the interface of the function, so to reach beneath them does something illegal in terms of parameterization.)</em></p>
+</li>
+<li>
+<p>S doesn't have any effect besides resetting delta, so it falls through as an adaptation to the base function.  BASE subtracts DELTA from N to get 1, which isn't an exit condition.  The F frame which was set in C and was preserved as an argument to S is then used by BASE to REDO and get back up to the start of C again.</p>
+</li>
+<li>
+<p>Once again C captures its frame and does a REDO to start up S, which now notices that N is 1 so it bumps it up to 10.  (It cannot set DELTA to 1, because as a specialized argument DELTA is not visible to it.)  This time when it falls through to BASE, the subtraction of DELTA from N yields zero so that BASE returns completion.</p>
+</li>
+<li>
+<p>Since the function we originally called and built a frame for was a CHAIN, the REDO is effectively REDO-finishing the frame for the adaptation of BASE that sits at the head of the frame.  That delegation has now finished bouncing around on that single frame and come to a completion, which means the chained functions will get that result.  The string is translated to a tag and signals success.</p>
+</li>
+</ul>
+<h2>
+<a name="all-pretty-crazy-stuff-you-probably-wont-use-6" class="anchor" href="https://forum.rebol.info#all-pretty-crazy-stuff-you-probably-wont-use-6"></a>All Pretty Crazy Stuff You Probably Won't Use</h2>
+<p><img src="https://forum.rebol.info/images/emoji/twitter/crazy_face.png?v=12" title=":crazy_face:" class="emoji only-emoji" alt=":crazy_face:" loading="lazy" width="20" height="20"></p>
+<p>But it's there, to placate people who think a language has to have tail calls to get respect.</p>
+          <p><a href="https://forum.rebol.info/t/tail-calls-in-ren-c-yes-we-have-them/2082/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/tail-calls-in-ren-c-yes-we-have-them/2082/1</link>
+        <pubDate>Mon, 18 Dec 2023 03:58:16 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-2082-1</guid>
+        <source url="https://forum.rebol.info/t/tail-calls-in-ren-c-yes-we-have-them/2082.rss">Tail Calls in Ren-C...Yes, We Have Them</source>
+      </item>
+  </channel>
+</rss>

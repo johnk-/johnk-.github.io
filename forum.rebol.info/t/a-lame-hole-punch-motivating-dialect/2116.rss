@@ -1,0 +1,175 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>A (Lame) Hole-Punch Motivating Dialect</title>
+    <link>https://forum.rebol.info/t/a-lame-hole-punch-motivating-dialect/2116</link>
+    <description>&gt; *Referenced in the explanation of [&quot;What Dialects Need From Binding&quot;](https://forum.rebol.info/t/what-dialects-need-from-binding/2111/11?u=hostilefork)*
+&gt;
+&gt; ***This code uses hypothetical mechanisms for a new approach to pure virtual binding that are not yet implemented at time of writing.***
+
+---
+
+Let&#39;s imagine you have the idea of a dialect which validates the number of some characters in a string.  You give it a list of strings and you match using &quot;keywords&quot; ONE or TWO for the character at hand.  You can also run code in groups if you want:
+
+    &gt;&gt; dialect [&quot;aaaa&quot; &quot;bbbb&quot;] [
+           [#a [one two one (print &quot;rule one match&quot;)]]
+           [#b [two one one (print &quot;passed 2 1 1&quot;) one (print &quot;rule two match&quot;)]]
+       ]
+      rule one match
+      passed 2 1 1
+
+Now imagine a callsite that wants to use this dialect.  Let&#39;s say it has its own definition for what TWO means just incidentally defined.  But it knows the dialect&#39;s meaning should override that.  However let&#39;s say it also has some MESSAGE, that it doesn&#39;t want the dialect to override.
+
+Let&#39;s also throw in COLLECT for good measure:
+
+     let two: lambda [body] [repeat 2 body]  ; some incidental definition
+
+     let message: &quot;passed 2 1 1&quot;  ; intended to be seen by the dialect
+
+     let results: collect [
+          dialect [&quot;aaaa&quot; &quot;bbbb&quot;] [
+               [#a [one two one (keep &lt;finished a&gt;)]]
+               [#b [two one one (print message) one (keep &lt;finished b&gt;)]]
+           ]
+     ]
+
+The caller and DIALECT have a common understanding: that ONE and TWO are things that the dialect provides.  But it&#39;s the dialect&#39;s responsibility to sort that out.  Even though the tip of the block it receives has a definition for TWO, it shouldn&#39;t be influenced by that...because all the ONE and TWO are unbound inside that block.
+
+Now say the plan of attack that the author has is to build upon the PARSE dialect to implement what they&#39;re doing.  It seems plausible they should be able to do the following:
+
+     dialect: func [strings [block!] lines [block!]] [
+         for-each line lines [
+            line: in lines line
+            let char: line.1
+            let rule: in line line.2
+            let string: strings.1
+            do compose/deep [
+                let one: (char)
+                let two: [repeat 2 (char)]
+                parse (string) [comment &quot;your code here&quot; (unuse [one two] rule)]
+            ]
+            strings: next strings
+         ]
+     ]
+
+In more detail:
+
+* Propagating with IN LINES and IN LINE means that RULE gets the binding of the original LINES block, which is the aggregated chain of bindings (from LIB for things like PRINT, for the LETs, for KEEP).  But it also has that definition of TWO.
+
+* We want RULE to come out of this as a BLOCK!, not boxed into a function, as PARSE intends to enumerate it.. as well as to be able to DO GROUP!s inside it.
+
+* We don&#39;t want to have to make a copy of that aggregated binding (e.g. an entire copy of LIB to remove any ONE and TWO, and a copy of all the other contexts to remove ONE and TWO).  Beyond inefficiency, we don&#39;t want to explode the number of binding environment identities.  Instead, we need an additive means to say *&quot;I want everything *but* ONE and TWO from this binding environment&quot;*.  Sort of a [&quot;persistent-vector&quot;](https://hypirion.com/musings/understanding-persistent-vector-pt-1) approach.
+
+* This is what I call a hole-punching instruction... that becomes the new specifier for the embedded rule, pointing at the specifier of rule as a parent.  Later on during the DO of the composed code... when PARSE descends into the block and uses IN, that&#39;s where the hole-punched binding is &quot;coalesced&quot; with available definitions of ONE and TWO from PARSE&#39;s &quot;current environment&quot; (which it propagated off second parameter it received).
+
+There are many other ways to accomplish this intent--and this particular example does suck (it inadvertently exposes all the features of PARSE even if it didn&#39;t want to...among other criticisms).  But I maintain this implementation strategy is analogous to real situations that come up, vs. some imagined thing.</description>
+    
+    <lastBuildDate>Sat, 13 Jan 2024 09:32:51 +0000</lastBuildDate>
+    <category>Dialects/DSLs</category>
+    <atom:link href="https://forum.rebol.info/t/a-lame-hole-punch-motivating-dialect/2116.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>A (Lame) Hole-Punch Motivating Dialect</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <blockquote>
+<p><em>Referenced in the explanation of <a href="https://forum.rebol.info/t/what-dialects-need-from-binding/2111/11">"What Dialects Need From Binding"</a></em></p>
+<p><em><strong>This code uses hypothetical mechanisms for a new approach to pure virtual binding that are not yet implemented at time of writing.</strong></em></p>
+</blockquote>
+<hr>
+<p>Let's imagine you have the idea of a dialect which validates the number of some characters in a string.  You give it a list of strings and you match using "keywords" ONE or TWO for the character at hand.  You can also run code in groups if you want:</p>
+<pre><code>&gt;&gt; dialect ["aaaa" "bbbb"] [
+       [#a [one two one (print "rule one match")]]
+       [#b [two one one (print "passed 2 1 1") one (print "rule two match")]]
+   ]
+  rule one match
+  passed 2 1 1
+</code></pre>
+<p>Now imagine a callsite that wants to use this dialect.  Let's say it has its own definition for what TWO means just incidentally defined.  But it knows the dialect's meaning should override that.  However let's say it also has some MESSAGE, that it doesn't want the dialect to override.</p>
+<p>Let's also throw in COLLECT for good measure:</p>
+<pre><code> let two: lambda [body] [repeat 2 body]  ; some incidental definition
+
+ let message: "passed 2 1 1"  ; intended to be seen by the dialect
+
+ let results: collect [
+      dialect ["aaaa" "bbbb"] [
+           [#a [one two one (keep &lt;finished a&gt;)]]
+           [#b [two one one (print message) one (keep &lt;finished b&gt;)]]
+       ]
+ ]
+</code></pre>
+<p>The caller and DIALECT have a common understanding: that ONE and TWO are things that the dialect provides.  But it's the dialect's responsibility to sort that out.  Even though the tip of the block it receives has a definition for TWO, it shouldn't be influenced by that...because all the ONE and TWO are unbound inside that block.</p>
+<p>Now say the plan of attack that the author has is to build upon the PARSE dialect to implement what they're doing.  It seems plausible they should be able to do the following:</p>
+<pre><code> dialect: func [strings [block!] lines [block!]] [
+     for-each line lines [
+        line: in lines line
+        let char: line.1
+        let rule: in line line.2
+        let string: strings.1
+        do compose/deep [
+            let one: (char)
+            let two: [repeat 2 (char)]
+            parse (string) [comment "your code here" (unuse [one two] rule)]
+        ]
+        strings: next strings
+     ]
+ ]
+</code></pre>
+<p>In more detail:</p>
+<ul>
+<li>
+<p>Propagating with IN LINES and IN LINE means that RULE gets the binding of the original LINES block, which is the aggregated chain of bindings (from LIB for things like PRINT, for the LETs, for KEEP).  But it also has that definition of TWO.</p>
+</li>
+<li>
+<p>We want RULE to come out of this as a BLOCK!, not boxed into a function, as PARSE intends to enumerate it.. as well as to be able to DO GROUP!s inside it.</p>
+</li>
+<li>
+<p>We don't want to have to make a copy of that aggregated binding (e.g. an entire copy of LIB to remove any ONE and TWO, and a copy of all the other contexts to remove ONE and TWO).  Beyond inefficiency, we don't want to explode the number of binding environment identities.  Instead, we need an additive means to say <em>"I want everything <em>but</em> ONE and TWO from this binding environment"</em>.  Sort of a <a href="https://hypirion.com/musings/understanding-persistent-vector-pt-1">"persistent-vector"</a> approach.</p>
+</li>
+<li>
+<p>This is what I call a hole-punching instruction... that becomes the new specifier for the embedded rule, pointing at the specifier of rule as a parent.  Later on during the DO of the composed code... when PARSE descends into the block and uses IN, that's where the hole-punched binding is "coalesced" with available definitions of ONE and TWO from PARSE's "current environment" (which it propagated off second parameter it received).</p>
+</li>
+</ul>
+<p>There are many other ways to accomplish this intent--and this particular example does suck (it inadvertently exposes all the features of PARSE even if it didn't want to...among other criticisms).  But I maintain this implementation strategy is analogous to real situations that come up, vs. some imagined thing.</p>
+          <p><a href="https://forum.rebol.info/t/a-lame-hole-punch-motivating-dialect/2116/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/a-lame-hole-punch-motivating-dialect/2116/1</link>
+        <pubDate>Sat, 13 Jan 2024 07:39:58 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-2116-1</guid>
+        <source url="https://forum.rebol.info/t/a-lame-hole-punch-motivating-dialect/2116.rss">A (Lame) Hole-Punch Motivating Dialect</source>
+      </item>
+      <item>
+        <title>A (Lame) Hole-Punch Motivating Dialect</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>I've shown that you can't always (or don't always want to) position your hole punches at the moment where the environment is completely built.</p>
+<p>Still, in this example, what's the tradeoff of doing it at the very top vs. inside a compose?</p>
+<pre><code> dialect: func [strings [block!] lines [block!]] [
+     lines: unuse [one two] lines  ; &lt;-- what's the impact of moving here?
+     for-each line lines [
+        line: in lines line
+        let char: line.1
+        let rule: in line line.2
+        let string: strings.1
+        do compose/deep [
+            let one: (char)
+            let two: [repeat 2 (char)]
+            parse (string) [comment "your code here" (rule)]  ; &lt;-- vs. here
+        ]
+        strings: next strings
+     ]
+ ]
+</code></pre>
+<p>The answer is clearly that wherever you do it, that's the moment the incoming definitions become unavailable.</p>
+<p>We don't have any meaningful code in the outer layers of the dialect blocks which might try and use the looping TWO definition from the callsite.  But what we'd want to happen in that code would guide the choice of whether to do the hole punching sooner or later.  Should it be seen?  Should it not?  Only the dialect knows.</p>
+<p>One impact is that if bound blocks get composed deeper as rules into the dialect somehow, they won't see the hole punches if you only punch at the top.  Generally speaking, composing in fully bound blocks is not going to work well for some dialect implementation strategies.  It's a reason why I think "industrial strength" dialects should probably be built more on keywords recognized literally for their "language"... and binding should be reserved for things you might think of more as variables.</p>
+<p>(...although, in some cases, it may be natural for the person who does the composing of the bound blocks to do the hole punching themselves vs. expect it all to be done by the dialect.  Guess how painful that is depends on how many holes there are, and if they're available in some sort of list alongside the dialect.)</p>
+<p><em>Anyway, this just sort of hammers in how the system has no chance at making such decisions automatically, so dialect complicity in binding at each level is the only sensible answer.</em></p>
+          <p><a href="https://forum.rebol.info/t/a-lame-hole-punch-motivating-dialect/2116/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/a-lame-hole-punch-motivating-dialect/2116/2</link>
+        <pubDate>Sat, 13 Jan 2024 07:34:12 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-2116-2</guid>
+        <source url="https://forum.rebol.info/t/a-lame-hole-punch-motivating-dialect/2116.rss">A (Lame) Hole-Punch Motivating Dialect</source>
+      </item>
+  </channel>
+</rss>

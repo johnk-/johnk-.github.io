@@ -1,0 +1,338 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>DO of TEXT! As Synonym of DO of FILE! Containing String</title>
+    <link>https://forum.rebol.info/t/do-of-text-as-synonym-of-do-of-file-containing-string/2125</link>
+    <description>So DO in Rebol and Red of a string has classically been what we might think of today as:
+
+    do in system.contexts.user transcode string
+
+Sample behavior:
+
+    rebol2&gt;&gt; var: 10
+    == 10
+
+    rebol2&gt;&gt; do &quot;var: var + 20 print [var]&quot;
+    30
+
+    rebol2&gt;&gt; var
+    == 30
+
+So not only could it see VAR, it could change it.
+
+This seems obviously bad in a modularized world, in the sense that if you DO a string somewhere besides the console (e.g. in a module) you&#39;re getting no effects where you likely intend them, and causing effects somewhere else.
+
+Ren-C addresses this by isolating the DO (as it would a module), which seems like the only sane idea.  If you have a string representing code and want to run it in the current context, you need a binding operation, e.g.:
+
+    do in [] transcode string
+
+## Quirks With Header Handling In String Input
+
+If you DO a string with a header, it appears to be handled:
+
+    rebol2&gt;&gt; do &quot;Rebol [] print {Hello}&quot;
+    Hello
+
+BUT it&#39;s actually not being handled in Rebol2.  It&#39;s just that historically, Rebol has been the system object:
+
+    rebol2&gt;&gt; words-of rebol
+    == [version build product core components words...]
+
+So the DO was actually evaluating Rebol to an OBJECT!, ignoring it, then evaluating a block, and ignoring that.  To see that this is what&#39;s happening:
+
+    rebol2&gt;&gt; unprotect &#39;Rebol
+
+    rebol2&gt;&gt; Rebol: does [print &quot;Boo&quot;]
+
+    rebol2&gt;&gt; do &quot;Rebol [] print {Hello}&quot;
+    Boo!
+    Hello
+
+R3-Alpha changed this, so that if you do a string starting with the word &quot;Rebol&quot; then it will interpret the subsequent block as a header, and use that to guide the loading process of the string... which might mean interpreting it into something besides a block (e.g. a module):
+
+    r3-alpha&gt;&gt; do {REBOL [Type: Module Options: [isolate]] xyz: &lt;hi&gt;}  
+    Module: &quot;Untitled&quot; Version: none Date: none
+
+    r3-alpha&gt;&gt; xyz
+    ** Script error: xyz has no value
+
+There&#39;s a quirk in that if you do a BLOCK! directly instead of a string, you get the old REBOL-evaluates-as-an-OBJECT! ignoring the block behavior ([issue 2372](https://github.com/metaeducation/rebol-issues/issues/2372))
+
+    r3-alpha&gt;&gt; do [REBOL [Type: Module Options: [isolate]] xyz: &lt;hi&gt;] 
+    == &lt;hi&gt;
+
+    r3-alpha&gt;&gt; xyz
+    == &lt;hi&gt;
+
+To help mitigate this, the word &quot;Rebol&quot; is defined to generate an error by default under evaluation in Ren-C (the system object is SYSTEM or alias as SYS)
+
+In any case, the idea here is that since headers are used to dictate how code is loaded and bound, if you have a BLOCK! it has already gone through that process.
+
+## DO of a TEXT! Should Require A Header
+
+All Rebol2 files processed by LOAD and DO of a FILE! (or URL!) are supposed to have a header:
+
+    rebol2&gt;&gt; write %code.r &quot;print {Hello World}&quot;
+
+    rebol2&gt;&gt; do %code.r
+    ** Syntax Error: Script is missing a REBOL header
+
+R3-Alpha doesn&#39;t enforce that, which was a step backwards in many people&#39;s opinions (including mine).
+
+    r3-alpha&gt;&gt; write %code.r &quot;print {Hello World}&quot;
+
+    r3-alpha&gt;&gt; do %code.r
+    Script: none Version: none Date: none
+    Hello World
+
+If you have code without a header in a file, then it&#39;s your job to TRANSCODE that yourself into a block and do whatever binding or processing you need to do to get it to run.
+
+But considering that, it seems to me that DO of a TEXT! should need a header, and be a synonym for DO LOAD of the text.  Having a header would help reinforce that you really are running this code like a script in its isolated environment.  And it means that if you got your script data from some random place, you don&#39;t have to write it to a file just to get DO to process the header.
+
+## Splitting DO and EVAL Is Likely Important
+
+When you add all this up, it may suggest we should separate DO and EVAL completely (which was a long-running opinion of @earl from back in the day).
+
+**eval block** is a little bit longer than **do block** but not by much.
+
+One benefit could be that if we shift away from assuming that DO is something that runs just Rebol code, we can say that it gets its knowledge from the file itself.  This could come from the extension (e.g. **do %some-file.js** could run javascript code, **do %some-file.css** could incorporate CSS).
+
+Another potentially good argument is that the amount of parameterization for DO could roughly wind up matching [the amount of parameterization for IMPORT](https://forum.rebol.info/t/design-for-import/1570).  This might suggest even that DO be arity-2 in all cases instead of having a refinement form of DO/ARGS.  That would allow for a content type override if you were DO-ing a string:
+
+    do css-source-text [Type: &#39;css]
+
+Though single-arity DO is pretty entrenched.  Maybe DO of a BLOCK! does expect that block to have a header structure, so you could add that header:
+
+    do compose [Rebol [Type: &#39;css] (css-source-text)]
+    ; -or-
+    do compose [CSS [&lt;options for merging CSS in ReplPad&gt;] (css-source-text)]
+
+    do compose [Rebol [] (spread transcode rebol-source-text)]
+
+## Regardless, DO of a TEXT! Needs a Header
+
+This strikes me as non-negotiable, so I went ahead to with this, and hit a few issues.
+
+DO-ing text directly with no intermediate processing step is a rarely needed operation, so it doesn&#39;t come up much.  But I did trip over two issues:
+
+### Issue: --do On The Command Line
+
+First thing I hit was the question of the **`--do &quot;your code here&quot;`** command line option.  This is a little annoying, because you don&#39;t have the option of saying **`--do [your code here]`** at that particular place.
+
+I can attest to the fact that I&#39;d be annoyed if I had to put a header there.  But then... what if I wanted a header&#39;s influence... settings to direct the execution of that code?
+
+This again seems to suggest a split of --eval and --do.  Use --do if you have a header, and --eval if you don&#39;t.  Since EVAL wouldn&#39;t take strings, the idea that the command line presumes you want the string bound in the &quot;default sense&quot; (e.g. what would happen if you typed in the console) seems fine.
+
+It may be that DO of a BLOCK! running Rebol code is just so ingrained that it isn&#39;t changeable.  If that&#39;s the case, then saying `--do` takes the block interpretation of the string you pass it is probably not a big issue, and then `--do {do {Rebol [] ...}}` can be how you inject a header on the command line.
+
+### Issue: DOES for doing code
+
+This isn&#39;t really about the DO-needs-a-header-on-string, but another thing I noticed pertaining to a potential DO/EVAL split.
+
+DOES is a shorthand for defining a LAMBDA with no arguments.
+
+    &gt;&gt; foo: does [1 + 2]
+
+    &gt;&gt; foo
+    == 3
+
+For reasons of consistency, Ren-C extended it so it would run anything DO would process:
+
+    &gt;&gt; foo: does %your-script.r
+
+    &gt;&gt; foo
+    Running your script...
+
+That&#39;s hardly an important feature *(`foo: does [do %your-script.r]` is easy enough to say if it ever actually comes up, which it has not.)*  But it raises a question about using the word DOES in light of a DO and EVAL split.  DOES contains the word DO and might suggest a connection with DO&#39;s behavior and not EVAL&#39;s.
+
+Perhaps RUN could be the script-oriented runner, with DO keeping the role of EVAL... though right now I&#39;m using RUN for executing frames and gathering arguments at the callsite (a kind of inline APPLY).  That would need another name.
+
+Perhaps EVALS is not so bad as an alternative to DOES?  :-/
+
+    &gt;&gt; foo: evals [print &quot;hi&quot;]
+
+    &gt;&gt; foo
+    hi
+
+No, it&#39;s bad.  I&#39;m not a fan.
+
+Or maybe the inconsistency that DOES has little relation to DO is not a big deal.  But inconsistency bothers me (which is why I made **does x** a synonym for **lambda [] [do x]** for all X, despite likely uselessness for non-block X.)</description>
+    
+    <lastBuildDate>Sat, 20 Jan 2024 00:14:15 +0000</lastBuildDate>
+    <category>Modules</category>
+    <atom:link href="https://forum.rebol.info/t/do-of-text-as-synonym-of-do-of-file-containing-string/2125.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>DO of TEXT! As Synonym of DO of FILE! Containing String</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>DO's expectations are higher level (e.g. that the code it receives has a header).</p>
+<p>The asymmetry between:</p>
+<pre><code>do "Rebol [Title: {My Script}] print {Hello}"
+</code></pre>
+<p>...and...</p>
+<pre><code>do [Rebol [Title: {My Script}] print {Hello}]
+</code></pre>
+<p>Hints at this.  The first example (in R3-Alpha and now Ren-C, at least) does processing based on the first two elements out-of-band of the script.  In the second case, the Rebol WORD! is in-band and looked up ordinarily, and the BLOCK! is in-band as well.</p>
+<p>The difference here would be more clear if EVAL of a BLOCK! were distinct.  This would free up DO of a BLOCK! to mean something else if desired... some kind of "DO dialect".  Not sure what it would be for (perhaps things like specifying required versions of scripts, things like that).  Or it could just error.</p>
+<p>But today, DO of BLOCK! is a synonym for EVAL of a BLOCK!... but EVAL has more options (single-stepping, for instance).</p>
+          <p><a href="https://forum.rebol.info/t/do-of-text-as-synonym-of-do-of-file-containing-string/2125/3">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/do-of-text-as-synonym-of-do-of-file-containing-string/2125/3</link>
+        <pubDate>Sat, 20 Jan 2024 00:14:15 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-2125-3</guid>
+        <source url="https://forum.rebol.info/t/do-of-text-as-synonym-of-do-of-file-containing-string/2125.rss">DO of TEXT! As Synonym of DO of FILE! Containing String</source>
+      </item>
+      <item>
+        <title>DO of TEXT! As Synonym of DO of FILE! Containing String</title>
+        <dc:creator><![CDATA[bradrn]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="2125">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/40/26_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<h2>Splitting DO and EVAL Is Likely Important</h2>
+<p>When you add all this up, it may suggest we should separate DO and EVAL completely (which was a long-running opinion of <span class="mention">@earl</span> from back in the day).</p>
+</blockquote>
+</aside>
+<p>I’m a little lost here… what would the difference be between DO and EVAL?</p>
+          <p><a href="https://forum.rebol.info/t/do-of-text-as-synonym-of-do-of-file-containing-string/2125/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/do-of-text-as-synonym-of-do-of-file-containing-string/2125/2</link>
+        <pubDate>Sat, 20 Jan 2024 00:06:52 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-2125-2</guid>
+        <source url="https://forum.rebol.info/t/do-of-text-as-synonym-of-do-of-file-containing-string/2125.rss">DO of TEXT! As Synonym of DO of FILE! Containing String</source>
+      </item>
+      <item>
+        <title>DO of TEXT! As Synonym of DO of FILE! Containing String</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>So DO in Rebol and Red of a string has classically been what we might think of today as:</p>
+<pre><code>do in system.contexts.user transcode string
+</code></pre>
+<p>Sample behavior:</p>
+<pre><code>rebol2&gt;&gt; var: 10
+== 10
+
+rebol2&gt;&gt; do "var: var + 20 print [var]"
+30
+
+rebol2&gt;&gt; var
+== 30
+</code></pre>
+<p>So not only could it see VAR, it could change it.</p>
+<p>This seems obviously bad in a modularized world, in the sense that if you DO a string somewhere besides the console (e.g. in a module) you're getting no effects where you likely intend them, and causing effects somewhere else.</p>
+<p>Ren-C addresses this by isolating the DO (as it would a module), which seems like the only sane idea.  If you have a string representing code and want to run it in the current context, you need a binding operation, e.g.:</p>
+<pre><code>do in [] transcode string
+</code></pre>
+<h2>
+<a name="quirks-with-header-handling-in-string-input-1" class="anchor" href="https://forum.rebol.info#quirks-with-header-handling-in-string-input-1"></a>Quirks With Header Handling In String Input</h2>
+<p>If you DO a string with a header, it appears to be handled:</p>
+<pre><code>rebol2&gt;&gt; do "Rebol [] print {Hello}"
+Hello
+</code></pre>
+<p>BUT it's actually not being handled in Rebol2.  It's just that historically, Rebol has been the system object:</p>
+<pre><code>rebol2&gt;&gt; words-of rebol
+== [version build product core components words...]
+</code></pre>
+<p>So the DO was actually evaluating Rebol to an OBJECT!, ignoring it, then evaluating a block, and ignoring that.  To see that this is what's happening:</p>
+<pre><code>rebol2&gt;&gt; unprotect 'Rebol
+
+rebol2&gt;&gt; Rebol: does [print "Boo"]
+
+rebol2&gt;&gt; do "Rebol [] print {Hello}"
+Boo!
+Hello
+</code></pre>
+<p>R3-Alpha changed this, so that if you do a string starting with the word "Rebol" then it will interpret the subsequent block as a header, and use that to guide the loading process of the string... which might mean interpreting it into something besides a block (e.g. a module):</p>
+<pre><code>r3-alpha&gt;&gt; do {REBOL [Type: Module Options: [isolate]] xyz: &lt;hi&gt;}  
+Module: "Untitled" Version: none Date: none
+
+r3-alpha&gt;&gt; xyz
+** Script error: xyz has no value
+</code></pre>
+<p>There's a quirk in that if you do a BLOCK! directly instead of a string, you get the old REBOL-evaluates-as-an-OBJECT! ignoring the block behavior (<a href="https://github.com/metaeducation/rebol-issues/issues/2372">issue 2372</a>)</p>
+<pre><code>r3-alpha&gt;&gt; do [REBOL [Type: Module Options: [isolate]] xyz: &lt;hi&gt;] 
+== &lt;hi&gt;
+
+r3-alpha&gt;&gt; xyz
+== &lt;hi&gt;
+</code></pre>
+<p>To help mitigate this, the word "Rebol" is defined to generate an error by default under evaluation in Ren-C (the system object is SYSTEM or alias as SYS)</p>
+<p>In any case, the idea here is that since headers are used to dictate how code is loaded and bound, if you have a BLOCK! it has already gone through that process.</p>
+<h2>
+<a name="do-of-a-text-should-require-a-header-2" class="anchor" href="https://forum.rebol.info#do-of-a-text-should-require-a-header-2"></a>DO of a TEXT! Should Require A Header</h2>
+<p>All Rebol2 files processed by LOAD and DO of a FILE! (or URL!) are supposed to have a header:</p>
+<pre><code>rebol2&gt;&gt; write %code.r "print {Hello World}"
+
+rebol2&gt;&gt; do %code.r
+** Syntax Error: Script is missing a REBOL header
+</code></pre>
+<p>R3-Alpha doesn't enforce that, which was a step backwards in many people's opinions (including mine).</p>
+<pre><code>r3-alpha&gt;&gt; write %code.r "print {Hello World}"
+
+r3-alpha&gt;&gt; do %code.r
+Script: none Version: none Date: none
+Hello World
+</code></pre>
+<p>If you have code without a header in a file, then it's your job to TRANSCODE that yourself into a block and do whatever binding or processing you need to do to get it to run.</p>
+<p>But considering that, it seems to me that DO of a TEXT! should need a header, and be a synonym for DO LOAD of the text.  Having a header would help reinforce that you really are running this code like a script in its isolated environment.  And it means that if you got your script data from some random place, you don't have to write it to a file just to get DO to process the header.</p>
+<h2>
+<a name="splitting-do-and-eval-is-likely-important-3" class="anchor" href="https://forum.rebol.info#splitting-do-and-eval-is-likely-important-3"></a>Splitting DO and EVAL Is Likely Important</h2>
+<p>When you add all this up, it may suggest we should separate DO and EVAL completely (which was a long-running opinion of <span class="mention">@earl</span> from back in the day).</p>
+<p><strong>eval block</strong> is a little bit longer than <strong>do block</strong> but not by much.</p>
+<p>One benefit could be that if we shift away from assuming that DO is something that runs just Rebol code, we can say that it gets its knowledge from the file itself.  This could come from the extension (e.g. <strong>do %some-file.js</strong> could run javascript code, <strong>do %some-file.css</strong> could incorporate CSS).</p>
+<p>Another potentially good argument is that the amount of parameterization for DO could roughly wind up matching <a href="https://forum.rebol.info/t/design-for-import/1570">the amount of parameterization for IMPORT</a>.  This might suggest even that DO be arity-2 in all cases instead of having a refinement form of DO/ARGS.  That would allow for a content type override if you were DO-ing a string:</p>
+<pre><code>do css-source-text [Type: 'css]
+</code></pre>
+<p>Though single-arity DO is pretty entrenched.  Maybe DO of a BLOCK! does expect that block to have a header structure, so you could add that header:</p>
+<pre><code>do compose [Rebol [Type: 'css] (css-source-text)]
+; -or-
+do compose [CSS [&lt;options for merging CSS in ReplPad&gt;] (css-source-text)]
+
+do compose [Rebol [] (spread transcode rebol-source-text)]
+</code></pre>
+<h2>
+<a name="regardless-do-of-a-text-needs-a-header-4" class="anchor" href="https://forum.rebol.info#regardless-do-of-a-text-needs-a-header-4"></a>Regardless, DO of a TEXT! Needs a Header</h2>
+<p>This strikes me as non-negotiable, so I went ahead to with this, and hit a few issues.</p>
+<p>DO-ing text directly with no intermediate processing step is a rarely needed operation, so it doesn't come up much.  But I did trip over two issues:</p>
+<h3>
+<a name="issue-do-on-the-command-line-5" class="anchor" href="https://forum.rebol.info#issue-do-on-the-command-line-5"></a>Issue: --do On The Command Line</h3>
+<p>First thing I hit was the question of the <strong><code>--do "your code here"</code></strong> command line option.  This is a little annoying, because you don't have the option of saying <strong><code>--do [your code here]</code></strong> at that particular place.</p>
+<p>I can attest to the fact that I'd be annoyed if I had to put a header there.  But then... what if I wanted a header's influence... settings to direct the execution of that code?</p>
+<p>This again seems to suggest a split of --eval and --do.  Use --do if you have a header, and --eval if you don't.  Since EVAL wouldn't take strings, the idea that the command line presumes you want the string bound in the "default sense" (e.g. what would happen if you typed in the console) seems fine.</p>
+<p>It may be that DO of a BLOCK! running Rebol code is just so ingrained that it isn't changeable.  If that's the case, then saying <code>--do</code> takes the block interpretation of the string you pass it is probably not a big issue, and then <code>--do {do {Rebol [] ...}}</code> can be how you inject a header on the command line.</p>
+<h3>
+<a name="issue-does-for-doing-code-6" class="anchor" href="https://forum.rebol.info#issue-does-for-doing-code-6"></a>Issue: DOES for doing code</h3>
+<p>This isn't really about the DO-needs-a-header-on-string, but another thing I noticed pertaining to a potential DO/EVAL split.</p>
+<p>DOES is a shorthand for defining a LAMBDA with no arguments.</p>
+<pre><code>&gt;&gt; foo: does [1 + 2]
+
+&gt;&gt; foo
+== 3
+</code></pre>
+<p>For reasons of consistency, Ren-C extended it so it would run anything DO would process:</p>
+<pre><code>&gt;&gt; foo: does %your-script.r
+
+&gt;&gt; foo
+Running your script...
+</code></pre>
+<p>That's hardly an important feature <em>(<code>foo: does [do %your-script.r]</code> is easy enough to say if it ever actually comes up, which it has not.)</em>  But it raises a question about using the word DOES in light of a DO and EVAL split.  DOES contains the word DO and might suggest a connection with DO's behavior and not EVAL's.</p>
+<p>Perhaps RUN could be the script-oriented runner, with DO keeping the role of EVAL... though right now I'm using RUN for executing frames and gathering arguments at the callsite (a kind of inline APPLY).  That would need another name.</p>
+<p>Perhaps EVALS is not so bad as an alternative to DOES?  :-/</p>
+<pre><code>&gt;&gt; foo: evals [print "hi"]
+
+&gt;&gt; foo
+hi
+</code></pre>
+<p>No, it's bad.  I'm not a fan.</p>
+<p>Or maybe the inconsistency that DOES has little relation to DO is not a big deal.  But inconsistency bothers me (which is why I made <strong>does x</strong> a synonym for <strong>lambda [] [do x]</strong> for all X, despite likely uselessness for non-block X.)</p>
+          <p><a href="https://forum.rebol.info/t/do-of-text-as-synonym-of-do-of-file-containing-string/2125/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/do-of-text-as-synonym-of-do-of-file-containing-string/2125/1</link>
+        <pubDate>Fri, 19 Jan 2024 12:38:09 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-2125-1</guid>
+        <source url="https://forum.rebol.info/t/do-of-text-as-synonym-of-do-of-file-containing-string/2125.rss">DO of TEXT! As Synonym of DO of FILE! Containing String</source>
+      </item>
+  </channel>
+</rss>

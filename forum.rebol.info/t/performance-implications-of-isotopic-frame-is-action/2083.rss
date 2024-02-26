@@ -1,0 +1,246 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Performance Implications of Isotopic-FRAME!-is-Action</title>
+    <link>https://forum.rebol.info/t/performance-implications-of-isotopic-frame-is-action/2083</link>
+    <description>Making the isotopic state of frames be [*&quot;interpret this frame as an action when run through a word reference&quot;*](https://forum.rebol.info/t/taking-action-on-function-vs-action/596/6?u=hostilefork) is a deep change.  The implications haven&#39;t been fully absorbed, and there are some things I noticed that create troubles for optimization.
+
+Looking again at a simple example:
+
+    &gt;&gt; f: make frame! :append
+    == make frame! [
+        series: ~
+        value: ~
+        part: ~
+        dup: ~
+        line: ~
+    ]
+
+    &gt;&gt; f.value: 5
+
+    &gt;&gt; append5: isotopic f
+    == ~make frame! [
+        series: ~
+        value: 5
+        part: ~
+        dup: ~
+        line: ~
+    ]~  ; isotope
+
+    &gt;&gt; append5 [a b c]
+    == [a b c 5]
+
+That&#39;s cool, for sure.  And it removes the number of things we have to name in the system (I was particularly annoyed by having to differentiate &quot;action&quot; and &quot;activation&quot; when there was a separate ACTION! datatype).
+
+## But What If The Frame Is Modified...?
+
+Say the user writes this:
+
+    &gt;&gt; append5 (f.series: [d e f], [a b c])
+    == ???
+
+When running the specialization **append5** we&#39;d already decided that the series parameter wasn&#39;t specialized and needed to be fulfilled.  But the user is *specializing the series parameter during the fulfillment*.
+
+At best, this is semantically messy (and can manifest as hard-to-comprehend behavior when the example is less obvious than this one).  At worst, the internal bookkeeping of the evaluator gets confused and it crashes due to having the slot it&#39;s filling changed out from under it.
+
+## We Could Snapshot The Frame... But Snapshots Aren&#39;t Free
+
+If we are forced to make a snapshot of the frame state at the start of execution, then that means making a copy, which takes time and space.
+
+The space isn&#39;t actually the problem...because we can just put the snapshot in the frame space we&#39;re already making for the function call.
+
+Where we pay is that it effectively adds an extra traversal of the arguments.  We&#39;re traversing the space to make the copy (with some slots unspecialized and needing to be fulfilled).  Then we&#39;re traversing the space again to do the fulfillment of the unspecialized arguments.
+
+With no snapshot, we could leave the memory for the frame cells completely garbage at the outset... and fill them as we go with either a fulfillment or a specialization.  Empirically, avoiding the snapshot could save as much as 5% of the runtime.
+
+## Another Issue: No Moment To Cache Optimizations
+
+When there was a separate &quot;make an action! out of this frame&quot; step, the action was a way of saying &quot;freeze!&quot; on the arguments, so they could no longer be changed.  So it avoids the problem of changes during fulfillment.
+
+But it did something else: it meant properties of the arguments could be studied...to remember things like *&quot;what&#39;s the first unspecialized argument slot&quot;*.
+
+(It might seem that it would be easy to find the first unspecialized argument slot.  But this isn&#39;t just a search from the beginning of the frame, because it&#39;s possible to reorder arguments or have partial specializations.  So it&#39;s tricky.)
+
+## How About Just Freezing The Frames If They&#39;re Executed?
+
+The simplest idea here is just to say that once you invoke a frame, it&#39;s frozen...you can&#39;t change its fields anymore.  Then that freezing process can do the caching of properties that accelerate action execution, and all is well.
+
+If you want to keep a frame mutable, then COPY it before making it isotopic.  The issue is just that changes to the frame won&#39;t be seen by the isotope you made.
+
+## Do Technicalities Like This Make Me Question FRAME!-as-Action?
+
+Well, it&#39;s a delicate balance of choices, and I&#39;m still feeling it out.
+
+The worry is that the number of concerns being exposed to users is such that the properties of &quot;the kind frame you can run is different enough that you basically have to think of it as a different type&quot;.
+
+To avoid that in this case, it&#39;s better to do the freezing implicitly vs. saying that you need a special routine like RUNS to bless a frame as runnable.  This way, RUNS can be understood as simply taking in a plain frame! and giving back an isotopic frame!... something you could easily write yourself.
+
+Crafting a uniformity of experience with FRAME! so it doesn&#39;t feel like it&#39;s making up for a missing ACTION! type is certainly something to continue to be mindful of.  But performance needs to be minded too at some point, so I&#39;m doing what I can about that.</description>
+    
+    <lastBuildDate>Wed, 20 Dec 2023 22:38:25 +0000</lastBuildDate>
+    <category>Optimization</category>
+    <atom:link href="https://forum.rebol.info/t/performance-implications-of-isotopic-frame-is-action/2083.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Performance Implications of Isotopic-FRAME!-is-Action</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="2083">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/40/26_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<pre><code>&gt;&gt; f: make frame! :append
+== make frame! [
+    series: ~
+    value: ~
+    part: ~
+    dup: ~
+    line: ~
+]
+</code></pre>
+</blockquote>
+</aside>
+<h2>
+<a name="another-performance-wrinkle-looking-in-two-places-1" class="anchor" href="https://forum.rebol.info#another-performance-wrinkle-looking-in-two-places-1"></a>Another Performance Wrinkle: Looking In Two Places</h2>
+<p>During the argument gathering process, when the evaluator is visiting a slot it needs to have one of two things on hand:</p>
+<ul>
+<li>
+<strong>the parameter specification</strong> (so it can know if it's a refinement or quoted or whatever while it gathers it)<br>
+-or-</li>
+<li><strong>the specialized value</strong></li>
+</ul>
+<p>With the idea that FRAME!s are just automatically transmuted into actions by virtue of being isotopic, we are saying that the specialization comes from the frame's cell for that slot if it's not "trash" (~).  But if it <em>is</em> trash, we have to look somewhere else for the parameter information (namely the "parent" of the frame--whatever frame this was copied or instantiated from).</p>
+<p><em>Having to look in two different places adds a not-insignificant cost.</em>  It means traversing two lists instead of one (incrementing two unrelated pointers), and is also a locality issue from not being able to just work on one location.</p>
+<p>That caused me to wonder if the moment I describe of a <code>Force_Frame_Runnable()</code> that locks the frame and caches optimizations could sneakily write in the parameter information over any unset cells.  This would be done only once, and execution could be faster.</p>
+<p>But this would weave a tangled web.  It would mean that an actual specialized frame would wind up looking like this after an execution:</p>
+<pre><code>&gt;&gt; f
+== make frame! [
+    series: ~#[parameter! [types: [any-series?] refinement: ~false~ ...]]~
+    value: 5
+    part: ~#[parameter! [types: [integer! any-series?] refinement: ~true~ ...]]~
+    dup: ~#[parameter! [types: [integer!] refinement: ~true~ ...]]~
+    line: ~#[parameter! [types: ~null~  refinement: ~true~ ...]]~
+]
+</code></pre>
+<p><em>(If you're wondering what a PARAMETER! is, it's an internal type which I've been inching toward exposing as a user-visible type for manipulating parameters.  Basically a compressed object--something like R3-Alpha's EVENT!--which only has very specific fields pertinent to parameter fulfillment.)</em></p>
+<p>Hence I've been wracking my brain trying to figure out how to preserve the illusion of these fields being unset, when they've actually got a parameter specification in them.</p>
+<p><em>It's a difficult illusion to implement</em>, and trying to do so starts bending the codebase pretty far from the goal of simplicity, just to accomplish some more performance.</p>
+<h2>
+<a name="what-if-we-embrace-parameter-as-unspecialized-2" class="anchor" href="https://forum.rebol.info#what-if-we-embrace-parameter-as-unspecialized-2"></a>WHAT IF... We Embrace PARAMETER!-as-Unspecialized?</h2>
+<p><strong>This way the "optimization" of using an unspecialized parameter slot to hold a parameter definition becomes the actual way in which parameters can be specified and reflected.</strong></p>
+<p>You could build a function from scratch by making a FRAME! with these isotopic parameters in it, and then ADAPT'ing some code into it.</p>
+<pre><code>&gt;&gt; f: make frame! [x: isotopic make parameter! [types: [integer!]]
+== make frame! [
+    x: ~#[parameter! [types: [integer!] refinement: ~false~ ...]]~
+]
+
+&gt;&gt; test: adapt f [print ["x is" x]]
+== ~#[frame! ...]~
+
+&gt;&gt; test 10
+x is 10
+</code></pre>
+<p>This is starting to look very much like my prophetic post: <strong><a href="https://forum.rebol.info/t/seeing-all-action-s-as-variadic-frame-makers/1002">"Seeing all ACTION!s as Variadic FRAME!-makers"</a></strong>.  The idea gives the reflection we'd want of being able to extract the parameter information, as well as to be able to modify it.  The help string could actually go inside the parameter as well, which would solve some bloat that we experience due to putting this in a copied state elsewhere.</p>
+<p>This would also mean that you could specialize parameters to be trash, as an isotopic parameter would be the only kind of value you couldn't specialize to.  The term for an isotopic parameter! could be "unspecialized?", so above <strong>unspecialized? f.series</strong> would return true.</p>
+<h2>
+<a name="what-about-downsides-3" class="anchor" href="https://forum.rebol.info#what-about-downsides-3"></a>What About Downsides?</h2>
+<p>Obviously the rendering is hideous, and I lament losing the elegance of the ~ that trash had.  The web console has much more leeway than a pure text one (for this and other rendering difficulties), like being able to show a collapsed form you can expand for more details.</p>
+<p>We could try workarounds, like simply abbreviating when things are inside the frame, and then blow them up when they were extracted:</p>
+<pre><code>&gt;&gt; f: make frame! [x: isotopic make parameter! [types: [integer!]]
+== make frame! [
+    x: ~#[parameter! ...]~
+]
+
+&gt;&gt; f.x
+== ~#[parameter! [
+    types: [integer!]
+    refinement: false
+    description: ~null~
+    ...
+]]~  ; isotope
+</code></pre>
+<p>You wouldn't be able to use DEFAULT to act on unspecialized fields, like <strong>f.x: default [...]</strong>, unless DEFAULT was rethought to consider unspecialized states as one of the things it considers "non-valued".</p>
+<p>Once you overwrote an unspecialized slot, there wouldn't be an easy way to undo it.  Not necessarily important... just mentioning that it's different from today, where you can put a value in a slot and then change your mind by just overwriting it with trash again.</p>
+<p>Using an unspecialized frame state wouldn't cause an error on access (though we'd presume there'd be relatively few places you could pass an isotopic parameter as an argument, especially since they're not legal in parameter fulfillments since they represent the unspecialized state).</p>
+<h2>
+<a name="still-only-partial-exposure-of-frame-magic-4" class="anchor" href="https://forum.rebol.info#still-only-partial-exposure-of-frame-magic-4"></a>Still Only Partial Exposure of FRAME! Magic</h2>
+<p>The code that runs from a frame still lurks behind the scenes.  When you say <strong>adapt frame [...]</strong> to put code into it, you get back a FRAME! that looks identical to the one you put in--at least as far as the parameters and specializations are concerned.</p>
+<p>This is kind of par for the course.  In JavaScript, digging into what it gives back for a function doesn't really give a body when you drill down...just the prototype:</p>
+<p><img src="https://forum.rebol.info/uploads/default/original/1X/2415b9c261f2f11e18382b622ac6025a1148e3fc.png" alt="image" data-base62-sha1="59dJCFLQg9e2oLJ4zASlYkpUcgs" width="426" height="478"></p>
+<p>And of course, native code won't show a body (though we conceivably could expose the C code as a string, at the cost of having to ship that C code in the executable and take up space).</p>
+<p>It's good to look at something like JavaScript just to get a reminder that nothing is perfect, and at least Ren-C's model is packing some serious functionality.</p>
+          <p><a href="https://forum.rebol.info/t/performance-implications-of-isotopic-frame-is-action/2083/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/performance-implications-of-isotopic-frame-is-action/2083/2</link>
+        <pubDate>Wed, 20 Dec 2023 22:38:25 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-2083-2</guid>
+        <source url="https://forum.rebol.info/t/performance-implications-of-isotopic-frame-is-action/2083.rss">Performance Implications of Isotopic-FRAME!-is-Action</source>
+      </item>
+      <item>
+        <title>Performance Implications of Isotopic-FRAME!-is-Action</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>Making the isotopic state of frames be <a href="https://forum.rebol.info/t/taking-action-on-function-vs-action/596/6"><em>"interpret this frame as an action when run through a word reference"</em></a> is a deep change.  The implications haven't been fully absorbed, and there are some things I noticed that create troubles for optimization.</p>
+<p>Looking again at a simple example:</p>
+<pre><code>&gt;&gt; f: make frame! :append
+== make frame! [
+    series: ~
+    value: ~
+    part: ~
+    dup: ~
+    line: ~
+]
+
+&gt;&gt; f.value: 5
+
+&gt;&gt; append5: isotopic f
+== ~make frame! [
+    series: ~
+    value: 5
+    part: ~
+    dup: ~
+    line: ~
+]~  ; isotope
+
+&gt;&gt; append5 [a b c]
+== [a b c 5]
+</code></pre>
+<p>That's cool, for sure.  And it removes the number of things we have to name in the system (I was particularly annoyed by having to differentiate "action" and "activation" when there was a separate ACTION! datatype).</p>
+<h2>
+<a name="but-what-if-the-frame-is-modified-1" class="anchor" href="https://forum.rebol.info#but-what-if-the-frame-is-modified-1"></a>But What If The Frame Is Modified...?</h2>
+<p>Say the user writes this:</p>
+<pre><code>&gt;&gt; append5 (f.series: [d e f], [a b c])
+== ???
+</code></pre>
+<p>When running the specialization <strong>append5</strong> we'd already decided that the series parameter wasn't specialized and needed to be fulfilled.  But the user is <em>specializing the series parameter during the fulfillment</em>.</p>
+<p>At best, this is semantically messy (and can manifest as hard-to-comprehend behavior when the example is less obvious than this one).  At worst, the internal bookkeeping of the evaluator gets confused and it crashes due to having the slot it's filling changed out from under it.</p>
+<h2>
+<a name="we-could-snapshot-the-frame-but-snapshots-arent-free-2" class="anchor" href="https://forum.rebol.info#we-could-snapshot-the-frame-but-snapshots-arent-free-2"></a>We Could Snapshot The Frame... But Snapshots Aren't Free</h2>
+<p>If we are forced to make a snapshot of the frame state at the start of execution, then that means making a copy, which takes time and space.</p>
+<p>The space isn't actually the problem...because we can just put the snapshot in the frame space we're already making for the function call.</p>
+<p>Where we pay is that it effectively adds an extra traversal of the arguments.  We're traversing the space to make the copy (with some slots unspecialized and needing to be fulfilled).  Then we're traversing the space again to do the fulfillment of the unspecialized arguments.</p>
+<p>With no snapshot, we could leave the memory for the frame cells completely garbage at the outset... and fill them as we go with either a fulfillment or a specialization.  Empirically, avoiding the snapshot could save as much as 5% of the runtime.</p>
+<h2>
+<a name="another-issue-no-moment-to-cache-optimizations-3" class="anchor" href="https://forum.rebol.info#another-issue-no-moment-to-cache-optimizations-3"></a>Another Issue: No Moment To Cache Optimizations</h2>
+<p>When there was a separate "make an action! out of this frame" step, the action was a way of saying "freeze!" on the arguments, so they could no longer be changed.  So it avoids the problem of changes during fulfillment.</p>
+<p>But it did something else: it meant properties of the arguments could be studied...to remember things like <em>"what's the first unspecialized argument slot"</em>.</p>
+<p>(It might seem that it would be easy to find the first unspecialized argument slot.  But this isn't just a search from the beginning of the frame, because it's possible to reorder arguments or have partial specializations.  So it's tricky.)</p>
+<h2>
+<a name="how-about-just-freezing-the-frames-if-theyre-executed-4" class="anchor" href="https://forum.rebol.info#how-about-just-freezing-the-frames-if-theyre-executed-4"></a>How About Just Freezing The Frames If They're Executed?</h2>
+<p>The simplest idea here is just to say that once you invoke a frame, it's frozen...you can't change its fields anymore.  Then that freezing process can do the caching of properties that accelerate action execution, and all is well.</p>
+<p>If you want to keep a frame mutable, then COPY it before making it isotopic.  The issue is just that changes to the frame won't be seen by the isotope you made.</p>
+<h2>
+<a name="do-technicalities-like-this-make-me-question-frame-as-action-5" class="anchor" href="https://forum.rebol.info#do-technicalities-like-this-make-me-question-frame-as-action-5"></a>Do Technicalities Like This Make Me Question FRAME!-as-Action?</h2>
+<p>Well, it's a delicate balance of choices, and I'm still feeling it out.</p>
+<p>The worry is that the number of concerns being exposed to users is such that the properties of "the kind frame you can run is different enough that you basically have to think of it as a different type".</p>
+<p>To avoid that in this case, it's better to do the freezing implicitly vs. saying that you need a special routine like RUNS to bless a frame as runnable.  This way, RUNS can be understood as simply taking in a plain frame! and giving back an isotopic frame!... something you could easily write yourself.</p>
+<p>Crafting a uniformity of experience with FRAME! so it doesn't feel like it's making up for a missing ACTION! type is certainly something to continue to be mindful of.  But performance needs to be minded too at some point, so I'm doing what I can about that.</p>
+          <p><a href="https://forum.rebol.info/t/performance-implications-of-isotopic-frame-is-action/2083/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/performance-implications-of-isotopic-frame-is-action/2083/1</link>
+        <pubDate>Wed, 20 Dec 2023 02:09:21 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-2083-1</guid>
+        <source url="https://forum.rebol.info/t/performance-implications-of-isotopic-frame-is-action/2083.rss">Performance Implications of Isotopic-FRAME!-is-Action</source>
+      </item>
+  </channel>
+</rss>
