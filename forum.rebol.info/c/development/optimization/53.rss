@@ -5,8 +5,54 @@
     <link>https://forum.rebol.info/c/development/optimization/53</link>
     <description>Topics in the &#39;Optimization&#39; category This is a category for discussing performance and optimization ideas.</description>
     
-      <lastBuildDate>Thu, 25 Jan 2024 03:27:25 +0000</lastBuildDate>
+      <lastBuildDate>Wed, 06 Mar 2024 15:24:07 +0000</lastBuildDate>
       <atom:link href="https://forum.rebol.info/c/development/optimization/53.rss" rel="self" type="application/rss+xml" />
+        <item>
+          <title>Mapping from Series =&gt; Series By Co-Opting The Key Series</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Optimization</category>
+          <description><![CDATA[
+            <p>There was an unfinished idea in an old version of the interpreter.  It related to how to deal with problems like trying to make a copy of a block, and make sure any series with the same identity are only copied once in the new structure, and point to that one copied identity.</p>
+<p>Rebol2 did not have this behavior:</p>
+<pre><code>rebol2&gt;&gt; block: [a]
+== [a]
+
+rebol2&gt;&gt; original: reduce [block block]
+== [[a] [a]]
+
+rebol2&gt;&gt; append block 'b
+== [a b]
+
+rebol2&gt;&gt; original
+== [[a b] [a b]]  ; both aliases see the append
+
+rebol2&gt;&gt; duplicate: copy/deep original
+== [[a b] [a b]]
+
+rebol2&gt;&gt; append first duplicate 'c
+== [a b c]
+
+rebol2&gt;&gt; duplicate
+== [[a b c] [a b]]  ; considered by many to be wrong: independent copies
+</code></pre>
+<p>This post isn't about whether that is right or wrong (and having such questions may seem to some as an indication of <em>"this language is madness! get me to Haskell"</em>, etc. But as I've said this is the game we're playing here so we roll with it.)</p>
+<p>But to not get independent copies, you need a way to map series nodes to copies you've already created...so you can consult that mapping before making new copies.  And the direction that was being pursued by the old interpreter I am looking at was to actually do surgery on the originating series nodes, to alter them so they shifted out some of their content, such that they could be their own keys in the mapping.</p>
+<p>Generally speaking, all the bits in a series stub are spoken for.  So it would seem there's nowhere to stow a pointer to the new series you are creating in it.  What the implementation was doing was pushing a 4 pointer cell on the data stack, writing one pointer's worth of information from the stub into that cell, then replacing that pointer slot in the stub with the stack index.  Then it wrote the new series into the cell...so the cell contained one stowed pointer from the original series and one pointer for the new series.</p>
+<p>This meant the original series was now in a "weird" state, that things like the GC had to know about and tolerate.  Other operations looking for the missing information in the stub needed to be caught if they tried to get at it without following the stack index through to the stack cell.</p>
+<p>Having the cells on the data stack meant it was not necessary to enumerate all the series stubs after a copy to "clean them up".  Otherwise, I'd imagine it may be possible to make some kind of guarantee that for any series appearing in source, the union of the bits in the source series and the bits of the copied series can hold all the information necessary to construct two valid series... e.g. one pointer's worth of information is always redundant in those two copies.  If you can get <em>two</em> pointers' worth of information redundant, the second could be used to chain a linked list as you go...removing the need for the stack cells to enumerate.</p>
+<p>Though having the stack cells and no particular requirement of information redundancy in source series with their copies offers another benefit: being applicable for creating mappings that aren't copying-related.</p>
+<p>Anyway, it was a little unfinished idea I ran across that I wanted to document.  I'm cleaning up the bootstrap executable to refresh it with something that will help <a href="https://forum.rebol.info/t/rethinking-braces-as-an-array-type/1727">in the FENCE! migration</a>, and mercilessly deleting any code in the bootstrap executable that does not specifically benefit bootstrap... to reduce the instability surface, speed things up, and make it easier to debug the 6-year old executable if worst comes to worst.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/mapping-from-series-series-by-co-opting-the-key-series/2166">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/mapping-from-series-series-by-co-opting-the-key-series/2166</link>
+          <pubDate>Wed, 06 Mar 2024 15:24:07 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2166</guid>
+          <source url="https://forum.rebol.info/t/mapping-from-series-series-by-co-opting-the-key-series/2166.rss">Mapping from Series =&gt; Series By Co-Opting The Key Series</source>
+        </item>
         <item>
           <title>Optimizing Environment Lookup</title>
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
@@ -422,6 +468,46 @@ REBOL [
           <discourse:topicArchived>No</discourse:topicArchived>
           <guid isPermaLink="false">forum.rebol.info-topic-2044</guid>
           <source url="https://forum.rebol.info/t/is-the-script-compression-feature-necessary/2044.rss">Is The Script Compression Feature Necessary?</source>
+        </item>
+        <item>
+          <title>Python Speedup Proposals</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Optimization</category>
+          <description><![CDATA[
+            <p>The original "CPython" implementation is in some ways similar to Rebol/Red... though these days Ren-C is more aligned with the stackless Python implementation...which is also written in C, but distinct from CPython.</p>
+<p><em>(But Ren-C's design overall is a lot less comparable to anything, due to the number of very "alien" ideas in it, but that I think are what gives it more notable properties.)</em></p>
+<p>In any case, despite running an interpreter loop and doing kind-of-what-Rebol-does, they've committed themselves to doing some speedup proposals and apparently it's paying off:</p>
+<p><a href="https://devblogs.microsoft.com/python/python-311-faster-cpython-team/" class="inline-onebox">A Team at Microsoft is Helping Make Python Faster - Python</a></p>
+<p>Some of their proposals involve JIT-compiling things (which they know won't work on restrictive platforms like iOS).  But they apparently have done a lot of tweaks besides that which have turned out beneficial.  Because it's a C interpreter there might be something applicable to be learned by looking at their "Stage 1" and "Stage 2" changes.</p>
+<blockquote>
+<h3>Stage 1 -- Python 3.10</h3>
+<p>The key improvement for 3.10 will be an adaptive, specializing interpreter. The interpreter will adapt to types and values during execution, exploiting type stability in the program, without needing runtime code generation.</p>
+<h3>Stage 2 -- Python 3.11</h3>
+<p>This stage will make many improvements to the runtime and key objects. Stage two will be characterized by lots of "tweaks", rather than any "headline" improvement. The planned improvements include:</p>
+<ul>
+<li>Improved performance for integers of less than one machine word.</li>
+<li>Improved peformance for binary operators.</li>
+<li>Faster calls and returns, through better handling of frames.</li>
+<li>Better object memory layout and reduced memory management overhead.</li>
+<li>Zero overhead exception handling.</li>
+<li>Further enhancements to the interpreter</li>
+<li>Other small enhancements.</li>
+</ul>
+<h3>Stage 3 -- Python 3.12 (requires runtime code generation)</h3>
+<p>Simple "JIT" compiler for small regions. Compile small regions of specialized code, using a relatively simple, fast compiler.</p>
+<h3>Stage 4 -- Python 3.13 (requires runtime code generation)</h3>
+<p>Extend regions for compilation. Enhance compiler to generate superior machine code.</p>
+</blockquote>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/python-speedup-proposals/1992">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/python-speedup-proposals/1992</link>
+          <pubDate>Sun, 27 Nov 2022 10:05:19 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-1992</guid>
+          <source url="https://forum.rebol.info/t/python-speedup-proposals/1992.rss">Python Speedup Proposals</source>
         </item>
         <item>
           <title>Boot Footprint: Giant String Literal vs. Encap?</title>

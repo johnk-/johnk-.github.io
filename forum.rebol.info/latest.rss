@@ -5,8 +5,938 @@
     <link>https://forum.rebol.info/latest</link>
     <description>Latest topics</description>
     
-      <lastBuildDate>Sun, 25 Feb 2024 12:53:56 +0000</lastBuildDate>
+      <lastBuildDate>Mon, 11 Mar 2024 15:08:10 +0000</lastBuildDate>
       <atom:link href="https://forum.rebol.info/latest.rss" rel="self" type="application/rss+xml" />
+        <item>
+          <title>Haskell parser combinators</title>
+          <dc:creator><![CDATA[bradrn]]></dc:creator>
+          <category>Foreign Inspiration</category>
+          <description><![CDATA[
+            <p>I’ve seen a few parsing-related threads recently in this forum. I haven’t been commenting much on them, since I don’t have enough experience with UPARSE (or for that matter historical PARSE) to say anything helpful.</p>
+<p>On the other hand, I <em>do</em> have a lot of experience with parser combinators in Haskell. In terms of structure and purpose, they’re probably the concept most similar to UPARSE that I’ve seen from another language. So I thought I’d write this post in the hope that something, somewhere, might eventually prove useful somehow.</p>
+<h2>
+<a name="high-level-overview-1" class="anchor" href="https://forum.rebol.info#high-level-overview-1"></a>High-level overview</h2>
+<p>The first and most important thing to realise about parser combinators is that <strong>they’re not built into the language</strong>. They’re simply ordinary libraries which make it easy to construct parsers compositionally.</p>
+<p>(I mean, for that matter, UPARSE isn’t built in either. But there’s a different level of integration with the rest of the language.)</p>
+<p>The basic approach is to define a new datatype for parsers, usually called something like <code>Parser a</code>. This is a parser which can process a string (or other datatype), returning a result of type <code>a</code> if it succeeds. Alongside this there will be a set of primitive parsers, most notably <code>char</code> (to parse single characters), <code>return</code> (which always succeeds with a result), and <code>empty</code> (which always fails).</p>
+<p>(Of course, practical libraries will have more primitives. <code>megaparsec</code> has <a href="https://hackage.haskell.org/package/megaparsec-9.6.1/docs/Text-Megaparsec.html#g:4">a nice selection</a>, with good comments.)</p>
+<p>The most interesting bit is the way these parser combinators are combined to create larger parsers. This, of course, relies on the standard abstractions of Haskell. Two operators are particularly important:</p>
+<ul>
+<li>Sequencing: <code>p &gt;&gt;= f</code> is a parser which runs <code>p</code> and passes the result to function <code>f</code>, then runs the resulting parser.</li>
+<li>Choice: <code>p &lt;|&gt; q</code> is a parser which runs <code>p</code>, then backtracks and runs <code>q</code> if that failed.</li>
+</ul>
+<p>From these basic elements you can define a very wide range of generic combinators, for instance these useful ones:</p>
+<pre data-code-wrap="hs"><code class="lang-plaintext">-- sequencing ignoring result
+(&gt;&gt;) :: Parser a -&gt; Parser b -&gt; Parser b
+p &gt;&gt; q = p &gt;&gt;= \_ -&gt; q
+
+-- Match a whole string
+string :: String -&gt; Parser ()
+string "" = return ()
+string (c:cs) = char c &gt;&gt; string cs
+
+-- 1 or more
+some :: Parser a -&gt; Parser [a]
+some p =
+    p &gt;&gt;= \first -&gt;
+    many p &gt;&gt;= \rest -&gt;
+    return (first : rest)
+
+-- 0 or more
+many :: Parser a -&gt; Parser [a]
+many p = some p &lt;|&gt; return []
+</code></pre>
+<h2>
+<a name="a-basic-implementation-2" class="anchor" href="https://forum.rebol.info#a-basic-implementation-2"></a>A basic implementation</h2>
+<p>This is all a little abstract, though. Probably the easiest way to understand parser combinators is to implement them.</p>
+<p>A basic implementation is quite simple. A parser is just a function which takes in a string, and on success returns the result alongside the unparsed portion of the string:</p>
+<pre data-code-wrap="hs"><code class="lang-plaintext">newtype Parser a = Parser (String -&gt; Maybe (String, a))
+</code></pre>
+<p>You then run the parser simply by unwrapping the function and applying it to your input:</p>
+<pre data-code-wrap="hs"><code class="lang-plaintext">runParser :: Parser a -&gt; String -&gt; Maybe (String, a)
+runParser (Parser p) input = p input
+</code></pre>
+<p>Simple parsers work as you’d expect:</p>
+<pre data-code-wrap="hs"><code class="lang-plaintext">char :: Char -&gt; Parser ()
+char c = Parser $ \input -&gt; case input of
+    (c':cs) | c == c' -&gt; Just (cs, ())
+    _ -&gt; Nothing
+
+return :: a -&gt; Parser a
+return a = Parser $ \input -&gt; Just (input, a)
+
+empty :: Parser a
+empty = Parser $ \_ -&gt; Nothing
+</code></pre>
+<p>The combinators require more elaborate state-threading, but are still straightforward:</p>
+<pre data-code-wrap="hs"><code class="lang-plaintext">(&gt;&gt;=) :: Parser a -&gt; (a -&gt; Parser b) -&gt; Parser b
+p &gt;&gt;= f = Parser $ \input -&gt;
+    case runParser p input of
+        Nothing -&gt; Nothing
+        Just (partiallyParsed, a) -&gt;
+            runParser (f a) partiallyParsed
+
+(&lt;|&gt;) :: Parser a -&gt; Parser a -&gt; Parser a
+p &lt;|&gt; q = Parser $ \input -&gt;
+    case runParser p input of
+        Just result -&gt; Just result
+        Nothing -&gt; runParser q input
+</code></pre>
+<p>This simple code suffices for a surprisingly wide variety of tasks. For instance, a slight variant is present in the base library as <a href="https://hackage.haskell.org/package/base-4.16.3.0/docs/Text-Read.html#t:ReadS"><code>ReadS</code></a>. (The variation is that <code>ReadS</code> can produce multiple results.)</p>
+<h2>
+<a name="managing-backtracking-3" class="anchor" href="https://forum.rebol.info#managing-backtracking-3"></a>Managing backtracking</h2>
+<p>Unfortunately, <strong>this has serious problems with any larger-scale use</strong>. For one thing, it can’t do error reporting beyond ‘it failed somewhere’. But there are even bigger problems with this implementation of the choice combinator <code>(&lt;|&gt;)</code>:</p>
+<ol>
+<li>It behaves unpredictably: any error anywhere will result in the parser backtracking to the last choice, and so on until every single choice has been exhausted. This is bad for the time complexity, plus it leaves you no chance of ever reporting errors nicely.</li>
+<li>It holds onto the input string during the whole time <code>p</code> is executing. This creates a space leak, which grows larger the more nested choices you have.</li>
+</ol>
+<p>The first parser combinator library to solve these issues was <code>Parsec</code>. Its design is described in <a href="https://www.microsoft.com/en-us/research/wp-content/uploads/2016/02/parsec-paper-letter.pdf">this paper</a> (which seems very readable). I won’t describe its implementation here… but the basic idea is simple to summarise: each parser keeps track of what it’s consumed, and <strong>commits to a parser as soon as it’s consumed any characters</strong>.</p>
+<p>Some parsers require no changes under this new semantics. For instance, <code>string "first word" &lt;|&gt; string "second word"</code> works without problems. If it sees an input character <code>f</code>, the first choice <code>string "first word"</code> matches immediately, meaning the library can commit to the first parser, and know that the second parser never needs to run. On the other hand, upon seeing an input character <code>'s'</code>, that first parser will fail on that very first character: since no characters have been consumed, control passes over to the second parser to succeed or fail.</p>
+<p>On the other hand, more elaborate lookahead becomes more difficult. For instance, <code>string "word 1" &lt;|&gt; string "word 2"</code> no longer works: as soon as this parser sees <code>'w'</code>, it matches the first parser, so the second parser will never be run.</p>
+<p>To solve this, Parsec introduces a new primitive combinator: <code>try</code>, which creates a parser which never consumes characters on failure. The effect of this is to allow backtracking over whatever is in the <code>try</code>. For this example, <code>try (string "word 1") &lt;|&gt; string "word 2"</code> would work as expected.</p>
+<p>The nice thing about this approach is the control it gives you. For instance, I can write things like:</p>
+<pre data-code-wrap="hs"><code class="lang-plaintext">(try (string "App") &gt;&gt; string "le") &lt;|&gt; string "Apricot"
+</code></pre>
+<p>Here, as soon as the parser reaches a second <code>'p'</code>, it can commit to the first branch. But if it sees another character, it’s still able to backtrack through the <code>string "App"</code> and move on to the second branch. Of course, this is a contrived example — but in general, being able to specify the control flow of your parser like this is exceedingly useful in larger parsers.</p>
+<h2>
+<a name="what-use-is-this-for-rebol-4" class="anchor" href="https://forum.rebol.info#what-use-is-this-for-rebol-4"></a>What use is this for Rebol?</h2>
+<p>Quite probably, none at all.</p>
+<p>But like I said, I’m hoping potentially some of this might end up useful somewhere. If it can act as inspiration which helps solve any problems, I’m happy.</p>
+<p>And, of course, now that we have this thread for it, feel free to ask me any questions about parser combinators you might have!</p>
+            <p><small>3 posts - 2 participants</small></p>
+            <p><a href="https://forum.rebol.info/t/haskell-parser-combinators/2173">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/haskell-parser-combinators/2173</link>
+          <pubDate>Mon, 11 Mar 2024 15:08:10 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2173</guid>
+          <source url="https://forum.rebol.info/t/haskell-parser-combinators/2173.rss">Haskell parser combinators</source>
+        </item>
+        <item>
+          <title>-&gt; for LAMBDA (or... &quot;LAMBDA-Lite?&quot;)</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Functions</category>
+          <description><![CDATA[
+            <p>So I'm still shoring up a new bootstrap executable, patching around in a 6-years-out-of-date codebase.   It's in some ways a cruel and unusual punishment... but in other ways a good trip down memory lane to revisit decisions that were made, and ask "was that the right decision?"</p>
+<p>The 6-year-old EXE defined an enfix form of lambda as <strong><code>=&gt;</code></strong>.  I shifted it to the lighter form as <strong><code>-&gt;</code></strong>.  Contrast:</p>
+<pre><code>y: case [
+    1 &gt; 2 [&lt;no&gt;]
+    1 &lt; 2 [&lt;yes&gt;]
+] then (lambda [x] [
+    assert [x = &lt;yes&gt;]
+    1000 + 20
+])
+assert [y = 1020]
+
+y: case [
+    1 &gt; 2 [&lt;no&gt;]
+    1 &lt; 2 [&lt;yes&gt;]
+] then x =&gt; [
+    assert [x = &lt;yes&gt;]
+    1000 + 20
+]
+assert [y = 1020]
+
+y: case [
+    1 &gt; 2 [&lt;no&gt;]
+    1 &lt; 2 [&lt;yes&gt;]
+] then x -&gt; [
+    assert [x = &lt;yes&gt;]
+    1000 + 20
+]
+assert [y = 1020]
+</code></pre>
+<p><em>(Supplemental: Reddit post on <a href="https://www.reddit.com/r/ProgrammingLanguages/comments/shllr3/whats_the_syntax_of_lambda_expressions_in_your/">"What's the syntax of lambda expressions in your language"</a>)</em></p>
+<p><strong>I like the <code>-&gt;</code> and don't think there's a greater purpose for it in the box.</strong>  As with everything else, overriding it is a personal choice.</p>
+<h2>
+<a name="a-speaking-with-ticshttpsforumrebolinfotspeaking-with-tics-should-quoted-arguments-always-be-apostrophed1359-note-1" class="anchor" href="https://forum.rebol.info#a-speaking-with-ticshttpsforumrebolinfotspeaking-with-tics-should-quoted-arguments-always-be-apostrophed1359-note-1"></a>A <a href="https://forum.rebol.info/t/speaking-with-tics-should-quoted-arguments-always-be-apostrophed/1359">Speaking-With-Tics</a> Note</h2>
+<p>Mechanically getting this to work is non-trivial:</p>
+<p><a href="https://forum.rebol.info/t/the-most-vexing-evaluation-lambda-meets-then-else/1361" class="inline-onebox">The Most Vexing Evaluation: LAMBDA meets THEN/ELSE</a></p>
+<p>Part of what makes it non-trivial is the "literal lookback" by which <strong><code>-&gt;</code></strong> infixedly snatches the X without letting it evaluate.</p>
+<p><a class="mention" href="https://forum.rebol.info/u/bradrn">@bradrn</a> might argue such mechanics shouldn't be necessary, because source-level non-evaluation should be explicit, e.g. <strong><code>'x -&gt; [...]</code></strong></p>
+<pre><code>y: case [
+    1 &gt; 2 [&lt;no&gt;]
+    1 &lt; 2 [&lt;yes&gt;]
+] then 'x -&gt; [
+    assert [x = &lt;yes&gt;]
+    1000 + 20
+]
+assert [y = 1020]
+</code></pre>
+<p>But that's one more stroke of key than I want, and one more piece of dirt than I want to see.  <em>I know from context that slot is a variable name, in the most common case.</em>  I'm not upset by intricate work to faciliate it, if it actually works (and empowers other creative things).  So I need to see hard disproofs before sacrificing what I consider to be "the point" of the design.</p>
+<p>I'm always ready to look at it from a further perspective to see a "greater point".  But still--from where I stand--that apostrophe sucks relative to not having it.  (And if you read the details of the implementation post, the only reason it's allowed to work in a quoted slot is because of left literalism, so...)</p>
+<h2>
+<a name="what-about-multiple-arguments-2" class="anchor" href="https://forum.rebol.info#what-about-multiple-arguments-2"></a>What About Multiple Arguments?</h2>
+<p>Notationally there are questions about this form of lambda.  Does it use a block for multiple arguments?</p>
+<pre><code>&gt;&gt; foo: [a b] -&gt; [a + b + 20]
+
+&gt;&gt; foo 400 600
+== 1020
+</code></pre>
+<p>It could, but you could be weirder:</p>
+<pre><code>foo: a.b -&gt; [a + b + 20]
+
+foo: a/b -&gt; [a + b + 20]
+</code></pre>
+<p>This would look a little tighter with branching, I think, since it wouldn't compete with the branches:</p>
+<pre><code>case [
+    ...
+] then [a b] -&gt; [
+    ...
+]
+
+case [
+    ...
+] then a.b -&gt; [
+    ...
+]
+</code></pre>
+<p><em>But wait, you'd never use it with a branch... because a branch only produces one value.</em></p>
+<p>UNLESS... what if what this form of lambda did was unpack packs?</p>
+<pre><code>case [
+    true [pack [10 + 20, 3 + 4]]  ; makes antiform ~['30 '7]~
+    ...
+] then [a b] -&gt; [
+    assert [a = 30, b = 7]
+]
+
+case [
+    true [pack [10 + 20, 3 + 4]]
+    ...
+] then a -&gt; [
+    assert [a = 30]
+]
+</code></pre>
+<p>So I've been thinking this is what it should actually do.  It means -&gt; won't be a good way to define functions or lambdas generally, but you have FUNC(TION) and LAMBDA for that.</p>
+<p>I don't know that enabling a lighter notation like <strong><code>a.b</code></strong> or <strong><code>a/b</code></strong> is worth it.</p>
+<pre><code>case [
+    true [pack [10 + 20, 3 + 4]]
+    ...
+] then a.b -&gt; [
+    assert [a = 30, b = 7]
+]
+
+case [
+    true [pack [10 + 20, 3 + 4]]
+    ...
+] then a/b -&gt; [
+    assert [a = 30, b = 7]
+]
+</code></pre>
+<p>Maybe just confusing, and limits what you can put in the spec.  Easier to add later if it seems useful than put it in now and take out later.</p>
+<h2>
+<a name="is-there-a-good-name-for-lambda-lite-3" class="anchor" href="https://forum.rebol.info#is-there-a-good-name-for-lambda-lite-3"></a>Is There A Good Name For "Lambda Lite"?</h2>
+<p>We could call it an "unpacking lambda".  Maybe it's controlled with a refinement:</p>
+<pre><code> &gt;&gt; foo: lambda/unpack [a b] [a + b + 20]
+
+ &gt;&gt; foo pack [400 600]
+ == 1020
+</code></pre>
+<p>Then <strong><code>-&gt;: :lambda/unpack</code></strong></p>
+<p>We could just call it <em>"an unpacker"</em>.</p>
+<pre><code> &gt;&gt; foo: unpacker [a b] [a + b + 20]
+
+ &gt;&gt; foo pack [400 600]
+ == 1020
+</code></pre>
+<p>Then <strong><code>-&gt;: :unpacker</code></strong></p>
+<p>The problem with calling it an "unpacker" is that 9 (or more) times out of 10 it will only take a single argument and not unpack anything.  So it seems better to classify it as a shade of distinction on lambda, but still when you point to an <code>-&gt;</code> on the screen say <em>"then it passes the argument to the lambda..."</em></p>
+            <p><small>3 posts - 2 participants</small></p>
+            <p><a href="https://forum.rebol.info/t/for-lambda-or-lambda-lite/2172">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/for-lambda-or-lambda-lite/2172</link>
+          <pubDate>Sun, 10 Mar 2024 15:21:58 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2172</guid>
+          <source url="https://forum.rebol.info/t/for-lambda-or-lambda-lite/2172.rss">-&gt; for LAMBDA (or... &quot;LAMBDA-Lite?&quot;)</source>
+        </item>
+        <item>
+          <title>Antiform TAG! As &quot;Triggers an Error On Access&quot; Type</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Datatypes</category>
+          <description><![CDATA[
+            <p>In the post <a href="https://forum.rebol.info/t/shades-of-distinction-in-non-valued-intents/1604">"Shades of Distinction In Non-Valued Intents"</a>, I had originally written:</p>
+<aside class="quote no-group quote-modified" data-username="hostilefork" data-post="1" data-topic="1604">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/40/26_2.png" class="avatar"><a href="https://forum.rebol.info/t/shades-of-distinction-in-non-valued-intents/1604/1">Shades of Distinction In Non-Valued Intents</a>
+</div>
+<blockquote>
+<p>Eventually the NULL state became the isotopic status of the WORD! null, so a <strong>~null~</strong> antiform.</p>
+<p>It joined <strong>~true~</strong> and <strong>~false~</strong> as being antiforms you could test for truthiness and falseyness. But if you were okay with getting an error on conditional testing, any other word could be used:</p>
+<pre><code class="lang-plaintext">  config: ~initialize-system-not-called~
+
+  initialize-system: func [
+      {Let's say this function reads the config file}
+  ][
+      ...
+      config: [...]
+  ]
+</code></pre>
+<p>This usually causes a nice labeled message anytime someone tries to use CONFIG:</p>
+<p>Going this route would create a pain point for anyone who thought they were going to test for whether you had a config initialized by testing <strong>if config [...]</strong>. So that has to be considered as whether it's what you want.</p>
+</blockquote>
+</aside>
+<p>I've come to question this as things have gone on, to where I'm wondering if all antiform words should be reserved by the system (there are system purposes for the ~end~ antiform, for instance).</p>
+<p>A generic "error trigger" might come from something like antiform TAG!, permitting spaces:</p>
+<pre><code>config: ~&lt;INITIALIZE-SYSTEM not called&gt;~
+
+initialize-system: func [
+    {Let's say this function reads the config file}
+][
+    ...
+    config: [...]
+]
+
+&gt;&gt; config
+** Error: INITIALIZE-SYSTEM not called
+</code></pre>
+            <p><small>3 posts - 2 participants</small></p>
+            <p><a href="https://forum.rebol.info/t/antiform-tag-as-triggers-an-error-on-access-type/2170">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/antiform-tag-as-triggers-an-error-on-access-type/2170</link>
+          <pubDate>Sat, 09 Mar 2024 08:49:19 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2170</guid>
+          <source url="https://forum.rebol.info/t/antiform-tag-as-triggers-an-error-on-access-type/2170.rss">Antiform TAG! As &quot;Triggers an Error On Access&quot; Type</source>
+        </item>
+        <item>
+          <title>Getting an unset variable</title>
+          <dc:creator><![CDATA[bradrn]]></dc:creator>
+          <category>Questions</category>
+          <description><![CDATA[
+            <p>Trash (now anti BLANK!) <a href="https://forum.rebol.info/t/shades-of-distinction-in-non-valued-intents/1604">has been established</a> as the value of unset variables. As the example in that thread states:</p>
+<pre><code class="lang-plaintext">&gt;&gt; trash-value
+** Error: TRASH-VALUE variable is unset
+
+&gt;&gt; append [a b] get/any 'trash-value
+** Error: APPEND does not allow adding ~ antiforms to blocks
+</code></pre>
+<p>But when I try this, I get quite different results:</p>
+<pre><code class="lang-plaintext">&gt;&gt; trash-value
+** Script Error: trash-value word is attached to a context, but unassigned
+
+&gt;&gt; append [a b] get/any 'trash-value
+** Script Error: trash-value word is not bound to a context
+</code></pre>
+<p>In fact, even GET/ANY doesn’t seem to work… even when I make sure the binding is right:</p>
+<pre><code class="lang-plaintext">&gt;&gt; get/any 'trash-value
+** Script Error: trash-value word is not bound to a context
+
+&gt;&gt; get/any $trash-value             
+** Script Error: trash-value word is attached to a context, but unassigned
+</code></pre>
+<p>So, what’s happening here? And how <em>do</em> I get trash out of an unset variable?</p>
+            <p><small>4 posts - 2 participants</small></p>
+            <p><a href="https://forum.rebol.info/t/getting-an-unset-variable/2169">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/getting-an-unset-variable/2169</link>
+          <pubDate>Sat, 09 Mar 2024 02:39:21 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2169</guid>
+          <source url="https://forum.rebol.info/t/getting-an-unset-variable/2169.rss">Getting an unset variable</source>
+        </item>
+        <item>
+          <title>How To Choose Between Returning VOID and NIHIL?</title>
+          <dc:creator><![CDATA[bradrn]]></dc:creator>
+          <category>Questions</category>
+          <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="6" data-topic="1604">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/40/26_2.png" class="avatar"><a href="https://forum.rebol.info/t/shades-of-distinction-in-non-valued-intents/1604/6">Shades of Distinction In Non-Valued Intents</a>
+</div>
+<blockquote>
+<p>Void is used generically in many places when you want things to vanish:</p>
+<pre><code class="lang-plaintext">&gt;&gt; compose [&lt;a&gt; (if false [&lt;b&gt;]) &lt;c&gt;]
+== [&lt;a&gt; &lt;c&gt;]
+</code></pre>
+</blockquote>
+</aside>
+<p>Ah-ha… I’d completely missed this use of void, as a return value.</p>
+<p>Though this does now raise the question of whether a function should return nihil or void. Both seem to vaporise in lists, after all. I guess it depends on whether you want the function call to be ignored or not.</p>
+            <p><small>2 posts - 2 participants</small></p>
+            <p><a href="https://forum.rebol.info/t/how-to-choose-between-returning-void-and-nihil/2171">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/how-to-choose-between-returning-void-and-nihil/2171</link>
+          <pubDate>Sat, 09 Mar 2024 02:30:26 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2171</guid>
+          <source url="https://forum.rebol.info/t/how-to-choose-between-returning-void-and-nihil/2171.rss">How To Choose Between Returning VOID and NIHIL?</source>
+        </item>
+        <item>
+          <title>Renaming SPECIFIER =&gt; CONTEXT ?</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Naming</category>
+          <description><![CDATA[
+            <p>There was a typeset in historical Rebol that was called ANY-OBJECT!, that tried to pull together anything that had WORD! keys that could be used as a binding target:</p>
+<pre><code>r3-alpha&gt;&gt; help any-object!
+ANY-OBJECT! is a typeset of value: make typeset! [
+    object! module! error! task! port!
+]
+</code></pre>
+<p>I had sort of a naming philosophy (which I still have) that you shouldn't name the category based on one of its instances like this.  Several reasons, but one is that it certainly confuses the implementation when you extract the pointed-to entity out of a cell:</p>
+<pre><code> if (Cell_Type(cell) == TYPE_ERROR) {
+     Object* = Cell_Object(cell);  // wait, but it's an ERROR! not an OBJECT!
+     ...
+ }
+</code></pre>
+<p>You could call it <code>AnyObject</code>, I guess.  But that's not the direction I took... instead calling the category ANY-CONTEXT!, and if you saw <code>Context*</code> in the source you wouldn't get confused to thinking it was an extraction from a CONTEXT! cell, because there was no such thing.  You knew it was the implementation of a superclass.</p>
+<h2>
+<a name="enter-specifier-1" class="anchor" href="https://forum.rebol.info#enter-specifier-1"></a>Enter "Specifier"</h2>
+<p>"Specifier"--the aggregated inheritance of binding candidates--has moved from an implementation detail to something which is rising to the surface of user awareness.  For that, it's a lousy name... and am near-certain I want to take "Context" for it.</p>
+<p>I like Context better than Environment, as it's shorter and leaves environment for "environment variables" (which being a script-class language Ren-C needs to be better at interacting with than it is today).</p>
+<p>We could say the other types are ANY-DICTIONARY!, although the name DICTIONARY! has been suggested as a replacement for MAP!, since we are thinking of MAP more as a function now.  But Dictionary may make more sense for things that only permit "words" as keys.</p>
+<p>A CONTEXT! itself--as a composition of other dictionaries (and possibly even just programmatic code that answers value-for-WORD!)--may itself be categorized as an ANY-DICTIONARY!</p>
+<h2>
+<a name="implementation-variance-needs-work-2" class="anchor" href="https://forum.rebol.info#implementation-variance-needs-work-2"></a>Implementation Variance Needs Work</h2>
+<p>So something that has happened in the messy evolution of the code is that the one-size-fits all <strong><code>Context*</code></strong> data structure that backed things like OBJECT!, ERROR!, MODULE! etc. became fractured around the time of Sea of Words and LET.</p>
+<p>Modules do not use the same representation, and have to be enumerated completely differently.  There's not really a lot of generic code that acts the same way for OBJECT! and MODULE!, to the point that we'd be better off dispelling the illusion in the C sources and making <strong><code>Module*</code></strong> its own distinct type.</p>
+<p>There's a lot to consider here about what the limits of "Amish" implementation are:</p>
+<ul>
+<li>
+<p>I'm pretty much sold on the known-integer-values concept for Frame.  And if <em><strong>I</strong></em> say that drifting away from that destroys what the project <em>is</em>, then it almost certainly does--because I'm known for being iconoclastic about a fair number of Rebol sacred cows.</p>
+</li>
+<li>
+<p>BUT taking a diverging approach for Module from "parallel arrays of Key and Value cell indexed by integer" has proven essential.  Floating variable stubs hanging off the word symbols themselves is an answer that has been critical in giving some legitimacy to modules, and it still passes the "simple" test for me.</p>
+<ul>
+<li>R3-Alpha was utterly hopeless, and Red will be too if they follow down that path (should they ever get modules).  I do not think this is a problem appropriate to approach with two-parallel-arrays.</li>
+</ul>
+</li>
+<li>
+<p>Objects are kind of a wild card.  Given their attempt to be dirt-simple, we might more accurately call the current version "Struct" or "Structure" instead (major annoyance in C naming the variables though, <code>Struct _struct</code>, to dodge the <code>struct</code> keyword?)</p>
+<ul>
+<li>
+<p>People want to dynamically add and remove keys from objects.  Rebol2 and Red don't allow it, and R3-Alpha only permitted growth (so the index numbers stored in words that were bound at an index wouldn't be invalidated)</p>
+</li>
+<li>
+<p>Moving to a more amortized implementation that spreads and shares keys gets you to something more like a database, where you can't point to little contiguous packets of memory and say "there is the object."</p>
+</li>
+<li>
+<p>As I said above, I think this was a necessity for Modules.  But the simple implementation that works quite well for them wouldn't scale to tens of thousands of objects which have keys with the same name.</p>
+</li>
+<li>
+<p>There's plenty of prior art and writeups of how JavaScript engines and others have approached this, and gotten it to be fast.</p>
+</li>
+</ul>
+</li>
+</ul>
+<p>Anyway, this all kind of culminates in saying that objects are due for a reckoning at some point.  We want to err on the side of simplicity over optimized complexity, but there may be a sufficiently elegant way to attack objects that can grow and shrink effectively and having better code overall than we have today.</p>
+<h2>
+<a name="anyway-back-to-the-naming-issue-3" class="anchor" href="https://forum.rebol.info#anyway-back-to-the-naming-issue-3"></a>Anyway, Back To The Naming Issue...</h2>
+<p>The above sort of reveals why ANY-OBJECT! isn't a good name for ANY-DICTIONARY or ANY-BINDTARGET?.</p>
+<p>Hm, maybe we consider ANY-BINDABLE? to be the category for things that can be bound <em>to</em>, and come up with another name for anything that can be bound?  ANY-REFERENCE?</p>
+<p>Eh, that sounds confusing.  Dictionary may be about as good as it gets (?)</p>
+<p>So basically, Dictionary would be a superclass offering lookup from Word Symbol =&gt; Value.  If you wanted anything else from it, you would have to figure out what subclass it was, because how you do things like enumerate keys and values diverges significantly.</p>
+<h2>
+<a name="or-maybe-some-unifying-theory-will-come-along-4" class="anchor" href="https://forum.rebol.info#or-maybe-some-unifying-theory-will-come-along-4"></a>Or Maybe Some Unifying Theory Will Come Along?</h2>
+<p>It could be, that everything--including OBJECT! and MODULE!, have the "inheritance" powers of what Specifier has today.</p>
+<p>Which would mean that you wouldn't have Specifiers.  You'd just ask for the binding of a block and maybe get a MODULE! that inherits from an OBJECT!, or an OBJECT! that inherits from a MODULE!, or a LET! that inherits from a LET! that inherits from an OBJECT!, etc.</p>
+<p>It all warrants more thought, and maybe a quick attempt to swap out the current OBJECT! implementation with something like V8's <a href="https://v8.dev/docs/hidden-classes">Hidden Classes</a> and see how it meshes with the system.  I've been so focused on the "bricks" in the language that these sorts of "boring" implementation details have just sort of been left alone while that's sorted out, but now it's getting to the point where there seem to be some answers to guide the shape.</p>
+            <p><small>3 posts - 2 participants</small></p>
+            <p><a href="https://forum.rebol.info/t/renaming-specifier-context/2168">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/renaming-specifier-context/2168</link>
+          <pubDate>Wed, 06 Mar 2024 18:56:13 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2168</guid>
+          <source url="https://forum.rebol.info/t/renaming-specifier-context/2168.rss">Renaming SPECIFIER =&gt; CONTEXT ?</source>
+        </item>
+        <item>
+          <title>Mapping from Series =&gt; Series By Co-Opting The Key Series</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Optimization</category>
+          <description><![CDATA[
+            <p>There was an unfinished idea in an old version of the interpreter.  It related to how to deal with problems like trying to make a copy of a block, and make sure any series with the same identity are only copied once in the new structure, and point to that one copied identity.</p>
+<p>Rebol2 did not have this behavior:</p>
+<pre><code>rebol2&gt;&gt; block: [a]
+== [a]
+
+rebol2&gt;&gt; original: reduce [block block]
+== [[a] [a]]
+
+rebol2&gt;&gt; append block 'b
+== [a b]
+
+rebol2&gt;&gt; original
+== [[a b] [a b]]  ; both aliases see the append
+
+rebol2&gt;&gt; duplicate: copy/deep original
+== [[a b] [a b]]
+
+rebol2&gt;&gt; append first duplicate 'c
+== [a b c]
+
+rebol2&gt;&gt; duplicate
+== [[a b c] [a b]]  ; considered by many to be wrong: independent copies
+</code></pre>
+<p>This post isn't about whether that is right or wrong (and having such questions may seem to some as an indication of <em>"this language is madness! get me to Haskell"</em>, etc. But as I've said this is the game we're playing here so we roll with it.)</p>
+<p>But to not get independent copies, you need a way to map series nodes to copies you've already created...so you can consult that mapping before making new copies.  And the direction that was being pursued by the old interpreter I am looking at was to actually do surgery on the originating series nodes, to alter them so they shifted out some of their content, such that they could be their own keys in the mapping.</p>
+<p>Generally speaking, all the bits in a series stub are spoken for.  So it would seem there's nowhere to stow a pointer to the new series you are creating in it.  What the implementation was doing was pushing a 4 pointer cell on the data stack, writing one pointer's worth of information from the stub into that cell, then replacing that pointer slot in the stub with the stack index.  Then it wrote the new series into the cell...so the cell contained one stowed pointer from the original series and one pointer for the new series.</p>
+<p>This meant the original series was now in a "weird" state, that things like the GC had to know about and tolerate.  Other operations looking for the missing information in the stub needed to be caught if they tried to get at it without following the stack index through to the stack cell.</p>
+<p>Having the cells on the data stack meant it was not necessary to enumerate all the series stubs after a copy to "clean them up".  Otherwise, I'd imagine it may be possible to make some kind of guarantee that for any series appearing in source, the union of the bits in the source series and the bits of the copied series can hold all the information necessary to construct two valid series... e.g. one pointer's worth of information is always redundant in those two copies.  If you can get <em>two</em> pointers' worth of information redundant, the second could be used to chain a linked list as you go...removing the need for the stack cells to enumerate.</p>
+<p>Though having the stack cells and no particular requirement of information redundancy in source series with their copies offers another benefit: being applicable for creating mappings that aren't copying-related.</p>
+<p>Anyway, it was a little unfinished idea I ran across that I wanted to document.  I'm cleaning up the bootstrap executable to refresh it with something that will help <a href="https://forum.rebol.info/t/rethinking-braces-as-an-array-type/1727">in the FENCE! migration</a>, and mercilessly deleting any code in the bootstrap executable that does not specifically benefit bootstrap... to reduce the instability surface, speed things up, and make it easier to debug the 6-year old executable if worst comes to worst.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/mapping-from-series-series-by-co-opting-the-key-series/2166">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/mapping-from-series-series-by-co-opting-the-key-series/2166</link>
+          <pubDate>Wed, 06 Mar 2024 15:24:07 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2166</guid>
+          <source url="https://forum.rebol.info/t/mapping-from-series-series-by-co-opting-the-key-series/2166.rss">Mapping from Series =&gt; Series By Co-Opting The Key Series</source>
+        </item>
+        <item>
+          <title>Revisiting a Maybe-Not-So-Weird Old Idea: &lt;- as IDENTITY</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Naming</category>
+          <description><![CDATA[
+            <p>So at one point I had a kind of strange idea for what to do with <strong><code>&lt;-</code></strong>.</p>
+<p>It would just pass through what you gave on its right.  And the idea was that you could use this in various situations as a kind of visual signal that you intended to produce a value that would be used by... something.</p>
+<p>You could use it to hint when a line is being continued:</p>
+<pre><code>browse join
+    &lt;- https://github.com/metaeducation/ren-c/blob/master/CHANGES.md#
+    &lt;- unspaced [system.version.1 "." system.version.2 "." system.version.3]
+</code></pre>
+<p>That JOIN is arity 2.   The arrows do nothing, but quickly pass through what they were passed.</p>
+<p>The current alternative you might reach for are parentheses, but you can only put it around the outermost level, and it's noticeably inferior:</p>
+<pre><code>browse (join
+    https://github.com/metaeducation/ren-c/blob/master/CHANGES.md#
+    unspaced [system.version.1 "." system.version.2 "." system.version.3]
+)
+</code></pre>
+<p>I had another idea that the arrow might be nice for signaling when you're at the end of a branch to help hint that the branch result is actually used.</p>
+<pre><code> something: case [
+     ... [...]
+     ... [...]
+     ; lots of code to where SOMETHING: has scrolled off the screen
+     ... [
+         your code here
+         more code here
+         &lt;- append data "stuff"
+     ]
+ ]
+</code></pre>
+<p>It gives you a nice hint that the result of the append (the head of the appended series) is actually used.<br>
+<strong>But, these two uses are in contention.</strong>  You can't use it to mean "continue the line above" and "pipe result out to some higher level.  Perhaps this is better done with an impromptu CATCH/THROW?</p>
+<pre><code> something: catch [case [
+     ... [... throw ...]
+     ... [... throw ...]
+     ; lots of code to where SOMETHING: has scrolled off the screen
+     ... [
+         your code here
+         more code here
+         throw append data "stuff"
+     ]
+ ]]
+</code></pre>
+<p>(Note that CATCH/THROW have nothing to do with errors in Rebol, it's a lightweight construct for doing this kind of manipulation.)</p>
+<h2>
+<a name="why-did-i-kill-off-the-as-identity-1" class="anchor" href="https://forum.rebol.info#why-did-i-kill-off-the-as-identity-1"></a>Why Did I Kill Off The &lt;- As Identity?</h2>
+<p>It was changed shortly after deciding to take <strong>-&gt;</strong> for an infix lambda operation.</p>
+<pre><code> foo: x -&gt; [print ["I'm a lambda" x]]
+
+ &gt;&gt; foo 1020
+ I'm a lambda 1020
+</code></pre>
+<p>This is particularly nice-looking in branching when you want to pass the branch result.</p>
+<pre><code>all [
+    1 &lt; 2
+    3 &lt; 4
+    #something
+] then x -&gt; [
+   print ["X is" mold x]  ; X is #something
+]
+</code></pre>
+<p>The first incarnation used <strong><code>=&gt;</code></strong> as JavaScript did.  But not only is the arrow lighter, it doesn't weigh on the question of whether <strong><code>=&gt;</code></strong> is an "arrow", when <strong><code>&lt;=</code></strong> is not one.  (Debate has been had over whether =&gt; should be a synonym for &gt;=, and =&lt; a synonym for &lt;=, etc. but status quo has won out.)</p>
+<p>So <strong><code>&lt;-</code></strong> was targeted as another function generator, namely for doing tacit programming as an alias for POINTFREE.</p>
+<pre><code>foo: &lt;- [append [a b c]]
+
+&gt;&gt; foo 'd
+== [a b c d]
+</code></pre>
+<p>The attempt to write POINTFREE entirely in usermode stalled a bit in the face of other priorities, though it's still very much desired.  And it doesn't seem like a bad idea to have &lt;- and -&gt; both connected as fundamental convenient function generators.</p>
+<p>I've not really questioned the decision to strike &lt;- as identity until I realized looking at some old code that it really is nice to have some alias for identity, used for one of the annotation purposes I mention.</p>
+<p>We do have single tick free, now <img src="https://forum.rebol.info/images/emoji/twitter/face_with_diagonal_mouth.png?v=12" title=":face_with_diagonal_mouth:" class="emoji" alt=":face_with_diagonal_mouth:" loading="lazy" width="20" height="20"></p>
+<pre><code>browse join
+  ' https://github.com/metaeducation/ren-c/blob/master/CHANGES.md#
+  ' unspaced [system.version.1 "." system.version.2 "." system.version.3]
+</code></pre>
+<p>That actually looks kind of decent.  It's not super consistent, because quoting implies not binding...and we'd want binding applied.  Can people mentally separate "the tick operator" as IDENTITY, from the non-bindingness of quoting?</p>
+<p>Backtick is available, though backticks are kind of a blight in general:</p>
+<pre><code>browse join
+  ` https://github.com/metaeducation/ren-c/blob/master/CHANGES.md#
+  ` unspaced [system.version.1 "." system.version.2 "." system.version.3]
+</code></pre>
+<p>Despite my hatred of backticks, I almost actually prefer that to the normal ticks in this narrow application.</p>
+<p>There's a few other ugly options, e.g. backslash which we still haven't given meaning to either.</p>
+<pre><code>browse join
+  \ https://github.com/metaeducation/ren-c/blob/master/CHANGES.md#
+  \ unspaced [system.version.1 "." system.version.2 "." system.version.3]
+</code></pre>
+<p><strong>Anyway, the cool idea here was just that line continuation not be a scanner feature, but be signaled by means of a normal token that ran the identity function... and you'd be cued into realizing that it was a continuation just because there's no point in calling the identity function in source unless you were applying it like this.</strong></p>
+<p>We could throw in a little help by having the evaluator only allow this if it was--actually--an argument to a function.</p>
+<p>Based on the above, I'm liking the backtick and apostrophe, and am not sure I'd want heavier for line continuation.</p>
+<p>The idea of &lt;- being an alternate way of saying identity that is used for the other annotation purpose (this result is used by the higher up stack level) would then be a possibility.  The system could maybe help a little bit here too, by making sure the <strong>&lt;-</strong> <em>isn't</em> an argument to a function...</p>
+<p>POINTFREE would need some other shorthand.  But maybe it's just an alternate mode of LAMBDA.  Or maybe it doesn't really need a shorthand.</p>
+<pre><code>foo: ... -&gt; [append [a b c]]
+
+foo: &lt;*&gt; -&gt; [append [a b c]]
+
+foo: |-&gt; [append [a b c]]
+
+foo: -|&gt; [append [a b c]]
+
+foo: pointfree [append [a b c]]
+
+&gt;&gt; foo 'd
+== [a b c d]
+</code></pre>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/revisiting-a-maybe-not-so-weird-old-idea-as-identity/2165">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/revisiting-a-maybe-not-so-weird-old-idea-as-identity/2165</link>
+          <pubDate>Wed, 06 Mar 2024 14:20:24 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2165</guid>
+          <source url="https://forum.rebol.info/t/revisiting-a-maybe-not-so-weird-old-idea-as-identity/2165.rss">Revisiting a Maybe-Not-So-Weird Old Idea: &lt;- as IDENTITY</source>
+        </item>
+        <item>
+          <title>What deserves to be a datatype?</title>
+          <dc:creator><![CDATA[bradrn]]></dc:creator>
+          <category>Philosophy</category>
+          <description><![CDATA[
+            <aside class="quote no-group" data-username="bradrn" data-post="7" data-topic="2159">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/bradrn/40/365_2.png" class="avatar"><a href="https://forum.rebol.info/t/header-dialect-and-multiline-strings/2159/7">Header dialect and multiline strings</a>
+</div>
+<blockquote>
+<p>(If I may philosophise for a moment… I feel there’s a big, gaping hole in my understanding of how we decide ‘what Rebol syntax is’, so to speak. Perhaps my caution around sigils and TYPE-BLOCK!s are a manifestation of that hole, as is this. I’ll make a new thread about it if I can figure out any clearer way to articulate my concerns.)</p>
+</blockquote>
+</aside>
+<p>This is that thread.</p>
+<p>I’ll begin by observing that in Rebol, the complexity of the lexer vs the parser is ‘reversed’ compared to other programming languages. In Rebol, the actual syntax is highly minimalistic: there’s only a few constructs which provide explicit grouping, and none provide anything more than a simple list of items. By contrast, the lexer is exceedingly complicated: nearly every datatype has its own literal form, oftentimes more than one.</p>
+<p>Language design ends up ‘reversed’ in a similar way. In most languages, discussion centres around questions like ‘which new syntactic constructs should we add’. By contrast, Rebol (and especially Ren-C) more often poses the question: ‘which new datatypes do we want to include, with which literal syntax?’.</p>
+<p>At the moment, I still feel uncomfortable discussing such questions. I don’t feel that I fully understand the kind of criteria we should consider to know whether a datatype is worth including or not. Or, more concisely, I don’t understand how decide: <strong>what deserves to be a Ren-C datatype?</strong>.</p>
+<hr>
+<p>One obvious criterion is simply, <em>datatypes representing common types of data</em>. This is why we have things like MONEY! and FILE! and DATE! and so on. Ultimately this stems from Rebol’s heritage as a data-transfer format, but obviously these types are far more broadly useful.</p>
+<p>Another obvious criterion is <em>syntax which is important for programming</em>. This gives us GROUP! and GET-WORD! and PATH! and so on. These exist as datatypes ultimately because Rebol is homoiconic, but their presence has suggested a wide range of uses beyond simple programming.</p>
+<p>This accounts for most of the types in Ren-C. And, if that were all to it, I’d have no objections.</p>
+<hr>
+<p>But, unfortunately, there are some other types, whose presence is explained by neither of those criteria. As I’ve said previously, the ones which make me feel most uncomfortable are THE-* and TYPE-*. Neither of these represent common types of data that one would want to pass around. And, with the possible exceptions of THE-WORD! and TYPE-BLOCK!, they’re basically useless in ‘regular’ programming.</p>
+<p>Despite this, <a class="mention" href="https://forum.rebol.info/u/hostilefork">@hostilefork</a> has lobbied pretty hard for both of these. Hopefully it should be clear now why I find this viewpoint confusing. I can’t say the existence of these types is <em>problematic</em>, as such, but I feel this <strong>indicates a gap in my understanding of the language</strong>.</p>
+<p>The closest to an explanation I’ve found is that these types are useful in dialecting. That is, they may not be useful for programming <em>per se</em>, but having the syntax around is useful for constructing new languages. (For instance, using TYPE-WORD!s in PARSE dialect, or THE-WORD!s for module inclusion.) The problem with this is, <a href="https://forum.rebol.info/t/a-proliferation-of-word-s/2147">as we’ve established</a>, that there’s a huge number of syntaxes which would be ‘useful in dialecting’: clearly, this is too low a bar for deciding ‘what deserves to be a datatype’.</p>
+<p>(And, incidentally, this also establishes that we’re quite willing to reject datatypes that don’t seem to be of sufficiently general usage.)</p>
+<p>Another argument is simply consistency: other sigils have versions for words, blocks, tuples, etc., so THE-* and TYPE-* should as well. But this doesn’t strike me as particularly convincing — there’s nothing intrinsic in Ren-C which requires sigils to generalise to all possible types. Indeed, we’re quite willing to avoid doing so when it would make no sense. (For instance, we don’t have ISSUE-TEXT!, ISSUE-BINARY!, ISSUE-EMAIL!… we just have a single textual ISSUE! type, because doing otherwise would be silly.)</p>
+<p>So, when all is said and done, we have a set of types which don’t seem to be of general use, and have no convincing reason to exist, but are nonetheless kept in the language. And <strong>I want to know why that is</strong>, because I can’t figure it out.</p>
+            <p><small>9 posts - 2 participants</small></p>
+            <p><a href="https://forum.rebol.info/t/what-deserves-to-be-a-datatype/2164">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/what-deserves-to-be-a-datatype/2164</link>
+          <pubDate>Tue, 05 Mar 2024 08:20:02 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2164</guid>
+          <source url="https://forum.rebol.info/t/what-deserves-to-be-a-datatype/2164.rss">What deserves to be a datatype?</source>
+        </item>
+        <item>
+          <title>REIFY and DEGRADE: a Narrower META and UNMETA</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Feature Discover</category>
+          <description><![CDATA[
+            <p>In the "small improvements can be big" category, I think that I've settled on the name for the function that turns quasiforms into antiforms, but leaves everything else alone: <strong>DEGRADE</strong>...and its complement <strong>REIFY</strong> which turns antiforms into quasiforms (but leaves everything else alone).</p>
+<pre><code>&gt;&gt; first [1020 ~null~]
+== 1020
+
+&gt;&gt; second [1020 ~null~]
+== ~null~
+
+&gt;&gt; degrade first [1020 ~null~]
+== 1020
+
+&gt;&gt; degrade second [1020 ~null~]
+== ~null~  ; anti
+
+&gt;&gt; 304
+== 304
+
+&gt;&gt; reify 304
+== 304
+
+&gt;&gt; true
+== ~true~  ; anti
+
+&gt;&gt; reify true
+== ~true~
+</code></pre>
+<p>If you're dealing with a full-band situation where you genuinely don't know if you're working with a "meaningful quasiform" where <em>quasi means quasi</em>, you have to use META and UNMETA.  But if you know that quasiforms aren't part of your data of interest, REIFY and DEGRADE can help you dodge adding and removing quote marks much (or most) of the time.</p>
+<aside class="quote no-group" data-username="hostilefork" data-post="12" data-topic="1560">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/40/26_2.png" class="avatar"><a href="https://forum.rebol.info/t/weird-word-s-allow-but-escape-them/1560/12">Weird WORD!s - Allow, But Escape Them?</a>
+</div>
+<blockquote>
+<p>Maybe it would be better (and give Chris less of a heart attack) if it said:</p>
+<pre><code class="lang-plaintext">for-each [sigil' items] [
+    ~null~ [  word   tu.p.le   pa/th   [bl o ck]   (gr o up)  ]
+    '::    [  word:  tu.p.le:  pa/th:  [bl o ck]:  (gr o up): ]
+    ':     [ :word  :tu.p.le  :pa/th  :[bl o ck]  :(gr o up)  ]
+    '^     [ ^word  ^tu.p.le  ^pa/th  ^[bl o ck]  ^(gr o up)  ]
+    '&amp;     [ &amp;word  &amp;tu.p.le  &amp;pa/th  &amp;[bl o ck]  &amp;(gr o up)  ]
+    '@     [ @word  @tu.p.le  @pa/th  @[bl o ck]  @(gr o up)  ]
+    '$     [ $word  $tu.p.le  $pa/th  $[bl o ck]  $(gr o up)  ]
+ ][
+      for-each item items [
+          if (unmeta sigil') &lt;&gt; sigil of item [fail [mold item]]
+      ]
+ ]
+</code></pre>
+</blockquote>
+</aside>
+<p>I like how DEGRADE can be used in situations like this to help you strike the quotes on the normal values...since SIGIL OF never returns quasiforms, only SIGIL! or a null antiform:</p>
+<pre><code>for-each [sigil items] [
+    ~null~ [  word   tu.p.le   pa/th   [bl o ck]   (gr o up)  ]
+    ::     [  word:  tu.p.le:  pa/th:  [bl o ck]:  (gr o up): ]
+    :      [ :word  :tu.p.le  :pa/th  :[bl o ck]  :(gr o up)  ]
+    ^      [ ^word  ^tu.p.le  ^pa/th  ^[bl o ck]  ^(gr o up)  ]
+    &amp;      [ &amp;word  &amp;tu.p.le  &amp;pa/th  &amp;[bl o ck]  &amp;(gr o up)  ]
+    @      [ @word  @tu.p.le  @pa/th  @[bl o ck]  @(gr o up)  ]
+    $      [ $word  $tu.p.le  $pa/th  $[bl o ck]  $(gr o up)  ]
+][
+    for-each item items [
+        if (degrade sigil) &lt;&gt; sigil of item [
+            fail [mold item]
+        ]
+    ]
+]
+</code></pre>
+<p>I think this will be a useful and common pattern.</p>
+<p>Void being a word antiform is locking this all up into place!</p>
+<p><img src="https://forum.rebol.info/images/emoji/twitter/atom_symbol.png?v=12" title=":atom_symbol:" class="emoji only-emoji" alt=":atom_symbol:" loading="lazy" width="20" height="20"> <img src="https://forum.rebol.info/images/emoji/twitter/+1.png?v=12" title=":+1:" class="emoji only-emoji" alt=":+1:" loading="lazy" width="20" height="20"></p>
+            <p><small>2 posts - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/reify-and-degrade-a-narrower-meta-and-unmeta/2163">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/reify-and-degrade-a-narrower-meta-and-unmeta/2163</link>
+          <pubDate>Sun, 03 Mar 2024 15:28:36 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2163</guid>
+          <source url="https://forum.rebol.info/t/reify-and-degrade-a-narrower-meta-and-unmeta/2163.rss">REIFY and DEGRADE: a Narrower META and UNMETA</source>
+        </item>
+        <item>
+          <title>Terminology MAP</title>
+          <dc:creator><![CDATA[GiuseppeChillemi]]></dc:creator>
+          <category>Site Feedback</category>
+          <description><![CDATA[
+            <p>Hi Hostile Fork,<br>
+Ren-C has a lot changes and new features but it is hard to follow what has been changed/created, and the discussion that led to the development of a feature, from start to end.</p>
+<p>To help undestand your project, could I ask to add a page or a post where you list all additions like: ANTIFORM, BLANK, ISOTOPES and a brief description. Also, it would be great to have a link to the introductiory post to each feature (like UPARSE) and all the subsequent posts regarding the design. This could be done either via a direct link to the introductory post for the new feature, and also filtering via TAG and DATE using tags like <span class="hashtag">#ANTIFORM</span> <span class="hashtag">#DESIGN</span></p>
+<p>Thank you</p>
+            <p><small>7 posts - 3 participants</small></p>
+            <p><a href="https://forum.rebol.info/t/terminology-map/2162">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/terminology-map/2162</link>
+          <pubDate>Sun, 03 Mar 2024 15:19:31 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2162</guid>
+          <source url="https://forum.rebol.info/t/terminology-map/2162.rss">Terminology MAP</source>
+        </item>
+        <item>
+          <title>Header dialect and multiline strings</title>
+          <dc:creator><![CDATA[gchiu]]></dc:creator>
+          <category>Modules</category>
+          <description><![CDATA[
+            <p>I've been reading the threads about multiline strings and using {} for arrays, and I'm thinking that the header is going to look rather messy given that's it's not uncommon to have multiline statements there.</p>
+<pre><code>Rebol [
+    Title: "Your module title here"
+    Type: module
+    Name: your-module
+    Rights: -{
+        Copyright 2012 REBOL Technologies
+        Copyright 2017-2021 Ren-C Open Source Contributors
+    }-
+    License: -{
+        Licensed under the Apache License, Version 2.0
+        See: http://www.apache.org/licenses/LICENSE-2.0
+    }-
+    Description: \{
+       Weirdly this does not look as good, despite dropping a character.
+       
+            printf("The char is } and it need not be escaped\n");
+
+       So that's good.  And here we can do \n\n\n for escaped lines.
+   }\
+]
+</code></pre>
+<p>As an alternative I quite like the way yaml is written, it's very clean without a lot of funny distracting escape characters.  Can we consider using a yaml dialect for the header?</p>
+<pre><code>Rebol -{
+    Title: Your module title here
+    Type: module
+    Name: your-module
+
+    Rights: |
+        Copyright 2012 REBOL Technologies
+        Copyright 2017-2021 Ren-C Open Source Contributors
+
+    License: |
+        Licensed under the Apache License, Version 2.0
+        See: http://www.apache.org/licenses/LICENSE-2.0
+
+    Description: |
+       This would be YAML-based.
+       
+            printf("The char is } and it need not be escaped\n");
+
+       So that's good.  And here we can do \n\n\n for escaped lines.
+}-
+</code></pre>
+            <p><small>8 posts - 3 participants</small></p>
+            <p><a href="https://forum.rebol.info/t/header-dialect-and-multiline-strings/2159">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/header-dialect-and-multiline-strings/2159</link>
+          <pubDate>Wed, 28 Feb 2024 07:17:13 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2159</guid>
+          <source url="https://forum.rebol.info/t/header-dialect-and-multiline-strings/2159.rss">Header dialect and multiline strings</source>
+        </item>
+        <item>
+          <title>API Breakthrough: Scope Detection In JavaScript and C !</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Language Bridging</category>
+          <description><![CDATA[
+            <h2>
+<a name="background-1" class="anchor" href="https://forum.rebol.info#background-1"></a>Background</h2>
+<p>When writing the implementation of a Rebol function using C or JavaScript code, getting at the arguments and locals of that function was something of an annoyance.</p>
+<p>You had to use a separate <strong><code>rebArg()</code></strong> API that looked on the Rebol stack for the last Rebol function call, and retrieved arguments in that frame.  This broke the flow, generating an extra API handle that had to be released:</p>
+<pre><code>quadrupler: js-native [num [integer!]] {
+    let rebol_num = reb.Arg("num")
+    let num = reb.UnboxInteger(rebol_num, "* 2")  // Rebol multiplying
+    reb.Release(rebol_num)
+    return reb.Integer(num * 2)  // JavaScript multiplying
+}
+</code></pre>
+<p>Of course, you could have used <strong><code>reb.R()</code></strong> to make a "releasing" splice, so the variadic would release it as it went along:</p>
+<pre><code>quadrupler: js-native [num [integer!]] {
+    let num = reb.UnboxInteger(reb.R(reb.Arg("num")), "* 2")
+    return reb.Integer(num * 2)
+}
+</code></pre>
+<p>This was made "prettier" <sub>cough</sub> with a fused instruction called <strong><code>reb.ArgR()</code></strong></p>
+<pre><code>quadrupler: js-native [num [integer!]] {
+    let num = reb.UnboxInteger(reb.ArgR("num"), "* 2")
+    return reb.Integer(num * 2)
+}
+</code></pre>
+<p>Kind of a headache.  <strong>But even worse... what if it's a WORD! or something evaluative?</strong></p>
+<pre><code>reverse-spell: js-native [
+    {If REVERSE-SPELL 'FOO you get "OOF"}
+    word [word!]
+]{
+    return reb.Spell("reverse to text!", reb.ArgR("word"));  // !!! WRONG
+}
+</code></pre>
+<p>The TO TEXT! won't convert the word, because the word will be spliced into the instruction stream and looked up as a variable..  You need to quote it (or meta it, if it's an antiform):</p>
+<pre><code>reverse-spell: js-native [word [word!]] {
+    return reb.Spell("reverse to text!", reb.Q(reb.ArgR("word")));
+}
+
+reverse-spell: js-native [word [word!]] {
+    return reb.Spell("reverse to text! @", reb.ArgR("word"));  // as good as it got
+}
+</code></pre>
+<p>This problem comes from what I have described as saying that all API calls are effectively doing an EVAL COMPOSE, because the C variable name isn't something Rebol can see...hence it cannot "protect" the value it holds.  You'd have the same problem with:</p>
+<pre><code> eval compose [reverse to text! (word)]
+</code></pre>
+<h2>
+<a name="wouldnt-it-be-nice-if-the-api-knew-it-was-inside-a-native-2" class="anchor" href="https://forum.rebol.info#wouldnt-it-be-nice-if-the-api-knew-it-was-inside-a-native-2"></a>Wouldn't it be nice if the API <em>knew</em> it was inside a native?</h2>
+<p>Then it could just do the lookup by name, with normal code...:</p>
+<pre><code>quadrupler: js-native [num [integer!]] {
+    let num = reb.UnboxInteger("num * 2")
+    return reb.Integer(num * 2)
+}
+
+reverse-spell: js-native [word [word!]] {
+    return reb.Spell("reverse to text! word");
+}
+</code></pre>
+<p>But how would it know when you called out from the code for the native body to some service routine that also used the API... where the parameters should not be visible?</p>
+<h2>
+<a name="well-ive-solved-it-star-in-cc-and-javascript-3" class="anchor" href="https://forum.rebol.info#well-ive-solved-it-star-in-cc-and-javascript-3"></a><strong>Well, I've Solved It!</strong> <img src="https://forum.rebol.info/images/emoji/twitter/star.png?v=12" title=":star:" class="emoji" alt=":star:" loading="lazy" width="20" height="20">  In C/C++ and JavaScript</h2>
+<p>It's the most significant API change in a while, and it has a big impact:</p>
+<p><strong><a href="https://github.com/metaeducation/ren-c/commit/71d86b67c05dddf5c90aff044ca3fb5e1c14952a">C Improvements</a></strong></p>
+<p><strong><a href="https://github.com/hostilefork/replpad-js/commit/b6978ec43f83a97aabb14c2efa218e5da5048e8f#diff-839c9f79a45893495f4bf96067d8c1567ccac664d09a265e299079862040f2f1L907">JavaScript Improvements</a></strong></p>
+<h2>
+<a name="hows-it-done-for-starters-pure-virtual-binding-4" class="anchor" href="https://forum.rebol.info#hows-it-done-for-starters-pure-virtual-binding-4"></a>How's It Done?  For Starters, Pure Virtual Binding...</h2>
+<p><a href="https://forum.rebol.info/t/rebol-and-scopes-well-why-not/1751">"Pure Virtual Binding"</a> gives us the possibility finding function arguments and locals dynamically, once the function is already running...even if we just have text in our hand:</p>
+<pre><code>demo: func [arg] [
+    name: "arg"
+    word: inside [] to word! name  ; BLOCK! evaluation captures specifier
+    print ["The value of arg is" get word]
+]
+
+&gt;&gt; demo 1020
+The value of arg is 1020
+</code></pre>
+<p>So that's how we're managing to look up the text.</p>
+<h2>
+<a name="capturing-shadowed-variables-as-a-proxy-for-stack-5" class="anchor" href="https://forum.rebol.info#capturing-shadowed-variables-as-a-proxy-for-stack-5"></a>Capturing Shadowed Variables As A Proxy For Stack</h2>
+<p>The next trick is: how do functions like <strong>reb.UnboxInteger()</strong> or <strong>reb.Spell()</strong> (or their C equivalents <strong>rebUnboxInteger()</strong> or <strong>rebSpell()</strong>) know what Rebol function is currently executing... or if you're in the body of the implementation or not?</p>
+<p>The variadic C API functions are actually macros that look like this:</p>
+<pre><code>#define rebSpell(...) \
+    rebSpell_helper( \
+        LIBREBOL_SPECIFIER,  /* captured from callsite! */ \
+        __VA_ARGS__, rebEND \
+    )
+</code></pre>
+<p>LIBREBOL_SPECIFIER is something that is defined before you <code>#include "rebol.h"</code>, that gives the expression to evaluate which will give you the stack.  So when you see a native definition like:</p>
+<pre><code>DECLARE_NATIVE(native_name_here) {
+    INCLUDE_PARAMS_OF_NATIVE_NAME_HERE;
+    ...
+}
+</code></pre>
+<p>That expands to:</p>
+<pre><code>RebolBounce N_native_name_here(RebolLevel* level_) {
+    RebolSpecifier librebol_specifier;
+    librebol_specifier = rebSpecifierFromLevel_internal(level_)
+    ...
+}
+</code></pre>
+<p>This overrides a global static.  If you're inside the function, the API macros will receive the specifier that's in the function, otherwise the static.  It drives its decision from there.</p>
+<p>The JavaScript uses a similar technique, but in that case it can override the <strong>reb</strong> used in the <strong>reb.Xxx()</strong> functions.  There's a global <code>reb</code>, and then a <code>reb</code> that's tweaked which comes in as a parameter to the JavaScript function implementing the native.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/api-breakthrough-scope-detection-in-javascript-and-c/2157">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/api-breakthrough-scope-detection-in-javascript-and-c/2157</link>
+          <pubDate>Mon, 26 Feb 2024 23:57:32 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2157</guid>
+          <source url="https://forum.rebol.info/t/api-breakthrough-scope-detection-in-javascript-and-c/2157.rss">API Breakthrough: Scope Detection In JavaScript and C !</source>
+        </item>
         <item>
           <title>Raku (Perl 6) Type System</title>
           <dc:creator><![CDATA[bradrn]]></dc:creator>
@@ -1083,986 +2013,6 @@ do with [x y] [x * y]
           <discourse:topicArchived>No</discourse:topicArchived>
           <guid isPermaLink="false">forum.rebol.info-topic-2145</guid>
           <source url="https://forum.rebol.info/t/meaning-of-meta-block/2145.rss">Meaning of META-BLOCK! ^[...]</source>
-        </item>
-        <item>
-          <title>Repurposing THE-XXX! (@xxx) For Undecorated Values</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Datatypes</category>
-          <description><![CDATA[
-            <p>Historical Rebol used quoted words (LIT-WORD!) to pass variables to functions, with the idea the function could then later set or get those variables.  The quote level was removed under evaluation, meaning the function got a WORD!</p>
-<pre><code>rebol2&gt;&gt; whatever: 10
-
-rebol2&gt;&gt; foo: func [var [word!]] [print [var "is" get var]]
-
-rebol2&gt;&gt; foo 'whatever
-whatever is 10
-</code></pre>
-<p>But we now have a general rule that quoting insulates whatever you quote from binding.  So you have to add the binding, by saying something like <strong><code>foo in [] 'whatever</code></strong></p>
-<p>This isn't the only option, if the callee was willing to receive something other than WORD!.  We also have THE-WORD!, which currently evaluates to the bound version of itself.</p>
-<pre><code>&gt;&gt; @whatever
-== @whatever
-
-&gt;&gt; foo: func [var [the-word!]] [print [var "is" get var]]
-
-&gt;&gt; foo @whatever
-@whatever is 10
-</code></pre>
-<p>This gets you the binding you want, but now you have a decorated word, which would be annoying if FOO is trying to do something besides GET/SET the value.  Plain words are the norm.</p>
-<p>If you wanted an undecorated word, you could use the standalone @ operator... which gives back its argument literally:</p>
-<pre><code>&gt;&gt; @ a
-== a
-</code></pre>
-<p><strong><code>@ a</code></strong> is a little bit uglier than <strong><code>'a</code></strong> but not as bad as <strong><code>in [] 'a</code></strong></p>
-<pre><code>&gt;&gt; foo: func [var [word!]] [print [var "is" get var]]
-
-&gt;&gt; foo @ whatever
-whatever is 10
-</code></pre>
-<p>But the spacing just throws it off to where it no longer looks like a single argument.  And it doesn't look like one because it isn't (e.g. can't fill exactly one slot in the API or a COMPOSE).  @ is also a function under the current design (you can redefine it), so calling it incurs some overhead.</p>
-<h2>
-<a name="or-we-could-say-that-things-evaluate-and-drop-the-1" class="anchor" href="https://forum.rebol.info#or-we-could-say-that-things-evaluate-and-drop-the-1"></a>Or... We Could Say that @ Things Evaluate And Drop The @</h2>
-<pre><code>&gt;&gt; @word
-== word  ; bound
-
-&gt;&gt; @(print "Hello")
-== (print "Hello")  ; bound
-
-&gt;&gt; @[print "Hello"]
-== [print "Hello"]  ; bound, less useful as plain block would have done that
-</code></pre>
-<p>This would make <strong><code>@word</code></strong> and <strong><code>@ word</code></strong> symmetrical, which is appealing.</p>
-<p>But it's at the cost of losing the idea of a category of ANY-WORD! that stays somewhat as-is.</p>
-<h2>
-<a name="how-big-a-loss-is-the-inert-wordgrouptuplepath-2" class="anchor" href="https://forum.rebol.info#how-big-a-loss-is-the-inert-wordgrouptuplepath-2"></a>How Big A Loss Is The "Inert" WORD!/GROUP!/TUPLE!/PATH!</h2>
-<p>In practice, the idea of inert words hasn't lived up to my hopes for them.  I thought maybe since they would be shielded from multiple phases of reducing, they might become popular for some kind of enumerated types.  But being a bit ugly, that's not materialized.</p>
-<p>If it gives you any idea of how not-popular the application has been, I changed the evaluator behavior and it <a href="https://github.com/metaeducation/ren-c/blob/0d2d7c39733f21e1088240ab2e5c7614072c8059/src/mezz/uparse.r#L151">only required <em>one</em> change in UPARSE to boot</a>:</p>
-<pre><code>  (if spec.1 = '@pending [
-        assert [spec.2 = [&lt;opt&gt; block!]]
-        autopipe: false  ; they're asking to handle pending themselves
-        spread reduce [@pending spec.2]  ; &lt;-- this has to be '@pending
-        elide spec: my skip 2
-    ] else [
-        autopipe: true  ; they didn't mention pending, handle automatically
-        spread [@pending [&lt;opt&gt; block!]]
-    ])
-</code></pre>
-<p>They're still free to be used in dialects for whatever purpose (here we see them marking output parameters in the function spec dialect).  And they serve a good purpose in PARSE for "treat this value literally":</p>
-<pre><code>&gt;&gt; block: [some "a"]
-
-&gt;&gt; parse ["a" "a"] [block]
-== "a"
-
-&gt;&gt; parse [[some "a"] [some "a"]] [some @block]
-== [some "a"]
-</code></pre>
-<p>But it seems that with the new binding model, they have a higher calling in the evaluator... for producing undecorated bound things!</p>
-<p>If you want wordlike things that do not reduce, there's blank-headed paths like <strong><code>/FOO</code></strong> ("refinement").  They have a binding and can be looked up.  Today, blank-headed tuples like <strong><code>.FOO</code></strong> don't evaluate, but I'm aiming to say that they do--and that they do member lookup in methods.  Or... y'know... you could put the word in a block! <strong><code>[foo]</code></strong></p>
-<h2>
-<a name="note-that-decorated-types-have-to-use-3" class="anchor" href="https://forum.rebol.info#note-that-decorated-types-have-to-use-3"></a>Note That Decorated Types Have To Use @</h2>
-<p>There's no such thing as a THE-SET-BLOCK! (and I don't imagine there ever will be).</p>
-<pre><code> &gt;&gt; @[x y]:
- ** Error: That doesn't exist
-
- &gt;&gt; @ [x y]:
- == [x y]:
-</code></pre>
-<p>So it's only the plain WORD!, TUPLE!, PATH!, GROUP! and (redundantly) BLOCK! that you can do this without a space.</p>
-<p>But it's likely much rarer to be generating such material bound in isolation.</p>
-<p>In any case, preliminary looking at the results, I think this is a solid change and much needed in the new binding world.</p>
-            <p><small>6 posts - 2 participants</small></p>
-            <p><a href="https://forum.rebol.info/t/repurposing-the-xxx-xxx-for-undecorated-values/2135">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/repurposing-the-xxx-xxx-for-undecorated-values/2135</link>
-          <pubDate>Mon, 29 Jan 2024 06:12:50 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-2135</guid>
-          <source url="https://forum.rebol.info/t/repurposing-the-xxx-xxx-for-undecorated-values/2135.rss">Repurposing THE-XXX! (@xxx) For Undecorated Values</source>
-        </item>
-        <item>
-          <title>Optimizing Environment Lookup</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Optimization</category>
-          <description><![CDATA[
-            <h2>
-<a name="object-storage-object-frame-port-error-1" class="anchor" href="https://forum.rebol.info#object-storage-object-frame-port-error-1"></a>Object Storage (OBJECT!, FRAME!, PORT!, ERROR!)</h2>
-<p>Rebol objects were designed as two parallel arrays, which we can call the "keylist" and the "varlist".  Originally these were entire cells, like this:</p>
-<pre><code>obj: make object! [a: 10 b: 20]
-
-            0     1     2
-KEYLIST  [     |  a  |  b  ]   ; 4 platform pointers per cell
-
-            0     1     2
-VARLIST  [self |  10 |  20 ]   ; 4 platform pointers per cell
-</code></pre>
-<p>The idea is that the <code>[0]</code>th cell of the varlist contains an instance of the object itself.  This means if the implementation has a pointer to the varlist in its hand, it also has a cell instance of the object.  This also means you can find out from just the varlist what subtype it is (ERROR!, FRAME!, PORT!, etc.)</p>
-<p>R3-Alpha used full 4-platform-pointer-sized WORD! cells for each element in the keylist, and left the [0]th cell empty.</p>
-<p>Ren-C optimized this to just point to symbols.  So keylists are arrays of single pointers, and there is no [0]th element.</p>
-<pre><code>                  0     1 
-KEYLIST        [  a  |  b  ]   ; 1 platform pointer per cell
-
-            0     1     2
-VARLIST  [self |  10 |  20 ]   ; 4 platform pointers per cell
-</code></pre>
-<p>Keylists are shared among objects that are used as prototypes for each other, e.g. <strong>obj2: make obj [...]</strong>.  They will become un-shared if any of the objects are expanded.</p>
-<p>(Object expansion is allowed in R3-Alpha and Ren-C, but not Rebol2 or Red).</p>
-<h2>
-<a name="module-storage-module-2" class="anchor" href="https://forum.rebol.info#module-storage-module-2"></a>Module Storage (MODULE!)</h2>
-<p>R3-Alpha used the same layout for modules containing hundreds of items as it did for objects.</p>
-<p>Ren-C instead allocates small variable "stubs" for each variable in a module.  Each stub is 8 platform pointers in size.</p>
-<ul>
-<li>4 of those platform pointers are for the cell of the variable's value</li>
-<li>1 pointer is for the symbol of the variable</li>
-<li>1 pointer is to the module the variable is for</li>
-<li>1 pointer to the next stub with the same symbol for another module</li>
-<li>1 pointer-sized slot unused at this time</li>
-</ul>
-<p>These form a linked list of all the same-named variable instances in modules.  This list is pointed to by the symbol itself.</p>
-<p>If we want to check if a WORD! cell has a variable in a module, the cell contains a pointer to the word's symbol.  We follow that, and get to the list of variables.  We can walk that list and see if there is an instance matching the module we are looking for.</p>
-<h2>
-<a name="let-variables-3" class="anchor" href="https://forum.rebol.info#let-variables-3"></a>LET Variables</h2>
-<p>At the moment, LET variables are similar to the stubs holding variables for a module... except they don't have an associated module.</p>
-<h2>
-<a name="specifier-chains-are-linked-lists-of-contexts-or-containers-4" class="anchor" href="https://forum.rebol.info#specifier-chains-are-linked-lists-of-contexts-or-containers-4"></a>Specifier Chains Are Linked Lists Of Contexts -or- Containers</h2>
-<p>Things like FRAME! or OBJECT! or MODULE! have one pointer for their "parent specifier".  So when you do something like:</p>
-<pre><code> let x: 10
- obj: make object! [y: x + 10, z: x + 20]
-</code></pre>
-<p>The BLOCK! that object receives has a specifier put onto it... in this case, it will be a LET variable.  That LET variable presumably points up to something else (an enclosing function frame, or a module, or whatever).</p>
-<p>The object creates its varlist, and then that varlist has a pointer to the LET.  It uses this as the edited specifier when running the body block of the object.</p>
-<p>But if you later try to leverage that object elsewhere e.g. with <strong>overbind obj [...]</strong>, it wants to chain that object onto some other specifier.  However its parent link is already in use for the other chain.  So this means a little stub USE container is needed... which points at the object and provides a new slot to put a pointer in.</p>
-<h2>
-<a name="looking-up-an-unbound-word-walks-this-chain-5" class="anchor" href="https://forum.rebol.info#looking-up-an-unbound-word-walks-this-chain-5"></a>Looking Up An Unbound Word Walks This Chain</h2>
-<aside class="quote no-group quote-modified" data-username="bradrn" data-post="12" data-topic="1751">
-<div class="title">
-<div class="quote-controls"></div>
-<img loading="lazy" alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/bradrn/40/365_2.png" class="avatar"><a href="https://forum.rebol.info/t/rebol-and-scopes-well-why-not/1751/12">Rebol And Scopes: Well, Why Not?</a>
-</div>
-<blockquote>
-<p>Though I do spy one low-hanging fruit…</p>
-<aside class="quote no-group" data-username="hostilefork" data-post="11" data-topic="1751">
-<div class="title">
-<div class="quote-controls"></div>
-<img loading="lazy" alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/40/26_2.png" class="avatar"><a href="https://forum.rebol.info/t/rebol-and-scopes-well-why-not/1751/11">Rebol And Scopes: Well, Why Not?</a>
-</div>
-<blockquote>
-<p>a linked list of objects</p>
-</blockquote>
-</aside>
-<p>Might it not be quicker to use a hashmap or similar data structure?</p>
-</blockquote>
-</aside>
-<p>It's not entirely obvious what to hash, here.  And it's not so much that any particular lookup is all that slow.  It's just that there's lots of them, and you can't reliably cache the answer between runs.</p>
-<p><a href="https://forum.rebol.info/t/semantics-and-optimization-of-copying-function-bodies/2119/2">One thing I cited to exploit</a> was the fact that when you copy a function body, you tend to wind up with elements that look up either in a module or in the frame of that function.</p>
-<ul>
-<li>
-<p>Module lookup is relatively fast because there aren't all that many redundant names (e.g. there's typically only one APPEND and it's in LIB.)</p>
-</li>
-<li>
-<p>Function frames are not allowed to expand.</p>
-</li>
-<li>
-<p>You can use the space in the unbound elements to give an answer to something knowable--like "this isn't defined in the frame for function X" or "this is defined in the frame for function X at offset Y", that can let you skip along to searching in the module or beeline for the pointer to what you want in the frame.</p>
-</li>
-</ul>
-<p>I'm sure this will help.  Will have to see how much.</p>
-<h2>
-<a name="gc-load-is-a-big-problem-6" class="anchor" href="https://forum.rebol.info#gc-load-is-a-big-problem-6"></a>GC Load Is A Big Problem</h2>
-<p>Ren-C's garbage collector has some interesting points, but it's still a mark-and-sweep strategy.</p>
-<p>These specifier chains are being allowed to leak out, with every function call producing tons of them... and function frames have to be GC'd because you can't assume there are no extant references.  (Natives are an exception, they will free their frames when they end, but you can't do that with usermode functions because they use frames as specifiers in the blocks they run... and you don't know what happens to that block).</p>
-<p>LETs are pretty bad too... a LET inside a loop creates a little piece of junk each time that needs to get cleaned up.</p>
-<p>I think reference counting would be helpful, because most of these aren't referenced very long and aren't involved in cycles.  So reaching a 0 refcount would be a moment the memory could be reclaimed.  My guess is it would outweigh the cost of the reference counting by a fair bit.  But it's difficult to do reference counting correctly in C-like code (although having a C++ build variant it could be double-checked).</p>
-            <p><small>4 posts - 2 participants</small></p>
-            <p><a href="https://forum.rebol.info/t/optimizing-environment-lookup/2134">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/optimizing-environment-lookup/2134</link>
-          <pubDate>Thu, 25 Jan 2024 03:27:25 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-2134</guid>
-          <source url="https://forum.rebol.info/t/optimizing-environment-lookup/2134.rss">Optimizing Environment Lookup</source>
-        </item>
-        <item>
-          <title>Tunnelling BREAK and CONTINUE Across Binding</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Binding</category>
-          <description><![CDATA[
-            <p>In <code>%make-reb-lib.r</code>, there's are abstractions for helping you do something for every API definition.  The APIs are in an array of objects, and the idea is to go through all the objects and run some code bound into each one... so you don't have to specify the object name each time.</p>
-<p>So instead of:</p>
-<pre><code>names: map-each api api-objects [
-    print ["The API name is" api.name]
-    api.name
-]
-</code></pre>
-<p>You could instead write:</p>
-<pre><code>names: map-each-api [
-    print ["The API name is" name]
-    name
-]
-</code></pre>
-<h2>
-<a name="implementation-of-map-each-api-1" class="anchor" href="https://forum.rebol.info#implementation-of-map-each-api-1"></a>Implementation of MAP-EACH-API</h2>
-<p>In order to make the API member fields visible to code, we use the OVERBIND instruction, which patches in the object:</p>
-<pre><code>map-each-api: lambda [code [block!]] [
-    map-each api api-objects compose [
-        eval overbind api (code)
-    ]
-]
-</code></pre>
-<h2>
-<a name="problem-continue-and-break-2" class="anchor" href="https://forum.rebol.info#problem-continue-and-break-2"></a>Problem: CONTINUE and BREAK</h2>
-<p>We'd like to be able to run the CONTINUE and BREAK of the MAP-EACH.  Previously, using a COMPOSE bought that.  Now, because the code block has a binding, those do not override.</p>
-<p>If the API's object's bindings were on the block passed to MAP-EACH, then it would patch the BREAK and CONTINUE onto them.  But we can't do that, because the API object is not available until the MAP-EACH is already running and the block has been passed.</p>
-<p>Using the current primitive tools for binding at hand, we can try making an object carrying BREAK and CONTINUE and overbind into that as well:</p>
-<pre><code>map-each-api: lambda [code [block!]] [
-    map-each api api-objects compose [
-        let aux: make object! compose [break: (^break) continue: (^continue)]
-        eval overbind aux overbind api (code)
-    ]
-]
-</code></pre>
-<p>It works...and the COMPOSE isn't really necessary anymore.  But, it certainly leaves a lot to be desired.  If we were to dialect this <em>(in the spirit of something like <a href="https://codeberg.org/hiiamboris/red-common/src/branch/master/with.red">hiiamboris's WITH</a>)</em>, it might look more like:</p>
-<pre><code>map-each-api: lambda [code [block!]] [
-    map-each api api-objects [
-        eval with [break continue :api] code
-    ]
-]
-</code></pre>
-<p>Overall though, it feels good to have things under more strict control.</p>
-            <p><small>1 post - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/tunnelling-break-and-continue-across-binding/2133">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/tunnelling-break-and-continue-across-binding/2133</link>
-          <pubDate>Wed, 24 Jan 2024 20:56:51 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-2133</guid>
-          <source url="https://forum.rebol.info/t/tunnelling-break-and-continue-across-binding/2133.rss">Tunnelling BREAK and CONTINUE Across Binding</source>
-        </item>
-        <item>
-          <title>Binding Contention: Visibility of Statics to Each Other</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Binding</category>
-          <description><![CDATA[
-            <p>The feature of functions having <code>&lt;static&gt;</code> variables is implemented by making an OBJECT! holding those variables, and then binding the body of the function to that object.</p>
-<p>You can give code in a GROUP! after the static to provide its initial value.</p>
-<pre><code> foo: func [x &lt;static&gt; s (5 + 5)] [
-      print ["static is" s]
-      s: s + x
- ]
-
- &gt;&gt; foo 20
- static is 10
-
- &gt;&gt; foo 100
- static is 30
-
- &gt;&gt; foo 0
- static is 130
-</code></pre>
-<p>And so on.  So effectively there is code here which is:</p>
-<pre><code> make object! [
-     s: (5 + 5)
- ]
-</code></pre>
-<p>Now, what should the specifier/environment for that GROUP! of code be?  We can argue it should be whatever it would be in the spec... the spec block had a context, and then maybe the GROUP! has one that overrides it, but if not it should be the same as the spec.</p>
-<p>Under that logic, we expect the following to work:</p>
-<pre><code> n: 5
-
- foo: func [x &lt;static&gt; s (n + 5)] [
-      print ["static is" s]
-      s: s + x
- ]
-</code></pre>
-<p>This would seem to mean that the BLOCK! we pass to MAKE OBJECT! doesn't need an environment, relying on MAKE OBJECT! to add the object context so the <strong>s:</strong> has a binding, but then the GROUP! evaluates however it wishes.</p>
-<p>And that appears to work, until the statics try to depend on each other:</p>
-<pre><code> n: 5
-
- foo: func [x &lt;static&gt; s1 (5 + 5) s2 (s1 + 5)] [
-      print ["statics are" s1 s2]
-      s1: s1 + x
-      s2: s2 + x
- ]
-</code></pre>
-<p>(Instances of this were encountered <a href="https://github.com/metaeducation/rebol-httpd/blob/c7ef495f6c3d8f0a9904ac37fcd94f9b1018a5a6/httpd.reb#L316">in the HTTP server</a>.)</p>
-<p>If this is to work, you have to somehow allow the object's binding to penetrate the groups.  One avenue of attack could be to unbind the groups and then move the spec's binding onto the block passed to MAKE OBJECT! instead of leaving it unbound.  But if the GROUP! was bound to somewhere in particular vs. just getting the default binding of what was in the spec, you lose that information.</p>
-<p>If you're going to try specifically grafting the object's context onto the groups, you might do it more like:</p>
-<pre><code> make object! [
-     s1: do overbind tip of [] [5 + 5]
-     s2: do overbind tip of [] [s1 + 5]  ; s1 + 5 block has established binding
- ]
-</code></pre>
-<p>I'm using TIP OF there as a way of getting the top thing in the environment, as a way of extracting the object.  Perhaps that could be the default behavior of an OVERBIND instruction (that it should know not to try and deeply insinuate all the way down to the user/lib contexts on top of something that already has contexts).</p>
-<p>In order to get things to work for now, I'm going to just unbind the groups, and bind the block passed to make object! to match the spec.  But a better answer is needed.</p>
-            <p><small>1 post - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/binding-contention-visibility-of-statics-to-each-other/2132">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/binding-contention-visibility-of-statics-to-each-other/2132</link>
-          <pubDate>Tue, 23 Jan 2024 17:56:51 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-2132</guid>
-          <source url="https://forum.rebol.info/t/binding-contention-visibility-of-statics-to-each-other/2132.rss">Binding Contention: Visibility of Statics to Each Other</source>
-        </item>
-        <item>
-          <title>The Fate of Redbol Emulation In A Mostly Unbound World</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Redbol</category>
-          <description><![CDATA[
-            <p>100% Emulation of historical Rebol was always going to be impossible.  But if we go forward with the model that most code is unbound, that's going to break even code that didn't do anything sophisticated with binding.  Not only will any values you PICK out of a block or iterate over be unbound, but even basic quoting won't be bound:</p>
-<p>e.g. this won't work:</p>
-<pre><code>rebol2&gt;&gt; thing: 10
-
-rebol2&gt;&gt; foo: func [w [word!]] [return get w]
-
-rebol2&gt;&gt; foo 'thing
-== 10
-</code></pre>
-<p>I had a problem with this in emulating my very, very old whitespace interpreter.  It <a href="https://github.com/hostilefork/rebol-whitespacers/blob/1d69ea0e79e60ba79fe680d3af657d0823dcbe9e/historical/whitespace-old.reb#L595">quoted ADD</a> and then <a href="https://github.com/hostilefork/rebol-whitespacers/blob/1d69ea0e79e60ba79fe680d3af657d0823dcbe9e/historical/whitespace-old.reb#L424">put it in a block</a>, expecting a DO of that block to run the ADD it meant.</p>
-<h2>
-<a name="simulating-waves-of-binding-probably-impractical-1" class="anchor" href="https://forum.rebol.info#simulating-waves-of-binding-probably-impractical-1"></a>Simulating Waves of Binding (Probably?) Impractical</h2>
-<p>You might think that so long as every word can still hold a binding, then historical behavior could be simulated by manually binding everything.</p>
-<p>When a module loads, you could walk through it binding every word.  Then when a function runs, you could copy its body and walk through it...overwriting those module bindings for functions and arguments.</p>
-<p>But it would really mean rewriting everything.  You'd have to redo MAKE OBJECT!, otherwise the <a href="https://forum.rebol.info/t/sticky-set-word-binding-problem-in-make-object/2127">indiscriminate binding would break its expectations</a>--as it doesn't override explicit binding anymore.</p>
-<h2>
-<a name="hooked-evaluator-may-fix-some-cases-2" class="anchor" href="https://forum.rebol.info#hooked-evaluator-may-fix-some-cases-2"></a>Hooked Evaluator May Fix (Some) Cases</h2>
-<p>We already are going to need a hooked evaluator to handle things like PATH! looking up in objects (done presently with a hack to the main evaluator).</p>
-<p>Another hook could just say that quoted things wound up bound under the same rules that non-quoted things use.</p>
-<p>That would make this one whitespace example work, and maybe it would be able to run some more simple historical example scripts.  But anything that mixes COMPOSE and DO is likely doomed.</p>
-<p>This may just be the price of progress.  Rebol2 emulation remains a good experiment of changing your baseline library, and it still would be a good example of that... for all the changes to primitives like FUNC and APPEND etc.  It just may not be able to accommodate the different expectations of binding.</p>
-            <p><small>1 post - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/the-fate-of-redbol-emulation-in-a-mostly-unbound-world/2131">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/the-fate-of-redbol-emulation-in-a-mostly-unbound-world/2131</link>
-          <pubDate>Tue, 23 Jan 2024 15:11:47 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-2131</guid>
-          <source url="https://forum.rebol.info/t/the-fate-of-redbol-emulation-in-a-mostly-unbound-world/2131.rss">The Fate of Redbol Emulation In A Mostly Unbound World</source>
-        </item>
-        <item>
-          <title>What is LOAD, Anyway?</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Modules</category>
-          <description><![CDATA[
-            <h2>
-<a name="ways-to-turn-a-string-into-a-block-in-rebol2-1" class="anchor" href="https://forum.rebol.info#ways-to-turn-a-string-into-a-block-in-rebol2-1"></a>Ways To Turn A String Into A BLOCK! In Rebol2</h2>
-<p>There was TO BLOCK!, which would give you unbound code:</p>
-<pre><code>rebol2&gt;&gt; code: to block! "print {Hello} x: 10"
-== [print "Hello" x: 10]
-
-rebol2&gt;&gt; do code
-** Script Error: print word has no context
-</code></pre>
-<p>And then there was LOAD, which would bind code into the user context, falling back on the lib context:</p>
-<pre><code>rebol2&gt;&gt; code: load "print {Hello} x: 10"
-== [print "Hello" x: 10
-]
-
-rebol2&gt;&gt; do code
-Hello
-== 10
-
-rebol2&gt;&gt; x
-== 10
-</code></pre>
-<p>LOAD had an additional option of /NEXT, so you could go one item at a time:</p>
-<pre><code>rebol2&gt;&gt; load/next "print {Hello} x: 10"
-== [print " {Hello} x: 10"]
-</code></pre>
-<p>The block you get back has the item scanned as the first element, and then the rest of the string as a remainder.</p>
-<p>What you receive is bound into the user/lib contexts, so this actually works:</p>
-<pre><code>&gt;&gt; do load/next "print {Hello} x: 10"
-{Hello} x: 10
-</code></pre>
-<h2>
-<a name="refactoring-things-in-terms-of-transcode-2" class="anchor" href="https://forum.rebol.info#refactoring-things-in-terms-of-transcode-2"></a>Refactoring Things In Terms of TRANSCODE</h2>
-<p>A goal of R3-Alpha was to support modularization, and ambitiously to make the module system itself implemented as usermode code.  So LOAD would not be native.</p>
-<p>The code for scanning UTF-8 strings into unbound Rebol values one-at-a-time was done via TRANSCODE.  But because R3-Alpha added unicode support, it had a quirk that it only took BINARY!, because Rebol strings could be encoded under the hood as 1, 2, or 3 bytes per character:</p>
-<pre><code>r3-alpha&gt;&gt; transcode/next to binary! "print {Hello} x: 10" 
-== [print #{207B48656C6C6F7D20783A203130}]
-</code></pre>
-<p>You could also transcode things entirely in one go, but the result would still have an empty binary at the end:</p>
-<pre><code>r3-alpha&gt;&gt; transcode to binary! "print {Hello} x: 10"
-== [print "Hello" x: 10 #{}]
-</code></pre>
-<p>Ren-C improved on this in several ways.</p>
-<ul>
-<li>
-<p><a href="https://forum.rebol.info/t/realistically-migrating-rebol-to-utf8-everywhere/374">Uses "UTF-8 Everywhere"</a>, and is technically able to accept a string anywhere a UTF-8 binary would otherwise be required... if it makes sense to do so.  You can transcode strings without making a copy as a UTF-8 binary first.</p>
-</li>
-<li>
-<p>Multi-return values allowed the separation of the remainder into its own result.  It is NULL when transcode is used without a /NEXT refinement (renamed to /ONE)</p>
-</li>
-<li>
-<p>Antiforms not being legitimate block elements allow the distinction of "nothing scanned" as a main result from TRANSCODE/ONE</p>
-<ul>
-<li><a href="https://github.com/red/red/issues/5183">See Red spin their wheels on this point, due to lack of isotopes.</a></li>
-</ul>
-</li>
-</ul>
-<p>The results of TRANSCODE were unbound, leaving it up to higher-level functions to add binding if they wanted to.</p>
-<h2>
-<a name="so-now-what-is-load-and-what-is-save-3" class="anchor" href="https://forum.rebol.info#so-now-what-is-load-and-what-is-save-3"></a>So Now, What Is LOAD (and What Is SAVE)?</h2>
-<p>I don't really know.</p>
-<p>It's clear you're supposed to give LOAD a file, and it gives you something back.  But if the file contains a script, it seems to me that all load can give you back is some kind of MODULE! that the only thing you can do with it is DO it (once?) or IMPORT it (possibly many times?)... in which case, why did you need the middle man of LOAD?</p>
-<p>Right now that's kind of where things stand in Ren-C... that LOAD is an implementation artifact of DO and IMPORT, used nowhere else.</p>
-<p>R3-Alpha had an example where it could do something like this:</p>
-<pre><code>r3-alpha&gt;&gt; save/header %test.r "Hello World" [Title: "My Hello"]
-
-r3-alpha&gt;&gt; read/string %test.r
-== {REBOL [
-    Title: "My Hello"
-]
-"Hello World"
-}
-
-r3-alpha&gt;&gt; load %test.r
-== "Hello World"
-</code></pre>
-<p>If you try this with a BLOCK!, it will just be the block's contents... not the whole block:</p>
-<pre><code>r3-alpha&gt;&gt; save/header %test.r [a [b c] d] [Title: "My Block"]
-
-r3-alpha&gt;&gt; read/string %test.r
-== {REBOL [
-    Title: "My Block"
-]
-a [b c] d
-}
-
-r3-alpha&gt;&gt; load %test.r
-== [a [b c] d]
-</code></pre>
-<p>There's no enclosing block saved, and yet it's interpreted as the contents of a block.  Hm, so what if the block had contained "Hello World"?  Well, the block is of course lost in that case:</p>
-<pre><code>r3-alpha&gt;&gt; save/header %test.r ["Hello World"] [Title: "My Hello Block"]
-
-r3-alpha&gt;&gt; load %test.r
-== "Hello World"
-</code></pre>
-<p>We could arguably "fix" this using isotopes, e.g. SAVE could take a splice if you wanted the values to be spread in the script... otherwise it would preserve your value.  But in order for me to make decisions like "is this reasonable?" I have to know what the use case is.  And I don't know what it is.  Are LOAD and SAVE some kind of generic value-to-file service?  Or are they specifically for scripts?</p>
-<h2>
-<a name="practical-matter-bootstrap-rebmake-code-4" class="anchor" href="https://forum.rebol.info#practical-matter-bootstrap-rebmake-code-4"></a>Practical Matter: Bootstrap Rebmake Code</h2>
-<p>There's code in the bootstrap which says:</p>
-<pre><code>user-config: make object! load (join repo-dir %configs/default-config.r)
-</code></pre>
-<p>Then <code>%default-config.r</code> has lines in it like <strong>os-id: null</strong>.  It expects to be able to resolve NULL to a definition, e.g. the one in LIB.  But we don't want to bind into LIB directly (too easy to do dangerous modifications).  So does LOAD always create a new context?  Here we want an object, not a module... this is important to distinguish because the techniques used by modules don't scale.  So if someone is going to LOAD thousands of objects, they shouldn't be modules... :-/</p>
-            <p><small>1 post - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/what-is-load-anyway/2130">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/what-is-load-anyway/2130</link>
-          <pubDate>Tue, 23 Jan 2024 15:02:01 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-2130</guid>
-          <source url="https://forum.rebol.info/t/what-is-load-anyway/2130.rss">What is LOAD, Anyway?</source>
-        </item>
-        <item>
-          <title>The Return of ALIAS?</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Binding</category>
-          <description><![CDATA[
-            <p>Rebol2 had a strange concept of the ability to create aliases for words:</p>
-<pre><code>rebol2&gt;&gt; alias 'append "foo"
-== foo
-
-rebol2&gt;&gt; foo [a b c] &lt;d&gt;
-== [a b c &lt;d&gt;]
-
-rebol2&gt;&gt; foo: 10
-== 10
-
-rebol2&gt;&gt; append
-== 10
-</code></pre>
-<p><em>(You might wonder why it takes a string, vs. being <strong>alias 'append 'foo</strong>.  The problem is that if you tried that, the fact that merely mentioning words creates variables for them in historical Rebol would mean that FOO appeared to already exist as an unset variable.  The alias wouldn't override it.)</em></p>
-<p>So I've actually been wondering about a more modern version of ALIAS.  Because right now we have a sort of pain point on the idea that you can only create bound references to something when the names match up exactly.  If you have the thing under a different name, then you have to create a proxy variable to hold the value with the right name... but then you disconnect seeing updates of the original thing.</p>
-<p>This could be particularly useful in module imports, where currently you don't see updates if something you import changes in the module you imported from.  EXPORT should likely default to providing declarations as read-only, and you should have to do something special if the importers can write a variable.  But it's come up frequently (both the desire to see updates, and to be able to write and have the changes seen by the module and other importers, without going through a level of indirection like an object)</p>
-            <p><small>1 post - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/the-return-of-alias/2129">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/the-return-of-alias/2129</link>
-          <pubDate>Mon, 22 Jan 2024 15:07:13 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-2129</guid>
-          <source url="https://forum.rebol.info/t/the-return-of-alias/2129.rss">The Return of ALIAS?</source>
-        </item>
-        <item>
-          <title>Caching Binding Lookup, and &quot;Attachment Binding&quot;</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Binding</category>
-          <description><![CDATA[
-            <p>I've written about Rebol's historical idea of walking the source deeply at the beginning, and the <a href="https://forum.rebol.info/t/the-real-story-about-user-and-lib-contexts/764">mere mention of an ANY-WORD!</a> would lead to a variable being created for it in the user context.  This chewed through memory making unnecessary variables, and gave you a situation ripe for typos:</p>
-<pre><code> rebol2&gt;&gt; add-ten: func [argument] [
-              argment: argument + 10
-              return argument
-           ]
-
- rebol2&gt;&gt; add-ten 20
- == 20
-
- rebol2&gt;&gt; argment
- == 30
-</code></pre>
-<p>This behavior resembles <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Strict_mode">pre-strict-mode JavaScript</a>, and makes it easy to get bugs</p>
-<p>But it's a semantic that some code uses intentionally.  And if Rebol2 emulation is to be possible, there has to be some way to do this.</p>
-<p>It's also a useful way to work in the console.  Browsers still run JavaScript in non-strict-mode by default:</p>
-<pre><code>&gt;&gt; function foo() { jkl = 10 }
-&lt;- undefined
-
-&gt;&gt; foo()
-undefined
-
-&gt;&gt; jkl
-&lt;- 10
-</code></pre>
-<h2>
-<a name="simulating-non-strictness-with-attachment-binding-1" class="anchor" href="https://forum.rebol.info#simulating-non-strictness-with-attachment-binding-1"></a>Simulating Non-Strictness With "Attachment" Binding</h2>
-<p>In order to overcome the idea of creating variables for every ANY-WORD! to be mentioned, the "Sea of Words" concept was first implemented by making code loaded for a module bind non-specifically to that module.  Words held a pointer to the module with no further information about the address of a variable in that module.  This was called the "attached" state.</p>
-<p>If you tried to read from an attached word, it would fail.  But if you wrote to an attached word, it would create a variable.  This gave the experience of non-strict mode, without a-priori creating tons of variables.</p>
-<p>But this creates weird words that are neither fully bound nor fully unbound.  And you can't take being in the "attached" state to mean the variable does not exist in the module... because more than one attached reference to the word could have been created, and one of them might have been used to create it... not knowing about the other word's attached state to fix it up.  Or perhaps the variable was created explicitly in the module--not via any particular assignment.</p>
-<h2>
-<a name="should-words-be-storing-environments-2" class="anchor" href="https://forum.rebol.info#should-words-be-storing-environments-2"></a>Should Words Be Storing "Environments"?</h2>
-<p>Historically, bound words would store the specific "address" of variables (most of the time object plus index), while unbound words would store nothing.</p>
-<p>Attachment introduced a new situation where an "unbound" word could hold a pointer to a module, where the word would be created if a SET or SET-WORD! operation were performed.</p>
-<p>But if objects and environments can expand, is there a good reason why the "attachment" should have been to a particular module... or should it be attached to an environment?  If the specifier for a piece of code has an OBJECT! to look in first, and then a MODULE!... and a lookup doesn't find it in either, why should it become "attached" only to the module?  What if it shows up in the object before you write it?</p>
-<p>Taking this to the extreme: Why should only "unbound"/"attached" things be able to see overrides that come along later on?  Why don't words store environments always, and look up every time...to be able to find new things?</p>
-<h2>
-<a name="ok-back-up-3" class="anchor" href="https://forum.rebol.info#ok-back-up-3"></a>Ok, Back Up.</h2>
-<p>It seems that once a word has been bound, it needs to stay bound to where it is.  e.g. the following seems bad:</p>
-<pre><code>&gt;&gt; word: in [] 'foo
-== foo
-
-&gt;&gt; protect word  ; make sure no one changes FOO's value
-
-&gt;&gt; set word 10
-== 10
-
-&gt;&gt; some-arbitrary-routine
-== &lt;whatever&gt;  ; didn't error, so didn't try to write foo
-
-&gt;&gt; get word
-== 20  ; !!! it wasn't written, so how?
-</code></pre>
-<p>We'd lose some grounding if bound words weren't stable.  It also would hurt performance, because words would have to be looked up in the environment chain every time.</p>
-<p>BUT we're saying that the <strong>IN</strong> operation does this lookup, and may get different results if the environment changes.  That's pretty much a given: the evaluator runs an equivalent to IN, and this is why when you run a function several times you get different bindings to different frames from the same unbound words as input.</p>
-<h2>
-<a name="contain-the-weirdness-to-attachment-4" class="anchor" href="https://forum.rebol.info#contain-the-weirdness-to-attachment-4"></a>Contain The Weirdness To "Attachment"</h2>
-<p>This points the finger at "attachment" binding being a narrow, weird thing... whose job is solely to simulate the idea that a variable exists that doesn't.</p>
-<p>Sea of Words made it a shallow illusion, e.g. it didn't let you GET/ANY the variable and get it back as being trash--you'd get an error instead.  There's risks to deepening the illusion, because you'd have to make module enumeration give back every possible word as a variable.  :-/</p>
-<p>So I think attachment should be to a module (not an environment) and it should be considered as bound for most practical purposes (it would need to be, for Rebol2 compatibility).</p>
-            <p><small>5 posts - 2 participants</small></p>
-            <p><a href="https://forum.rebol.info/t/caching-binding-lookup-and-attachment-binding/2128">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/caching-binding-lookup-and-attachment-binding/2128</link>
-          <pubDate>Mon, 22 Jan 2024 14:47:39 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-2128</guid>
-          <source url="https://forum.rebol.info/t/caching-binding-lookup-and-attachment-binding/2128.rss">Caching Binding Lookup, and &quot;Attachment Binding&quot;</source>
-        </item>
-        <item>
-          <title>Sticky SET-WORD! Binding Problem In MAKE OBJECT!</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Binding</category>
-          <description><![CDATA[
-            <p>Trying to use the policy that bindings don't override, I ran into a bug with MAKE OBJECT! when a SET-WORD! is carrying a pre-existing binding.</p>
-<p>What happens is that a new field is made (cued by seeing a top-level SET-WORD!) but then when the body is executed it uses the old binding... so the newly created field remains unassigned, and the old value is updated.</p>
-<pre><code>&gt;&gt; obj: make object! [x: 10]
-== make object! [
-    x: 10
-]
-
-&gt;&gt; block: compose [(bind 'x: obj) &lt;new&gt;]
-== [x: &lt;new&gt;]
-
-&gt;&gt; obj2: make object! block
-== make object! [
-    x: ~
-]
-
-&gt;&gt; obj
-== make object! [
-    x: &lt;new&gt;
-]
-</code></pre>
-<p>This hints at a class of hard-to-reason-about cases.  The more you use material with hardened bindings, the more you'll see them come up.</p>
-<p>(I hit the problem in the whitespace dialect code, which is still using mutable binding when it probably should not... but, it gives a good example of a problem that happens if you do... and if we're living in the non-binding-overriding world.)</p>
-<p>For the moment, I think I'm going to say that MAKE OBJECT! will error if any of the SET-WORD!s in the top level already have a binding.</p>
-<ul>
-<li>
-<p>Binding can't serve two masters.  If the code were more complex than the above, it's not clear to say that the original binding didn't mean what it said in terms of intending a specific assignment... vs wanting to be overridden.</p>
-</li>
-<li>
-<p>I don't want fundamentals like this to use mutable binding, and to get this to work virtually at one-level of depth would require a tricky bind instruction that I don't want to deal with right now.</p>
-</li>
-</ul>
-<p>I'd say it's the first "major" problem I've seen in practice from a policy of not overriding binding (in the sense that it's fairly hard to argue "well, maybe you wanted that").</p>
-            <p><small>4 posts - 2 participants</small></p>
-            <p><a href="https://forum.rebol.info/t/sticky-set-word-binding-problem-in-make-object/2127">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/sticky-set-word-binding-problem-in-make-object/2127</link>
-          <pubDate>Sat, 20 Jan 2024 00:21:21 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-2127</guid>
-          <source url="https://forum.rebol.info/t/sticky-set-word-binding-problem-in-make-object/2127.rss">Sticky SET-WORD! Binding Problem In MAKE OBJECT!</source>
-        </item>
-        <item>
-          <title>DO of TEXT! As Synonym of DO of FILE! Containing String</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Modules</category>
-          <description><![CDATA[
-            <p>So DO in Rebol and Red of a string has classically been what we might think of today as:</p>
-<pre><code>do in system.contexts.user transcode string
-</code></pre>
-<p>Sample behavior:</p>
-<pre><code>rebol2&gt;&gt; var: 10
-== 10
-
-rebol2&gt;&gt; do "var: var + 20 print [var]"
-30
-
-rebol2&gt;&gt; var
-== 30
-</code></pre>
-<p>So not only could it see VAR, it could change it.</p>
-<p>This seems obviously bad in a modularized world, in the sense that if you DO a string somewhere besides the console (e.g. in a module) you're getting no effects where you likely intend them, and causing effects somewhere else.</p>
-<p>Ren-C addresses this by isolating the DO (as it would a module), which seems like the only sane idea.  If you have a string representing code and want to run it in the current context, you need a binding operation, e.g.:</p>
-<pre><code>do in [] transcode string
-</code></pre>
-<h2>
-<a name="quirks-with-header-handling-in-string-input-1" class="anchor" href="https://forum.rebol.info#quirks-with-header-handling-in-string-input-1"></a>Quirks With Header Handling In String Input</h2>
-<p>If you DO a string with a header, it appears to be handled:</p>
-<pre><code>rebol2&gt;&gt; do "Rebol [] print {Hello}"
-Hello
-</code></pre>
-<p>BUT it's actually not being handled in Rebol2.  It's just that historically, Rebol has been the system object:</p>
-<pre><code>rebol2&gt;&gt; words-of rebol
-== [version build product core components words...]
-</code></pre>
-<p>So the DO was actually evaluating Rebol to an OBJECT!, ignoring it, then evaluating a block, and ignoring that.  To see that this is what's happening:</p>
-<pre><code>rebol2&gt;&gt; unprotect 'Rebol
-
-rebol2&gt;&gt; Rebol: does [print "Boo"]
-
-rebol2&gt;&gt; do "Rebol [] print {Hello}"
-Boo!
-Hello
-</code></pre>
-<p>R3-Alpha changed this, so that if you do a string starting with the word "Rebol" then it will interpret the subsequent block as a header, and use that to guide the loading process of the string... which might mean interpreting it into something besides a block (e.g. a module):</p>
-<pre><code>r3-alpha&gt;&gt; do {REBOL [Type: Module Options: [isolate]] xyz: &lt;hi&gt;}  
-Module: "Untitled" Version: none Date: none
-
-r3-alpha&gt;&gt; xyz
-** Script error: xyz has no value
-</code></pre>
-<p>There's a quirk in that if you do a BLOCK! directly instead of a string, you get the old REBOL-evaluates-as-an-OBJECT! ignoring the block behavior (<a href="https://github.com/metaeducation/rebol-issues/issues/2372">issue 2372</a>)</p>
-<pre><code>r3-alpha&gt;&gt; do [REBOL [Type: Module Options: [isolate]] xyz: &lt;hi&gt;] 
-== &lt;hi&gt;
-
-r3-alpha&gt;&gt; xyz
-== &lt;hi&gt;
-</code></pre>
-<p>To help mitigate this, the word "Rebol" is defined to generate an error by default under evaluation in Ren-C (the system object is SYSTEM or alias as SYS)</p>
-<p>In any case, the idea here is that since headers are used to dictate how code is loaded and bound, if you have a BLOCK! it has already gone through that process.</p>
-<h2>
-<a name="do-of-a-text-should-require-a-header-2" class="anchor" href="https://forum.rebol.info#do-of-a-text-should-require-a-header-2"></a>DO of a TEXT! Should Require A Header</h2>
-<p>All Rebol2 files processed by LOAD and DO of a FILE! (or URL!) are supposed to have a header:</p>
-<pre><code>rebol2&gt;&gt; write %code.r "print {Hello World}"
-
-rebol2&gt;&gt; do %code.r
-** Syntax Error: Script is missing a REBOL header
-</code></pre>
-<p>R3-Alpha doesn't enforce that, which was a step backwards in many people's opinions (including mine).</p>
-<pre><code>r3-alpha&gt;&gt; write %code.r "print {Hello World}"
-
-r3-alpha&gt;&gt; do %code.r
-Script: none Version: none Date: none
-Hello World
-</code></pre>
-<p>If you have code without a header in a file, then it's your job to TRANSCODE that yourself into a block and do whatever binding or processing you need to do to get it to run.</p>
-<p>But considering that, it seems to me that DO of a TEXT! should need a header, and be a synonym for DO LOAD of the text.  Having a header would help reinforce that you really are running this code like a script in its isolated environment.  And it means that if you got your script data from some random place, you don't have to write it to a file just to get DO to process the header.</p>
-<h2>
-<a name="splitting-do-and-eval-is-likely-important-3" class="anchor" href="https://forum.rebol.info#splitting-do-and-eval-is-likely-important-3"></a>Splitting DO and EVAL Is Likely Important</h2>
-<p>When you add all this up, it may suggest we should separate DO and EVAL completely (which was a long-running opinion of <span class="mention">@earl</span> from back in the day).</p>
-<p><strong>eval block</strong> is a little bit longer than <strong>do block</strong> but not by much.</p>
-<p>One benefit could be that if we shift away from assuming that DO is something that runs just Rebol code, we can say that it gets its knowledge from the file itself.  This could come from the extension (e.g. <strong>do %some-file.js</strong> could run javascript code, <strong>do %some-file.css</strong> could incorporate CSS).</p>
-<p>Another potentially good argument is that the amount of parameterization for DO could roughly wind up matching <a href="https://forum.rebol.info/t/design-for-import/1570">the amount of parameterization for IMPORT</a>.  This might suggest even that DO be arity-2 in all cases instead of having a refinement form of DO/ARGS.  That would allow for a content type override if you were DO-ing a string:</p>
-<pre><code>do css-source-text [Type: 'css]
-</code></pre>
-<p>Though single-arity DO is pretty entrenched.  Maybe DO of a BLOCK! does expect that block to have a header structure, so you could add that header:</p>
-<pre><code>do compose [Rebol [Type: 'css] (css-source-text)]
-; -or-
-do compose [CSS [&lt;options for merging CSS in ReplPad&gt;] (css-source-text)]
-
-do compose [Rebol [] (spread transcode rebol-source-text)]
-</code></pre>
-<h2>
-<a name="regardless-do-of-a-text-needs-a-header-4" class="anchor" href="https://forum.rebol.info#regardless-do-of-a-text-needs-a-header-4"></a>Regardless, DO of a TEXT! Needs a Header</h2>
-<p>This strikes me as non-negotiable, so I went ahead to with this, and hit a few issues.</p>
-<p>DO-ing text directly with no intermediate processing step is a rarely needed operation, so it doesn't come up much.  But I did trip over two issues:</p>
-<h3>
-<a name="issue-do-on-the-command-line-5" class="anchor" href="https://forum.rebol.info#issue-do-on-the-command-line-5"></a>Issue: --do On The Command Line</h3>
-<p>First thing I hit was the question of the <strong><code>--do "your code here"</code></strong> command line option.  This is a little annoying, because you don't have the option of saying <strong><code>--do [your code here]</code></strong> at that particular place.</p>
-<p>I can attest to the fact that I'd be annoyed if I had to put a header there.  But then... what if I wanted a header's influence... settings to direct the execution of that code?</p>
-<p>This again seems to suggest a split of --eval and --do.  Use --do if you have a header, and --eval if you don't.  Since EVAL wouldn't take strings, the idea that the command line presumes you want the string bound in the "default sense" (e.g. what would happen if you typed in the console) seems fine.</p>
-<p>It may be that DO of a BLOCK! running Rebol code is just so ingrained that it isn't changeable.  If that's the case, then saying <code>--do</code> takes the block interpretation of the string you pass it is probably not a big issue, and then <code>--do {do {Rebol [] ...}}</code> can be how you inject a header on the command line.</p>
-<h3>
-<a name="issue-does-for-doing-code-6" class="anchor" href="https://forum.rebol.info#issue-does-for-doing-code-6"></a>Issue: DOES for doing code</h3>
-<p>This isn't really about the DO-needs-a-header-on-string, but another thing I noticed pertaining to a potential DO/EVAL split.</p>
-<p>DOES is a shorthand for defining a LAMBDA with no arguments.</p>
-<pre><code>&gt;&gt; foo: does [1 + 2]
-
-&gt;&gt; foo
-== 3
-</code></pre>
-<p>For reasons of consistency, Ren-C extended it so it would run anything DO would process:</p>
-<pre><code>&gt;&gt; foo: does %your-script.r
-
-&gt;&gt; foo
-Running your script...
-</code></pre>
-<p>That's hardly an important feature <em>(<code>foo: does [do %your-script.r]</code> is easy enough to say if it ever actually comes up, which it has not.)</em>  But it raises a question about using the word DOES in light of a DO and EVAL split.  DOES contains the word DO and might suggest a connection with DO's behavior and not EVAL's.</p>
-<p>Perhaps RUN could be the script-oriented runner, with DO keeping the role of EVAL... though right now I'm using RUN for executing frames and gathering arguments at the callsite (a kind of inline APPLY).  That would need another name.</p>
-<p>Perhaps EVALS is not so bad as an alternative to DOES?  :-/</p>
-<pre><code>&gt;&gt; foo: evals [print "hi"]
-
-&gt;&gt; foo
-hi
-</code></pre>
-<p>No, it's bad.  I'm not a fan.</p>
-<p>Or maybe the inconsistency that DOES has little relation to DO is not a big deal.  But inconsistency bothers me (which is why I made <strong>does x</strong> a synonym for <strong>lambda [] [do x]</strong> for all X, despite likely uselessness for non-block X.)</p>
-            <p><small>3 posts - 2 participants</small></p>
-            <p><a href="https://forum.rebol.info/t/do-of-text-as-synonym-of-do-of-file-containing-string/2125">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/do-of-text-as-synonym-of-do-of-file-containing-string/2125</link>
-          <pubDate>Fri, 19 Jan 2024 12:38:09 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-2125</guid>
-          <source url="https://forum.rebol.info/t/do-of-text-as-synonym-of-do-of-file-containing-string/2125.rss">DO of TEXT! As Synonym of DO of FILE! Containing String</source>
-        </item>
-        <item>
-          <title>Making FUNC Variant That Auto-Returns Last Result</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Functions</category>
-          <description><![CDATA[
-            <p>I had offered that people could use this simple wrapper to get the old behavior of FUNC, to drop out its last result (instead of returning trash):</p>
-<pre><code>func: adapt :lib.func [body: compose [return (as group! body)]]
-</code></pre>
-<p>The concept is that if you write:</p>
-<pre><code> foo: func [x] [
-     if x &lt; 0 [return x + 10]
-     x - 10
- ]
-</code></pre>
-<p>What you'd actually get would be:</p>
-<pre><code> foo: lib.func [x] [
-     return (
-         if x &lt; 0 [return x + 10]
-         x - 10
-     )
- ]
-</code></pre>
-<h2>
-<a name="broken-under-new-binding-model-1" class="anchor" href="https://forum.rebol.info#broken-under-new-binding-model-1"></a>Broken Under New Binding Model</h2>
-<p>Under the new binding model, an array which is bound will by default hold onto its binding.</p>
-<ul>
-<li>
-<p>The BODY was a BLOCK! that evaluated at the callsite and captured its environment (e.g. to the user context, module context, outer function context, etc.)</p>
-</li>
-<li>
-<p>When you convert it to a GROUP! it will still have that binding.</p>
-</li>
-<li>
-<p>The surgery which is done to inject the frame containing X into the environment will thus apply only at the outermost level.  So the outer block where the return lives would see it, but never make it to the inner group.</p>
-<pre><code>func: adapt :lib.func [
-    body: compose [
-        print ["Here would see the X:" x]
-        return (as group! body)  ; &lt;-- inside group will not
-    ]
-]
-</code></pre>
-</li>
-</ul>
-<h2>
-<a name="mimicking-funcs-surgery-2" class="anchor" href="https://forum.rebol.info#mimicking-funcs-surgery-2"></a>Mimicking FUNC's Surgery</h2>
-<p>One idea would be to use a utility that can do something like what LIB.FUNC did to put the frame onto the proxy body, on the original body.</p>
-<p>But awkwardly, you can't do this surgery inside the COMPOSE, because it has to be done once the function is running.  If we call that surgery OVERBIND, one answer would look something like this:</p>
-<pre><code>func: adapt :lib.func [
-    body: compose [
-        return do overbind binding of in [] 'return (body)
-    ]
-]
-</code></pre>
-<p><em>(I'll mention that this OVERBIND is not as efficient as what FUNC does, because the frame itself has a pointer to the inherited environment when it's made.  But it only has one slot for that pointer.  So if you try to build a specifier chain with the frame that points to another environment, it has to fabricate a "frame holder" which has its own pointer to put in the chain.)</em></p>
-<p>Notice that we only want the frame, here... which we get from the binding of the RETURN.  We don't want to inject awareness of everything in this FUNC adaptation's scope.  So not <strong><code>overbind [] (body)</code></strong>.  If such a thing were even legal to do... body probably has its own copy of lib inherited from another module, and then you've got another module and its lib... we're trying to avoid that kind of conundrum with conservative binding preservation.</p>
-<h2>
-<a name="another-approach-steal-the-binding-and-unbind-3" class="anchor" href="https://forum.rebol.info#another-approach-steal-the-binding-and-unbind-3"></a>Another Approach: Steal The Binding And Unbind</h2>
-<p>Another approach would be to steal the binding off of the body and put it on the composition, then remove the binding from the body:</p>
-<pre><code>func: adapt :lib.func [
-    body: in body bindable compose [
-        return (bindable as group! body)
-    ]
-]
-</code></pre>
-<p>You can put the BINDABLE before or after the AS GROUP!.</p>
-<p>I actually think this reads less insanely if we just go with UNBIND as being a "tip-unbinding" operation by default, and then have UNBIND/DEEP.  <em>(Maybe UNBIND/SHALLOW for one level of depth?)</em>:</p>
-<pre><code>func: adapt :lib.func [
-    body: in body unbind compose [
-        return (as group! unbind body)
-    ]
-]
-</code></pre>
-<p>It's much better to do it this way.  You're doing cheaper operations and doing them at FUNC creation time.</p>
-<h2>
-<a name="note-that-i-still-hate-implicit-return-4" class="anchor" href="https://forum.rebol.info#note-that-i-still-hate-implicit-return-4"></a>Note That I Still Hate Implicit RETURN</h2>
-<p>There's a reason the default FUNC doesn't do it.  If you start doing cool things with RETURN you'll break things in a way that lurks.</p>
-<p>Sample cool thing that works today:</p>
-<pre><code> foo: func [x y] [
-     return: adapt augment :return [arg2] [
-         value: meta ((unmeta value) + arg2)  ; return ^VALUE is meta
-     ]
-     if x &gt; 10 [
-         return x y  ; arity 2 return, adds args and returns sum!
-    ]
-]
-
-&gt;&gt; foo 20 30
-== 50
-
-&gt;&gt; foo 5 5
-== ~  ; anti
-</code></pre>
-<p>If anything, I feel like the trash result isn't going far enough--and it should actually error if you skip out on a return.  Maybe there was some important finalization work to do.</p>
-<p>But my example shows that putting it in implicitly means it doesn't necessarily roll with whatever updated definition you give to return.  You'll just get a confusing error in a bit of hidden code.  Not good for a fundamental part.</p>
-            <p><small>3 posts - 2 participants</small></p>
-            <p><a href="https://forum.rebol.info/t/making-func-variant-that-auto-returns-last-result/2124">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/making-func-variant-that-auto-returns-last-result/2124</link>
-          <pubDate>Thu, 18 Jan 2024 19:23:59 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-2124</guid>
-          <source url="https://forum.rebol.info/t/making-func-variant-that-auto-returns-last-result/2124.rss">Making FUNC Variant That Auto-Returns Last Result</source>
-        </item>
-        <item>
-          <title>Case-Insensitivity And Dialecting</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Dialects/DSLs</category>
-          <description><![CDATA[
-            <p>Today's Ren-C uses case-sensitive binding.  The topic has been discussed a lot:</p>
-<p><a href="https://forum.rebol.info/t/case-insensitivity-vs-case-preservation-cant-have-both/1439" class="inline-onebox">Case Insensitivity vs. Case-Preservation (can't have both?)</a></p>
-<p>As a discipline, we still are trying to keep the language lowercase, in the standard library at least.</p>
-<p>But one thing that hasn't been discussed much is how case could be used creatively in dialects, when you know the case doesn't matter.  I think that in certain domains, use of case in dialects could be an interesting tool.</p>
-<h2>
-<a name="using-casing-to-imply-uppercase-lowercase-as-is-case-1" class="anchor" href="https://forum.rebol.info#using-casing-to-imply-uppercase-lowercase-as-is-case-1"></a>Using Casing To Imply Uppercase, Lowercase, As-Is Case</h2>
-<p>I've written a little about how the <a href="https://forum.rebol.info/t/usefulness-of-string-interpolation/2114">CScape interpolation tool</a> does casing.  That's strings and not ordinary code.</p>
-<p>The case logic would work in ordinary code something like this:</p>
-<pre><code>&gt;&gt; strings: ["aBc" "dEf" "gHi]
-
-&gt;&gt; cased-print ["For instance:" STRINGS.1 strings.2 Strings.3]
-For instance: ABC def gHi
-</code></pre>
-<p>It might seem silly, but in CScape it turns out to be pretty useful to do that.</p>
-<h2>
-<a name="non-case-related-example-hardening-bindings-2" class="anchor" href="https://forum.rebol.info#non-case-related-example-hardening-bindings-2"></a>Non-Case-Related Example: "Hardening" Bindings</h2>
-<p>We have an issue now that sometimes when you are composing material you want bindings to "stick".  Here we want LET and PASSTHRU to be bound to the same environment as the block given to the COMPOSE (which propagates to the GROUP!s, and then to the blocks evaluated in the groups).  But we want RETURN to be unbound, and pick up its binding from the site where it is composed:</p>
-<pre><code> compose [
-     (in [] 'let) (name): (in [] 'passthru) :return
- ]
-</code></pre>
-<p>There could be some dialect options for this... a special signal, maybe something you pass:</p>
-<pre><code>compose/harden [
-    &lt;hard&gt; let (name): &lt;hard&gt; passthru :return
-] &lt;hard&gt;
-
-compose/harden [
-    %h let (name): %h passthru :return
-] %h
-
-compose/harden [
-    $ let (name): $ passthru :return
-] $
-</code></pre>
-<p>Since you have groups available, you could get the literal of the thing you're hardening with, e.g. with <code>(&lt;hard&gt;)</code> or <code>(%h)</code> or <code>($)</code></p>
-<p>And of course, you could have an operation that reverses this...so that things were hardened by default but you escaped to leave them unbound.</p>
-<p>But... a weirder idea... what if you used something like the case?</p>
-<pre><code> weird-compose [
-     LET (unbind name): PASSTHRU :return
- ]
-</code></pre>
-<p>Important to remember is that symbols don't have case.  So you can't use the trick for everything.</p>
-<p>But I present this in juxtaposition to using even the most minimal signal (like $) just to show how much the comprehensibility can benefit.</p>
-            <p><small>1 post - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/case-insensitivity-and-dialecting/2123">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/case-insensitivity-and-dialecting/2123</link>
-          <pubDate>Wed, 17 Jan 2024 22:33:15 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-2123</guid>
-          <source url="https://forum.rebol.info/t/case-insensitivity-and-dialecting/2123.rss">Case-Insensitivity And Dialecting</source>
-        </item>
-        <item>
-          <title>Functions That Capture the Current &quot;Evaluation Environment&quot;</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Binding</category>
-          <description><![CDATA[
-            <aside class="quote no-group quote-modified" data-username="bradrn" data-post="11" data-topic="2093">
-<div class="title">
-<div class="quote-controls"></div>
-<img loading="lazy" alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/bradrn/40/365_2.png" class="avatar"><a href="https://forum.rebol.info/t/custom-function-generator-pitfalls/2093/11">Custom Function Generator Pitfalls</a>
-</div>
-<blockquote>
-<p>Indeed, there would have to be a notion of the ‘currently active environment’ from which unbound words lookup their names. (...)  Surely <a href="https://forum.rebol.info/t/rebol-and-scopes-well-why-not/1751">specifiers</a> require the same kind of concept already?</p>
-</blockquote>
-</aside>
-<p>This sounds very <a href="https://forum.rebol.info/t/lisps-kernel-clojure-limits-of-code-is-data-and-data-is-code/2060">Kernel-like</a>, e.g.</p>
-<pre><code>foo: func [block &lt;environment&gt; env] [
-    print mold block
-    print [env.x env.y]
-]
-
-bar: func [x] [
-   let y: 20
-   foo [x + y]
-]
-
-&gt;&gt; bar 10
-[x + y]
-10 20
-</code></pre>
-<p>It's true that specifiers have been creeping toward being able to offer something like this functionality.  But they were originally made with a particular mix of correctness and optimization in mind for combining FRAME! instances with "relativized" function bodies, so that simple index numbers could be used to find instance variables.  Extending them has been experimental to permit things like LET but they're fairly brittle at present.</p>
-<p>Today's specifiers narrow the fiddling to literals.  e.g. <strong>if foo [x + y]</strong> would have the specifier influence [x + y], but if you'd written <strong>if foo (block)</strong> the specifier wouldn't affect the passed-in block...so it's different from a situation where IF was receiving an environment.</p>
-<hr>
-<p><strong>I'm worried about a generalized <code>&lt;environment&gt;</code> becoming available... and especially if such an out-of-band parameter sneaks in and affecting the behavior of fundamentals like COMPOSE or EITHER etc.</strong></p>
-<p>Once you have this out of band parameter, you have the problem of what happens when things get a step removed and you need to start making it passed in-band.  (e.g. the difference between a function that calls COMPOSE directly vs. a function that calls a function that calls COMPOSE, where the intended environment of influence comes from the outermost call).</p>
-<p>You also start getting some strange combinatorics of how much influence the environment is supposed to have in an operation vs. any existing binding on the passed in items.  So I'd generally been going with the idea that the evolution of binding from being "just on words" to being "on words and arrays" would keep with the spirit that the way to tunnel "environments" through is to use mechanisms that put them granularly on your arguments vs. relying on this parameter.</p>
-<p>For the vast majority of code, I like the idea that whatever is done with environments gets those environments pasted onto the values themselves, so that things like GET and COMPOSE remain single-arity in an abstractable way, so that they can also be abstracted as single-arity functions without introducing quandaries from sometimes-implicit environment parameters.</p>
-            <p><small>2 posts - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/functions-that-capture-the-current-evaluation-environment/2122">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/functions-that-capture-the-current-evaluation-environment/2122</link>
-          <pubDate>Tue, 16 Jan 2024 10:31:44 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-2122</guid>
-          <source url="https://forum.rebol.info/t/functions-that-capture-the-current-evaluation-environment/2122.rss">Functions That Capture the Current &quot;Evaluation Environment&quot;</source>
         </item>
   </channel>
 </rss>

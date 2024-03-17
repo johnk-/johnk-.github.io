@@ -1,0 +1,239 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>API Breakthrough: Scope Detection In JavaScript and C !</title>
+    <link>https://forum.rebol.info/t/api-breakthrough-scope-detection-in-javascript-and-c/2157</link>
+    <description>## Background
+
+When writing the implementation of a Rebol function using C or JavaScript code, getting at the arguments and locals of that function was something of an annoyance.
+
+You had to use a separate **`rebArg()`** API that looked on the Rebol stack for the last Rebol function call, and retrieved arguments in that frame.  This broke the flow, generating an extra API handle that had to be released:
+
+    quadrupler: js-native [num [integer!]] {
+        let rebol_num = reb.Arg(&quot;num&quot;)
+        let num = reb.UnboxInteger(rebol_num, &quot;* 2&quot;)  // Rebol multiplying
+        reb.Release(rebol_num)
+        return reb.Integer(num * 2)  // JavaScript multiplying
+    }
+
+Of course, you could have used **`reb.R()`** to make a &quot;releasing&quot; splice, so the variadic would release it as it went along:
+
+    quadrupler: js-native [num [integer!]] {
+        let num = reb.UnboxInteger(reb.R(reb.Arg(&quot;num&quot;)), &quot;* 2&quot;)
+        return reb.Integer(num * 2)
+    }
+
+This was made &quot;prettier&quot; &lt;sub&gt;cough&lt;/sub&gt; with a fused instruction called **`reb.ArgR()`**
+
+    quadrupler: js-native [num [integer!]] {
+        let num = reb.UnboxInteger(reb.ArgR(&quot;num&quot;), &quot;* 2&quot;)
+        return reb.Integer(num * 2)
+    }
+
+Kind of a headache.  **But even worse... what if it&#39;s a WORD! or something evaluative?**
+
+    reverse-spell: js-native [
+        {If REVERSE-SPELL &#39;FOO you get &quot;OOF&quot;}
+        word [word!]
+    ]{
+        return reb.Spell(&quot;reverse to text!&quot;, reb.ArgR(&quot;word&quot;));  // !!! WRONG
+    }
+
+The TO TEXT! won&#39;t convert the word, because the word will be spliced into the instruction stream and looked up as a variable..  You need to quote it (or meta it, if it&#39;s an antiform):
+
+    reverse-spell: js-native [word [word!]] {
+        return reb.Spell(&quot;reverse to text!&quot;, reb.Q(reb.ArgR(&quot;word&quot;)));
+    }
+
+    reverse-spell: js-native [word [word!]] {
+        return reb.Spell(&quot;reverse to text! @&quot;, reb.ArgR(&quot;word&quot;));  // as good as it got
+    }
+
+This problem comes from what I have described as saying that all API calls are effectively doing an EVAL COMPOSE, because the C variable name isn&#39;t something Rebol can see...hence it cannot &quot;protect&quot; the value it holds.  You&#39;d have the same problem with:
+
+     eval compose [reverse to text! (word)]
+
+## Wouldn&#39;t it be nice if the API *knew* it was inside a native?
+
+Then it could just do the lookup by name, with normal code...:
+
+    quadrupler: js-native [num [integer!]] {
+        let num = reb.UnboxInteger(&quot;num * 2&quot;)
+        return reb.Integer(num * 2)
+    }
+
+    reverse-spell: js-native [word [word!]] {
+        return reb.Spell(&quot;reverse to text! word&quot;);
+    }
+
+But how would it know when you called out from the code for the native body to some service routine that also used the API... where the parameters should not be visible?
+
+## **Well, I&#39;ve Solved It!** :star:  In C/C++ and JavaScript
+
+It&#39;s the most significant API change in a while, and it has a big impact:
+
+**[C Improvements](https://github.com/metaeducation/ren-c/commit/71d86b67c05dddf5c90aff044ca3fb5e1c14952a)**
+
+**[JavaScript Improvements](https://github.com/hostilefork/replpad-js/commit/b6978ec43f83a97aabb14c2efa218e5da5048e8f#diff-839c9f79a45893495f4bf96067d8c1567ccac664d09a265e299079862040f2f1L907)**
+
+## How&#39;s It Done?  For Starters, Pure Virtual Binding...
+
+[&quot;Pure Virtual Binding&quot;](https://forum.rebol.info/t/rebol-and-scopes-well-why-not/1751) gives us the possibility finding function arguments and locals dynamically, once the function is already running...even if we just have text in our hand:
+
+    demo: func [arg] [
+        name: &quot;arg&quot;
+        word: inside [] to word! name  ; BLOCK! evaluation captures specifier
+        print [&quot;The value of arg is&quot; get word]
+    ]
+
+    &gt;&gt; demo 1020
+    The value of arg is 1020
+
+So that&#39;s how we&#39;re managing to look up the text.
+
+## Capturing Shadowed Variables As A Proxy For Stack
+
+The next trick is: how do functions like **reb.UnboxInteger()** or **reb.Spell()** (or their C equivalents **rebUnboxInteger()** or **rebSpell()**) know what Rebol function is currently executing... or if you&#39;re in the body of the implementation or not?
+
+The variadic C API functions are actually macros that look like this:
+
+    #define rebSpell(...) \
+        rebSpell_helper( \
+            LIBREBOL_SPECIFIER,  /* captured from callsite! */ \
+            __VA_ARGS__, rebEND \
+        )
+
+LIBREBOL_SPECIFIER is something that is defined before you `#include &quot;rebol.h&quot;`, that gives the expression to evaluate which will give you the stack.  So when you see a native definition like:
+
+    DECLARE_NATIVE(native_name_here) {
+        INCLUDE_PARAMS_OF_NATIVE_NAME_HERE;
+        ...
+    }
+
+That expands to:
+
+    RebolBounce N_native_name_here(RebolLevel* level_) {
+        RebolSpecifier librebol_specifier;
+        librebol_specifier = rebSpecifierFromLevel_internal(level_)
+        ...
+    }
+
+This overrides a global static.  If you&#39;re inside the function, the API macros will receive the specifier that&#39;s in the function, otherwise the static.  It drives its decision from there.
+
+The JavaScript uses a similar technique, but in that case it can override the **reb** used in the **reb.Xxx()** functions.  There&#39;s a global `reb`, and then a `reb` that&#39;s tweaked which comes in as a parameter to the JavaScript function implementing the native.</description>
+    
+    <lastBuildDate>Tue, 27 Feb 2024 15:17:56 +0000</lastBuildDate>
+    <category>Language Bridging</category>
+    <atom:link href="https://forum.rebol.info/t/api-breakthrough-scope-detection-in-javascript-and-c/2157.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>API Breakthrough: Scope Detection In JavaScript and C !</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <h2>
+<a name="background-1" class="anchor" href="https://forum.rebol.info#background-1"></a>Background</h2>
+<p>When writing the implementation of a Rebol function using C or JavaScript code, getting at the arguments and locals of that function was something of an annoyance.</p>
+<p>You had to use a separate <strong><code>rebArg()</code></strong> API that looked on the Rebol stack for the last Rebol function call, and retrieved arguments in that frame.  This broke the flow, generating an extra API handle that had to be released:</p>
+<pre><code>quadrupler: js-native [num [integer!]] {
+    let rebol_num = reb.Arg("num")
+    let num = reb.UnboxInteger(rebol_num, "* 2")  // Rebol multiplying
+    reb.Release(rebol_num)
+    return reb.Integer(num * 2)  // JavaScript multiplying
+}
+</code></pre>
+<p>Of course, you could have used <strong><code>reb.R()</code></strong> to make a "releasing" splice, so the variadic would release it as it went along:</p>
+<pre><code>quadrupler: js-native [num [integer!]] {
+    let num = reb.UnboxInteger(reb.R(reb.Arg("num")), "* 2")
+    return reb.Integer(num * 2)
+}
+</code></pre>
+<p>This was made "prettier" <sub>cough</sub> with a fused instruction called <strong><code>reb.ArgR()</code></strong></p>
+<pre><code>quadrupler: js-native [num [integer!]] {
+    let num = reb.UnboxInteger(reb.ArgR("num"), "* 2")
+    return reb.Integer(num * 2)
+}
+</code></pre>
+<p>Kind of a headache.  <strong>But even worse... what if it's a WORD! or something evaluative?</strong></p>
+<pre><code>reverse-spell: js-native [
+    {If REVERSE-SPELL 'FOO you get "OOF"}
+    word [word!]
+]{
+    return reb.Spell("reverse to text!", reb.ArgR("word"));  // !!! WRONG
+}
+</code></pre>
+<p>The TO TEXT! won't convert the word, because the word will be spliced into the instruction stream and looked up as a variable..  You need to quote it (or meta it, if it's an antiform):</p>
+<pre><code>reverse-spell: js-native [word [word!]] {
+    return reb.Spell("reverse to text!", reb.Q(reb.ArgR("word")));
+}
+
+reverse-spell: js-native [word [word!]] {
+    return reb.Spell("reverse to text! @", reb.ArgR("word"));  // as good as it got
+}
+</code></pre>
+<p>This problem comes from what I have described as saying that all API calls are effectively doing an EVAL COMPOSE, because the C variable name isn't something Rebol can see...hence it cannot "protect" the value it holds.  You'd have the same problem with:</p>
+<pre><code> eval compose [reverse to text! (word)]
+</code></pre>
+<h2>
+<a name="wouldnt-it-be-nice-if-the-api-knew-it-was-inside-a-native-2" class="anchor" href="https://forum.rebol.info#wouldnt-it-be-nice-if-the-api-knew-it-was-inside-a-native-2"></a>Wouldn't it be nice if the API <em>knew</em> it was inside a native?</h2>
+<p>Then it could just do the lookup by name, with normal code...:</p>
+<pre><code>quadrupler: js-native [num [integer!]] {
+    let num = reb.UnboxInteger("num * 2")
+    return reb.Integer(num * 2)
+}
+
+reverse-spell: js-native [word [word!]] {
+    return reb.Spell("reverse to text! word");
+}
+</code></pre>
+<p>But how would it know when you called out from the code for the native body to some service routine that also used the API... where the parameters should not be visible?</p>
+<h2>
+<a name="well-ive-solved-it-star-in-cc-and-javascript-3" class="anchor" href="https://forum.rebol.info#well-ive-solved-it-star-in-cc-and-javascript-3"></a><strong>Well, I've Solved It!</strong> <img src="https://forum.rebol.info/images/emoji/twitter/star.png?v=12" title=":star:" class="emoji" alt=":star:" loading="lazy" width="20" height="20">  In C/C++ and JavaScript</h2>
+<p>It's the most significant API change in a while, and it has a big impact:</p>
+<p><strong><a href="https://github.com/metaeducation/ren-c/commit/71d86b67c05dddf5c90aff044ca3fb5e1c14952a">C Improvements</a></strong></p>
+<p><strong><a href="https://github.com/hostilefork/replpad-js/commit/b6978ec43f83a97aabb14c2efa218e5da5048e8f#diff-839c9f79a45893495f4bf96067d8c1567ccac664d09a265e299079862040f2f1L907">JavaScript Improvements</a></strong></p>
+<h2>
+<a name="hows-it-done-for-starters-pure-virtual-binding-4" class="anchor" href="https://forum.rebol.info#hows-it-done-for-starters-pure-virtual-binding-4"></a>How's It Done?  For Starters, Pure Virtual Binding...</h2>
+<p><a href="https://forum.rebol.info/t/rebol-and-scopes-well-why-not/1751">"Pure Virtual Binding"</a> gives us the possibility finding function arguments and locals dynamically, once the function is already running...even if we just have text in our hand:</p>
+<pre><code>demo: func [arg] [
+    name: "arg"
+    word: inside [] to word! name  ; BLOCK! evaluation captures specifier
+    print ["The value of arg is" get word]
+]
+
+&gt;&gt; demo 1020
+The value of arg is 1020
+</code></pre>
+<p>So that's how we're managing to look up the text.</p>
+<h2>
+<a name="capturing-shadowed-variables-as-a-proxy-for-stack-5" class="anchor" href="https://forum.rebol.info#capturing-shadowed-variables-as-a-proxy-for-stack-5"></a>Capturing Shadowed Variables As A Proxy For Stack</h2>
+<p>The next trick is: how do functions like <strong>reb.UnboxInteger()</strong> or <strong>reb.Spell()</strong> (or their C equivalents <strong>rebUnboxInteger()</strong> or <strong>rebSpell()</strong>) know what Rebol function is currently executing... or if you're in the body of the implementation or not?</p>
+<p>The variadic C API functions are actually macros that look like this:</p>
+<pre><code>#define rebSpell(...) \
+    rebSpell_helper( \
+        LIBREBOL_SPECIFIER,  /* captured from callsite! */ \
+        __VA_ARGS__, rebEND \
+    )
+</code></pre>
+<p>LIBREBOL_SPECIFIER is something that is defined before you <code>#include "rebol.h"</code>, that gives the expression to evaluate which will give you the stack.  So when you see a native definition like:</p>
+<pre><code>DECLARE_NATIVE(native_name_here) {
+    INCLUDE_PARAMS_OF_NATIVE_NAME_HERE;
+    ...
+}
+</code></pre>
+<p>That expands to:</p>
+<pre><code>RebolBounce N_native_name_here(RebolLevel* level_) {
+    RebolSpecifier librebol_specifier;
+    librebol_specifier = rebSpecifierFromLevel_internal(level_)
+    ...
+}
+</code></pre>
+<p>This overrides a global static.  If you're inside the function, the API macros will receive the specifier that's in the function, otherwise the static.  It drives its decision from there.</p>
+<p>The JavaScript uses a similar technique, but in that case it can override the <strong>reb</strong> used in the <strong>reb.Xxx()</strong> functions.  There's a global <code>reb</code>, and then a <code>reb</code> that's tweaked which comes in as a parameter to the JavaScript function implementing the native.</p>
+          <p><a href="https://forum.rebol.info/t/api-breakthrough-scope-detection-in-javascript-and-c/2157/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/api-breakthrough-scope-detection-in-javascript-and-c/2157/1</link>
+        <pubDate>Mon, 26 Feb 2024 23:57:32 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-2157-1</guid>
+        <source url="https://forum.rebol.info/t/api-breakthrough-scope-detection-in-javascript-and-c/2157.rss">API Breakthrough: Scope Detection In JavaScript and C !</source>
+      </item>
+  </channel>
+</rss>
