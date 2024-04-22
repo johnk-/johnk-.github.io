@@ -67,9 +67,138 @@ Early tinkering has been promising...though this really does muck with the [prim
 
 One thing about Stackless Python is seeing how they use pluggable evaluator functions which can become part of the stackless approach.  That&#39;s good, because this ties into how we can have a stackless parse.  Previously it might have been seen as bad that Ren-C was roping in the frame system used by the evaluator and debugger for each PARSE recursion due to inefficiency and eating more stack--but this should address any concerns from that.</description>
     
-    <lastBuildDate>Sun, 27 Sep 2020 01:20:36 +0000</lastBuildDate>
+    <lastBuildDate>Tue, 19 Mar 2024 06:51:09 +0000</lastBuildDate>
     <category>Internals</category>
     <atom:link href="https://forum.rebol.info/t/switching-to-stackless-why-this-why-now/1247.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Switching to Stackless: Why this, Why now?</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>For historical reference, here's what C_STACK_OVERFLOWING() comments (my explanation) said:</p>
+<pre><code>//=////////////////////////////////////////////////////////////////////////=//
+//
+//  C STACK
+//
+//=////////////////////////////////////////////////////////////////////////=//
+//
+// Rebol doesn't want to crash in the event of a stack overflow, but would
+// like to gracefully error and return the user to the console.  While it
+// is possible for Rebol to set a limit to how deeply it allows function
+// calls in the interpreter to recurse, there's no *portable* way to
+// catch a stack overflow in the C code of the interpreter itself.
+//
+// Hence, by default Rebol will use a non-standard heuristic.  A flag is
+// passed to say if OS_STACK_GROWS_UP.  If so, it then extrapolates that C
+// function call frames will be laid out consecutively, and the memory
+// difference between a stack variable in the topmost stacks can be checked
+// against some limit.
+//
+// This has nothing to do with guarantees in the C standard, and compilers
+// can really put variables at any address they feel like:
+//
+// http://stackoverflow.com/a/1677482/211160
+//
+// Additionally, it puts the burden on every recursive or deeply nested
+// routine to sprinkle calls to the C_STACK_OVERFLOWING macro somewhere
+// in it.  The ideal answer is to make Rebol itself corral an interpreted
+// script such that it can't cause the C code to stack overflow.  Lacking
+// that ideal this technique could break, so build configurations should
+// be able to turn it off if needed.
+//
+// In the meantime, C_STACK_OVERFLOWING is a macro which takes the
+// address of some variable local to the currently executed function.
+// Note that because the limit is noticed before the C stack has *actually*
+// overflowed, you still have a bit of stack room to do the cleanup and
+// raise the failure.  (You need to take care of any unmanaged series
+// allocations, etc).  So cleaning up that state should be doable without
+// making deep function calls.
+//
+// !!! Future approaches should look into use of Windows stack exceptions
+// or libsigsegv:
+//
+// http://stackoverflow.com/questions/5013806/
+//
+
+#if TO_EMSCRIPTEN || TO_WASI
+    //
+    // !!! Catching stack overflows in emscripten stopped working in the
+    // BinaryEn build; the stack seems to not grow up or down specifically.
+    // As a temporary non-solution, see what happens to just let it crash.
+    //
+    #define C_STACK_OVERFLOWING(address_of_local_var) \
+        false
+
+#elif defined(OS_STACK_GROWS_UP)
+
+    #define C_STACK_OVERFLOWING(address_of_local_var) \
+        (i_cast(uintptr_t, (address_of_local_var)) &gt;= g_ts.C_stack_limit_addr)
+
+#elif defined(OS_STACK_GROWS_DOWN)
+
+    #define C_STACK_OVERFLOWING(address_of_local_var) \
+        (i_cast(uintptr_t, (address_of_local_var)) &lt;= g_ts.C_stack_limit_addr)
+
+#else
+
+    #define C_STACK_OVERFLOWING(local_var_addr) \
+        (g_ts.C_stack_grows_up \
+            ? i_cast(uintptr_t, (local_var_addr)) &gt;= g_ts.C_stack_limit_addr \
+            : i_cast(uintptr_t, (local_var_addr)) &lt;= g_ts.C_stack_limit_addr)
+#endif
+</code></pre>
+          <p><a href="https://forum.rebol.info/t/switching-to-stackless-why-this-why-now/1247/9">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/switching-to-stackless-why-this-why-now/1247/9</link>
+        <pubDate>Tue, 19 Mar 2024 06:51:09 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1247-9</guid>
+        <source url="https://forum.rebol.info/t/switching-to-stackless-why-this-why-now/1247.rss">Switching to Stackless: Why this, Why now?</source>
+      </item>
+      <item>
+        <title>Switching to Stackless: Why this, Why now?</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="1247">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/40/26_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>We could put in a recursion counter and call that good enough...like old CPython does.</p>
+<p>But...the problem with pressing on when you know something is wrong, is that there's some fairly deep impact on how the system and APIs work. If enough groundwork isn't laid to know where the stackless influence is, we might write bad extensions or interoperability that fundamentally won't work later.</p>
+</blockquote>
+</aside>
+<p>Further validation...</p>
+<p>...I moved up to GCC 13, and address sanitizer now breaks the assumptions of Rebol's old C_STACK_OVERFLOWING() check.</p>
+<p><strong><a href="https://bugs.mysql.com/bug.php?id=111432">MySQL got bit by it</a></strong> (June 2023, they jumped compilers earlier than me):</p>
+<blockquote>
+<p>There is another problem with stack growth detection under Address Sanitizer on modern gcc and clang compilers (possibly under other sanitizers as well but this hasn't been tested).</p>
+<p>Starting from clang version 15 and gcc version 13, both of these compilers are using custom technique for allocating stack frames when Asan is enabled (-fsanitize=address compiler flag is specified).</p>
+<p><a href="https://github.com/google/sanitizers/wiki/AddressSanitizerUseAfterReturn">https://github.com/google/sanitizers/wiki/AddressSanitizerUseAfterReturn</a></p>
+<p>They rely on a custom function __asan_stack_malloc() that allocates a block of memory from an internal ASan memory pool.</p>
+<p>The problem is that this __asan_stack_malloc() may return absolutely random (or, I would at least say, unordered memory addresses) even for consequent calls.</p>
+<p>In other words, there is no such thing as "stack growth direction" in this case and we just simply cannot rely on this concept in the MySQL code.</p>
+</blockquote>
+<p>As I mention, modern Ren-C isn't <em>completely</em> free from "stackful" recursions yet.  But we're not really that reliant on catching those cases overflowing in everyday code.  We can live without C_STACK_OVERFLOWING(), and it's probably time we do.  All the documentation and writeup of how bad it is and how it can't work in the webassembly build and it's not in the C standard is an unnecessary weight at this point.</p>
+<p><strong>But the bootstrap executable isn't stackless at all.</strong>  So if we tossed the check there, a simple usermode recursion can crash the interpreter--without providing any feedback about what happened.  That's... not great.  And I do like running address sanitizer on the bootstrap build as much as anywhere else.</p>
+<p>For now, it seems I can bypass the arbitrary C stack frame allocations with:</p>
+<pre><code>export ASAN_OPTIONS=detect_stack_use_after_return=0
+</code></pre>
+<p>And that's fine for the bootstrap executable.  But on balance, I think we're better served by getting rid of the C_STACK_OVERFLOWING() check in the main code, and enabling the new address sanitizer check.</p>
+<aside class="quote no-group" data-username="hostilefork" data-post="5" data-topic="1247">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/40/26_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p><strong>Scanning</strong> - If you imagine writing something like <strong>load "[[[[[[[[[[[[[..."</strong> there is going to be a limit somewhere. Red seems to use a specialized stack for this vs. doing recursions (the error you get for deep scans is <code>PARSE - stack limit reached</code>, and not a typical <code>stack overflow</code>). But Rebol's scanner was based on plain C recursion.</p>
+</blockquote>
+</aside>
+<p>FWIW, Ren-C's scanner is now stackless.  (Doesn't sound like a necessity on the surface, but bear in mind API calls use the scanner, so it's kind of entwined in the evaluation model... this lets you unwind mid-API call with a partial scan.)</p>
+          <p><a href="https://forum.rebol.info/t/switching-to-stackless-why-this-why-now/1247/8">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/switching-to-stackless-why-this-why-now/1247/8</link>
+        <pubDate>Tue, 19 Mar 2024 06:25:55 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1247-8</guid>
+        <source url="https://forum.rebol.info/t/switching-to-stackless-why-this-why-now/1247.rss">Switching to Stackless: Why this, Why now?</source>
+      </item>
       <item>
         <title>Switching to Stackless: Why this, Why now?</title>
         <dc:creator><![CDATA[hostilefork]]></dc:creator>

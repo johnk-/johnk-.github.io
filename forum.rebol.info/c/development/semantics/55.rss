@@ -5,8 +5,188 @@
     <link>https://forum.rebol.info/c/development/semantics/55</link>
     <description>Topics in the &#39;Semantics&#39; category While the &quot;Internals&quot; discusses the bits and bytes of how things are implemented, this category is for discussing things design questions of the language... like what &lt;strong&gt;do []&lt;/strong&gt; should return.</description>
     
-      <lastBuildDate>Thu, 07 Dec 2023 16:29:35 +0000</lastBuildDate>
+      <lastBuildDate>Fri, 29 Mar 2024 21:22:15 +0000</lastBuildDate>
       <atom:link href="https://forum.rebol.info/c/development/semantics/55.rss" rel="self" type="application/rss+xml" />
+        <item>
+          <title>Should SET-WORD!s Propagate Undecayed Packs?</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Semantics</category>
+          <description><![CDATA[
+            <p>Packs are antiform blocks, which decay if not specifically handled.</p>
+<pre><code>&gt;&gt; pack [1 2]
+== ~['1 '2]~  ; anti
+
+&gt;&gt; a: pack [1 2]
+== 1
+
+&gt;&gt; a
+== 1
+</code></pre>
+<p>From time to time, I've wondered if there's a good reason why the plain SET-WORD! shouldn't propagate the pack:</p>
+<pre><code>&gt;&gt; a: pack [1 2]
+== ~['1 '2]~  ; anti  (hypothetical)
+
+&gt;&gt; a
+== 1
+</code></pre>
+<p>One rationale is that intuitively, <strong>a:</strong> should be a synonym for <strong>[a]:</strong>, e.g. "unpack one item" is implicit.</p>
+<p>But that just bumps the question to the next one we might ask: why doesn't a multi-return without a "circled" result just evaluate to the whole pack?</p>
+<p>It looks to make some sense at first, it allows you to chain indefinitely:</p>
+<pre><code>&gt;&gt; [a b]: [c d]: pack [1 2]
+== ~['1 '2]~  ; anti
+
+&gt;&gt; a
+== 1
+
+&gt;&gt; b
+== 2
+
+&gt;&gt; c
+== 1
+
+&gt;&gt; d
+== 2
+</code></pre>
+<p>Though it feels a little bit unsettling when you drop it down:</p>
+<pre><code>&gt;&gt; [a b]: [c]: pack [1 2]
+== ~['1 '2]~  ; anti
+
+&gt;&gt; a
+== 1
+
+&gt;&gt; b
+== 2
+
+&gt;&gt; c
+== 1
+</code></pre>
+<p>But we could argue that if you're bothered, then you use circling (currently <code>@c</code>, but with FENCE! proposed to be <code>{c}</code>).  Note in the below example you'd have to use <code>/b</code> in order to indicate you were okay with unpacking more values than available.</p>
+<pre><code>&gt;&gt; [a /b]: [{c}]: pack [1 2]
+== 1
+
+&gt;&gt; a
+== 1
+
+&gt;&gt; b
+== ~null~  ; anti
+
+&gt;&gt; c
+== 1
+</code></pre>
+<p>We could then make a choice if <strong>a:</strong> was a synonym for <strong>[a]:</strong> or for <strong>[{a}]:</strong></p>
+<h2>
+<a name="most-recent-motivation-for-thinking-about-this-1" class="anchor" href="https://forum.rebol.info#most-recent-motivation-for-thinking-about-this-1"></a>Most Recent Motivation For Thinking About This</h2>
+<p>I rewrote <a href="https://forum.rebol.info/t/speed-of-uparse/2177/3">some code in an example</a> from this:</p>
+<pre><code>[^result' remainder]: parser input except e -&gt; [
+    remainder: input  ; succeed on parser fail but don't advance input
+    return null
+]
+return unmeta result'  ; return successful parser result
+</code></pre>
+<p>...to this:</p>
+<pre><code>return [@ remainder]: parser input except [
+    remainder: input  ; succeed on parser fail but don't advance input
+    return null
+]
+</code></pre>
+<p>The idea is that the parser being called has multiple return results... the first is the synthesized value, the second is the amount it advanced.  <em>(There's a third result on some parsers of "pending items", but this OPTIONAL combinator has an "autopipe" which is just bubbling the pending items through in the order of successful parsers called...so the third result is specialized out on its interface and on the parsers it calls.)</em></p>
+<p><strong>However, the synthesized value can itself be a pack.</strong>  This means that if we named a variable in the slot where the <code>@</code> is, then that pack would be decayed to store in the variable unless we used a ^META result.</p>
+<p>So does the act of not-naming and just circling subvert the decay?  Or should the circled result not be decayed even if the variable is?</p>
+<pre><code>&gt;&gt; [{a} b]: pack [pack [1 2] 3]
+== ~['1 '2]~  ; anti  (or should it be decayed to 1?)
+
+&gt;&gt; a
+== 1
+
+&gt;&gt; b
+== 3
+</code></pre>
+<p>It's a different--but related--question.  It seems it should align with the behavior of plain assignments:</p>
+<pre><code>&gt;&gt; a: pack [1 2]
+== ~['1 '2]~  ; anti  (implied if the above behavior is chosen)
+
+&gt;&gt; a
+== 1
+</code></pre>
+<h2>
+<a name="not-100-certain-but-i-think-undecayed-propagation-is-good-2" class="anchor" href="https://forum.rebol.info#not-100-certain-but-i-think-undecayed-propagation-is-good-2"></a>Not 100% Certain, But I Think Undecayed Propagation Is Good</h2>
+<p>I'll point out that it's possible to DECAY things pretty easily, but you can't recover a pack after it has been decayed.</p>
+<p>So I'm getting the feeling that it's probably best to decay the assignments, but propagate the undecayed pack.  It looks like the more general and useful behavior...even if it seems a bit confusing.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/should-set-word-s-propagate-undecayed-packs/2178">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/should-set-word-s-propagate-undecayed-packs/2178</link>
+          <pubDate>Fri, 29 Mar 2024 21:22:15 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2178</guid>
+          <source url="https://forum.rebol.info/t/should-set-word-s-propagate-undecayed-packs/2178.rss">Should SET-WORD!s Propagate Undecayed Packs?</source>
+        </item>
+        <item>
+          <title>VOID Branches (not branches that evaluate to void)</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Semantics</category>
+          <description><![CDATA[
+            <p>I've mentioned before that <a href="https://forum.rebol.info/t/augment-add-parameters-and-refinements-after-the-fact/1216">AUGMENT can be used to implement the legacy SWITCH/DEFAULT behavior</a>.</p>
+<p>But looking at what seems like the "correct" formulation of that code today, we get:</p>
+<pre><code>switch-d: enclose (augment :switch [
+    /default "Default case if no others are found"
+        [block!]
+]) lambda [f [frame!]] [
+    let def: f.default
+    eval f else (maybe def)
+]
+</code></pre>
+<p>It points out the existence of <em>void branches</em>... so not branches that evaluate to void (e.g. <code>[void]</code>) but code that evaluates to a branch to run, and that branch is void.</p>
+<p>Considering this specific usage only, it suggests a semantic for ELSE of a VOID branch, which is that you want it to act like there was no branch at all.  e.g. as if you'd written just <strong><code>eval f</code></strong> with no ELSE.</p>
+<pre><code> &gt;&gt; if false [1 + 2]
+ == ~void~  ; anti
+
+ &gt;&gt; if false [1 + 2] else [10 + 20]
+ == 30
+
+ &gt;&gt; if false [1 + 2] else (void)
+ == ~void~  ; anti
+</code></pre>
+<p>Would the same apply to THEN?</p>
+<pre><code> &gt;&gt; if true [1 + 2]
+ == 3
+
+ &gt;&gt; if true [1 + 2] then [10 + 20]
+ == 30
+
+ &gt;&gt; if true [1 + 2] then (void)
+ == 3
+</code></pre>
+<p><img src="https://forum.rebol.info/images/emoji/twitter/thinking.png?v=12" title=":thinking:" class="emoji only-emoji" alt=":thinking:" loading="lazy" width="20" height="20"></p>
+<p>I don't know if it's great, but it's certainly better than evaluating to NULL (via some void-in-null-out rationale) because that would trigger an ELSE branch.</p>
+<pre><code> &gt;&gt; if true [1 + 2] then (void) else [print "we don't want this."]
+ we don't want this.
+</code></pre>
+<p>But what should other branching constructs do, like CASE or SWITCH?  Might a void branch suggest "opting out" of that particular branch?</p>
+<pre><code> case [
+     1 &lt; 2 (void)
+     3 &lt; 4 [print "Should this run?"]
+ ]
+</code></pre>
+<p>A CASE (at least CASE/ALL) is supposed to be synonymous with a series of IF statements.  And IF can't exactly do that, unless it decided to be NIHIL...</p>
+<pre><code>&gt;&gt; 1 + 2 if false (void)
+== 3
+</code></pre>
+<p>That would be a bit weird, but, it does sort of parallel what happens when ELSE and THEN effectively vaporize themselves.</p>
+<p>As with most things on the edge of usefulness, I don't know about this... other than the situation of wanting to revoke the ELSE branch in SWITCH-D.  I'll keep an eye on it.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/void-branches-not-branches-that-evaluate-to-void/2176">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/void-branches-not-branches-that-evaluate-to-void/2176</link>
+          <pubDate>Thu, 28 Mar 2024 13:07:17 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2176</guid>
+          <source url="https://forum.rebol.info/t/void-branches-not-branches-that-evaluate-to-void/2176.rss">VOID Branches (not branches that evaluate to void)</source>
+        </item>
         <item>
           <title>Definitional Break and Continue... the Time is Now</title>
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
@@ -1510,180 +1690,6 @@ red&gt;&gt; pick2 b 'y
           <discourse:topicArchived>No</discourse:topicArchived>
           <guid isPermaLink="false">forum.rebol.info-topic-1706</guid>
           <source url="https://forum.rebol.info/t/collect-mutation-semantics-keep-vs-keep-only/1706.rss">COLLECT Mutation Semantics: KEEP vs. KEEP/ONLY</source>
-        </item>
-        <item>
-          <title>UPARSE needs BREAK, REJECT, ACCEPT... But What Are They?</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Semantics</category>
-          <description><![CDATA[
-            <p>When something doesn't sit right in my head, I notice.  Like how I could never remember in the beginning what GET-WORD! or SET-WORD! in PARSE did.  <em>(e.g. is a GET-WORD! GET-ing the parse position to SET a variable, or GET-ting a variable's value to use to SET the parse position?)</em></p>
-<p>And I never really understood ACCEPT, REJECT, BREAK, and FAIL.</p>
-<h2>I Currently Consider the FAIL Confusion "Solved"</h2>
-<p>Things have settled nicely, in that LOGIC! is used to get a pure "keep going" or "stop".  So FAIL is replaced simply by FALSE.  It means <strong>if (expression-returning-logic)</strong> is replaced in UPARSE as <strong>:(expression-returning-logic)</strong>, and we can keep FAIL on the meaning of "raise error".</p>
-<p>This generalization has the pleasing property that we don't need to go introducing "parse switch" or "parse case" or any such things.  Since NULL means the same thing as #[true] for a GET-GROUP! splice, you have every option at your disposal.</p>
-<h2>BREAK and REJECT Seem Too Similar</h2>
-<p>The problem I have is that BREAK sounds a lot like "this didn't work".  In fact, I've enforced that loops return NULL if-and-only-if you BREAK them:</p>
-<pre><code>&gt;&gt; repeat 3 [break]
-; null
-
-&gt;&gt; repeat 3 [null]
-== ~null~  ; isotope
-</code></pre>
-<p>A NULL is used as a signal of "soft failure", e.g. it causes ELSE to run.</p>
-<pre><code> &gt;&gt; repeat 3 [break] else [print "soft failure"]
- soft failure
-
- &gt;&gt; repeat 3 [null] else [print "soft failure"]
- == ~null~  ; isotope
-</code></pre>
-<p>So the distinction between BREAK and REJECT seems a thin one.  I feel like I'd rather that BREAK meant you decided the iterated rule isn't working out...and some other signal indicated that you want to accept it and go on.</p>
-<p>But ACCEPT doesn't really hint at ceasing iteration.  Perhaps STOP?  As a word, it hints more at the ceasing of an iteration...and that's used in CYCLE.</p>
-<pre><code>&gt;&gt; cycle [stop]
-== ~void~  ; isotope
-</code></pre>
-<p>Unlike BREAK (which always returns NULL) it is able to return a non-NULL...and a NULL will be isotopified so it won't be seen as a "soft failure" by ELSE:</p>
-<pre><code>&gt;&gt; cycle [stop 10]
-== 10
-
-&gt;&gt; cycle [stop null]
-== ~null~  ; isotope
-</code></pre>
-<p>Similarly, if you're going to be saying an iterative construct in PARSE is to keep going, then you should have an opportunity to say what the value synthesized from that rule will be.  This requires "endable" rules (because we want a plain stop to work).  I think that's doable.</p>
-<p>So I guess I'm saying prefer BREAK to mean rule failed... return NULL.  And STOP to mean rule succeeded.  Default to returning a void isotope if no argument given, but allow an argument.  The argument would be a rule, so you could actually make the STOP a rule.</p>
-<pre><code>&gt;&gt; uparse "aaab" [while ["a" (print "A") | stop ["b" (1020)]]]
-A
-A
-A
-== 1020
-</code></pre>
-<h2>What About CONTINUE ?</h2>
-<p>If your loop is only one deep in alternates, then all an alternate needs to do continue is succeed:</p>
-<pre><code>&gt;&gt; uparse "aaab" [while ["a" comment "continue" | "b" comment "continue"]]
-</code></pre>
-<p>But if you're deeper than that, it is trickier.  And I don't see any particular reason why you shouldn't be able to ask a rule to CONTINUE a loop.</p>
-<pre><code>&gt;&gt; uparse "abbbaccc" [while [
-    "a" [some "bbb" (print "BBB"), continue | some "ccc" (print "CCC")]
-    (print "like this!")
-]
-BBB
-CCC
-like this!
-</code></pre>
-<p>And CONTINUE could also take an argument, which would matter only if it was the final iteration:</p>
-<pre><code>&gt;&gt; uparse "bba" [repeat (3) ["a" continue (&lt;like this&gt;) | "b"]]
-== &lt;like this&gt;
-</code></pre>
-<h2>Would That Be an Improvement?</h2>
-<p>I think CONTINUE is pretty obviously useful.</p>
-<p>One thing that's a bit weird about what I suggest is that when a BREAK happens in a <em>non-parse</em> loop, the code after it runs.</p>
-<p>But the idea that "failure" stops progression is a cross-cutting design aspect in PARSE.  It seems consistent to me.</p>
-<p>Yet another issue is that STOP is not currently offered by plain WHILE or REPEAT or FOR-EACH or other loops.  The reason is that if you are to try and write your own iterator in terms of other iterators, you cannot tell from the outside if a "cease iterating" intention happened.</p>
-<p>Consider this:</p>
-<pre><code>&gt;&gt; opaque-code: [print "looping", 1000 + 20]
-
-&gt;&gt; repeat 2 (opaque-code) then [repeat 2 (opaque-code)]
-looping
-looping
-looping
-looping
-== 1020
-</code></pre>
-<p>That's nice because if the opaque-code has a break, the whole thing will break:</p>
-<pre><code>&gt;&gt; opaque-code: [print "entering", break]
-
-&gt;&gt; repeat 2 (opaque-code) then [repeat 2 (opaque-code)]
-entering
-; null
-</code></pre>
-<p>But if you permit STOP to return a value, the stopping intent is lost:</p>
-<pre><code>&gt;&gt; opaque-code: [print "entering", stop 1020]
-
-&gt;&gt; repeat 2 (opaque-code) then [repeat 2 (opaque-code)]
-entering
-entering
-== 1020
-</code></pre>
-<p>When you're trying to write compound looping expressions that are built up of smaller loops, this really matters.  CYCLE is an oddball because you know the only way it <em>ever</em> terminates with a value is if there was a stopping intent...which is why it allows STOP.</p>
-<h2>Maybe ACCEPT and REJECT Should Be Used and No BREAK?</h2>
-<p>...but this kind of runs into the same problem that non-PARSE WHILE doesn't have ACCEPT or REJECT.  So why get worked up about it having STOP when non-PARSE WHILE doesn't have STOP, if it makes everything line up?</p>
-<p>Or maybe non-PARSE while <em>can</em> have STOP...you just understand that STOP has limits when it comes to loop abstraction.  Not everything works all the time.  So STOP can have a warning on it that you can't tell the stopping intent happened from outside a loop that isn't CYCLE...</p>
-<h2>What Do You Think?</h2>
-<p>Are the needs of PARSE different, or the same?  Should BREAK make the overall expression evaluate to NULL <em>but</em> keep going?  Are ACCEPT and REJECT the right answer?</p>
-<p>It's hard to say.  I have to work out the mechanism by which such things could work in usermode combinators whatever you call them...so there's time to think about it.</p>
-            <p><small>2 posts - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/uparse-needs-break-reject-accept-but-what-are-they/1650">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/uparse-needs-break-reject-accept-but-what-are-they/1650</link>
-          <pubDate>Sat, 07 Aug 2021 11:51:18 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-1650</guid>
-          <source url="https://forum.rebol.info/t/uparse-needs-break-reject-accept-but-what-are-they/1650.rss">UPARSE needs BREAK, REJECT, ACCEPT... But What Are They?</source>
-        </item>
-        <item>
-          <title>BLOCK! Behavior In DELIMIT (hence SPACED, UNSPACED, PRINT)</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Semantics</category>
-          <description><![CDATA[
-            <p>Because I've thought of Redbols as targeting being a kind of "user friendly" and intuitive language, I was long bent out of shape about how junky things like PRINT and REJOIN were.</p>
-<p>If your "Hello World" level programs are unpredictable nonsense, I don't see how you know where to start.  :-/</p>
-<p>So an early thing I came up with was the idea to replace REJOIN with something that had some nice learnable invariants...which was called COMBINE.  It was harder than I thought.</p>
-<p>Among the various philosophies that were tried out, was that blocks would be reduced recursively:</p>
-<pre><code>&gt;&gt; var: "World"
-
-old&gt;&gt; print ["Hello" var]
-Hello World
-
-&gt;&gt; block: ["Hello" var]
-
-&gt;&gt; print ["((" block "))"]
-(( Hello World ))
-</code></pre>
-<p>But I began having second thoughts, because it seemed like reducing blocks inside the print was a bit "dangerous".  You were in an evaluative context so if you wanted reduction you could ask for it.</p>
-<p>Many ideas were tried over time, such as using BLOCK! as a means of getting "tight spacing" so you could intermix spaced and unspaced portions:</p>
-<pre><code>&gt;&gt; print ["Outer" "spaced" ["inner" "not" "spaced"] "was an" "idea"]
-Outer spaced innernotspaced was an idea
-</code></pre>
-<p>This seemed to give a best of both worlds scenario.  But it wasn't clear whether the blocks should be reduced, or exactly what this "unspaced non-reduced block" operation was.</p>
-<h2>Today, I Think We Have A Direction and Rationale</h2>
-<p><a href="https://forum.rebol.info/t/print-for-empty-block-empty-text-or-text-of-just-spaces/1641">I just posted my reasoning for why I think this should be true</a>:</p>
-<pre><code>&gt;&gt; print ["abc" [] "def"]
-abc def
-</code></pre>
-<p>Rebol2 and Red throw in two spaces and that's no good.</p>
-<p>If BLOCK! is going to be an aggregator for material inside of PRINT then the base case needs to basically act as if no material is there.  Otherwise it's mostly useless, e.g. it couldn't be used for indentation:</p>
-<pre><code>print [collect [repeat indent [keep tab]]], "what if indent is 0?"]
-</code></pre>
-<p>With that laid down I think it's safe to say that we want what's in a BLOCK! to be considered as being <em>pre-reduced</em>.  But also, <em>that it be unspaced</em>.</p>
-<pre><code>&gt;&gt; word: "part"
-== "part"
-
-&gt;&gt; print ["Mixing" ["unspaced" word] "with" "spaced" word]
-Mixing unspacedword with spaced part
-</code></pre>
-<p>We have a nice tool now with GET-BLOCK! that will reduce, so you have every tool on hand:</p>
-<pre><code>&gt;&gt; print ["Mixing" :["unspaced" word] "with" "spaced" word]
-Mixing unspacedpart with spaced part
-</code></pre>
-<h2>Invariant For BLOCK! Inside DELIMIT (hence PRINT, etc)</h2>
-<p>So I came up with a good model for what the BLOCK! inside of the PRINT above will do.</p>
-<p><strong>It does the same thing that APPEND of a BLOCK! to a string would do.</strong></p>
-<pre><code>&gt;&gt; append copy {} ["unspaced" word]
-== "unspacedword"
-</code></pre>
-<p><strong>Whatever that is, that's what happens with blocks in print.</strong>  So it's not FORM-ing, and no spaces.  It's the behavior of raw material being appended blockwise to a string.</p>
-<p>This keeps us from having to define a separate new behavior.  It doesn't define that behavior, so we're not out of the woods.  But as I say, it's a slow process...one step at a time.</p>
-            <p><small>2 posts - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/block-behavior-in-delimit-hence-spaced-unspaced-print/1642">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/block-behavior-in-delimit-hence-spaced-unspaced-print/1642</link>
-          <pubDate>Sat, 31 Jul 2021 17:35:38 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-1642</guid>
-          <source url="https://forum.rebol.info/t/block-behavior-in-delimit-hence-spaced-unspaced-print/1642.rss">BLOCK! Behavior In DELIMIT (hence SPACED, UNSPACED, PRINT)</source>
         </item>
   </channel>
 </rss>
