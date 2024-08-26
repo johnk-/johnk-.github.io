@@ -1,0 +1,506 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>SET-WORD! To Initialize Locals In Function Specs?</title>
+    <link>https://forum.rebol.info/t/set-word-to-initialize-locals-in-function-specs/2210</link>
+    <description>*(cc: @IngoHohmann as you have had opinions on these kinds of things.)*
+
+It seems it would be nice if you had the option of setting your locals when you define them.
+
+    foo: func [
+        arg1 [integer!]
+        arg2 [text!]
+        &lt;local&gt;
+        local1 local2
+        local3: 10
+        local4: (20 * 30)
+    ][
+        ...
+    ]
+
+As it so happens, there&#39;s potential to exploit this for efficiency.  The frame mechanics have a slot for each local in the function archetype that currently just holds trash, and it could hold this default value / expression.  So it wouldn&#39;t just save on typing the local name and then later the name again and the expression...but you&#39;re avoiding the need to perform the evaluation to do the assignment on each call!
+
+There&#39;s a lot of questions to answer:
+
+* What binding rules is it using?  Could you initialize local3 and then say **`local4: (local2 * arg1)`**?
+
+    * Almost certainly not, and it would just be using the binding of the spec block
+
+* Does the code run on each invocation, or is it run only once to calculate a fixed value?  e.g. if it was **`local4: (global-var * 30)`** would each invocation of FOO recalculate what **`(global-var * 30)`** was at that moment?
+
+     * Almost certainly would just calculate a fixed value and use that value on each call.
+
+* Do you need parentheses directly after the SET-WORD!?
+
+    * If the expression were run on each invocation (which it probably shouldn&#39;t be) then it would be a requirement, because there&#39;d be no way to find the start and the end of the right hand expression without evaluating it.
+
+   * If plain words are being picked up as locals there&#39;s potential for error if you accidentally wrote an expression that didn&#39;t work, like:
+ 
+         func [
+            arg [integer!]
+            &lt;local&gt;
+            local1 local2
+            local3: arity-2-but-I-think-it&#39;s-3 a b c
+            local4: 10
+         ][
+             ...
+         ]
+
+     That could wind up making a local **`c`** that you didn&#39;t intend.  But then again, sometimes it would be just a very obvious simple initialization, like **`local4: 10`**.  Forcing people to use parentheses could do more harm than good, vs. trusting them to use the parentheses if they feel it&#39;s warranted.
+
+## Compare to `&lt;static&gt;`: Not Initialized With SET-WORD! ATM
+
+Right now the `&lt;static&gt;` feature lets you assign your variables, but it uses a non-Reboly-notation to do so:
+
+    accumulate: func [
+        item [any-element?]
+        &lt;static&gt;
+        block ([])
+    ][
+        append block item
+    ]
+
+The parentheses are optional to hold the initializer.  But  it seems much more normal to say:
+
+    accumulate: func [
+        item [any-element?]
+        &lt;static&gt;
+        block: []
+    ][
+        append block item
+    ]
+
+One reason for the parentheses notation was to try and be consistent with the idea of defaulting refinements.
+
+    &gt;&gt; foo: func [/string [text!] (&quot;default&quot;)] [print string]
+
+    &gt;&gt; foo/string &quot;hello&quot;
+    hello
+
+    &gt;&gt; foo
+    default
+
+But that feature was removed
+
+There&#39;s another reason why just WORD! was used...
+
+## RETURN: Has &quot;Owned&quot; SET-WORD! In The Spec Dialect
+
+We have a little bit of friction in that the dialect has been using RETURN: to indicate what a function returns.  The choice has not much to do with what comes after a return being an assignment any more than anything else, it was picked for looks:
+
+    double-multiply: func [
+        return: [integer!]
+        value1 [integer!]
+        value2 [integer!]
+    ][
+        return 2 * value1 * value2
+    ]
+
+The issue is that historical Rebol2 (and R3-Alpha, and Red) allow this:
+
+    rebol2&gt;&gt; print-sum: func [return break] [print [&quot;Sum is&quot; return + break]]
+
+    rebol2&gt;&gt; print-sum 10 20
+    Sum is 30
+
+Ren-C only lets you do that in LAMBDA.  FUNC prohibits it:
+
+    ren-c&gt;&gt; print-sum: func [return break] [print [return + break]]
+    ** Error: Generator provides RETURN:, use LAMBDA if not desired
+
+I think Red/System decided on RETURN: first.  [But they put it at the end of the spec.](https://static.red-lang.org/red-system-specs-light.html#section-3.3)  Red errors if you try to put the return elsewhere:
+
+    red&gt;&gt; stringy: func [a b return: [string!]] [a + b]
+    == func [a b return: [string!]][a + b]
+
+    red&gt;&gt; stringy: func [return: [string!] a  b] [a + b]
+    *** Script Error: invalid function definition: [return: [string!] a b]
+
+But either way, it&#39;s not checked.  On the [2012 announcement of function support in Red](https://www.red-lang.org/2012/12/red-v031-functions-support-added.html), DocKimbel says: *&quot;Note: argument and return value type checking have not been implemented yet, they need typeset! and error! datatypes to be implemented first.&quot;*  Parameter type checking works, but I guess return type checking was never added.  It does show up in the HELP though.
+
+    red&gt;&gt; help stringy
+    USAGE:
+         STRINGY a b
+
+    DESCRIPTION: 
+         STRINGY is a function! value.
+
+    ARGUMENTS:
+         a             
+         b             
+
+    RETURNS:
+         [string!]
+ 
+Note that they also put the RETURNS: at the end there, too.  Most people would expect the return value for functions to be the first thing you put down.
+
+## I&#39;ve Wondered If A Leading Block Would Suffice...
+
+Off and on, I&#39;ve been willing to consider the idea that return typing is just implicitly what you get if you have a leading block:
+
+    double-multiply: func [
+        [integer!]
+        value1 [integer!]
+        value2 [integer!]
+    ][
+       return 2 * value1 * value2
+    ]
+
+
+Yet while it looks clean there, it causes some problems when you are filling in documentation strings.
+
+I&#39;ve become a pretty true believer in the idea that documentation strings for arguments come after the argument name (and that we may do a service to the userbase by standardizing this, rather than by letting it be done either way and have people fight about it):
+
+     my-style: func [
+         &quot;Overall function description here&quot;
+         argument &quot;Argument description here&quot;
+             [integer! text!]
+         /refinement &quot;Refinement description here&quot;
+     ][
+        ...
+     ]
+
+The rationale is that any good function will put labels on all its arguments.  But not all arguments are type-constrained, in particular refinements are not.  So you wind up either being inconsistent
+
+     variation1: func [
+         &quot;Overall function description here&quot;
+         argument [integer! text!]
+             &quot;Argument description here&quot;
+         /refinement &quot;Refinement description here&quot;  ; this feels inconsistent
+     ][
+        ...
+     ]
+
+Or you&#39;re throwing in newlines for no reason
+
+     variation2: func [
+         &quot;Overall function description here&quot;
+         argument [integer! text!]
+             &quot;Argument description here&quot;
+         /refinement
+             &quot;Refinement description here&quot;  ; consistent, but annoying
+     ][
+        ...
+     ]
+
+This is why I chose &quot;MY-STYLE&quot; above.  But if return becomes implicit on a leading block, you wind up back in inconsistent land:
+
+    my-style-with-leading-block: func [
+         &quot;Overall function description here&quot;
+         [integer!] &quot;Description here&quot;
+         argument &quot;Argument description here&quot;
+             [integer! text!]
+         /refinement &quot;Refinement description here&quot;
+     ][
+        ...
+     ]
+
+So one thing RETURN: has historically bought us is making that look better:
+
+    my-style-with-leading-block: func [
+         &quot;Overall function description here&quot;
+         return: &quot;Description here&quot;
+             [integer!] 
+         argument &quot;Argument description here&quot;
+             [integer! text!]
+         /refinement &quot;Refinement description here&quot;
+     ][
+        ...
+     ]
+
+And I think having the word RETURN in there makes it better.  Note how it&#39;s less obvious when the word isn&#39;t there what that is.
+
+## But SET-WORD!... is that best?
+
+If we&#39;re going to be allowing SET-WORD! for locals and statics, does it make sense to have a stray SET-WORD! for RETURN?
+
+And one outside-the-box thought... given that modern FUNC doesn&#39;t allow you to name parameters RETURN, why not just go with a plain WORD! ?
+
+    what-about-plain-word: func [
+        &quot;Overall function description here&quot;
+        return &quot;Description here&quot;
+            [integer!] 
+        argument &quot;Argument description here&quot;
+            [integer! text!]
+        /refinement &quot;Refinement description here&quot;
+     ][
+        ...
+     ]
+
+If you try that with a LAMBDA you&#39;ll not get an error, and maybe suffer some confusion when the lambda gets its first argument as a variable named RETURN.  You&#39;ll figure it out pretty quickly, though.
+
+Though I have wondered about questions like &quot;what if you want the behavior of a lambda with the bottom expression dropping out, and no RETURN declared, but you still want type checking?&quot;
+
+You might say &quot;just use ENSURE&quot;
+
+     my-lambda: lambda [
+        &quot;Overall function description here&quot;
+        argument &quot;Argument description here&quot;
+            [integer! text!]
+        /refinement &quot;Refinement description here&quot;
+     ][
+        ensure [integer!] [
+            ...
+        ]
+     ]
+
+The problem is that the return type and any description don&#39;t make it to the HELP.  This is one reason that I pretty much always use FUNC.
+
+This makes one want to lean back to the return type being something nameless, like just a leading block.
+
+## Not Sure On RETURN, But I Like SET-WORD! Locals
+
+I definitely feel that finding a way to not be using SET-WORD! for RETURN: would be good.  It&#39;s not like it has anything to do with assignment.
+
+Plain word RETURN in FUNC is not an idea that I&#39;m feeling is as crazy as it might sound.
+
+I do think that I like the idea of SET-WORD! for local initialization... that runs the right hand side without required parentheses, and that only runs the evaluation once in the environment of the spec block... stowing that value in the currently-just-trash slots of the frame archetype for the local.
+
+And I like the idea of bringing `&lt;static&gt;` on board with the same rules.</description>
+    
+    <lastBuildDate>Sat, 24 Aug 2024 04:41:16 +0000</lastBuildDate>
+    <category>Functions</category>
+    <atom:link href="https://forum.rebol.info/t/set-word-to-initialize-locals-in-function-specs/2210.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>SET-WORD! To Initialize Locals In Function Specs?</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p><em>(cc: <a class="mention" href="https://forum.rebol.info/u/ingohohmann">@IngoHohmann</a> as you have had opinions on these kinds of things.)</em></p>
+<p>It seems it would be nice if you had the option of setting your locals when you define them.</p>
+<pre><code>foo: func [
+    arg1 [integer!]
+    arg2 [text!]
+    &lt;local&gt;
+    local1 local2
+    local3: 10
+    local4: (20 * 30)
+][
+    ...
+]
+</code></pre>
+<p>As it so happens, there's potential to exploit this for efficiency.  The frame mechanics have a slot for each local in the function archetype that currently just holds trash, and it could hold this default value / expression.  So it wouldn't just save on typing the local name and then later the name again and the expression...but you're avoiding the need to perform the evaluation to do the assignment on each call!</p>
+<p>There's a lot of questions to answer:</p>
+<ul>
+<li>
+<p>What binding rules is it using?  Could you initialize local3 and then say <strong><code>local4: (local2 * arg1)</code></strong>?</p>
+<ul>
+<li>Almost certainly not, and it would just be using the binding of the spec block</li>
+</ul>
+</li>
+<li>
+<p>Does the code run on each invocation, or is it run only once to calculate a fixed value?  e.g. if it was <strong><code>local4: (global-var * 30)</code></strong> would each invocation of FOO recalculate what <strong><code>(global-var * 30)</code></strong> was at that moment?</p>
+<ul>
+<li>Almost certainly would just calculate a fixed value and use that value on each call.</li>
+</ul>
+</li>
+<li>
+<p>Do you need parentheses directly after the SET-WORD!?</p>
+<ul>
+<li>
+<p>If the expression were run on each invocation (which it probably shouldn't be) then it would be a requirement, because there'd be no way to find the start and the end of the right hand expression without evaluating it.</p>
+</li>
+<li>
+<p>If plain words are being picked up as locals there's potential for error if you accidentally wrote an expression that didn't work, like:</p>
+<pre><code>func [
+   arg [integer!]
+   &lt;local&gt;
+   local1 local2
+   local3: arity-2-but-I-think-it's-3 a b c
+   local4: 10
+][
+    ...
+]
+</code></pre>
+<p>That could wind up making a local <strong><code>c</code></strong> that you didn't intend.  But then again, sometimes it would be just a very obvious simple initialization, like <strong><code>local4: 10</code></strong>.  Forcing people to use parentheses could do more harm than good, vs. trusting them to use the parentheses if they feel it's warranted.</p>
+</li>
+</ul>
+</li>
+</ul>
+<h2>
+<a name="compare-to-static-not-initialized-with-set-word-atm-1" class="anchor" href="https://forum.rebol.info#compare-to-static-not-initialized-with-set-word-atm-1"></a>Compare to <code>&lt;static&gt;</code>: Not Initialized With SET-WORD! ATM</h2>
+<p>Right now the <code>&lt;static&gt;</code> feature lets you assign your variables, but it uses a non-Reboly-notation to do so:</p>
+<pre><code>accumulate: func [
+    item [any-element?]
+    &lt;static&gt;
+    block ([])
+][
+    append block item
+]
+</code></pre>
+<p>The parentheses are optional to hold the initializer.  But  it seems much more normal to say:</p>
+<pre><code>accumulate: func [
+    item [any-element?]
+    &lt;static&gt;
+    block: []
+][
+    append block item
+]
+</code></pre>
+<p>One reason for the parentheses notation was to try and be consistent with the idea of defaulting refinements.</p>
+<pre><code>&gt;&gt; foo: func [/string [text!] ("default")] [print string]
+
+&gt;&gt; foo/string "hello"
+hello
+
+&gt;&gt; foo
+default
+</code></pre>
+<p>But that feature was removed</p>
+<p>There's another reason why just WORD! was used...</p>
+<h2>
+<a name="return-has-owned-set-word-in-the-spec-dialect-2" class="anchor" href="https://forum.rebol.info#return-has-owned-set-word-in-the-spec-dialect-2"></a>RETURN: Has "Owned" SET-WORD! In The Spec Dialect</h2>
+<p>We have a little bit of friction in that the dialect has been using RETURN: to indicate what a function returns.  The choice has not much to do with what comes after a return being an assignment any more than anything else, it was picked for looks:</p>
+<pre><code>double-multiply: func [
+    return: [integer!]
+    value1 [integer!]
+    value2 [integer!]
+][
+    return 2 * value1 * value2
+]
+</code></pre>
+<p>The issue is that historical Rebol2 (and R3-Alpha, and Red) allow this:</p>
+<pre><code>rebol2&gt;&gt; print-sum: func [return break] [print ["Sum is" return + break]]
+
+rebol2&gt;&gt; print-sum 10 20
+Sum is 30
+</code></pre>
+<p>Ren-C only lets you do that in LAMBDA.  FUNC prohibits it:</p>
+<pre><code>ren-c&gt;&gt; print-sum: func [return break] [print [return + break]]
+** Error: Generator provides RETURN:, use LAMBDA if not desired
+</code></pre>
+<p>I think Red/System decided on RETURN: first.  <a href="https://static.red-lang.org/red-system-specs-light.html#section-3.3">But they put it at the end of the spec.</a>  Red errors if you try to put the return elsewhere:</p>
+<pre><code>red&gt;&gt; stringy: func [a b return: [string!]] [a + b]
+== func [a b return: [string!]][a + b]
+
+red&gt;&gt; stringy: func [return: [string!] a  b] [a + b]
+*** Script Error: invalid function definition: [return: [string!] a b]
+</code></pre>
+<p>But either way, it's not checked.  On the <a href="https://www.red-lang.org/2012/12/red-v031-functions-support-added.html">2012 announcement of function support in Red</a>, DocKimbel says: <em>"Note: argument and return value type checking have not been implemented yet, they need typeset! and error! datatypes to be implemented first."</em>  Parameter type checking works, but I guess return type checking was never added.  It does show up in the HELP though.</p>
+<pre><code>red&gt;&gt; help stringy
+USAGE:
+     STRINGY a b
+
+DESCRIPTION: 
+     STRINGY is a function! value.
+
+ARGUMENTS:
+     a             
+     b             
+
+RETURNS:
+     [string!]
+</code></pre>
+<p>Note that they also put the RETURNS: at the end there, too.  Most people would expect the return value for functions to be the first thing you put down.</p>
+<h2>
+<a name="ive-wondered-if-a-leading-block-would-suffice-3" class="anchor" href="https://forum.rebol.info#ive-wondered-if-a-leading-block-would-suffice-3"></a>I've Wondered If A Leading Block Would Suffice...</h2>
+<p>Off and on, I've been willing to consider the idea that return typing is just implicitly what you get if you have a leading block:</p>
+<pre><code>double-multiply: func [
+    [integer!]
+    value1 [integer!]
+    value2 [integer!]
+][
+   return 2 * value1 * value2
+]
+</code></pre>
+<p>Yet while it looks clean there, it causes some problems when you are filling in documentation strings.</p>
+<p>I've become a pretty true believer in the idea that documentation strings for arguments come after the argument name (and that we may do a service to the userbase by standardizing this, rather than by letting it be done either way and have people fight about it):</p>
+<pre><code> my-style: func [
+     "Overall function description here"
+     argument "Argument description here"
+         [integer! text!]
+     /refinement "Refinement description here"
+ ][
+    ...
+ ]
+</code></pre>
+<p>The rationale is that any good function will put labels on all its arguments.  But not all arguments are type-constrained, in particular refinements are not.  So you wind up either being inconsistent</p>
+<pre><code> variation1: func [
+     "Overall function description here"
+     argument [integer! text!]
+         "Argument description here"
+     /refinement "Refinement description here"  ; this feels inconsistent
+ ][
+    ...
+ ]
+</code></pre>
+<p>Or you're throwing in newlines for no reason</p>
+<pre><code> variation2: func [
+     "Overall function description here"
+     argument [integer! text!]
+         "Argument description here"
+     /refinement
+         "Refinement description here"  ; consistent, but annoying
+ ][
+    ...
+ ]
+</code></pre>
+<p>This is why I chose "MY-STYLE" above.  But if return becomes implicit on a leading block, you wind up back in inconsistent land:</p>
+<pre><code>my-style-with-leading-block: func [
+     "Overall function description here"
+     [integer!] "Description here"
+     argument "Argument description here"
+         [integer! text!]
+     /refinement "Refinement description here"
+ ][
+    ...
+ ]
+</code></pre>
+<p>So one thing RETURN: has historically bought us is making that look better:</p>
+<pre><code>my-style-with-leading-block: func [
+     "Overall function description here"
+     return: "Description here"
+         [integer!] 
+     argument "Argument description here"
+         [integer! text!]
+     /refinement "Refinement description here"
+ ][
+    ...
+ ]
+</code></pre>
+<p>And I think having the word RETURN in there makes it better.  Note how it's less obvious when the word isn't there what that is.</p>
+<h2>
+<a name="but-set-word-is-that-best-4" class="anchor" href="https://forum.rebol.info#but-set-word-is-that-best-4"></a>But SET-WORD!... is that best?</h2>
+<p>If we're going to be allowing SET-WORD! for locals and statics, does it make sense to have a stray SET-WORD! for RETURN?</p>
+<p>And one outside-the-box thought... given that modern FUNC doesn't allow you to name parameters RETURN, why not just go with a plain WORD! ?</p>
+<pre><code>what-about-plain-word: func [
+    "Overall function description here"
+    return "Description here"
+        [integer!] 
+    argument "Argument description here"
+        [integer! text!]
+    /refinement "Refinement description here"
+ ][
+    ...
+ ]
+</code></pre>
+<p>If you try that with a LAMBDA you'll not get an error, and maybe suffer some confusion when the lambda gets its first argument as a variable named RETURN.  You'll figure it out pretty quickly, though.</p>
+<p>Though I have wondered about questions like "what if you want the behavior of a lambda with the bottom expression dropping out, and no RETURN declared, but you still want type checking?"</p>
+<p>You might say "just use ENSURE"</p>
+<pre><code> my-lambda: lambda [
+    "Overall function description here"
+    argument "Argument description here"
+        [integer! text!]
+    /refinement "Refinement description here"
+ ][
+    ensure [integer!] [
+        ...
+    ]
+ ]
+</code></pre>
+<p>The problem is that the return type and any description don't make it to the HELP.  This is one reason that I pretty much always use FUNC.</p>
+<p>This makes one want to lean back to the return type being something nameless, like just a leading block.</p>
+<h2>
+<a name="not-sure-on-return-but-i-like-set-word-locals-5" class="anchor" href="https://forum.rebol.info#not-sure-on-return-but-i-like-set-word-locals-5"></a>Not Sure On RETURN, But I Like SET-WORD! Locals</h2>
+<p>I definitely feel that finding a way to not be using SET-WORD! for RETURN: would be good.  It's not like it has anything to do with assignment.</p>
+<p>Plain word RETURN in FUNC is not an idea that I'm feeling is as crazy as it might sound.</p>
+<p>I do think that I like the idea of SET-WORD! for local initialization... that runs the right hand side without required parentheses, and that only runs the evaluation once in the environment of the spec block... stowing that value in the currently-just-trash slots of the frame archetype for the local.</p>
+<p>And I like the idea of bringing <code>&lt;static&gt;</code> on board with the same rules.</p>
+          <p><a href="https://forum.rebol.info/t/set-word-to-initialize-locals-in-function-specs/2210/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/set-word-to-initialize-locals-in-function-specs/2210/1</link>
+        <pubDate>Sat, 24 Aug 2024 03:00:51 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-2210-1</guid>
+        <source url="https://forum.rebol.info/t/set-word-to-initialize-locals-in-function-specs/2210.rss">SET-WORD! To Initialize Locals In Function Specs?</source>
+      </item>
+  </channel>
+</rss>

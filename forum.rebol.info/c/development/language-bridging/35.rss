@@ -5,8 +5,147 @@
     <link>https://forum.rebol.info/c/development/language-bridging/35</link>
     <description>Topics in the &#39;Language Bridging&#39; category Interfacing Rebol with other languages discussed here.</description>
     
-      <lastBuildDate>Mon, 26 Feb 2024 23:57:32 +0000</lastBuildDate>
+      <lastBuildDate>Sat, 24 Aug 2024 07:07:09 +0000</lastBuildDate>
       <atom:link href="https://forum.rebol.info/c/development/language-bridging/35.rss" rel="self" type="application/rss+xml" />
+        <item>
+          <title>Why @ Isn&#39;t A Precise Synonym For THE</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Language Bridging</category>
+          <description><![CDATA[
+            <p>The SIGIL! @ has non-overrideable behavior in the evaluator.  It acts like THE (Ren-C's parallel to Redbol's QUOTE)</p>
+<pre><code>&gt;&gt; @ foo
+== foo
+
+&gt;&gt; @ (1 + 2)
+== (1 + 2)
+
+&gt;&gt; the foo
+== foo
+
+&gt;&gt; the (1 + 2)
+== (1 + 2)
+</code></pre>
+<p>But it does something a normal function can't...which is to effectively put antiforms in suspended animation in the API.</p>
+<p>If it worked in the main language, it would be like this:</p>
+<pre><code>&gt;&gt; eval impossible-compose [@ ('~null~)]
+== ~null~
+
+&gt;&gt; eval impossible-compose [@ (null)]
+== ~null~  ; anti
+</code></pre>
+<p>You might imagine the @ operator doing a little cheat, by turning quasiform null into antiform null.  Then IMPOSSIBLE-COMPOSE could just do this:</p>
+<pre><code>&gt;&gt; block: impossible-compose [@ (null)]
+== [@ ~null~]
+
+&gt;&gt; eval block
+== ~null~  ; anti
+</code></pre>
+<p>For a time this is exactly what it did.  But then...how would you literally get a quasiform null?  It can't do both.</p>
+<p>Today, using some magic in the evaluator, this API code works:</p>
+<pre><code>Value* result1 = rebValue("eval [@", nullptr, "]);
+assert(result1 == nullptr);
+
+Value* result2 = rebValue("eval [@ ~null~"]);
+rebElide("assert ['~null~ = first [", result2, "]]");
+</code></pre>
+<p>It depends on @ not being overrideable and always using the special evaluator magic that lets this work, when you can't do it inside Rebol.</p>
+<h2>
+<a name="why-let-the-api-do-something-the-language-cant-1" class="anchor" href="https://forum.rebol.info#why-let-the-api-do-something-the-language-cant-1"></a>Why Let The API Do Something The Language Can't?</h2>
+<p>Because quite simply... <strong>rebQ(thing)</strong> in the API is uglier than <strong><code>'thing</code></strong> which you can do if you're in the language.</p>
+<p>And which would you rather read?</p>
+<pre><code>Value* result1 = rebValue("eval [", rebQ(nullptr), "]);
+
+Value* result1 = rebValue("eval [@", nullptr, "]);
+</code></pre>
+<p>The second is also faster.</p>
+<p>Anyway, there are other ways of doing it that don't use a literalizing operator.  But here, a literalizing operator is what we generally want.  We just want it to reconstruct antiforms, and a hack lets us do it.</p>
+<h2>
+<a name="is-this-dangerous-2" class="anchor" href="https://forum.rebol.info#is-this-dangerous-2"></a>Is This Dangerous?</h2>
+<p>The hack has the slightly undesirable property that if you asked for the API code you are running as a block, you couldn't get a legitimate block out of it.</p>
+<p>So if you were stepping in a debugger or something, there's an impossible situation in play... something that's not a legal array element is sitting in a slot where the antiform is.  And when the evaluator hits that thing it will almost always give an API error saying "you can't do that".</p>
+<p>So this would fail:</p>
+<pre><code>rebElide("block: [@", nullptr, "]")
+</code></pre>
+<p>There's no evaluation going on inside that block here, so no exception.  You can't put antiforms in blocks and receive that block as a normal value.</p>
+<p>But as long as it is in an evaluative context immediately after @, then the action is to reconstitute the antiform as an evaluative product.</p>
+<p>A debugger would have to have special awareness of this if it were to show you the array, and never let it leak out from the API feed.  If you copied it out you would have to get a warning that the antiforms had all been converted to quasiforms and the code wouldn't work.</p>
+<p>My belief is that this is worth it.  I couldn't justify it (or even figure out how it would be done) when @ was just running an ordinary function, because it would create a crazy parameter convention exception, and leak the mechanic to places it should never be seen.  But this isolates it to where it's a built-in evaluator capability that you mostly don't need to know how it works.</p>
+            <p><small>2 posts - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/why-isnt-a-precise-synonym-for-the/2215">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/why-isnt-a-precise-synonym-for-the/2215</link>
+          <pubDate>Sat, 24 Aug 2024 07:07:09 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2215</guid>
+          <source url="https://forum.rebol.info/t/why-isnt-a-precise-synonym-for-the/2215.rss">Why @ Isn&#39;t A Precise Synonym For THE</source>
+        </item>
+        <item>
+          <title>Code Review Solicitation: C/C++ interface %rebol.h</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Language Bridging</category>
+          <description><![CDATA[
+            <p>The API has been relatively stable for a while, with the only major change this year <a href="https://forum.rebol.info/t/api-breakthrough-scope-detection-in-javascript-and-c/2157">being quite a good one</a>.</p>
+<p>The actual %rebol.h file is generated by a <a href="https://github.com/metaeducation/ren-c/blob/master/tools/make-librebol.r">piece of Rebol code</a> that analyzes the <a href="https://github.com/metaeducation/ren-c/blob/master/src/core/a-lib.c">definitions in %a-lib.c</a>.</p>
+<p>There I explain the premise of the API, and mention the trickery is accomplished via <a href="https://github.com/metaeducation/ren-c/blob/master/src/include/structs/struct-node.h">non-strict-alias endian-sensitive first-byte access</a>, where patterns are chosen for Cells and Stubs that do not overlap leading valid bytes for UTF-8.</p>
+<p><em>(Also explained in the Rebol 2019 video: <strong><a href="http://2019.reb4.me/talks">Abusing UTF-8 For Fun And Profit</a></strong>)</em></p>
+<hr>
+<pre><code>This is the "external" API, and %rebol.h contains its exported
+definitions.  That file (and %make-librebol.r which generates it) contains
+comments and notes which will help understand it.
+
+What characterizes the external API is that it is not necessary to #include
+the extensive definitions of `struct Series` or the APIs for dealing with
+all the internal details (e.g. Push_GC_Guard(), which are easy to get
+wrong).  Not only does this simplify the interface, but it also means that
+the C code using the library isn't competing as much for definitions in
+the global namespace.
+
+Also, due to the nature of the Node superclass (see %sys-node.h), it's
+possible to feed the scanner with a list of pointers that may be to UTF-8
+strings or to Rebol values.  The behavior is to "splice" in the values at
+the point in the scan that they occur, e.g.
+
+    RebolValue* item1 = ...;
+    RebolValue* item2 = ...;
+    RebolValue* item3 = ...;
+
+    RebolValue* result = rebValue(
+       "if not", item1, "[\n",
+           item2, "| print {Close brace separate from content}\n",
+        "] else [\n",
+            item3, "| print {Close brace with content}]\n"
+    );
+
+ (Note: C can't count how many arguments a variadic takes, so this is done
+ by making things like rebValue() a macro that uses __VA_ARGS__ and tacks
+ a rebEND onto the tail of the list.  There's lots of tricks in play--see
+ %make-librebol.r for the nitty-gritty details.)
+
+ While the approach is flexible, any token must be completed within its
+ UTF-8 string component.  So you can't--for instance--divide a scan up like
+  ("{abc", "def", "ghi}") and get the TEXT! {abcdefghi}.  On that note,
+ ("a", "/", "b") produces `a / b` and not the PATH! `a/b`.
+</code></pre>
+<hr>
+<p>I think <a class="mention" href="https://forum.rebol.info/u/iarnold">@iArnold</a> may be the only person to have experienced the API at the C level besides myself.  But several people have engaged the JavaScript version, which bridges via WebAssembly to run the exact same code in %a-lib.c through some wrappers.</p>
+<hr>
+<p>I'm ready for feedback on it, and this post can be a thread for that.  (How's your C/C++, <a class="mention" href="https://forum.rebol.info/u/bradrn">@bradrn</a>?)</p>
+<p>Since the <code>rebol.h</code> file is generated and not committed to the repository, I have made a gist of what it compiles to at this moment:</p>
+<p><a href="https://gist.github.com/hostilefork/8a8cf776387e9b66fe99ca77f560b5a8" class="inline-onebox">Snapshot of auto-generated Ren-C rebol.h file, 20-Aug-2024 · GitHub</a></p>
+<p>There are a couple of bad names (e.g. REBDNG) which are left bad as a reminder that those are parts that need review, so skip those.  The rest is about as good as I've been able to make it.</p>
+            <p><small>2 posts - 2 participants</small></p>
+            <p><a href="https://forum.rebol.info/t/code-review-solicitation-c-c-interface-rebol-h/2203">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/code-review-solicitation-c-c-interface-rebol-h/2203</link>
+          <pubDate>Wed, 21 Aug 2024 02:05:21 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2203</guid>
+          <source url="https://forum.rebol.info/t/code-review-solicitation-c-c-interface-rebol-h/2203.rss">Code Review Solicitation: C/C++ interface %rebol.h</source>
+        </item>
         <item>
           <title>API Breakthrough: Scope Detection In JavaScript and C !</title>
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
@@ -171,7 +310,7 @@ The value of arg is 1020
 &lt;/body&gt;
 
 &lt;/html&gt;</code></pre>
-            <p><small>1 post - 1 participant</small></p>
+            <p><small>2 posts - 1 participant</small></p>
             <p><a href="https://forum.rebol.info/t/loading-blazor-and-ren-c-wasm-in-the-same-page/1611">Read full topic</a></p>
           ]]></description>
           <link>https://forum.rebol.info/t/loading-blazor-and-ren-c-wasm-in-the-same-page/1611</link>
@@ -852,16 +991,11 @@ rebElide("trap [",
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
           <category>Language Bridging</category>
           <description><![CDATA[
-            <p>Something that has been kind of on my mind is the relationship between JavaScript's <code>undefined</code> and n-C's trash state.</p>
-<p>I've set it up so that if you have a JS-NATIVE that doesn't have a return statement, that returns trash.  That's consistent with plain functions that don't have a return statement.</p>
-<p>However, it seems to me that <strong>reb.Value("print {Hello}");</strong> should not return <code>undefined</code> the way that <strong>reb.Value("select [a 10 b 20] 'c");</strong> returns <code>null</code>.  One reason is because JavaScript is bad about conflating falsey things, and it considers undefined to be falsey.  So it is probably good to have only one falsey result that can come back from running arbitrary code.</p>
-<p>It also seems like it's probably better to error on <code>undefined</code> when given as an argument:</p>
-<pre><code>function foo() { }
-reb.Elide("append data", foo())
-</code></pre>
-<p>Would you rather that run without error, appending a trash to data, or have reb.Elide() complain that an argument is undefined?</p>
+            <p>Something that has been kind of on my mind is the relationship between JavaScript's <code>undefined</code> and Ren-C's NOTHING state.</p>
+<p>I've set it up so that if you have a JS-NATIVE that doesn't have a return statement, that returns NOTHING.  That's consistent with plain functions that don't have a return statement.</p>
+<p>However, it seems to me that <strong>reb.Value("print {Hello}");</strong> should not return <code>undefined</code> the way that <strong>reb.Value("select [a 10 b 20] 'c");</strong> returns <code>null</code>.  One reason is because JavaScript is bad about conflating falsey things, and it considers undefined to be falsey.  <a href="https://forum.rebol.info/t/the-truthiness-of-nothing/2180">Whereas Ren-C considers nothing to be truthy.</a></p>
 <p>Guess my point is that it seems like an area where noticing the parallel is useful, but care should be taken in where to make the mapping apply...</p>
-            <p><small>2 posts - 1 participant</small></p>
+            <p><small>1 post - 1 participant</small></p>
             <p><a href="https://forum.rebol.info/t/the-meaning-of-javascripts-undefined-in-the-api/2158">Read full topic</a></p>
           ]]></description>
           <link>https://forum.rebol.info/t/the-meaning-of-javascripts-undefined-in-the-api/2158</link>
@@ -1365,164 +1499,32 @@ REBVAL *datetime = rebValue("use [date] [",
           <source url="https://forum.rebol.info/t/taming-handle-tracking-with-a-uniform-variadic-api/535.rss">Taming Handle Tracking with a Uniform Variadic API</source>
         </item>
         <item>
-          <title>Should WORD!, PATH!, FUNCTION! be &quot;live&quot; by default in rebDo()</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <title>User-Mode Library Access</title>
+          <dc:creator><![CDATA[rgchris]]></dc:creator>
           <category>Language Bridging</category>
           <description><![CDATA[
-            <p><em>To make a medium-size story short:</em> <strong>No, I don't believe so.</strong></p>
-<blockquote>
-<p><strong>Beta/One Update March 2019</strong>: The final decision is to give people the choice; all operators come in "live" and "quoted" forms.  The live forms have names like <code>rebRun()</code> or <code>rebSpell()</code>.  The quoting forms have names like <code>rebRunQ()</code> or <code>rebSpellQ()</code>.  Additional rebQ()-quoting and rebU()-unquoting operators let you raise or lower the quoting level of splices in mid-expression.</p>
-<p>Hence one could say "I've changed my mind" because the "default" without the Q is to splice the value as-is.  But it's been made as easy as a single letter to make the choice, so certainly making it easy is still a priority.  <a href="https://forum.rebol.info/t/beta-one-quoting-in-the-api-decision-rebrun-and-rebrunq/1095">See the complete rationale here</a></p>
-</blockquote>
-<hr>
-<p><em>To make a medium-size story long:</em> ...</p>
-<p>Let's imagine you have a simple situation that generates a function and stores it in an API handle value:</p>
-<pre><code>REBVAL *foo = rebDo("function [x] [print x]", END);
-</code></pre>
-<p>What should happen if you tried to use a SET-WORD! in code to assign it to another variable?</p>
-<pre><code>rebDo("also-foo:", foo, END);
-</code></pre>
-<p>Perhaps one thinks that looks most like accessing a function through a WORD! <code>foo</code>.  That might imply referring to it by its C variable name would <em>execute</em> it by default.  Hence the burden would be upon you to do some kind of trick to "disarm" it, such as:</p>
-<pre><code>rebDo("also-foo: quote", foo, END);
-</code></pre>
-<p>However, the idea that referring to the C variable name executes it is <em>not</em> generally what happens.  Had you written code as a simple C assignment:</p>
-<pre><code>REBVAL *also_foo = foo;
-</code></pre>
-<p><code>foo</code> would not try to execute, and it can't.  In plain C there's no opportunity for such a statement to execute arbitrary code.  At least in that context, a simple reference to a C variable <em>has</em> to be inert...and its mere appearance does not imply execution.</p>
-<p>This means you would bias things the other way.  If you wanted an execution, <a href="https://forum.rebol.info/t/meet-the-eval-native/311">you would use an EVAL</a>.</p>
-<pre><code>rebDo("eval", foo, "10", END); // to print 10
-</code></pre>
-<p>This concept feels like it makes sense, because mostly what I see in C code is that the calculation to produce the values has already occurred.  You don't want them to undergo a double evaluation.  Consider this:</p>
-<pre><code>REBVAL *value = rebPath("a/b/c");
-// now value holds an item of type PATH!
-rebDo("target:", value, END);
-</code></pre>
-<p>Here you're abstracting through a variable that doesn't look like a path at all.  It seems sketchy to be pulling out "live" behavior when it's not requested, because think about how the following would act:</p>
-<pre><code>value: 'a/b/c
-;-- now value holds an item of type PATH!
-target: value
-</code></pre>
-<p>This provides convincing evidence that access through a C variable should be seen as more akin to picking something out of a Rebol variable via a GET-WORD!.  It should be seen as inert to the evaluator on the first pass, and it takes something more than just running the evaluator across it once to get it to execute.  You either COMPOSE it into a block and DO it, or use EVAL.</p>
-<p>I'm curious about what might be possible notationally for a fast/API-level EVAL:</p>
-<pre><code>rebDo(rebEval(), foo, "10", END); // 0-arity a bit confusing
-rebDo(rebEvalNative(), foo, "10", END); // a bit wordy
-rebDo(rebEval(foo), "10", END); // unusual but nicer
-</code></pre>
-<p>The last one seems coolest to me, even though it's "strange".  But EVAL is strange...it takes one argument and then potentially bounces it and keeps on going.  This suggests the return result of <code>rebEval(foo)</code> would not be a finalized REBVAL, rather something that has to be spliced into a rebDo() chain...a new datatype.  Such things are tricky, but possible...</p>
-            <p><small>4 posts - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/should-word-path-function-be-live-by-default-in-rebdo/371">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/should-word-path-function-be-live-by-default-in-rebdo/371</link>
-          <pubDate>Thu, 09 Nov 2017 19:13:29 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-371</guid>
-          <source url="https://forum.rebol.info/t/should-word-path-function-be-live-by-default-in-rebdo/371.rss">Should WORD!, PATH!, FUNCTION! be &quot;live&quot; by default in rebDo()</source>
-        </item>
-        <item>
-          <title>Variadic Scanning in pure C First Example: *working*</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Language Bridging</category>
-          <description><![CDATA[
-            <blockquote>
-<p><strong>This post from October 2017 announces a turning point in the API, which has been very fruitful.</strong></p>
-<p>Many things have changed (including wrapping in a variadic macro that automatically supplies the "END", and being able to <a href="https://forum.rebol.info/t/api-breakthrough-scope-detection-in-javascript-and-c/2157">access native arguments in the code strings</a>).  But the basic idea remains the same.  The bit patterns for internal types carefully avoid having the first byte of those structures overlap legal leading bytes of a UTF-8 sequence, so you can splice together runs of code with cell and series pointers.</p>
-<p>Modern naming would be <code>DECLARE_NATIVE()</code> instead of <code>REBNATIVE()</code>, <code>Array*</code> instead of <code>REBARR*</code>, and <code>OUT</code> instead of <code>D_OUT</code>.</p>
-</blockquote>
-<hr>
-<p>I'm happy to report that a bit of hacking led to a successful first test flight of fully C-standards compliant, variadic scanning.</p>
-<p>Here's a quick sample native:</p>
-<pre><code>//
-//  variadic-scan-test: native [
-//
-//  {Demo the routine powering the variadic scanner with 3 items}
-//
-//      item1
-//      item2
-//      item3
-//  ]
-//
-REBNATIVE(variadic_scan_test)
-{
-    INCLUDE_PARAMS_OF_VARIADIC_SCAN_TEST;
-
-    REBARR *result = Scan_Va_Managed(
-        "if not", ARG(item1), "[\n",
-            ARG(item2), "| print {Close brace separate from content}\n",
-        "] else [\n",
-            ARG(item3), "| print {Close brace with content}]\n",
-        END
-    );
-    Init_Block(D_OUT, result);
-    return R_OUT;
-}
-</code></pre>
-<p>Invoking it actually worked on the first try, as intended:</p>
-<pre><code>&gt;&gt; variadic-scan-test 1 {Two} [T h r e e]
-== [if not 1 [
-    "Two" | print "Close brace separate from content"
-] else [
-    [T h r e e] | print "Close brace with content"
-]]
-</code></pre>
-<p>Pretty nifty, huh?</p>
-<p>If you're not concerned about the newlines (most <strong>rebDo()</strong> or whatever you call it would perhaps not be) then it could look a bit cleaner.  We could also consider some separate token for that so it didn't make the code as ugly.</p>
-            <p><small>2 posts - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/variadic-scanning-in-pure-c-first-example-working/361">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/variadic-scanning-in-pure-c-first-example-working/361</link>
-          <pubDate>Wed, 01 Nov 2017 03:05:50 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>Yes</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-361</guid>
-          <source url="https://forum.rebol.info/t/variadic-scanning-in-pure-c-first-example-working/361.rss">Variadic Scanning in pure C First Example: *working*</source>
-        </item>
-        <item>
-          <title>Should values given to C through API &quot;handles&quot; be mutable?</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Language Bridging</category>
-          <description><![CDATA[
-            <p>In libRed, the definition for <a href="https://github.com/red/red/blob/33aaf1c983aae16490edf5753d205d844b7b6096/libRed/red.h#L35" rel="nofollow noopener">a <code>red_value</code> is a <code>void*</code></a>.  In the <a href="https://forum.rebol.info/t/lifetime-of-handles-given-back-to-c-code/343/1">"lifetime of handles"</a> post, I mentioned where these pointers point at...a small pool of values, that go bad quickly (last 50 API call results, at time of writing).</p>
-<p>Due to the definition, the parameters don't give the appearance of pointers, they look like they're being passed-by-value, e.g. <strong>red_value redSelect(red_series series, red_value value);</strong>  Hence it's not surprising that libRed doesn't have mutating operators on red_values themselves.  This parallels how Rebol works in userspace; you don't fiddle with the bits inside values, you use operations that generate new values and overwrite old ones.</p>
-<p>Consider their structure of a cell that holds a <a href="https://github.com/red/red/blob/868f584896d12853009f529703085f26a03ca7e8/runtime/datatypes/structures.reds#L54" rel="nofollow noopener">BLOCK!</a>:</p>
-<pre><code>red-block!: alias struct! [
-    header [integer!] ;-- cell header
-    head   [integer!] ;-- block's head index (zero-based)
-    node   [node!]    ;-- series node pointer
-    extra  [integer!] ;-- (reserved for block-derivative types)
+            <p><strong>Is the ability to load external libraries considered a fundamental part of the core functionality of the language?</strong></p>
+<p>On the face of it, I would suggest so—off the top of my head I could cite SQLite and ImageMagick as desirable components that, though they could be incorporated in other ways such as CALL, would more efficiently be utilized through the library interface.</p>
+<p>The promise in Rebol 3 Alpha and Rebol 2 (specific implementation differing slightly) was thus:</p>
+<pre><code class="lang-plaintext">sqlite: make library! %libsqlite3.dylib
+sqlite-version: make-routine sqlite "sqlite3_libversion" [
+    return: [string]
 ]
+sqlite-version
 </code></pre>
-<p>Imagine you wanted to visit each position in a BLOCK! from C.  Since red_value is an opaque type, you can't twiddle the bits and increment the <code>head</code> index, you'd have to call <a href="https://doc.red-lang.org/en/libred.html#_redskip" rel="nofollow noopener">redSkip</a>.  And that will produce a new cell for each position.</p>
-<p>Their philosophy on keeping this from being "cost prohibitive" is to have a tiny pool of cells they reuse for these results.  The results are temporaries, and you aren't supposed to get too attached to these cells.  If you have some long-running operation and ask to tweak the index of a value you got some number of calls ago, you're going to run into trouble.</p>
-<p>But RenCpp was designed differently.  The cell behind a <strong>ren::AnyValue</strong> has the standard lifetime of the C++ object...it will exist so long as it is in scope.  You can pass them by value (in which case they are copied and a new cell is created) or you can pass them by reference (which means mutations will be seen by other references to the same object).  So rather than create 100000 distinct cells during iteration of 100000 positions in an array, when you call the <strong>.next()</strong> method on a series subclass, it just updates the bits of a single cell.</p>
-<p>I'm not very eager to change this behavior of RenCpp.  But this raises the question of how a C-friendly libRebol that parallels libRed--but with a different model of lifetimes of API handles--should operate.  Should it offer functions that let you mutate the guts of a value you already have?</p>
-<p>A less invasive way of thinking would be if every API function took as a parameter an existing cell to write to, perhaps with NULL meaning "create a new cell"...</p>
-<pre><code>REBVAL *gotten = rebAlloc();
-for (i = 0; i &lt; 100, i++) {
-    rebGet(gotten, "a"); // fetch into already existing cell
-    rebAppend(gotten, rebBlank());
-}
-rebFree(gotten);
-</code></pre>
-<p>The approaches aren't mutually exclusive.  Every API could have an "Ex" version which has a slot to write to, and then specialize it:</p>
-<pre><code>#define rebGet(symbol) \
-    rebGetEx(NULL, (symbol))
-</code></pre>
-<p><strong>However</strong> one thing I do like about the idea of immutability and not thinking in terms of "cells the user can write to" would be the elimination of "nulled cells" from API awareness.  Since you never ask to overwrite an existing cell address with an operation result, you never worry about what bit pattern that would need to hold the absence of a result...and you could just use NULL for that.  That has very strong appeal for me.</p>
-<p><em>(RenCpp has a C++-shaped tool for avoiding the need for expressing nulled cells...it uses <a href="http://en.cppreference.com/w/cpp/utility/optional" rel="nofollow noopener">std::optional</a>.)</em></p>
-<p>My leaning here is to say that RenCpp and libRebol just go down different paths with this.  I guess I'd have to see more libRed example code to think about what users are interested in, and what the kind of code they'd write would look like...since my only real example case so far is Ren Garden, and libRed would be thoroughly unsuitable for it.</p>
-            <p><small>2 posts - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/should-values-given-to-c-through-api-handles-be-mutable/345">Read full topic</a></p>
+<p>This is nominally possible in Ren-C through the FFI extension (I say nominally as I have not been able to confirm this first hand and understand this is still a less than ideal approach).</p>
+<p><strong>Or are extensions the prescribed way to achieve integration?</strong></p>
+<p>Which would open up a whole bunch of other questions.</p>
+            <p><small>6 posts - 3 participants</small></p>
+            <p><a href="https://forum.rebol.info/t/user-mode-library-access/470">Read full topic</a></p>
           ]]></description>
-          <link>https://forum.rebol.info/t/should-values-given-to-c-through-api-handles-be-mutable/345</link>
-          <pubDate>Thu, 19 Oct 2017 06:37:54 +0000</pubDate>
+          <link>https://forum.rebol.info/t/user-mode-library-access/470</link>
+          <pubDate>Mon, 15 Jan 2018 21:37:51 +0000</pubDate>
           <discourse:topicPinned>No</discourse:topicPinned>
           <discourse:topicClosed>No</discourse:topicClosed>
           <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-345</guid>
-          <source url="https://forum.rebol.info/t/should-values-given-to-c-through-api-handles-be-mutable/345.rss">Should values given to C through API &quot;handles&quot; be mutable?</source>
+          <guid isPermaLink="false">forum.rebol.info-topic-470</guid>
+          <source url="https://forum.rebol.info/t/user-mode-library-access/470.rss">User-Mode Library Access</source>
         </item>
   </channel>
 </rss>

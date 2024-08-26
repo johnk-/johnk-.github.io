@@ -708,47 +708,49 @@ Will work
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
           <category>Optimization</category>
           <description><![CDATA[
-            <p>Ren-C has a multi-return interface for TRANSCODE.  Without /ONE, you get the whole thing:</p>
+            <p>Ren-C has a multi-return interface for TRANSCODE.  Without /NEXT, you get the whole thing:</p>
 <pre><code>&gt;&gt; transcode "abc def"
-; first in pack of length 2
 == [abc def]
 </code></pre>
-<p>If you ask for a remainder in this case, it will be empty:</p>
-<pre><code>&gt;&gt; [value pos]: transcode "abc def"
-== [abc def]
-
-&gt;&gt; pos
-== ""
-</code></pre>
-<p>With the /ONE refinement, it will go one item at a time.  Because the main return (value) can come back NULL, there may not be a remainder, so POS needs to be optional:</p>
-<pre><code>&gt;&gt; [value /pos]: transcode/one "abc def"
-== abc
+<p>With the /NEXT refinement, it will go one item at a time.  But the return convention is that you receive back a the remainder as the primary return result, and the transcoded value is the second:</p>
+<pre><code>&gt;&gt; [pos value]: transcode/next "abc def"
+== " def"
 
 &gt;&gt; pos
 == " def"
+
+&gt;&gt; value
+== abc
 </code></pre>
-<p>You know that you're at the end of the input when it returns null as a main result, with all the benefits of easy reactions to NULL with IF and ELSE and friends:</p>
-<pre><code>&gt;&gt; [value /pos]: transcode/one ""
+<p>Of course, with multi-return you can ask for the overall return result to be the synthesized value:</p>
+<pre><code>&gt;&gt; [pos @value]: transcode/next "abc def"
+== abc
+</code></pre>
+<p>You don't even have to name things if you don't want them!</p>
+<pre><code>&gt;&gt; [_ @]: transcode/next "abc def"
+== abc
+</code></pre>
+<p>And you can just use a regular SET-WORD! to get just the primary result.</p>
+<pre><code>&gt;&gt; pos: trancode/next "abc def"
+== " def"
+</code></pre>
+<p><strong>You know that you're at the end of the input when it returns NULL.</strong>  This means there was no value synthesized, and you're done.</p>
+<pre><code>&gt;&gt; [pos /value]: transcode/next ""
 == ~null~  ; anti
 
 &gt;&gt; pos
 == ~null~  ; anti
+
+&gt;&gt; value
+== ~null~  ; anti
 </code></pre>
 <p>Writing foolproof loops to process items are a breeze:</p>
-<pre><code>while [true]
-    [item /utf8]: transcode utf8 else [break]
+<pre><code>while [[utf8 /item]: transcode utf8]
     print mold item
- ]
-
-; or for the THEN/ELSE haters out there (you know who you are :-P)
-
-while [true]
-    if null? [item /utf8]: transcode utf8 [
-        break
-    ]
-    print mold item
- ]
+]
 </code></pre>
+<p>The leading slash on <code>/item</code> is necessary when you want to accommodate the case where transcode didn't produce any item.  Because then it doesn't return a 2-parameter pack, it just returns a pure null.  This is required for clean interoperability with THEN and ELSE...because nulls in packs are considered to be "something" vs. "nothing".  Multi-return unpacking requires you to demonstrate consciousness when you are trying to unpack more items than you're getting, hence the slash is needed when trying to unpack a singular null into two slots.</p>
+<p>On the plus side, if you are expecting that there must be a transcoded item, then you get a free check by eliminating the slash...it will then cause an error if the item isn't produced!</p>
 <p><img src="https://forum.rebol.info/images/emoji/twitter/+1.png?v=12" title=":+1:" class="emoji only-emoji" alt=":+1:" loading="lazy" width="20" height="20"></p>
 <h2>
 <a name="this-runs-circles-around-red-and-r3-alpha-1" class="anchor" href="https://forum.rebol.info#this-runs-circles-around-red-and-r3-alpha-1"></a>This Runs Circles Around Red and R3-Alpha</h2>
@@ -793,38 +795,19 @@ def
 
 red&gt;&gt; while [not tail? utf8] [
      set [item utf8] transcode/next utf8
-     print mold item
+     print ["Item is:" mold item]
 ]
-[]
+Item is: []
 </code></pre>
 <p>You get one spurious item.  (They chose BLOCK! for the item, but it wouldn't matter what it was--a NONE! would be just as bad, you're just losing the distinction between empty strings and <code>"#[none]"</code> then.)</p>
-<p>If I were prescribing a solution for Red I'd say:</p>
-<ul>
-<li>
-<p>Make /NEXT take a variable to write the next position into</p>
-</li>
-<li>
-<p>Error on <code>#{}</code> input, so anyone doing a TRANSCODE/NEXT knows they are responsible for testing for TAIL? before they call (if they're not sure their input is non-empty)</p>
-<ul>
-<li>This way an empty remainder returned in the /NEXT variable will uniquely signal the reached-end state</li>
-</ul>
-</li>
-<li>
-<p>Make the synthesized product at the tail something ugly but assignable (so not an unset!)</p>
-<ul>
-<li>an ERROR! saying "end of input" is at least informative in case it winds up getting treated as an actual value somewhere</li>
-</ul>
-</li>
-</ul>
-<p>That would at least give them patterns like:</p>
-<pre><code>if not tail? utf8 [  ; needed if you're not sure it's non-empty
-    while [true] [
-        item: transcode/next utf8 'utf8
-        if tail? utf8 [break]
-        print mold item
-    ]
+<p><strong>If I were prescribing a solution for Red I'd suggest approximating Ren-C's solution as closely as possible.</strong></p>
+<p>When /NEXT is used have it take a variable to write the transcoded value into.  Then return the position.  If the scan turns out to have no product, return NONE.  For consistency with Ren-C you might set the transcoded value to NONE as well <em>(it doesn't matter, because the return of none signals whatever it is isn't meaningful...so use UNSET! if you want.)</em></p>
+<pre><code>while [utf8: transcode/next utf8 'item] [
+    print mold item
 ]
+assert [none? item]  ; or unset, or whatever
 </code></pre>
+<p>Not as nice as the multi-returns, and you can't duck out of passing the variable if you aren't interested.  But... <img src="https://forum.rebol.info/images/emoji/twitter/man_shrugging.png?v=12" title=":man_shrugging:" class="emoji" alt=":man_shrugging:" loading="lazy" width="20" height="20"></p>
 <h2>
 <a name="ren-c-also-thrashes-r3-alpha-and-red-in-error-handling-2" class="anchor" href="https://forum.rebol.info#ren-c-also-thrashes-r3-alpha-and-red-in-error-handling-2"></a>Ren-C Also <em>Thrashes</em> R3-Alpha and Red In Error Handling</h2>
 <p>Ren-C TRANSCODE has these potential behaviors:</p>
@@ -833,21 +816,29 @@ red&gt;&gt; while [not tail? utf8] [
 <p>RETURN a BLOCK! (if plain TRANSCODE)</p>
 </li>
 <li>
-<p>RETURN an ANY-VALUE! or NULL (if TRANSCODE/ONE)</p>
+<p>RETURN a PACK of the <strong>~[remainder value]~</strong> if TRANSCODE/NEXT) -or- RETURN NULL if no value was transcoded from the input (empty string, comments, just spaces, etc.)</p>
+<ul>
+<li>
+<p>Having remainder as the primary return means you can check the default result in a loop for truthiness and loop easily using WHILE or whatever.</p>
+</li>
+<li>
+<p>Returning pure NULL when no value is transcoded means you can react to there being nothing to transcode with THEN and ELSE, etc.</p>
+</li>
+</ul>
 </li>
 <li>
 <p>It can do a "hard FAIL"</p>
 <ul>
 <li>
-<p>This would happen if you asked something fundamentally incoherent...like asking to TRANSCODE a with input that was non-UTF-8...like a GOB!, or something like that</p>
+<p>This would happen if you asked something fundamentally incoherent...like asking to TRANSCODE an input that was non-UTF-8...like a GOB!, or something like that</p>
 </li>
 <li>
-<p>Such errors are only interceptible by a special SYS.UTIL.ENTRAP method--they are not supposed to be easy to gloss over and unlikely to have meaningful mitigation.  So only special sandboxing situations (like writing consoles that print out the error) are supposed to trap them.</p>
+<p>Such errors are only interceptible by a special SYS.UTIL.RESCUE method--they are not supposed to be easy to gloss over and unlikely to have meaningful mitigation.  So only special sandboxing situations (like writing consoles that print out the error) are supposed to trap them.</p>
 </li>
 </ul>
 </li>
 <li>
-<p>It can RETURN an <em>isotopic ERROR!</em> ("raised error") if something went wrong in the transcoding process itself</p>
+<p>It can RETURN an <em>antiform ERROR!</em> ("raised error") if something went wrong in the transcoding process itself</p>
 <ul>
 <li>
 <p>This would be something like a syntax error, like  if you asked <strong>transcode "a bc 1&amp;x def"</strong></p>
@@ -874,8 +865,8 @@ Error: scan-invalid
 r3-alpha&gt;&gt; if not attempt [transcode to binary! "abc def"] [print "Bad input"]
 Bad input
 </code></pre>
-<p><em><strong>But the input isn't bad!!!</strong></em>  This leads to a nightmare of trying to figure out what was going wrong.  I had just one of those nightmares today in the bootstrap executable when tinkering with the shim implementation of TRANSCODE.  A bug in the shim was leading to silently skipping work that should have been done, because the caller wanted to be tolerant of bad transcode input.</p>
-<p>There's simply no practical way of working on code of any complexity without something like definitional failures, and experience has proven this day after day.</p>
+<p><em><strong>But the input isn't bad!!!</strong></em>  This leads to a nightmare of trying to figure out what was going wrong.  Today's particular nightmare was when tinkering with the shim implementation of TRANSCODE.  A bug in the shim was leading to silently skipping work that should have been done, because the caller wanted to be tolerant of bad transcode input.</p>
+<p><strong>There's simply no practical way of working on code of any complexity without something like definitional failures, and experience has proven this day after day.</strong></p>
 <h2>
 <a name="getting-incomplete-results-via-r3-alphas-error-3" class="anchor" href="https://forum.rebol.info#getting-incomplete-results-via-r3-alphas-error-3"></a>Getting Incomplete Results Via R3-Alpha's /ERROR</h2>
 <p>R3-Alpha offered this feature:</p>
@@ -909,7 +900,7 @@ Bad input
 error: null
 block: collect [
    while [true] [
-       keep [# pos]: transcode pos else [
+       keep [pos @]: transcode pos else [
            break
        ] except e -&gt; [
            error: e
@@ -921,83 +912,34 @@ block: collect [
 <p>That gives you a proper version, setting error if something happened and giving you the block intact.</p>
 <h2>
 <a name="so-finally-we-see-its-an-optimization-problem-4" class="anchor" href="https://forum.rebol.info#so-finally-we-see-its-an-optimization-problem-4"></a>So Finally... We See It's An Optimization Problem</h2>
-<p>Question is if there's some way of folding this into TRANSCODE, so it's doing the looping and collecting efficiently for you.</p>
-<p>But this interface wants to get back a "remainder".  And I kind of hate to sacrifice the property that TRANSCODE's asking for a remainder means scan one element.  :-/</p>
-<p>I guess we <em>could</em> say that there's a logical process you follow:</p>
-<ul>
-<li>
-<p>The output parameter is called REST</p>
-</li>
-<li>
-<p>An additional output parameter is added for ERROR</p>
-</li>
-<li>
-<p>If you ask for the REST and <em>don't</em> ask for an ERROR, that suggests you want to encode a single item</p>
-<ul>
-<li>
-<p>You could have just intercepted the error if you wanted it</p>
-</li>
-<li>
-<p>Nothing is lost because there wouldn't be any partial results to miss (if you're only doing one item, there will always be zero items completed before it)</p>
-</li>
-</ul>
-</li>
-<li>
-<p>If you ask for the REST and <em>do</em> ask for an error, then it assumes you must not want the one-item-only semantics after all.</p>
-</li>
-</ul>
-<p>It's a little bit awkward because it conflates partial output with fully successful output</p>
-<pre><code>&gt;&gt; [block rest error]: transcode "a bc"
+<p>Question is if there's some way of folding this into TRANSCODE, so it's doing the looping and collecting efficiently for you.  What would the interface be like that gave you back the error, and how would you know to remember to check it?</p>
+<p>The problem is that when you return a raised definitional error from a function, that's the only thing you return.  How would you return partial results (and maybe a resumption position) as well?</p>
+<p>A /TRAP refinement could cause another variation in how the return results are given:</p>
+<pre><code>&gt;&gt; [error block]: transcode/trap "a bc"
+; null
+
+&gt;&gt; block
 == [a bc]
 
-&gt;&gt; error
-; null
-
-&gt;&gt; [block rest error]: transcode "a bc 1&amp;x def"
-== [a bc]  ; no indication something failed
-
-&gt;&gt; error? error  ; you'd have to remember to check this
-== #[true]
-</code></pre>
-<p>That's not a deal breaker, and Ren-C makes it easy to work with, using <a href="https://forum.rebol.info/t/circling-multi-returns-choose-which-is-expression-result/1587">circling an output in multi-return</a> to make it the primary return result:</p>
-<pre><code>&gt;&gt; [block rest @error]: transcode "a bc"
-; null
-
-&gt;&gt; [block rest @error]: transcode "a bc 1&amp;x def"
+&gt;&gt; [error block]: transcode/trap "a bc 1&amp;x def"
 == make error! [...]
+
+&gt;&gt; block
+== [a bc]
 </code></pre>
-<p><strong>What's much more jarring to me is the flipping back and forth of whether you're asking for a full transcode or not.</strong></p>
-<pre><code>&gt;&gt; x: transcode "abc def"
-== [abc def]
-
-&gt;&gt; [x y]: transcode "abc def"
-== abc
-
-&gt;&gt; [x y z]: transcode "abc def"
-== [abc def]
-</code></pre>
-<p>Ick.  Should I be willing to bend on the transcode "requested parameter" behavior in this case, by adding a /ONE refinement?</p>
-<pre><code>&gt;&gt; [block rest]: transcode "abc def"
-== [abc def]
-
-&gt;&gt; rest
-== #{}  ; kind of useless, but honest
-
-&gt;&gt; [block rest]: transcode/one "abc def"
-== abc
-
-&gt;&gt; rest
-== " def"
-</code></pre>
-<p>That would make me feel grief, as it loses one of the first showcases of return value sensitivity.  <em>And it irks me to think that the beauty is ultimately being given up for the sake of what amounts to an optimization.</em></p>
+<p>Having the error be first seems good, lining up with TRAP.  Then the block as the second result.</p>
+<p>That's not bad, but it would require some implementation reworking that I don't have time for.  Problem is that how the scanner is written now it clears all the stack out when an error gets raised, and there'd have to be some flag to tell it to persist the data stack accruals despite unwinding the level stack.  It's not rocket science it's just not important right now.</p>
 <h2>
 <a name="answer-for-now-kill-off-error-5" class="anchor" href="https://forum.rebol.info#answer-for-now-kill-off-error-5"></a>Answer For Now: Kill Off /ERROR</h2>
 <ul>
 <li>
-<p>The answer /ERROR has been giving back in error cases for the remainder is sketchy, and I don't want to figure out how to fix it.</p>
+<p>The answer /ERROR has been giving back in error cases for the remainder is sketchy and conflates potential literal error scanning with a scanning error.</p>
 </li>
 <li>
-<p>You can get the behavior reliably just by intercepting errors going one transcode item at a time.</p>
+<p>You can get the behavior 100% reliably just by intercepting errors going one transcode item at a time.</p>
+<ul>
+<li>Bear in mind that one-at-a-time is only going one <em>top-level</em> item at a time.  If you scan a block with 1000 items in it, that's one transcode step.  So we're not really talking about that many steps most of the time with regards to the scale of a file.</li>
+</ul>
 </li>
 <li>
 <p>This is a good opportunity to write tests of item-by-item scanning with error handling</p>

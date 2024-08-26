@@ -1,0 +1,284 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Re-imagining EVAL/NEXT</title>
+    <link>https://forum.rebol.info/t/re-imagining-eval-next/767</link>
+    <description>&gt; **NOTE:** [The nature of DO is to deal with whole scripts](https://forum.rebol.info/t/do-of-text-as-synonym-of-do-of-file-containing-string/2125).  We know **`do/next %foo.r`** doesn&#39;t make any sense, and in fact having DO take a BLOCK! of Rebol code should be a dialect about how to load and bind what you pass it... not expressions like **`do [1 + 2]`**.
+&gt;
+&gt; So in modern Ren-C, array evaluation is handled by a primitive called **EVAL**.  Hence the /NEXT refinement has been removed from DO, and for a transitional period DO will not take BLOCK! at all... until all such references are gone.  At which point it will take a dialected LOAD spec, probably aligning closely with what IMPORT takes.
+
+### Right Now, EVAL/NEXT Takes A Variable To Store The New Position
+
+    &gt;&gt; result: eval/next [1 + 2 10 + 20] $pos
+    == 3
+
+    &gt;&gt; pos
+    == [10 + 20]
+
+This is exactly how Red and R3-Alpha handle DO/NEXT.
+
+It was considered more convenient than how Rebol2 gave you a block of both the result and the new position...which you had to pick apart:
+
+    rebol2&gt;&gt; do/next [1 + 2 10 + 20]
+    == [3 [10 + 20]]
+
+*(That couldn&#39;t work at all in Ren-C, because evaluation can produce antiforms, and antiforms can&#39;t be put in blocks.)*
+
+### One Twist: EVAL/NEXT of [] Returns A NULL Position
+
+If you try to step with /NEXT over a BLOCK! like **[1 + 2 10 + 20]**, then there are EXACTLY TWO steps with meaningful results of 3 and 30.
+
+So if you&#39;re going to be doing the evaluations in a WHILE loop, you want the EVAL/NEXT position result to return success twice, and then have a third call that returns null to signal the looping is done.
+
+This gives you the possibly surprising (or not?) result that `EVAL/NEXT []` doesn&#39;t take a step and doesn&#39;t synthesize VOID, even though `EVAL []` is VOID.  It&#39;s a terminal condition.  So if you&#39;re trying to take steps and generate an overall accumulated result, you have to seed your result with VOID... and then `EVAL/NEXT []` will tell you there was nothing to do and you return your seeded result.
+
+Make sense?
+
+Rebol2, Red, and R3-Alpha all require you to check for the TAIL? of the block as your terminal condition.  Because DO/NEXT on a tail position just produces an UNSET! and another tail position.
+
+    rebol2&gt;&gt; do/next [10 + 20]
+    == [30 []]
+
+    rebol2&gt;&gt; do/next []
+    == [unset []]
+
+    rebol2&gt;&gt; do/next []
+     == [unset []]
+
+That&#39;s quite a lot more awkward to handle for a terminal condition.  In fact it forces you to check for TAIL? on the block you&#39;re evaluating *before* the first call to DO/NEXT (because seeing the tail afterward won&#39;t tell you if the previous step synthesized a valid UNSET!).
+
+R3-Alpha and Red didn&#39;t change this, and still make you check for TAIL? before you take steps:
+
+    r3-alpha/red&gt;&gt; do/next [10 + 20] &#39;pos
+    == 30
+
+    r3-alpha/red&gt;&gt; pos
+    == []
+
+    r3-alpha/red&gt;&gt; do/next [] &#39;pos
+    ; no console result here means unset
+
+    r3-alpha/red&gt;&gt; pos
+    == []
+
+    r3-alpha/red&gt;&gt; do/next [] &#39;pos
+    ; no console result here means unset
+
+    r3-alpha/red&gt;&gt; pos
+    == []
+
+Still very awkward, and unclear why they did this instead of making the POS be #[none].
+
+## But Ren-C Can Do Even Better: Multi-Returns!
+
+What if EVAL/NEXT turned the return result into a parameter pack, where you get both the evaluation product and the new position?
+
+*(I&#39;m going to make it so it switches the main return result to be the position, and the secondary result is the evaluation product.  Then I&#39;ll explain why.)*
+
+    &gt;&gt; block: [1 + 2 10 + 20]
+    == [1 + 2 10 + 20]
+
+    &gt;&gt; pos: eval/next block  ; don&#39;t have to heed both returns
+    == [10 + 20]
+
+    &gt;&gt; [pos /result]: eval/next pos  ; but you can heed both returns
+    == []
+
+    &gt;&gt; result
+    == 30
+
+    &gt;&gt; [pos /result]: eval/next pos
+    == ~null~  ; anti
+
+    &gt;&gt; result
+    == ~null~  ; anti &lt;- not meaningful, because POS was null
+
+The reason you (often) need the slash on /RESULT is that when EVAL/NEXT is done, it returns a pure null... not a multi-return.  This makes it correctly reactive to THEN and ELSE, which consider nulls inside of parameter packs to be &quot;something&quot; instead of &quot;nothing&quot;.  But if you try to unpack a single null into two slots that is considered not enough.
+
+Using a leading slash on a multi-return unpack is indication that you accept there may not be enough items in the pack to have one for that variable.  We could choose to have the multi-return unpacker make it trash or null, but in general null is more useful.
+
+*(To distinguish from a null that was actually in a pack and unpacked, you&#39;d have to use **`^/result`**...which would meta the value so an unpacked null would be a quasiform ~null~, while the null resulting from too few values in the pack would be the antiform.  Caring about this is rare, but good to have a way to tell the difference if you do care.)*
+
+## Why Did I Make Position The Primary Return Result?
+
+1. **It Makes It Easier to Loop Through an Evaluation** - There are some situations where EVAL/NEXT doesn&#39;t care about the value synthesized, but pretty much no cases where you don&#39;t care about the new position.  Being able to conditionally test if the returned position reached the end of a loop is super convenient.
+
+       block: [1 + 2 10 + 20]
+
+       while [[block /result]: eval/next block] [
+           print [&quot;Step result was:&quot; result]
+       ]
+     
+     It&#39;s true that with Ren-C&#39;s super multi-return powers, you could ask for the second argument to be the overall main result.  But that&#39;s uglier, why be ugly?
+
+       block: [1 + 2 10 + 20]
+
+       while [[result @/block]: eval/next block] [
+           print [&quot;Step result was:&quot; result]
+       ]
+
+2. **Avoids Ambiguity When EVAL Result Is Itself A Multi-Return** - Imagine the following kind of confusion if we made the evaluation product the first result instead of the second:
+
+       &gt;&gt; block: [1 + 2 comment &quot;I don&#39;t care about this&quot;]
+
+       &gt;&gt; result: eval/next block  ; I just want the first thing!
+       == 3  ; great, I didn&#39;t want that position anyway
+
+       &gt;&gt; block: [pack [&lt;left&gt; &lt;right&gt;] comment &quot;I don&#39;t care about this&quot;]
+
+       &gt;&gt; [left right]: eval/next block  ; just want to unpack that first thing
+       == &lt;left&gt;  ; great, just what I expected
+
+       &gt;&gt; right
+       == [comment &quot;I don&#39;t care about this&quot;]  ; whaaa? I wanted &lt;right&gt;!
+
+    Encountering problems with this in the past has made me back off from using multi-returns in places they seemed like they would be perfect.  But what I now realize is you simply don&#39;t want your primary return result of a multi-return to be something that can itself be a multi-return... unless you *really* know what you are doing.
+
+     If you intend to do something with the evaluation product and want to be truly general, you of course have to be using ^META conventions:
+
+       [pos ^result]: eval/next pos
+
+     Whether you need to do that or not depends on what you are doing.  Why are you stepping through arrays one step at a time, anyway?  Usually intermediate results are discarded.  What is it precisely you are looking for?  (Again on my point of why making the position the primary result makes sense... usually you aren&#39;t looking at the result at all, you&#39;re a dialect and looking at what you advance to at the next position.)
+
+## LGTM :+1:</description>
+    
+    <lastBuildDate>Sat, 24 Aug 2024 00:36:58 +0000</lastBuildDate>
+    <category>Internals</category>
+    <atom:link href="https://forum.rebol.info/t/re-imagining-eval-next/767.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Re-imagining EVAL/NEXT</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <blockquote>
+<p><strong>NOTE:</strong> <a href="https://forum.rebol.info/t/do-of-text-as-synonym-of-do-of-file-containing-string/2125">The nature of DO is to deal with whole scripts</a>.  We know <strong><code>do/next %foo.r</code></strong> doesn't make any sense, and in fact having DO take a BLOCK! of Rebol code should be a dialect about how to load and bind what you pass it... not expressions like <strong><code>do [1 + 2]</code></strong>.</p>
+<p>So in modern Ren-C, array evaluation is handled by a primitive called <strong>EVAL</strong>.  Hence the /NEXT refinement has been removed from DO, and for a transitional period DO will not take BLOCK! at all... until all such references are gone.  At which point it will take a dialected LOAD spec, probably aligning closely with what IMPORT takes.</p>
+</blockquote>
+<h3>
+<a name="right-now-evalnext-takes-a-variable-to-store-the-new-position-1" class="anchor" href="https://forum.rebol.info#right-now-evalnext-takes-a-variable-to-store-the-new-position-1"></a>Right Now, EVAL/NEXT Takes A Variable To Store The New Position</h3>
+<pre><code>&gt;&gt; result: eval/next [1 + 2 10 + 20] $pos
+== 3
+
+&gt;&gt; pos
+== [10 + 20]
+</code></pre>
+<p>This is exactly how Red and R3-Alpha handle DO/NEXT.</p>
+<p>It was considered more convenient than how Rebol2 gave you a block of both the result and the new position...which you had to pick apart:</p>
+<pre><code>rebol2&gt;&gt; do/next [1 + 2 10 + 20]
+== [3 [10 + 20]]
+</code></pre>
+<p><em>(That couldn't work at all in Ren-C, because evaluation can produce antiforms, and antiforms can't be put in blocks.)</em></p>
+<h3>
+<a name="one-twist-evalnext-of-returns-a-null-position-2" class="anchor" href="https://forum.rebol.info#one-twist-evalnext-of-returns-a-null-position-2"></a>One Twist: EVAL/NEXT of [] Returns A NULL Position</h3>
+<p>If you try to step with /NEXT over a BLOCK! like <strong>[1 + 2 10 + 20]</strong>, then there are EXACTLY TWO steps with meaningful results of 3 and 30.</p>
+<p>So if you're going to be doing the evaluations in a WHILE loop, you want the EVAL/NEXT position result to return success twice, and then have a third call that returns null to signal the looping is done.</p>
+<p>This gives you the possibly surprising (or not?) result that <code>EVAL/NEXT []</code> doesn't take a step and doesn't synthesize VOID, even though <code>EVAL []</code> is VOID.  It's a terminal condition.  So if you're trying to take steps and generate an overall accumulated result, you have to seed your result with VOID... and then <code>EVAL/NEXT []</code> will tell you there was nothing to do and you return your seeded result.</p>
+<p>Make sense?</p>
+<p>Rebol2, Red, and R3-Alpha all require you to check for the TAIL? of the block as your terminal condition.  Because DO/NEXT on a tail position just produces an UNSET! and another tail position.</p>
+<pre><code>rebol2&gt;&gt; do/next [10 + 20]
+== [30 []]
+
+rebol2&gt;&gt; do/next []
+== [unset []]
+
+rebol2&gt;&gt; do/next []
+ == [unset []]
+</code></pre>
+<p>That's quite a lot more awkward to handle for a terminal condition.  In fact it forces you to check for TAIL? on the block you're evaluating <em>before</em> the first call to DO/NEXT (because seeing the tail afterward won't tell you if the previous step synthesized a valid UNSET!).</p>
+<p>R3-Alpha and Red didn't change this, and still make you check for TAIL? before you take steps:</p>
+<pre><code>r3-alpha/red&gt;&gt; do/next [10 + 20] 'pos
+== 30
+
+r3-alpha/red&gt;&gt; pos
+== []
+
+r3-alpha/red&gt;&gt; do/next [] 'pos
+; no console result here means unset
+
+r3-alpha/red&gt;&gt; pos
+== []
+
+r3-alpha/red&gt;&gt; do/next [] 'pos
+; no console result here means unset
+
+r3-alpha/red&gt;&gt; pos
+== []
+</code></pre>
+<p>Still very awkward, and unclear why they did this instead of making the POS be #[none].</p>
+<h2>
+<a name="but-ren-c-can-do-even-better-multi-returns-3" class="anchor" href="https://forum.rebol.info#but-ren-c-can-do-even-better-multi-returns-3"></a>But Ren-C Can Do Even Better: Multi-Returns!</h2>
+<p>What if EVAL/NEXT turned the return result into a parameter pack, where you get both the evaluation product and the new position?</p>
+<p><em>(I'm going to make it so it switches the main return result to be the position, and the secondary result is the evaluation product.  Then I'll explain why.)</em></p>
+<pre><code>&gt;&gt; block: [1 + 2 10 + 20]
+== [1 + 2 10 + 20]
+
+&gt;&gt; pos: eval/next block  ; don't have to heed both returns
+== [10 + 20]
+
+&gt;&gt; [pos /result]: eval/next pos  ; but you can heed both returns
+== []
+
+&gt;&gt; result
+== 30
+
+&gt;&gt; [pos /result]: eval/next pos
+== ~null~  ; anti
+
+&gt;&gt; result
+== ~null~  ; anti &lt;- not meaningful, because POS was null
+</code></pre>
+<p>The reason you (often) need the slash on /RESULT is that when EVAL/NEXT is done, it returns a pure null... not a multi-return.  This makes it correctly reactive to THEN and ELSE, which consider nulls inside of parameter packs to be "something" instead of "nothing".  But if you try to unpack a single null into two slots that is considered not enough.</p>
+<p>Using a leading slash on a multi-return unpack is indication that you accept there may not be enough items in the pack to have one for that variable.  We could choose to have the multi-return unpacker make it trash or null, but in general null is more useful.</p>
+<p><em>(To distinguish from a null that was actually in a pack and unpacked, you'd have to use <strong><code>^/result</code></strong>...which would meta the value so an unpacked null would be a quasiform ~null~, while the null resulting from too few values in the pack would be the antiform.  Caring about this is rare, but good to have a way to tell the difference if you do care.)</em></p>
+<h2>
+<a name="why-did-i-make-position-the-primary-return-result-4" class="anchor" href="https://forum.rebol.info#why-did-i-make-position-the-primary-return-result-4"></a>Why Did I Make Position The Primary Return Result?</h2>
+<ol>
+<li>
+<p><strong>It Makes It Easier to Loop Through an Evaluation</strong> - There are some situations where EVAL/NEXT doesn't care about the value synthesized, but pretty much no cases where you don't care about the new position.  Being able to conditionally test if the returned position reached the end of a loop is super convenient.</p>
+<pre><code>block: [1 + 2 10 + 20]
+
+while [[block /result]: eval/next block] [
+    print ["Step result was:" result]
+]
+</code></pre>
+<p>It's true that with Ren-C's super multi-return powers, you could ask for the second argument to be the overall main result.  But that's uglier, why be ugly?</p>
+<pre><code>block: [1 + 2 10 + 20]
+
+while [[result @/block]: eval/next block] [
+    print ["Step result was:" result]
+]
+</code></pre>
+</li>
+<li>
+<p><strong>Avoids Ambiguity When EVAL Result Is Itself A Multi-Return</strong> - Imagine the following kind of confusion if we made the evaluation product the first result instead of the second:</p>
+<pre><code>&gt;&gt; block: [1 + 2 comment "I don't care about this"]
+
+&gt;&gt; result: eval/next block  ; I just want the first thing!
+== 3  ; great, I didn't want that position anyway
+
+&gt;&gt; block: [pack [&lt;left&gt; &lt;right&gt;] comment "I don't care about this"]
+
+&gt;&gt; [left right]: eval/next block  ; just want to unpack that first thing
+== &lt;left&gt;  ; great, just what I expected
+
+&gt;&gt; right
+== [comment "I don't care about this"]  ; whaaa? I wanted &lt;right&gt;!
+</code></pre>
+<p>Encountering problems with this in the past has made me back off from using multi-returns in places they seemed like they would be perfect.  But what I now realize is you simply don't want your primary return result of a multi-return to be something that can itself be a multi-return... unless you <em>really</em> know what you are doing.</p>
+<p>If you intend to do something with the evaluation product and want to be truly general, you of course have to be using ^META conventions:</p>
+<pre><code>[pos ^result]: eval/next pos
+</code></pre>
+<p>Whether you need to do that or not depends on what you are doing.  Why are you stepping through arrays one step at a time, anyway?  Usually intermediate results are discarded.  What is it precisely you are looking for?  (Again on my point of why making the position the primary result makes sense... usually you aren't looking at the result at all, you're a dialect and looking at what you advance to at the next position.)</p>
+</li>
+</ol>
+<h2>
+<a name="lgtm-1-5" class="anchor" href="https://forum.rebol.info#lgtm-1-5"></a>LGTM <img src="https://forum.rebol.info/images/emoji/twitter/+1.png?v=12" title=":+1:" class="emoji" alt=":+1:" loading="lazy" width="20" height="20">
+</h2>
+          <p><a href="https://forum.rebol.info/t/re-imagining-eval-next/767/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/re-imagining-eval-next/767/1</link>
+        <pubDate>Thu, 22 Aug 2024 04:00:00 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-767-1</guid>
+        <source url="https://forum.rebol.info/t/re-imagining-eval-next/767.rss">Re-imagining EVAL/NEXT</source>
+      </item>
+  </channel>
+</rss>

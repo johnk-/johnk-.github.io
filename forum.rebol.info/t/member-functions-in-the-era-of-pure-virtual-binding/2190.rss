@@ -1,0 +1,710 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>&quot;Member Functions&quot; (in the era of Pure Virtual Binding)</title>
+    <link>https://forum.rebol.info/t/member-functions-in-the-era-of-pure-virtual-binding/2190</link>
+    <description>## Let&#39;s Start With &quot;Member Variable&quot; Binding
+
+The properties of historical Rebol binding created a bizarre environment in which to implement objects with methods and member variable references.
+
+There&#39;s a pretty basic question one can ask:
+
+&gt; **You: &quot;It appears that every WORD! can bind to at most one object containing that word&#39;s symbol.  So if I write a FUNC intended to act as a member function... what are the member word references bound to in that function&#39;s body, that allows them to apply the code to the field values of a new instance of the object?&quot;**
+
+To make a long story short:
+
+&gt; **Redbol: &quot;For every field of an object that holds a FUNCTION! value, making a new object instance will [*clone a new FUNCTION! value for the associated field in the copy*](https://github.com/rebol/rebol/blob/25033f897b2bd466068d7663563cd3ff64740b94/src/core/t-object.c#L338).  The original function&#39;s body is *[copied deeply](https://github.com/rebol/rebol/blob/25033f897b2bd466068d7663563cd3ff64740b94/src/core/f-blocks.c#L139)*, with any references to the original object&#39;s fields *[rebound to the field of the new object.](https://github.com/rebol/rebol/blob/25033f897b2bd466068d7663563cd3ff64740b94/src/core/c-frame.c#L1040)*&quot;**
+
+This creates a pathological explosion.  Make an object with 20 methods, each of which has a body that is built up of... say... 10 blocks on average.  Now instantiate 10,000 of those objects.
+
+Beyond the basic overhead you&#39;d expect from a new object copy, **you just allocated 200,000 new function identities... plus two million *nearly*-identical arrays for their bodies... *solely for the purpose of accomplishing what a single `this` or `self` pointer does in most OOP languages*.**
+
+Those with non-trivial codebases (e.g. Atronix) who at first wrote code in this style...
+
+    obj: make object! [
+       x: 10
+       f: func [y] [return x + y]
+    ]
+
+    &gt;&gt; obj/f 20
+    == 30
+
+...were forced to &quot;de-methodize&quot; it, passing the instance into a [&quot;free function&quot;](https://en.wikipedia.org/wiki/Free_function):
+
+    free-f: func [o y] [return o/x + y]
+
+    obj: make object! [
+       x: 10
+    ]
+
+    &gt;&gt; free-f obj 20
+    == 30
+
+---
+
+## Worth Noting: Rebol&#39;s Central Aesthetic *is* &quot;free functions&quot;
+
+Rebol&#39;s style of data mutation is done as &quot;generics&quot;, e.g.:
+
+    append block [1 2 3]
+    ;
+    ; ... NOT block/append [1 2 3]
+
+This dynamically chooses the right kind of APPEND procedure based *entirely* on the type of the first argument (blocks, strings, etc.)
+
+But you can&#39;t implement this generic for your own objects.  Red doesn&#39;t let you APPEND to OBJECT! at all.  While in R3-Alpha if you APPEND to an OBJECT! it just adds fields--vs. delegate to any &quot;append implementation&quot; associated with some kind of object &quot;class&quot;:
+
+    r3-alpha&gt;&gt; obj: make object! [a: 10]
+    == make object! [
+        a: 10
+    ]
+
+    r3-alpha&gt;&gt; append obj [b: 20]
+    == make object! [
+        a: 10
+        b: 20
+    ]
+
+I will mention that if you had a PORT!, curiously there was a way to supply an &quot;actor&quot; to PORT!s that could implement a small set of &quot;port actions&quot;.  For an example of this, see the original R3-Alpha ODBC extension:
+
+  https://github.com/gurzgri/r3-odbc/blob/c15c70d61a2f5c39cb01f7c685c4310d4ee987de/src/boot/odbc.r3#L68
+
+For the sake of documenting history, the list of &quot;generic verbs&quot; you can implement on a R3-Alpha are called &quot;port actions&quot; and [limited to this arbitrary set](https://github.com/rebol/rebol/blob/25033f897b2bd466068d7663563cd3ff64740b94/src/boot/actions.r#L361):
+
+CREATE, DELETE, OPEN, CLOSE, READ, WRITE, OPEN?, QUERY, MODIFY, UPDATE, RENAME
+
+So even that wouldn&#39;t help you with APPEND.
+
+---
+
+## Were &quot;Classes&quot; Ever On The Table in R3-Alpha?
+    
+On Carl&#39;s blog, circa 2006, he wrote **[At a CLASS Crossroads?](http://www.rebol.net/r3blogs/0035.html)**:
+
+He said:
+
+&gt; *&quot;And, on top of all this, I&#39;ve yet to mention the fact that **REBOL 3.0 is likely to support object methods** to make object function implementation more efficient (in memory usage). The implementing of methods in REBOL has always been considered difficult (mainly because there is no referential anchor for a group, a class, of objects -- they are prototypical and can be cloned from each other, not just a single parent). A class-based approach makes the implementation of methods much easier.*&quot;
+
+The post wasn&#39;t without criticism in the comments, e.g. from &quot;Pierre Johnson&quot;:
+
+&gt; *&quot;Class-based inheritance for REBOL? Why not just kill the product?&quot;*
+&gt;
+&gt; *&quot;Class-based Aristotlean socialist thinking abounds in academic-based / near academic-based junk -- Java, C++, C#, Python.&quot;*
+&gt;
+&gt; *&quot;While not elegant, perhaps the #1, most used programming language of the world is Javascript. Why? Simpler, rapid prototyping using prototypes.&quot;*
+
+You didn&#39;t really hear anything about it after that.  R3-Alpha got pretty bogged down just trying to be Rebol2 plus Unicode.
+
+---
+
+## How About Red?  Any Ideas There?
+
+When OBJECT! was first added to Red circa 2014, DocKimbel wrote the blog **[0.5.0: Objects support](https://www.red-lang.org/2014/12/050-objects-support.html)**, and says (emphasis mine)
+
+&gt; &quot;Red implements the same object concept as Rebol, called [prototype-based](http://en.wikipedia.org/wiki/Prototype-based_programming) objects. Creating new objects is done by cloning existing objects or the base OBJECT! value. During the creation process, existing field values can be modified and new fields can be added. It is a very simple and efficient model to encapsulate your Red code. **There is also a lot to say about words binding and contexts, but that topic is too long for this blog entry, we will address that in the future documentation.**&quot;
+
+Uh... I think I&#39;ve said above pretty much all there has historically been to say... and it only took me... maybe an hour?
+
+The big idea in Red is essentially to implement the [&quot;setters&quot;](https://en.wikipedia.org/wiki/Mutator_method) half of &quot;getters and setters&quot;.  If you have a field in an object with that the precise name ON-CHANGE*, it will get the name of a field... the old value... and the new value it takes on.  A lot of the code they seem to be interested in uses that instead of methods: just write a value to a field, and code executes.  If you can get your work done with just that, you won&#39;t have method binding problems.
+
+Although, presumably every copy of your object duplicates the ON-CHANGE* method itself?
+
+    red&gt;&gt; obj: make object! [
+        a: 10
+        on-change*: func [word old new] [print [word old new]]
+    ]
+
+    red&gt;&gt; obj/a: 20
+    a 10 20
+
+    red&gt;&gt; obj2: make obj [a: 30]
+    a 20 30  ; note obj2 sees creation w/new field value as a &quot;change&quot;
+
+    red&gt;&gt; body-of :obj/on-change*
+    == [print [word old new]]
+
+    red&gt;&gt; append body-of :obj/on-change* [print &quot;that figures.&quot;]
+    == [print [word old new] print &quot;that figures.&quot;]
+
+    red&gt;&gt; body-of :obj2/on-change*
+    == [print [word old new]]
+
+I take it back, this is way too complicated to address in a blog post.  *It&#39;s too deep.*  :roll_eyes: 
+
+----
+
+## *&quot;Okay, Ren-C... What Have You Got?&quot;*
+
+Building up to the existence of [Pure Virtual Binding II](https://forum.rebol.info/t/rebol-and-scopes-well-why-not/1751/9), Ren-C just kind of got waves of new tricks:
+
+* First there were **[&quot;definitional returns&quot;](https://forum.rebol.info/t/what-are-definitional-returns/2191)**, which gave each function a cell to store a local RETURN function.  While the behavior was unique to each function, no actual new identity was allocated.  Instead a slot in the 4-platform-pointer cell (known as the &quot;coupling&quot;) was used to hold the FRAME! of the instance of the running function...so it was efficient at doing so.
+
+* Then there was **[&quot;(function-)relative binding&quot;](https://forum.rebol.info/t/relative-binding-and-frame-internals/1344)**.  This started a separation in the type system of the interpreter code distinguishing a &quot;Cell&quot; (which hadn&#39;t had its binding fully resolved) from a &quot;Value&quot; (which did have a resolved binding).  Each function instantiation would slowly trickle down the FRAME! of the function during evaluation, such that the &quot;relative&quot; Cells would have to be paired with that frame before they could be passed to a routine doing non-structural Lookup to follow the word to a &quot;specific&quot; Value.
+
+* This laid the foundation for what I called [**&quot;derived binding&quot;**](https://forum.rebol.info/t/introducing-derived-binding/2192), which actually mixed the two approaches together.  Just as any particular local variable named RETURN could hold a FRAME! in a cell&#39;s &quot;coupling&quot; slot (while reusing the same canon RETURN implementation), you could use that technique to store an OBJECT! in *any* function&#39;s coupling slot.  So the function call would not only trickle down the frame, but also this object... so there would be two contexts that were searched during derelativization.
+
+So under derived binding, making a new object doesn&#39;t require either a new function identity or a deep copy.  It just means that the new object receives its function cells with an effective &quot;this&quot; pointer in one of the 4 platform-pointer-sized slots.  That pointer is stowed in the FRAME! and trickles down via the cells instantiated by the evaluator as it descends the relativized arrays.
+
+### Originally, Derived Binding Did Not Blindly Override...
+
+Here&#39;s something that didn&#39;t work in derived binding as you&#39;d expect given what I described:
+
+    old-ren-c&gt;&gt; x: 42
+
+    old-ren-c&gt;&gt; obj: make object! [x: 10, f: null]
+
+    old-ren-c&gt;&gt; obj2: make obj [x: 20, f: null]
+
+    old-ren-c&gt;&gt; obj2.f: func [] [print [&quot;x is&quot; x]]
+
+    old-ren-c&gt;&gt; obj2.f: couple :obj2.f obj2
+
+    old-ren-c&gt;&gt; obj2.f
+    x is 42
+
+The reason it didn&#39;t work was because this function was defined outside the scope of the MAKE OBJECT!, meaning the binding of the X was to 42.  When applying derived binding, Ren-C wouldn&#39;t do any overriding of any WORD! references that weren&#39;t bound to an object that was in the same &quot;inheritance chain&quot;.
+
+You&#39;d have to do something like this to see the effect:
+
+    old-ren-c&gt;&gt; x: 42
+
+    old-ren-c&gt;&gt; obj: make object! [x: 10, f: func [] [print [&quot;x is&quot; x]]]
+
+    old-ren-c&gt;&gt; obj2: make obj [x: 20, f: null]
+
+    old-ren-c&gt;&gt; obj2.f: couple :obj.f obj2
+
+    old-ren-c&gt;&gt; obj2.f
+    x is 20
+
+Here, the X was deep walked during the MAKE OBJECT! and bound to OBJ&#39;s X.  When derived binding went to run the rebound function in OBJ2, it noticed that the binding to X was to a relative of OBJ2 in the inheritance chain... so it was willing to &quot;forward&quot; that binding to the object in the FRAME! it was relativizing against.
+
+Note that the sort of virtual &quot;this&quot; pointer is not coming from the fact that OBJ2 is on the left hand side of the instantiation of the call to **OBJ2.F** -- it&#39;s solely coming from the coupling slot in the cell stored in that field.  You could make OBJ2.F be derived-bound to anything you want.
+
+And now I can tell you that if you had used METHOD instead of FUNC... and hadn&#39;t said **`(f: null)`** when making OBJ2, then the above behavior is what you would get automatically.  The MAKE OBJECT! would simply notice when any of the fields it was copying had a stowed function with a coupling slot of itself, and update the cell in the new object with a coupling pointer to the new object.
+
+*(All METHOD is, is an enfix operator that steals the binding from the SET-WORD! on its left to poke into the cell of the generated function.)*
+
+### But With Virtual Binding II, The Object Wins (Mostly)
+
+We&#39;re not in binding Kansas anymore... there is no &quot;deep walk&quot; when the FUNC is created that gives X an initial binding of 10.  As of this moment, bindings aren&#39;t ever overridden *(hole punching is still on the table, but let&#39;s not go there right now...)*
+
+    &gt;&gt; x: 10
+
+    &gt;&gt; obj: make object! [x: 20, f: null]
+
+    &gt;&gt; obj.f: func [] [print [&quot;x is&quot; x]]
+
+    &gt;&gt; obj.f: couple :obj.f obj
+
+    &gt;&gt; obj.f
+    x is 20
+
+I actually didn&#39;t know what the following would do until I tried it:
+
+    &gt;&gt; obj.f: func [x] [print [&quot;x is&quot; x]]
+
+    &gt;&gt; obj.f: couple :obj.f obj
+
+    &gt;&gt; obj.f 30
+    x is 30
+
+I guess locals to the function are looked up first, before member variables.  Maybe I meant to do that *(C++ does it that way)*.
+
+---
+
+## What Have We Learned?
+
+* It seems Rebol could use a better way of doing [multiple dispatch](https://en.wikipedia.org/wiki/Multiple_dispatch) so that you could write things like **`append my-object [a b c]`** and get custom behavior for the &quot;class&quot;.
+
+    * The aesthetic of the system is supposed to promote that kind of free-function syntax
+
+    * It doesn&#39;t make a lot of sense that you can only do this with PORT! and only for a handful of &quot;generic verbs&quot;
+
+* But to the extent people have wanted to do traditional `obj/member` calls (in Ren-C `obj.member`), the historical implementation of the idea was catastrophically bad
+
+    * Without changing the overall usage experience (much), Ren-C wiped out the pathological implementation aspects
+
+    * While Ren-C may be on the whole slower than its peers for many things at the moment, derived binding is one area where it blows them away.
+
+        * The [&quot;O-Big&quot; example](https://github.com/metaeducation/ren-c/blob/199db785027eaec3132b2edbd42bdf6364f64e8d/tests/datatypes/object.test.reb#L140) I came up with is simply not runnable in R3-Alpha or Red.</description>
+    
+    <lastBuildDate>Mon, 19 Aug 2024 14:06:59 +0000</lastBuildDate>
+    <category>Binding</category>
+    <atom:link href="https://forum.rebol.info/t/member-functions-in-the-era-of-pure-virtual-binding/2190.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>&quot;Member Functions&quot; (in the era of Pure Virtual Binding)</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="3" data-topic="2190">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/40/26_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>As is frequently the case, I write a long post and then start messing with the implementation and find problems immediately.</p>
+</blockquote>
+</aside>
+<p><strong>A first tentative step showed some success, and allowed the deletion of ugly cruft while still working on complex examples!</strong>  That's always a win.</p>
+<p>But when you're writing freeform code inside of a MAKE OBJECT!, it can be easy to forget to use <strong><code>.field</code></strong> instead of just <strong><code>field</code></strong>.  This is because at time of writing, everything in the object spec block sees the words of the object being created.</p>
+<p>e.g. if you say:</p>
+<pre><code>obj: make object! [
+    x: 10
+    repeat 3 [
+        x: x + 1
+        print ["x is" x]
+    ]
+ ]
+</code></pre>
+<p>That will give you:</p>
+<pre><code>x is 11
+x is 12
+x is 13
+== make object! [
+    x: 13
+]
+</code></pre>
+<p>The broad and deep availability of the object's fields inside of this can be very cool <em>sometimes</em>.  But a lot of the time it is a pain... you often only want the top-level SET-WORD!s to target the object being created, leaving plain WORD!s and anything deeper alone:</p>
+<pre><code>make-point: func [x [integer!] y [integer!]] [
+    return make object! [x: x, y: y]  ; can't do this, x and y are unset!
+]
+
+make-point: func [x [integer!] y [integer!]] [
+    return make object! compose [x: (x), y: (y)]  ; works, but ... annoying
+]
+</code></pre>
+<p>So I'm gathering we need a stricter construction operation that doesn't deeply fog up the bindings inside the block.  Essentially, semantics like this, where all the code that isn't a top-level SET-WORD! acts like it isn't inside the object's "scope" at all:</p>
+<pre><code>obj: simple-construct [x: &lt;expr1&gt; y: &lt;expr2&gt; z:&lt;expr3&gt;]
+=&gt;
+obj: make object! [x: y: z: null]
+obj.x: &lt;expr1&gt;
+obj.y: &lt;expr2&gt;
+obj.z: &lt;expr3&gt;
+</code></pre>
+<p>This way, if you define a function inside a SIMPLE-CONSTRUCT you can't fail to use the <code>.field</code> reference style for the members.</p>
+<p>I've pointed out before that what MAKE OBJECT! does is high-level and weird, and <a href="https://forum.rebol.info/t/breaking-make-object-into-component-operations/1442">needs to be broken up into component operations</a>.  <strong>And I'm now suspecting that FENCE! should have the SIMPLE-CONSTRUCT semantics</strong>, such that the following would work:</p>
+<pre><code>make-point: func [x [integer!] y [integer!]] [
+    return {x: x, y: y}
+]
+</code></pre>
+<p>Not that doing-as-JavaScript-does is much of an argument for anything, but I'll point out that does work in JS:</p>
+<pre><code>function make_point(x,y) { return {x: x, y: y} }
+
+&gt;&gt; make_point(10,20)
+&lt;- Object { x: 10, y: 20 }
+</code></pre>
+<p>Looking back on history, I actually see the motivation for why CONTEXT used to be a synonym for what MAKE OBJECT! does in Rebol2/R3-Alpha-Red:</p>
+<pre><code>context: func [
+    "Defines a unique (underived) object."
+    blk [block!] "Object variables and values."
+][
+    make object! blk
+]
+</code></pre>
+<p>If you write something like:</p>
+<pre><code>obj: context [foo: 10, print ["foo is" (foo: foo + 1)], bar: 20]
+</code></pre>
+<p>That actually makes clearer sense, in that it tells you what you're doing is setting up a context in which code will run.  I didn't like it because CONTEXT was a noun.  Maybe CONTEXTUALIZE?</p>
+<pre><code>obj: contextualize [foo: 10, print ["foo is" (foo: foo + 1)], bar: 20]
+</code></pre>
+<p>But it makes sense that there's a verb in this variation that takes in a BLOCK!, because there are high odds you will need to COMPOSE it if there are any collisions between names in the context and names outside of it that you want to reference.</p>
+<p>Perhaps we should start looking at MAKE as being a truly high-level builder, not a low level one.  I have had some thoughts about that, even <a href="http://www.rebol.net/r3blogs/0003.html">going back to variadicness</a> *(via Ren-C mechanisms), perhaps like:</p>
+<pre><code> foo: make function [arg] [print ["arg is" arg]]
+
+ obj: make object [foo: 10, print ["foo is" (foo: foo + 1)], bar: 20]
+</code></pre>
+<p>MAKE could quote the word after it, and this doesn't look too bad.  You could still specialize the non-variadic bits today:</p>
+<pre><code> func: specialize :make [name: 'function]
+</code></pre>
+<p>Partially specializing the variadic portion would be less easy, so perhaps there would be <strong>make-function</strong> and <strong>make-object</strong> available, which are dispatched to by the internals of MAKE's syntax sugar.</p>
+<p>Tangents aside though--this does look like some of the haze surrounding this may be dissipating.  If coming up with names for things winds up being the last bit to solve, we'll be quite lucky.</p>
+          <p><a href="https://forum.rebol.info/t/member-functions-in-the-era-of-pure-virtual-binding/2190/4">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/member-functions-in-the-era-of-pure-virtual-binding/2190/4</link>
+        <pubDate>Mon, 19 Aug 2024 14:06:59 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-2190-4</guid>
+        <source url="https://forum.rebol.info/t/member-functions-in-the-era-of-pure-virtual-binding/2190.rss">&quot;Member Functions&quot; (in the era of Pure Virtual Binding)</source>
+      </item>
+      <item>
+        <title>&quot;Member Functions&quot; (in the era of Pure Virtual Binding)</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>A post was split to a new topic: <a href="https://forum.rebol.info/t/usermode-multiple-dispatch-in-r/2193">Usermode Multiple Dispatch in R</a></p>
+          <p><a href="https://forum.rebol.info/t/member-functions-in-the-era-of-pure-virtual-binding/2190/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/member-functions-in-the-era-of-pure-virtual-binding/2190/2</link>
+        <pubDate>Mon, 19 Aug 2024 07:15:58 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-2190-2</guid>
+        <source url="https://forum.rebol.info/t/member-functions-in-the-era-of-pure-virtual-binding/2190.rss">&quot;Member Functions&quot; (in the era of Pure Virtual Binding)</source>
+      </item>
+      <item>
+        <title>&quot;Member Functions&quot; (in the era of Pure Virtual Binding)</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group quote-modified" data-username="hostilefork" data-post="1" data-topic="2190">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/40/26_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>And now I can tell you that if you had used METHOD instead of FUNC... and hadn't said <strong><code>(f: null)</code></strong> when making OBJ2, then the above behavior is what you would get automatically. The MAKE OBJECT! would simply notice when any of the fields it was copying had a stowed function with a coupling slot of itself, and update the cell in the new object with a pointer to the new object.</p>
+</blockquote>
+</aside>
+<p>Something that bothers me is...</p>
+<p>...this derived binding may use a very optimized implementation compared to R3-Alpha or Red.  <strong>But it's still effectively doing something that feels "dirty" when you make a derived object and it feels the need to make decisions to go around adjusting cells so they are effectively different functions.</strong></p>
+<p>What if you wanted to grab a function that was relativized against an object and put it into another object, and have its object coupling "stick"?  You were just moving a piece of hardened functionality around to act like a function, but it re-relativizes it.</p>
+<p>Almost worse to me <em>is that you only get the re-relativization on derivation</em>.  Not because that's conceptually the best time to do it, but because it would be even more dirty code if you had to hook every assignment.</p>
+<aside class="quote no-group quote-modified" data-username="hostilefork" data-post="1" data-topic="2190">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/40/26_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>Note that the sort of virtual "this" pointer is not coming from the fact that OBJ2 is on the left hand side of the instantiation of the call to <strong>OBJ2.F</strong> -- it's solely coming from the slot in the cell stored in that field. You could make OBJ2.F be derived-bound to anything you want.</p>
+</blockquote>
+</aside>
+<p>In light of the above I have frequently asked myself: <strong>"why NOT get the <code>'this'</code> pointer from the left hand side???"</strong></p>
+<p>Then the system won't have to go around tweaking function cells without consulting you.  And if you ever explicitly put a coupling to a specific object in a function cell, that never gets overridden by the system.  It's assumed you meant to create a persistent coupling of that method with that object--at which point it can be called with no left-hand side (if you like).</p>
+<h3>
+<a name="butnot-every-function-in-an-object-is-a-method-of-that-object-1" class="anchor" href="https://forum.rebol.info#butnot-every-function-in-an-object-is-a-method-of-that-object-1"></a>But...Not Every Function In An Object Is A Method Of That Object</h3>
+<p>Let's say I write some kind of emitter:</p>
+<pre><code> msg: "I am emitting:"
+
+ my-emitter: func [item] [
+     print [msg (mold item)]
+ ]
+</code></pre>
+<p>Now lets say you have some overall state object which lets you provide a handler:</p>
+<pre><code> p: make processor [factor: 10]
+ p.emit: :my-emitter
+ process p [1 2 3]
+</code></pre>
+<p>You're hoping to get:</p>
+<pre><code> I am emitting: 10
+ I am emitting: 20
+ I am emitting: 30
+</code></pre>
+<p>But instead you are surprised to get:</p>
+<pre><code>** Script Error: PROCESSOR =&gt; 10
+</code></pre>
+<p>Looking at the code, you can see why:</p>
+<pre><code> processor: make object! [
+     factor: null
+     subsystem: "PROCESSOR"
+     msg: func [text] [fail [subsystem "=&gt;" text]] 
+     emit: null
+ ]                         
+
+ process: func [p [object!] data [block!]] [
+      if not integer? p.factor [msg "FACTOR must be INTEGER!"]
+      if not action? :p.emit [msg "EMIT must be ACTION!"]
+      for-each item data [
+          p.emit item * factor
+      ]
+ ]
+</code></pre>
+<p>If <strong>p.emit</strong> automatically injects P into EMIT asssuming it's a method of P, then MY-EMITTER will see MSG as it is defined in P.</p>
+<h2>
+<a name="well-what-if-member-variables-were-annotated-2" class="anchor" href="https://forum.rebol.info#well-what-if-member-variables-were-annotated-2"></a>Well, What If Member Variables Were Annotated?</h2>
+<p>So if we are always "relativizing against" the left hand side, it's clearly a problem that we're just assuming any old plain WORD! is supposed to be a member.</p>
+<p>What if for METHOD there was a <code>'this'</code> (or <code>'self'</code>, as in R3-Alpha), and it was initialized to the invocation object.  This could come either from the function cell, or if not in the cell then the left hand side.</p>
+<pre><code> msg: method [text] [fail [self.subsystem "=&gt;" text]] 
+</code></pre>
+<p>Some drawbacks:</p>
+<ul>
+<li>
+<p>It does mean we've either created a second class of function (or we give in and just give all FUNCs a SELF regardless of whether you're going to use it)</p>
+</li>
+<li>
+<p>On a tiny function like this it may not look bad, but I absolutely HATE seeing <code>this</code> and <code>self</code> noise all over a method code (Rust drives me up the wall where it can be every other word in the function).</p>
+</li>
+<li>
+<p>We're kind-of creating a keyword, and I don't like that</p>
+</li>
+</ul>
+<p>So I've wondered: <strong>"what if we gave the meaning of a BLANK!-headed tuple to mean "pick out of the relativized invocation object?"</strong></p>
+<pre><code>&gt;&gt; to tuple! [_ subsystem]
+== .subsystem
+</code></pre>
+<p>It's light, it doesn't use any keywords, and would be a <em>vast</em> help in reading code to tell what's a member access and what is not.</p>
+<pre><code>msg: func [text] [fail [.subsystem "=&gt;" text]] 
+</code></pre>
+<p>It might help to still have to flip some flag with a FUNC vs METHOD distinction to get it.  I don't know.</p>
+<h2>
+<a name="but-its-not-a-word-anymore-3" class="anchor" href="https://forum.rebol.info#but-its-not-a-word-anymore-3"></a>But... It's Not a WORD! Anymore</h2>
+<p>Historically there have been many places where you could put a WORD! but could not put a member selection (historically, via PATH!)</p>
+<p>Just one small example: consider this simple Red code today:</p>
+<pre><code>red&gt;&gt; a: none
+red&gt;&gt; parse [1] [set a integer!]
+red&gt;&gt; a
+== 1
+
+red&gt;&gt; obj: make object! [b: none]
+red&gt;&gt; parse [1] [set obj/b integer!]
+*** Script Error: PARSE - unexpected end of rule after: set
+</code></pre>
+<p>Generally speaking I don't think this is a good argument against it.  A good Ren-C dialect should be willing to take a TUPLE! pretty much anywhere it takes a WORD! <em>(in the event it is intended to be a variable reference)</em>.</p>
+<p>So if anything it's an argument for it.  And it makes it rather nice that <strong><code>.foo</code></strong> is indeed a reduced case of TUPLE! which you should already be handling...instead of some other novel datatype.</p>
+<p>And with pure virtual binding, you could always import it, using some construct or another.</p>
+<pre><code>msg: method [text] [
+   use .  ; imports all fields to top of context stack
+   fail [subsystem "=&gt;" text]  ; dot no longer required
+]
+</code></pre>
+<p>Maybe the construct would let you import just what you wanted as a WORD!:</p>
+<pre><code>msg: method [text] [
+   use .subsystem
+   fail [subsystem "=&gt;" text]
+]
+</code></pre>
+<h2>
+<a name="but-blank-headed-tuple-and-path-were-previously-inert-4" class="anchor" href="https://forum.rebol.info#but-blank-headed-tuple-and-path-were-previously-inert-4"></a>But BLANK!-Headed TUPLE! And PATH! Were Previously Inert...</h2>
+<p>In order to match historical behavior of "refinement!"s, BLANK!-headed paths e.g. <strong><code>/foo</code></strong> are inert.  So BLANK!-headed tuples got the same treatment.</p>
+<p>The actual logic was "any path or tuple with an inert first element is inert".  Hence why <strong><code>192.0.0.1</code></strong> is inert instead of a "cannot pick 0 out of 192" error.</p>
+<p>Ah well.  <a href="https://www.youtube.com/watch?v=PJIfYUK-SqM">Symmetry is boring, anyway....</a></p>
+<pre><code>Odd is our god
+So keep it uneven
+Our talent's imbalance
+It's what we believe in
+</code></pre>
+<h2>
+<a name="get-tuple-cant-automatically-poke-the-cells-field-right-5" class="anchor" href="https://forum.rebol.info#get-tuple-cant-automatically-poke-the-cells-field-right-5"></a>GET-TUPLE! Can't Automatically Poke The Cell's Field, Right?</h2>
+<p>When we think about doing something like:</p>
+<pre><code>extracted: :p.emit
+</code></pre>
+<p>That should leave the function alone, right...vs. harden a reference to the P object inside the cell of the action for EXTRACTED?</p>
+<p>It doesn't seem like a bad thing to have to be explicit about hardening an extracted method.</p>
+<pre><code>extracted: couple :p.msg p  ; or whatever
+
+extracted ...  ; now you can call it with no left hand side
+</code></pre>
+<hr>
+<h1>
+<a name="im-curious-enough-to-try-it-6" class="anchor" href="https://forum.rebol.info#im-curious-enough-to-try-it-6"></a>I'm Curious Enough To Try It</h1>
+<p>As is frequently the case, I write a long post and then start messing with the implementation and find problems immediately.</p>
+<p>But this is a line of thinking that I've had for a long time... driven both by the near-unreadability of things (like Rebmake) which don't call out member field accesses in giant functions... as well as a strong distaste for the "auto-twiddling" that happens to functions in derivation.</p>
+<p>Pure Virtual Binding II now brings this idea within reach.  So I'm going to give it a shot.  Clearly there's going to be some bit of new implementation magic around to allow a tuple like <strong><code>.foo</code></strong> to carry the frame with it when bound, despite not having a word (as OBJ in <code>obj.foo</code>) to carry it on.</p>
+          <p><a href="https://forum.rebol.info/t/member-functions-in-the-era-of-pure-virtual-binding/2190/3">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/member-functions-in-the-era-of-pure-virtual-binding/2190/3</link>
+        <pubDate>Mon, 19 Aug 2024 06:39:33 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-2190-3</guid>
+        <source url="https://forum.rebol.info/t/member-functions-in-the-era-of-pure-virtual-binding/2190.rss">&quot;Member Functions&quot; (in the era of Pure Virtual Binding)</source>
+      </item>
+      <item>
+        <title>&quot;Member Functions&quot; (in the era of Pure Virtual Binding)</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <h2>
+<a name="lets-start-with-member-variable-binding-1" class="anchor" href="https://forum.rebol.info#lets-start-with-member-variable-binding-1"></a>Let's Start With "Member Variable" Binding</h2>
+<p>The properties of historical Rebol binding created a bizarre environment in which to implement objects with methods and member variable references.</p>
+<p>There's a pretty basic question one can ask:</p>
+<blockquote>
+<p><strong>You: "It appears that every WORD! can bind to at most one object containing that word's symbol.  So if I write a FUNC intended to act as a member function... what are the member word references bound to in that function's body, that allows them to apply the code to the field values of a new instance of the object?"</strong></p>
+</blockquote>
+<p>To make a long story short:</p>
+<blockquote>
+<p><strong>Redbol: "For every field of an object that holds a FUNCTION! value, making a new object instance will <a href="https://github.com/rebol/rebol/blob/25033f897b2bd466068d7663563cd3ff64740b94/src/core/t-object.c#L338"><em>clone a new FUNCTION! value for the associated field in the copy</em></a>.  The original function's body is <em><a href="https://github.com/rebol/rebol/blob/25033f897b2bd466068d7663563cd3ff64740b94/src/core/f-blocks.c#L139">copied deeply</a></em>, with any references to the original object's fields <em><a href="https://github.com/rebol/rebol/blob/25033f897b2bd466068d7663563cd3ff64740b94/src/core/c-frame.c#L1040">rebound to the field of the new object.</a></em>"</strong></p>
+</blockquote>
+<p>This creates a pathological explosion.  Make an object with 20 methods, each of which has a body that is built up of... say... 10 blocks on average.  Now instantiate 10,000 of those objects.</p>
+<p>Beyond the basic overhead you'd expect from a new object copy, <strong>you just allocated 200,000 new function identities... plus two million <em>nearly</em>-identical arrays for their bodies... <em>solely for the purpose of accomplishing what a single <code>this</code> or <code>self</code> pointer does in most OOP languages</em>.</strong></p>
+<p>Those with non-trivial codebases (e.g. Atronix) who at first wrote code in this style...</p>
+<pre><code>obj: make object! [
+   x: 10
+   f: func [y] [return x + y]
+]
+
+&gt;&gt; obj/f 20
+== 30
+</code></pre>
+<p>...were forced to "de-methodize" it, passing the instance into a <a href="https://en.wikipedia.org/wiki/Free_function">"free function"</a>:</p>
+<pre><code>free-f: func [o y] [return o/x + y]
+
+obj: make object! [
+   x: 10
+]
+
+&gt;&gt; free-f obj 20
+== 30
+</code></pre>
+<hr>
+<h2>
+<a name="worth-noting-rebols-central-aesthetic-is-free-functions-2" class="anchor" href="https://forum.rebol.info#worth-noting-rebols-central-aesthetic-is-free-functions-2"></a>Worth Noting: Rebol's Central Aesthetic <em>is</em> "free functions"</h2>
+<p>Rebol's style of data mutation is done as "generics", e.g.:</p>
+<pre><code>append block [1 2 3]
+;
+; ... NOT block/append [1 2 3]
+</code></pre>
+<p>This dynamically chooses the right kind of APPEND procedure based <em>entirely</em> on the type of the first argument (blocks, strings, etc.)</p>
+<p>But you can't implement this generic for your own objects.  Red doesn't let you APPEND to OBJECT! at all.  While in R3-Alpha if you APPEND to an OBJECT! it just adds fields--vs. delegate to any "append implementation" associated with some kind of object "class":</p>
+<pre><code>r3-alpha&gt;&gt; obj: make object! [a: 10]
+== make object! [
+    a: 10
+]
+
+r3-alpha&gt;&gt; append obj [b: 20]
+== make object! [
+    a: 10
+    b: 20
+]
+</code></pre>
+<p>I will mention that if you had a PORT!, curiously there was a way to supply an "actor" to PORT!s that could implement a small set of "port actions".  For an example of this, see the original R3-Alpha ODBC extension:</p>
+<p><a href="https://github.com/gurzgri/r3-odbc/blob/c15c70d61a2f5c39cb01f7c685c4310d4ee987de/src/boot/odbc.r3#L68" class="inline-onebox">r3-odbc/src/boot/odbc.r3 at c15c70d61a2f5c39cb01f7c685c4310d4ee987de · gurzgri/r3-odbc · GitHub</a></p>
+<p>For the sake of documenting history, the list of "generic verbs" you can implement on a R3-Alpha are called "port actions" and <a href="https://github.com/rebol/rebol/blob/25033f897b2bd466068d7663563cd3ff64740b94/src/boot/actions.r#L361">limited to this arbitrary set</a>:</p>
+<p>CREATE, DELETE, OPEN, CLOSE, READ, WRITE, OPEN?, QUERY, MODIFY, UPDATE, RENAME</p>
+<p>So even that wouldn't help you with APPEND.</p>
+<hr>
+<h2>
+<a name="were-classes-ever-on-the-table-in-r3-alpha-3" class="anchor" href="https://forum.rebol.info#were-classes-ever-on-the-table-in-r3-alpha-3"></a>Were "Classes" Ever On The Table in R3-Alpha?</h2>
+<p>On Carl's blog, circa 2006, he wrote <strong><a href="http://www.rebol.net/r3blogs/0035.html">At a CLASS Crossroads?</a></strong>:</p>
+<p>He said:</p>
+<blockquote>
+<p><em>"And, on top of all this, I've yet to mention the fact that <strong>REBOL 3.0 is likely to support object methods</strong> to make object function implementation more efficient (in memory usage). The implementing of methods in REBOL has always been considered difficult (mainly because there is no referential anchor for a group, a class, of objects -- they are prototypical and can be cloned from each other, not just a single parent). A class-based approach makes the implementation of methods much easier.</em>"</p>
+</blockquote>
+<p>The post wasn't without criticism in the comments, e.g. from "Pierre Johnson":</p>
+<blockquote>
+<p><em>"Class-based inheritance for REBOL? Why not just kill the product?"</em></p>
+<p><em>"Class-based Aristotlean socialist thinking abounds in academic-based / near academic-based junk -- Java, C++, C#, Python."</em></p>
+<p><em>"While not elegant, perhaps the <span class="hashtag">#1</span>, most used programming language of the world is Javascript. Why? Simpler, rapid prototyping using prototypes."</em></p>
+</blockquote>
+<p>You didn't really hear anything about it after that.  R3-Alpha got pretty bogged down just trying to be Rebol2 plus Unicode.</p>
+<hr>
+<h2>
+<a name="how-about-red-any-ideas-there-4" class="anchor" href="https://forum.rebol.info#how-about-red-any-ideas-there-4"></a>How About Red?  Any Ideas There?</h2>
+<p>When OBJECT! was first added to Red circa 2014, DocKimbel wrote the blog <strong><a href="https://www.red-lang.org/2014/12/050-objects-support.html">0.5.0: Objects support</a></strong>, and says (emphasis mine)</p>
+<blockquote>
+<p>"Red implements the same object concept as Rebol, called <a href="http://en.wikipedia.org/wiki/Prototype-based_programming">prototype-based</a> objects. Creating new objects is done by cloning existing objects or the base OBJECT! value. During the creation process, existing field values can be modified and new fields can be added. It is a very simple and efficient model to encapsulate your Red code. <strong>There is also a lot to say about words binding and contexts, but that topic is too long for this blog entry, we will address that in the future documentation.</strong>"</p>
+</blockquote>
+<p>Uh... I think I've said above pretty much all there has historically been to say... and it only took me... maybe an hour?</p>
+<p>The big idea in Red is essentially to implement the <a href="https://en.wikipedia.org/wiki/Mutator_method">"setters"</a> half of "getters and setters".  If you have a field in an object with that the precise name ON-CHANGE*, it will get the name of a field... the old value... and the new value it takes on.  A lot of the code they seem to be interested in uses that instead of methods: just write a value to a field, and code executes.  If you can get your work done with just that, you won't have method binding problems.</p>
+<p>Although, presumably every copy of your object duplicates the ON-CHANGE* method itself?</p>
+<pre><code>red&gt;&gt; obj: make object! [
+    a: 10
+    on-change*: func [word old new] [print [word old new]]
+]
+
+red&gt;&gt; obj/a: 20
+a 10 20
+
+red&gt;&gt; obj2: make obj [a: 30]
+a 20 30  ; note obj2 sees creation w/new field value as a "change"
+
+red&gt;&gt; body-of :obj/on-change*
+== [print [word old new]]
+
+red&gt;&gt; append body-of :obj/on-change* [print "that figures."]
+== [print [word old new] print "that figures."]
+
+red&gt;&gt; body-of :obj2/on-change*
+== [print [word old new]]
+</code></pre>
+<p>I take it back, this is way too complicated to address in a blog post.  <em>It's too deep.</em>  <img src="https://forum.rebol.info/images/emoji/twitter/roll_eyes.png?v=12" title=":roll_eyes:" class="emoji" alt=":roll_eyes:" loading="lazy" width="20" height="20"></p>
+<hr>
+<h2>
+<a name="okay-ren-c-what-have-you-got-5" class="anchor" href="https://forum.rebol.info#okay-ren-c-what-have-you-got-5"></a><em>"Okay, Ren-C... What Have You Got?"</em>
+</h2>
+<p>Building up to the existence of <a href="https://forum.rebol.info/t/rebol-and-scopes-well-why-not/1751/9">Pure Virtual Binding II</a>, Ren-C just kind of got waves of new tricks:</p>
+<ul>
+<li>
+<p>First there were <strong><a href="https://forum.rebol.info/t/what-are-definitional-returns/2191">"definitional returns"</a></strong>, which gave each function a cell to store a local RETURN function.  While the behavior was unique to each function, no actual new identity was allocated.  Instead a slot in the 4-platform-pointer cell (known as the "coupling") was used to hold the FRAME! of the instance of the running function...so it was efficient at doing so.</p>
+</li>
+<li>
+<p>Then there was <strong><a href="https://forum.rebol.info/t/relative-binding-and-frame-internals/1344">"(function-)relative binding"</a></strong>.  This started a separation in the type system of the interpreter code distinguishing a "Cell" (which hadn't had its binding fully resolved) from a "Value" (which did have a resolved binding).  Each function instantiation would slowly trickle down the FRAME! of the function during evaluation, such that the "relative" Cells would have to be paired with that frame before they could be passed to a routine doing non-structural Lookup to follow the word to a "specific" Value.</p>
+</li>
+<li>
+<p>This laid the foundation for what I called <a href="https://forum.rebol.info/t/introducing-derived-binding/2192"><strong>"derived binding"</strong></a>, which actually mixed the two approaches together.  Just as any particular local variable named RETURN could hold a FRAME! in a cell's "coupling" slot (while reusing the same canon RETURN implementation), you could use that technique to store an OBJECT! in <em>any</em> function's coupling slot.  So the function call would not only trickle down the frame, but also this object... so there would be two contexts that were searched during derelativization.</p>
+</li>
+</ul>
+<p>So under derived binding, making a new object doesn't require either a new function identity or a deep copy.  It just means that the new object receives its function cells with an effective "this" pointer in one of the 4 platform-pointer-sized slots.  That pointer is stowed in the FRAME! and trickles down via the cells instantiated by the evaluator as it descends the relativized arrays.</p>
+<h3>
+<a name="originally-derived-binding-did-not-blindly-override-6" class="anchor" href="https://forum.rebol.info#originally-derived-binding-did-not-blindly-override-6"></a>Originally, Derived Binding Did Not Blindly Override...</h3>
+<p>Here's something that didn't work in derived binding as you'd expect given what I described:</p>
+<pre><code>old-ren-c&gt;&gt; x: 42
+
+old-ren-c&gt;&gt; obj: make object! [x: 10, f: null]
+
+old-ren-c&gt;&gt; obj2: make obj [x: 20, f: null]
+
+old-ren-c&gt;&gt; obj2.f: func [] [print ["x is" x]]
+
+old-ren-c&gt;&gt; obj2.f: couple :obj2.f obj2
+
+old-ren-c&gt;&gt; obj2.f
+x is 42
+</code></pre>
+<p>The reason it didn't work was because this function was defined outside the scope of the MAKE OBJECT!, meaning the binding of the X was to 42.  When applying derived binding, Ren-C wouldn't do any overriding of any WORD! references that weren't bound to an object that was in the same "inheritance chain".</p>
+<p>You'd have to do something like this to see the effect:</p>
+<pre><code>old-ren-c&gt;&gt; x: 42
+
+old-ren-c&gt;&gt; obj: make object! [x: 10, f: func [] [print ["x is" x]]]
+
+old-ren-c&gt;&gt; obj2: make obj [x: 20, f: null]
+
+old-ren-c&gt;&gt; obj2.f: couple :obj.f obj2
+
+old-ren-c&gt;&gt; obj2.f
+x is 20
+</code></pre>
+<p>Here, the X was deep walked during the MAKE OBJECT! and bound to OBJ's X.  When derived binding went to run the rebound function in OBJ2, it noticed that the binding to X was to a relative of OBJ2 in the inheritance chain... so it was willing to "forward" that binding to the object in the FRAME! it was relativizing against.</p>
+<p>Note that the sort of virtual "this" pointer is not coming from the fact that OBJ2 is on the left hand side of the instantiation of the call to <strong>OBJ2.F</strong> -- it's solely coming from the coupling slot in the cell stored in that field.  You could make OBJ2.F be derived-bound to anything you want.</p>
+<p>And now I can tell you that if you had used METHOD instead of FUNC... and hadn't said <strong><code>(f: null)</code></strong> when making OBJ2, then the above behavior is what you would get automatically.  The MAKE OBJECT! would simply notice when any of the fields it was copying had a stowed function with a coupling slot of itself, and update the cell in the new object with a coupling pointer to the new object.</p>
+<p><em>(All METHOD is, is an enfix operator that steals the binding from the SET-WORD! on its left to poke into the cell of the generated function.)</em></p>
+<h3>
+<a name="but-with-virtual-binding-ii-the-object-wins-mostly-7" class="anchor" href="https://forum.rebol.info#but-with-virtual-binding-ii-the-object-wins-mostly-7"></a>But With Virtual Binding II, The Object Wins (Mostly)</h3>
+<p>We're not in binding Kansas anymore... there is no "deep walk" when the FUNC is created that gives X an initial binding of 10.  As of this moment, bindings aren't ever overridden <em>(hole punching is still on the table, but let's not go there right now...)</em></p>
+<pre><code>&gt;&gt; x: 10
+
+&gt;&gt; obj: make object! [x: 20, f: null]
+
+&gt;&gt; obj.f: func [] [print ["x is" x]]
+
+&gt;&gt; obj.f: couple :obj.f obj
+
+&gt;&gt; obj.f
+x is 20
+</code></pre>
+<p>I actually didn't know what the following would do until I tried it:</p>
+<pre><code>&gt;&gt; obj.f: func [x] [print ["x is" x]]
+
+&gt;&gt; obj.f: couple :obj.f obj
+
+&gt;&gt; obj.f 30
+x is 30
+</code></pre>
+<p>I guess locals to the function are looked up first, before member variables.  Maybe I meant to do that <em>(C++ does it that way)</em>.</p>
+<hr>
+<h2>
+<a name="what-have-we-learned-8" class="anchor" href="https://forum.rebol.info#what-have-we-learned-8"></a>What Have We Learned?</h2>
+<ul>
+<li>
+<p>It seems Rebol could use a better way of doing <a href="https://en.wikipedia.org/wiki/Multiple_dispatch">multiple dispatch</a> so that you could write things like <strong><code>append my-object [a b c]</code></strong> and get custom behavior for the "class".</p>
+<ul>
+<li>
+<p>The aesthetic of the system is supposed to promote that kind of free-function syntax</p>
+</li>
+<li>
+<p>It doesn't make a lot of sense that you can only do this with PORT! and only for a handful of "generic verbs"</p>
+</li>
+</ul>
+</li>
+<li>
+<p>But to the extent people have wanted to do traditional <code>obj/member</code> calls (in Ren-C <code>obj.member</code>), the historical implementation of the idea was catastrophically bad</p>
+<ul>
+<li>
+<p>Without changing the overall usage experience (much), Ren-C wiped out the pathological implementation aspects</p>
+</li>
+<li>
+<p>While Ren-C may be on the whole slower than its peers for many things at the moment, derived binding is one area where it blows them away.</p>
+<ul>
+<li>The <a href="https://github.com/metaeducation/ren-c/blob/199db785027eaec3132b2edbd42bdf6364f64e8d/tests/datatypes/object.test.reb#L140">"O-Big" example</a> I came up with is simply not runnable in R3-Alpha or Red.</li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+          <p><a href="https://forum.rebol.info/t/member-functions-in-the-era-of-pure-virtual-binding/2190/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/member-functions-in-the-era-of-pure-virtual-binding/2190/1</link>
+        <pubDate>Mon, 19 Aug 2024 04:52:45 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-2190-1</guid>
+        <source url="https://forum.rebol.info/t/member-functions-in-the-era-of-pure-virtual-binding/2190.rss">&quot;Member Functions&quot; (in the era of Pure Virtual Binding)</source>
+      </item>
+  </channel>
+</rss>

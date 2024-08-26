@@ -5,8 +5,254 @@
     <link>https://forum.rebol.info/c/development/functions/59</link>
     <description>Topics in the &#39;Functions&#39; category Discussions of Functions and Generators, e.g. how things like RETURN work... or the mechanics of generators and composers like ADAPT, SPECIALIZE, ENCLOSE, HIJACK, etc.</description>
     
-      <lastBuildDate>Sun, 10 Mar 2024 15:21:58 +0000</lastBuildDate>
+      <lastBuildDate>Sat, 24 Aug 2024 03:00:51 +0000</lastBuildDate>
       <atom:link href="https://forum.rebol.info/c/development/functions/59.rss" rel="self" type="application/rss+xml" />
+        <item>
+          <title>SET-WORD! To Initialize Locals In Function Specs?</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Functions</category>
+          <description><![CDATA[
+            <p><em>(cc: <a class="mention" href="https://forum.rebol.info/u/ingohohmann">@IngoHohmann</a> as you have had opinions on these kinds of things.)</em></p>
+<p>It seems it would be nice if you had the option of setting your locals when you define them.</p>
+<pre><code>foo: func [
+    arg1 [integer!]
+    arg2 [text!]
+    &lt;local&gt;
+    local1 local2
+    local3: 10
+    local4: (20 * 30)
+][
+    ...
+]
+</code></pre>
+<p>As it so happens, there's potential to exploit this for efficiency.  The frame mechanics have a slot for each local in the function archetype that currently just holds trash, and it could hold this default value / expression.  So it wouldn't just save on typing the local name and then later the name again and the expression...but you're avoiding the need to perform the evaluation to do the assignment on each call!</p>
+<p>There's a lot of questions to answer:</p>
+<ul>
+<li>
+<p>What binding rules is it using?  Could you initialize local3 and then say <strong><code>local4: (local2 * arg1)</code></strong>?</p>
+<ul>
+<li>Almost certainly not, and it would just be using the binding of the spec block</li>
+</ul>
+</li>
+<li>
+<p>Does the code run on each invocation, or is it run only once to calculate a fixed value?  e.g. if it was <strong><code>local4: (global-var * 30)</code></strong> would each invocation of FOO recalculate what <strong><code>(global-var * 30)</code></strong> was at that moment?</p>
+<ul>
+<li>Almost certainly would just calculate a fixed value and use that value on each call.</li>
+</ul>
+</li>
+<li>
+<p>Do you need parentheses directly after the SET-WORD!?</p>
+<ul>
+<li>
+<p>If the expression were run on each invocation (which it probably shouldn't be) then it would be a requirement, because there'd be no way to find the start and the end of the right hand expression without evaluating it.</p>
+</li>
+<li>
+<p>If plain words are being picked up as locals there's potential for error if you accidentally wrote an expression that didn't work, like:</p>
+<pre><code>func [
+   arg [integer!]
+   &lt;local&gt;
+   local1 local2
+   local3: arity-2-but-I-think-it's-3 a b c
+   local4: 10
+][
+    ...
+]
+</code></pre>
+<p>That could wind up making a local <strong><code>c</code></strong> that you didn't intend.  But then again, sometimes it would be just a very obvious simple initialization, like <strong><code>local4: 10</code></strong>.  Forcing people to use parentheses could do more harm than good, vs. trusting them to use the parentheses if they feel it's warranted.</p>
+</li>
+</ul>
+</li>
+</ul>
+<h2>
+<a name="compare-to-static-not-initialized-with-set-word-atm-1" class="anchor" href="https://forum.rebol.info#compare-to-static-not-initialized-with-set-word-atm-1"></a>Compare to <code>&lt;static&gt;</code>: Not Initialized With SET-WORD! ATM</h2>
+<p>Right now the <code>&lt;static&gt;</code> feature lets you assign your variables, but it uses a non-Reboly-notation to do so:</p>
+<pre><code>accumulate: func [
+    item [any-element?]
+    &lt;static&gt;
+    block ([])
+][
+    append block item
+]
+</code></pre>
+<p>The parentheses are optional to hold the initializer.  But  it seems much more normal to say:</p>
+<pre><code>accumulate: func [
+    item [any-element?]
+    &lt;static&gt;
+    block: []
+][
+    append block item
+]
+</code></pre>
+<p>One reason for the parentheses notation was to try and be consistent with the idea of defaulting refinements.</p>
+<pre><code>&gt;&gt; foo: func [/string [text!] ("default")] [print string]
+
+&gt;&gt; foo/string "hello"
+hello
+
+&gt;&gt; foo
+default
+</code></pre>
+<p>But that feature was removed</p>
+<p>There's another reason why just WORD! was used...</p>
+<h2>
+<a name="return-has-owned-set-word-in-the-spec-dialect-2" class="anchor" href="https://forum.rebol.info#return-has-owned-set-word-in-the-spec-dialect-2"></a>RETURN: Has "Owned" SET-WORD! In The Spec Dialect</h2>
+<p>We have a little bit of friction in that the dialect has been using RETURN: to indicate what a function returns.  The choice has not much to do with what comes after a return being an assignment any more than anything else, it was picked for looks:</p>
+<pre><code>double-multiply: func [
+    return: [integer!]
+    value1 [integer!]
+    value2 [integer!]
+][
+    return 2 * value1 * value2
+]
+</code></pre>
+<p>The issue is that historical Rebol2 (and R3-Alpha, and Red) allow this:</p>
+<pre><code>rebol2&gt;&gt; print-sum: func [return break] [print ["Sum is" return + break]]
+
+rebol2&gt;&gt; print-sum 10 20
+Sum is 30
+</code></pre>
+<p>Ren-C only lets you do that in LAMBDA.  FUNC prohibits it:</p>
+<pre><code>ren-c&gt;&gt; print-sum: func [return break] [print [return + break]]
+** Error: Generator provides RETURN:, use LAMBDA if not desired
+</code></pre>
+<p>I think Red/System decided on RETURN: first.  <a href="https://static.red-lang.org/red-system-specs-light.html#section-3.3">But they put it at the end of the spec.</a>  Red errors if you try to put the return elsewhere:</p>
+<pre><code>red&gt;&gt; stringy: func [a b return: [string!]] [a + b]
+== func [a b return: [string!]][a + b]
+
+red&gt;&gt; stringy: func [return: [string!] a  b] [a + b]
+*** Script Error: invalid function definition: [return: [string!] a b]
+</code></pre>
+<p>But either way, it's not checked.  On the <a href="https://www.red-lang.org/2012/12/red-v031-functions-support-added.html">2012 announcement of function support in Red</a>, DocKimbel says: <em>"Note: argument and return value type checking have not been implemented yet, they need typeset! and error! datatypes to be implemented first."</em>  Parameter type checking works, but I guess return type checking was never added.  It does show up in the HELP though.</p>
+<pre><code>red&gt;&gt; help stringy
+USAGE:
+     STRINGY a b
+
+DESCRIPTION: 
+     STRINGY is a function! value.
+
+ARGUMENTS:
+     a             
+     b             
+
+RETURNS:
+     [string!]
+</code></pre>
+<p>Note that they also put the RETURNS: at the end there, too.  Most people would expect the return value for functions to be the first thing you put down.</p>
+<h2>
+<a name="ive-wondered-if-a-leading-block-would-suffice-3" class="anchor" href="https://forum.rebol.info#ive-wondered-if-a-leading-block-would-suffice-3"></a>I've Wondered If A Leading Block Would Suffice...</h2>
+<p>Off and on, I've been willing to consider the idea that return typing is just implicitly what you get if you have a leading block:</p>
+<pre><code>double-multiply: func [
+    [integer!]
+    value1 [integer!]
+    value2 [integer!]
+][
+   return 2 * value1 * value2
+]
+</code></pre>
+<p>Yet while it looks clean there, it causes some problems when you are filling in documentation strings.</p>
+<p>I've become a pretty true believer in the idea that documentation strings for arguments come after the argument name (and that we may do a service to the userbase by standardizing this, rather than by letting it be done either way and have people fight about it):</p>
+<pre><code> my-style: func [
+     "Overall function description here"
+     argument "Argument description here"
+         [integer! text!]
+     /refinement "Refinement description here"
+ ][
+    ...
+ ]
+</code></pre>
+<p>The rationale is that any good function will put labels on all its arguments.  But not all arguments are type-constrained, in particular refinements are not.  So you wind up either being inconsistent</p>
+<pre><code> variation1: func [
+     "Overall function description here"
+     argument [integer! text!]
+         "Argument description here"
+     /refinement "Refinement description here"  ; this feels inconsistent
+ ][
+    ...
+ ]
+</code></pre>
+<p>Or you're throwing in newlines for no reason</p>
+<pre><code> variation2: func [
+     "Overall function description here"
+     argument [integer! text!]
+         "Argument description here"
+     /refinement
+         "Refinement description here"  ; consistent, but annoying
+ ][
+    ...
+ ]
+</code></pre>
+<p>This is why I chose "MY-STYLE" above.  But if return becomes implicit on a leading block, you wind up back in inconsistent land:</p>
+<pre><code>my-style-with-leading-block: func [
+     "Overall function description here"
+     [integer!] "Description here"
+     argument "Argument description here"
+         [integer! text!]
+     /refinement "Refinement description here"
+ ][
+    ...
+ ]
+</code></pre>
+<p>So one thing RETURN: has historically bought us is making that look better:</p>
+<pre><code>my-style-with-leading-block: func [
+     "Overall function description here"
+     return: "Description here"
+         [integer!] 
+     argument "Argument description here"
+         [integer! text!]
+     /refinement "Refinement description here"
+ ][
+    ...
+ ]
+</code></pre>
+<p>And I think having the word RETURN in there makes it better.  Note how it's less obvious when the word isn't there what that is.</p>
+<h2>
+<a name="but-set-word-is-that-best-4" class="anchor" href="https://forum.rebol.info#but-set-word-is-that-best-4"></a>But SET-WORD!... is that best?</h2>
+<p>If we're going to be allowing SET-WORD! for locals and statics, does it make sense to have a stray SET-WORD! for RETURN?</p>
+<p>And one outside-the-box thought... given that modern FUNC doesn't allow you to name parameters RETURN, why not just go with a plain WORD! ?</p>
+<pre><code>what-about-plain-word: func [
+    "Overall function description here"
+    return "Description here"
+        [integer!] 
+    argument "Argument description here"
+        [integer! text!]
+    /refinement "Refinement description here"
+ ][
+    ...
+ ]
+</code></pre>
+<p>If you try that with a LAMBDA you'll not get an error, and maybe suffer some confusion when the lambda gets its first argument as a variable named RETURN.  You'll figure it out pretty quickly, though.</p>
+<p>Though I have wondered about questions like "what if you want the behavior of a lambda with the bottom expression dropping out, and no RETURN declared, but you still want type checking?"</p>
+<p>You might say "just use ENSURE"</p>
+<pre><code> my-lambda: lambda [
+    "Overall function description here"
+    argument "Argument description here"
+        [integer! text!]
+    /refinement "Refinement description here"
+ ][
+    ensure [integer!] [
+        ...
+    ]
+ ]
+</code></pre>
+<p>The problem is that the return type and any description don't make it to the HELP.  This is one reason that I pretty much always use FUNC.</p>
+<p>This makes one want to lean back to the return type being something nameless, like just a leading block.</p>
+<h2>
+<a name="not-sure-on-return-but-i-like-set-word-locals-5" class="anchor" href="https://forum.rebol.info#not-sure-on-return-but-i-like-set-word-locals-5"></a>Not Sure On RETURN, But I Like SET-WORD! Locals</h2>
+<p>I definitely feel that finding a way to not be using SET-WORD! for RETURN: would be good.  It's not like it has anything to do with assignment.</p>
+<p>Plain word RETURN in FUNC is not an idea that I'm feeling is as crazy as it might sound.</p>
+<p>I do think that I like the idea of SET-WORD! for local initialization... that runs the right hand side without required parentheses, and that only runs the evaluation once in the environment of the spec block... stowing that value in the currently-just-trash slots of the frame archetype for the local.</p>
+<p>And I like the idea of bringing <code>&lt;static&gt;</code> on board with the same rules.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/set-word-to-initialize-locals-in-function-specs/2210">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/set-word-to-initialize-locals-in-function-specs/2210</link>
+          <pubDate>Sat, 24 Aug 2024 03:00:51 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2210</guid>
+          <source url="https://forum.rebol.info/t/set-word-to-initialize-locals-in-function-specs/2210.rss">SET-WORD! To Initialize Locals In Function Specs?</source>
+        </item>
         <item>
           <title>-&gt; for LAMBDA (or... &quot;LAMBDA-Lite?&quot;)</title>
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
@@ -220,7 +466,7 @@ foo: func [x] with {staticvar: 0} [
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
           <category>Functions</category>
           <description><![CDATA[
-            <p>I had offered that people could use this simple wrapper to get the old behavior of FUNC, to drop out its last result (instead of returning trash):</p>
+            <p>I had offered that people could use this simple wrapper to get the old behavior of FUNC, to drop out its last result (instead of returning nothing):</p>
 <pre><code>func: adapt :lib.func [body: compose [return (as group! body)]]
 </code></pre>
 <p>The concept is that if you write:</p>
@@ -307,7 +553,7 @@ foo: func [x] with {staticvar: 0} [
 &gt;&gt; foo 5 5
 == ~  ; anti
 </code></pre>
-<p>If anything, I feel like the trash result isn't going far enough--and it should actually error if you skip out on a return.  Maybe there was some important finalization work to do.</p>
+<p>If anything, I feel like the nothing result isn't going far enough--and it should actually error if you skip out on a return.  Maybe there was some important finalization work to do.</p>
 <p>But my example shows that putting it in implicitly means it doesn't necessarily roll with whatever updated definition you give to return.  You'll just get a confusing error in a bit of hidden code.  Not good for a fundamental part.</p>
             <p><small>3 posts - 2 participants</small></p>
             <p><a href="https://forum.rebol.info/t/making-func-variant-that-auto-returns-last-result/2124">Read full topic</a></p>
@@ -716,25 +962,16 @@ s: specialize adapt :base [
     arg [~null~ &lt;const&gt; block! word! number!]
 ] ...
 </code></pre>
-<p>It also works for "trash" (isotopic voids) and doesn't look too bad there, e.g. for RETURN:</p>
+<p>It also works for "nothing" (isotopic blank) and doesn't look too bad there, e.g. for RETURN:</p>
 <pre><code>foo: func [
-    return: [~]  ; as opposed to `return: [trash?]`
+    return: [~]  ; as opposed to `return: [nothing?]`
  ] ...
 </code></pre>
-<p>That doesn't work for voids, and the current idea is that there's no VOID! because TYPE OF VOID gives back NULL.  This is consistent with void-in-null out in general, although it might confuse people who expect to do:</p>
-<pre><code>switch type of value [
-    null [print "This means value was void, not null"]
-    ...
-]
-</code></pre>
-<p>So the idea there was that perhaps TYPE OF NULL is an error, and this guides you to another solution like <strong>switch/type</strong> where you can use <strong>&amp;[null?]</strong> or <strong>&amp;[void?]</strong> as type predicates and get what you actually want.</p>
-<p><em>(I still don't think defining <strong>null!: &amp;[null?]</strong> is a good idea, because it looks like a fundamental datatype, and you cannot <strong>make null! ...</strong> etc.  Maybe <strong>null?!: &amp;[null?]</strong> or something like that would be a bit less noisy at usage sites, enough to be worth it?)</em></p>
 <h2>
 <a name="allowing-null-and-null-as-choices-seems-good-4" class="anchor" href="https://forum.rebol.info#allowing-null-and-null-as-choices-seems-good-4"></a>Allowing NULL? and ~NULL~ As Choices Seems Good</h2>
-<p>I think we can live with <strong>void?</strong> in function specs for functions that deliberately take voids.  It's also more legitimate--voids are more neutral than nulls in the current formulation--e.g. <strong>append [a b c] void</strong> is [a b c].</p>
 <p>I like the option of <strong>~null~</strong> instead of <strong>null?</strong> to call out the more rare-and-alarming idea of accepting null parameters.</p>
 <h2>
-<a name="what-about-return-nihil-and-return-trash-5" class="anchor" href="https://forum.rebol.info#what-about-return-nihil-and-return-trash-5"></a>What about <code>return: &lt;nihil&gt;</code> and <code>return: &lt;trash&gt;</code>
+<a name="what-about-return-nihil-and-return-nothing-5" class="anchor" href="https://forum.rebol.info#what-about-return-nihil-and-return-nothing-5"></a>What about <code>return: &lt;nihil&gt;</code> and <code>return: &lt;nothing&gt;</code>
 </h2>
 <p>These two special uses of tag! with no block have been used to say you don't need a RETURN statement at all... the function just gives back none or nihil respectively when the body completes.</p>
 <p>How necessary is it?  Well, you either write things like:</p>
@@ -752,14 +989,14 @@ s: specialize adapt :base [
 ][
 ]
 </code></pre>
-<p>This style of "don't even worry about writing a RETURN" has the widest applicability to NONE and NIHIL.  We don't strictly need it, but I've gotten used to it.</p>
-<p>I mention <strong>return: [~]</strong> as a possible alternative for saying trash is a return type using the quasiform-means-isotope idea.  And since trash falls out of function bodies by default with no return, it's not strictly necessary to have <strong><code>return: &lt;trash&gt;</code></strong> as any kind of special operation.</p>
+<p>This style of "don't even worry about writing a RETURN" has the widest applicability to NOTHING and NIHIL.  We don't strictly need it, but I've gotten used to it.</p>
+<p>I mention <strong>return: [~]</strong> as a possible alternative for saying nothing is a return type using the quasiform-means-isotope idea.  And since nothing falls out of function bodies by default with no return, it's not strictly necessary to have <strong><code>return: &lt;nothing&gt;</code></strong> as any kind of special operation.</p>
 <p>Again, how does that look?</p>
 <pre><code>foo: func [
     return: [~]
  ] ...
 </code></pre>
-<p>If you're going to break the pattern and not say <strong><code>return: [trash?]</code></strong>  then I may call that a break-even alternative to <strong><code>return: [trash?]</code></strong>.  A little more symbol-y, but doesn't break the rhythm of type specs being blocks.</p>
+<p>A little more symbol-y, but doesn't break the rhythm of type specs being blocks.</p>
 <p>This leaves the nihil case.  We could say <strong>return: [~[]~]</strong> and have that mean "I return an empty pack" but in that case you'd still need an explicit return:</p>
 <pre><code>comment: func [
     return: [~[]~]
@@ -768,8 +1005,8 @@ s: specialize adapt :base [
     return nihil
 ]
 </code></pre>
-<p>But I think I like <strong><code>return: [nihil?]</code></strong> better than that.  Compared to <strong><code>return: [~]</code></strong> the <strong><code>[~[]~]</code></strong> is a bridge too far.</p>
-<p>Anyway, the reason this is a struggle is that <strong><code>return: &lt;trash&gt;</code></strong> has just become so pervasive that it's hard to see that changed to <strong><code>return: [trash?]</code></strong>.  But standardizing on blocks and moving away from the tags for this application may be the best idea.</p>
+<p>But I think I like <strong><code>return: [nihil?]</code></strong> better than that.  Compared to <strong><code>return: [~]</code></strong> the <strong><code>[~[]~]</code></strong> feels a bit like a bridge too far.  But I might change my mind.</p>
+<p>Anyway, the reason this is a struggle is that <strong><code>return: &lt;nothing&gt;</code></strong> has just become so pervasive that it's hard to see that changed to <strong><code>return: [nothing?]</code></strong>.  But standardizing on blocks and moving away from the tags for this application may be the best idea.</p>
             <p><small>1 post - 1 participant</small></p>
             <p><a href="https://forum.rebol.info/t/dialect-meaning-of-non-words-in-function-parameter-spec-blocks/2064">Read full topic</a></p>
           ]]></description>
@@ -994,6 +1231,41 @@ only
           <discourse:topicArchived>No</discourse:topicArchived>
           <guid isPermaLink="false">forum.rebol.info-topic-1793</guid>
           <source url="https://forum.rebol.info/t/no-alternative-local-notation-in-the-func-spec-dialect/1793.rss">(No) Alternative Local Notation in the Func Spec Dialect</source>
+        </item>
+        <item>
+          <title>How To Indicate &quot;Divergence&quot; in Function RETURN: Spec</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Functions</category>
+          <description><![CDATA[
+            <p>Today's vocabulary word is <strong><a href="https://en.wikipedia.org/wiki/Divergence_(computer_science)">"divergent"</a></strong> ... a description for when a function never returns a result in a "normal" way.</p>
+<p>All functions that can FAIL or be THROWN or RETURN'd across have divergence as an <em>option</em> (which is, right now, all functions).  But it becomes an issue of what to say when there really is no type a function <em>ever</em> returns...what do you put in the spec?</p>
+<p>Lately I've been using just <strong><code>[return: []]</code></strong>.  That seems pretty solid.  An empty block indicating there's no types you can return...so any return would generate an error.</p>
+<p>But because I can imagine people not knowing what that meant, I find myself always adding a comment so people can look up the term "divergent":</p>
+<pre><code>catch [
+    my-non-returning-function: func [
+        return: []  ; divergent
+    ][
+        if now/month = 8 [
+            return "It's August"  ; oops, meant THROW (so causes error)
+        ]
+        throw "It's not August"
+    ]
+    my-non-returning-function
+]
+</code></pre>
+<p>My tendency to hedge is probably silly.  Because <strong><code>return: []</code></strong>  is pretty straightforward.  The comment probably makes it <em>more</em> confusing.</p>
+<p>So <strong><code>return: &lt;divergent&gt;</code></strong> (or whatever) is probably not worth it.</p>
+<p><em>(I should point out that it hasn't always been as clear that <strong><code>return: []</code></strong> wouldn't mean something like "the function is invisible" or "the function returns trash".  But we have good clear ways of saying those things, so I like this for divergence.)</em></p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/how-to-indicate-divergence-in-function-return-spec/1667">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/how-to-indicate-divergence-in-function-return-spec/1667</link>
+          <pubDate>Mon, 16 Aug 2021 02:35:53 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-1667</guid>
+          <source url="https://forum.rebol.info/t/how-to-indicate-divergence-in-function-return-spec/1667.rss">How To Indicate &quot;Divergence&quot; in Function RETURN: Spec</source>
         </item>
         <item>
           <title>Implicit Execution of RETURN in functions = ...BAD (?)</title>
@@ -1494,7 +1766,7 @@ after  ; did not reflect the change
 <h2>But What About The Deviant RETURN: ?</h2>
 <p>It's a bit confusing to have RETURN: work different than other things specified by SET-WORD!.  This could be avoided by using a different convention, e.g. <strong><code>&lt;return&gt; [integer!]</code></strong> to stress the difference.</p>
 <p>Or we could just say that it's "one of those things" and learnable, that the act of naming a return value "RETURN:" implies it's the main return...and gets special conventions and handling.</p>
-            <p><small>8 posts - 2 participants</small></p>
+            <p><small>9 posts - 2 participants</small></p>
             <p><a href="https://forum.rebol.info/t/notation-for-outputs-in-function-specs/1414">Read full topic</a></p>
           ]]></description>
           <link>https://forum.rebol.info/t/notation-for-outputs-in-function-specs/1414</link>
@@ -1900,12 +2172,53 @@ after  ; did not reflect the change
           <source url="https://forum.rebol.info/t/looking-into-a-usermode-pointfree/1236.rss">Looking into a *usermode* POINTFREE</source>
         </item>
         <item>
+          <title>What Are Definitional Returns?</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Functions</category>
+          <description><![CDATA[
+            <p>Novices using Rebol2 or Red aren't really clear on how their RETURN works.  (Or <em>doesn't</em> work, as the case my be.)  RETURN climbs the stack until it finds a function that is willing to accept returns.</p>
+<ul>
+<li>Functions in Rebol2/Red that <em>won't</em> accept returns: <strong>IF, WHILE, or pretty much any native</strong>
+</li>
+<li>Functions in Rebol2/Red that <em>will</em> accept returns: <strong>any user FUNC you write</strong>
+</li>
+</ul>
+<p>To give a brutally simple example, you cannot implement UNLESS in terms of IF:</p>
+<pre><code> rebol2&gt;&gt; foo: func [x] [if not x = 10 [return "not 10"] return "it's 10!"]
+ rebol2&gt;&gt; foo 20
+ == "not 10"
+
+ rebol2&gt;&gt; unless: func [cond block] [if not cond block]
+ rebol2&gt;&gt; bar: func [x] [unless x = 10 [return "not 10"] return "it's 10!"]
+ rebol2&gt;&gt; bar 20
+ == "it's 10"  ; D'oh
+</code></pre>
+<p>That UNLESS, because it's a FUNC and not a native, is a candidate for receiving RETURN.  So the UNLESS itself returned "not 10" instead of returning from bar.  Execution continued and the `return "it's 10!" ran.  <strong>I maintain that correct behavior constitutes another must-have, <a href="https://github.com/metaeducation/rebol-issues/issues/539#issuecomment-170878011">and I was by no means alone in this, nor the first to say so</a></strong>.</p>
+<pre><code>&gt;&gt; unless: function [cond block] [if not cond (block)]  ; see note re: group!
+&gt;&gt; bar: function [x] [unless x = 10 [return "not 10"] return "it's 10!"]
+&gt;&gt; bar 20
+== "not 10"
+</code></pre>
+<p><strong>I do not consider annotating UNLESS to say "I'm the kind of thing that doesn't catch returns" to be remotely acceptable.</strong>  I'd sooner throw out the project than go that route.  Addressing definitional returns wasn't at all trivial...even though conceptually it was understood what needed to be done.  It was one of the first things I tried to do in open-sourced R3-Alpha.  The rearranging I had to do in order to understand the code well enough to accomplish it laid the groundwork for many features to come.</p>
+<p><em>(Note: The reason you have to put a group! around <code>block</code> (or say <code>:block</code>) is due to soft-quoted branching, and I <a href="https://forum.rebol.info/t/stylistic-questions-and-soft-quoted-branching/1220">argue for the tradeoff here</a>.  I would not consider that one of my non-negotiable points for this list, though I've offered what I believe to be some compelling arguments.  I do--however--consider FUNCTION instead of FUNC to be a non-negotiable way of writing this, with current leaning that <a href="https://forum.rebol.info/t/abbreviations-as-synonyms/1211">FUNC is a full synonym for FUNCTION</a>)</em></p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/what-are-definitional-returns/2191">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/what-are-definitional-returns/2191</link>
+          <pubDate>Sun, 20 Oct 2019 04:00:00 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2191</guid>
+          <source url="https://forum.rebol.info/t/what-are-definitional-returns/2191.rss">What Are Definitional Returns?</source>
+        </item>
+        <item>
           <title>How Attached are we to Functions Return Last Result?</title>
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
           <category>Functions</category>
           <description><![CDATA[
             <blockquote>
-<p>**UPDATE: 2021: Use LAMBDA if you want to return the last result; FUNC(TION) requires a RETURN statement and will return trash otherwise.  Full rationale:</p>
+<p><strong>UPDATE: 2021:</strong> Use LAMBDA if you want to return the last result; FUNC(TION) requires a RETURN statement and will return trash otherwise.  Full rationale:</p>
 <p><a href="https://forum.rebol.info/t/implicit-execution-of-return-in-functions-bad/1656" class="inline-onebox">Implicit Execution of RETURN in functions = ...BAD (?)</a></p>
 </blockquote>
 <hr>
@@ -1922,7 +2235,7 @@ after  ; did not reflect the change
 </code></pre>
 <p>I know this isn't how Rebol has historically operated.  But the historical operation of Rebol can lead to the accidental leakage of a lot of values which the caller wasn't necessarily meant to see.  There's currently a burden to annotate in the spec when a function doesn't return something.</p>
 <p>So in the <em>"Let's not give JavaScript any upper hand"</em> line of thinking, should this be re-evaluated?  I must admit I kind of feel their way is clearer.  :-/</p>
-            <p><small>12 posts - 3 participants</small></p>
+            <p><small>13 posts - 3 participants</small></p>
             <p><a href="https://forum.rebol.info/t/how-attached-are-we-to-functions-return-last-result/1219">Read full topic</a></p>
           ]]></description>
           <link>https://forum.rebol.info/t/how-attached-are-we-to-functions-return-last-result/1219</link>
@@ -2019,305 +2332,6 @@ f multi-return
           <discourse:topicArchived>No</discourse:topicArchived>
           <guid isPermaLink="false">forum.rebol.info-topic-1926</guid>
           <source url="https://forum.rebol.info/t/wrapping-and-forwarding-multi-returns/1926.rss">Wrapping And Forwarding Multi-Returns</source>
-        </item>
-        <item>
-          <title>The History of Multi-Return in Ren-C</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Functions</category>
-          <description><![CDATA[
-            <p><em>This thread merges discussions of history across several threads to cover the key points, starting with material from the post announcing the addition of the SET-BLOCK! and GET-BLOCK!...and then folding in important points from later posts in the relative chronology of when they happened.  So it's broken up into sections by approximate date.</em></p>
-<hr>
-<h1>March 2019: SET-BLOCK! and GET-BLOCK! Added</h1>
-<p>These were generic parts which you could use in dialects however you wanted...just like other types.</p>
-<p><strong>But a key motivation was the concept that the evaluator would use them for some kind of multiple-return-value strategy.</strong>  Users of languages with the feature seemed to rave about it. And if you don't have it, they will complain and constantly try to find ways to work around it.</p>
-<p>I had inklings that Rebol could do them in a way that is mindbending and original. But a dirt simple implementation of the idea in 2019 looked roughly like what people were used to with SET of BLOCK! from Rebol2, without needing to write the word SET:</p>
-<pre><code>early-multi-concept: function [a b] [
-    return :[(a * 3) (b - 16)]  ; e.g. :[...] would act like REDUCE [...]
-]
-
-&gt;&gt; [x y]: early-multi-concept 10 20
-== [30 4]
-
-&gt;&gt; x
-== 30
-
-&gt;&gt; y
-== 4
-</code></pre>
-<p>So <strong><code>([x y]: foo)</code></strong> would act like <strong><code>(set [x y] foo)</code></strong>, including allowances to let you take fewer than one value:</p>
-<pre><code>&gt;&gt; [x]: [10 20]
-== [10 20]
-
-&gt;&gt; x
-== 10
-</code></pre>
-<h2>But the simplicity had obvious drawbacks</h2>
-<p>First of all, Ren-C had NULL states that by design could not be put into blocks.  This approach wouldn't be able to return those without distorting them into some different reified value  than the intended NULL.</p>
-<pre><code>&gt;&gt; [x y]: function-returning-null-and-30
-== [&lt;null&gt; 30]  ; can't put null, so... "something else" in first slot?
-
-&gt;&gt; x
-== null  ; not the same thing as what the block said...seems bad, yes?
-
-&gt;&gt; y
-== 30
-</code></pre>
-<p>Also, you would have to know that what you were calling returned multiple values.  If you missed that and used a plain SET-WORD!, you'd just wind up with the block:</p>
-<pre><code>&gt;&gt; x: some-function-i-didnt-know-was-multi-return ...
-== [ret1 ret2 ret3]  ; the block! could easily be mistaken for single return
-</code></pre>
-<h2>I had one of those ideas that just wouldn't go away...</h2>
-<p>It seemed clearly preferable that rather than choose between <strong>[x]:</strong> and <strong>[x y]:</strong> and knowing in advance how many values you're taking or throwing away... someone who only asked for one value should be able to be blissfully ignorant.  So the choice would be between:</p>
-<pre><code>&gt;&gt; x: multi-return ...
-&gt;&gt; [x y]: multi-return ...
-</code></pre>
-<p>Even though the first case is a multiple return, you wouldn't set x to a block of values, <em>but just get the first value</em>.  An interface like this would also solve the issue of returning NULL.</p>
-<p>Not being forced to return a BLOCK! also made great sense... <em>because since BLOCK! is always truthy, you'd not really be able to make useful conditional behavior be based on a BLOCK! return anyway!</em></p>
-<pre><code>&gt;&gt; [x y]: function-returning-null-and-30
-== null  ; so you could meaningfully say `if [x y]: whatever [...]`
-
-&gt;&gt; x
-== null
-
-&gt;&gt; y
-== 30
-</code></pre>
-<p>Going even further, I suggested <em>"it would be important that if a function wanted to do multiple returns that it could know how many results it was assigning.  This could save calculation on things that aren't needed."</em></p>
-<h3>
-<em><strong>...but all this would require some kind of magic...</strong></em> <img src="https://forum.rebol.info/images/emoji/twitter/mage.png?v=9" title=":mage:" class="emoji" alt=":mage:">
-</h3>
-            <p><small>5 posts - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/the-history-of-multi-return-in-ren-c/1134">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/the-history-of-multi-return-in-ren-c/1134</link>
-          <pubDate>Thu, 28 Mar 2019 01:56:31 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-1134</guid>
-          <source url="https://forum.rebol.info/t/the-history-of-multi-return-in-ren-c/1134.rss">The History of Multi-Return in Ren-C</source>
-        </item>
-        <item>
-          <title>Variadic Return Values (not VARARGS! return values...)</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Functions</category>
-          <description><![CDATA[
-            <p>Imagine the following:</p>
-<pre><code>inline: function [
-    return: [any-value! &lt;variadic&gt;]
-    block [block!]
-][
-    return make varargs! block
-]
-</code></pre>
-<p>With the desired behavior:</p>
-<pre><code>&gt;&gt; 1 inline [+ 2 + 3]
-== 6
-</code></pre>
-<p>This would be a very powerful macro-like mechanism.  (While not being done with any preprocessing step, and hence not a "macro" in the conventional sense).</p>
-<p>One of the mechanical problems with such a construct is that when the evaluator is looking right from the 1, it has to know if the function it is seeing is enfix or not.  Unfortunately, INLINE doesn't have a generic answer...its answer depends on calculations it does once it is running, after its arguments are evaluated.  It depends on what's in the block it gets.</p>
-<p>The evolving way of dealing with such situations is <em>left-variadic-enfix</em>.  This is to say that inline can defer its answer until when it runs...but by doing so it runs <em>before</em> its left hand side.</p>
-<p>Here is simplified model of how that would work:</p>
-<pre><code>inline: enfix function [
-    return: [any-value! &lt;variadic&gt;]
-    :look [&lt;opt&gt; any-value! &lt;variadic&gt;]
-    block [block!]
-][
-    if enfix? w: match [word!] first block [
-        return make varargs! compose/only [(take look) block]
-    ]
-    return make varargs! block
-]
-</code></pre>
-<p>The moment of the TAKE (or the lack of a take) is how the evaluator gets its "are you enfix or not" answer from something whose left hand side is variadic.</p>
-<p>While this looks very similar <a href="https://trello.com/c/Kg9A45b5/231-paths-can-be-dispatched-as-infix-and-provide-refinements-to-infix-operators-using-shove">to what SHOVE does</a>, SHOVE is actually implemented as an internal trick to the evaluator that is tailored to that particular case.  It doesn't run usermode code (or even plain code inside a native) to accomplish what it does.  It can't, because the variadic take of the left would require completing a higher stack level of code before a lower stack level.</p>
-<p>It may seem variadics do this already (there's an ACTION! on the stack whose frame is running, and code is being processed from its "feed" to supply values to a variadic further on in the stack).  But that action is already running and has finished gathering its arguments--you're not interrupting the evaluator in mid-process, and hooking into the enfix mechanic itself.  I think it's possible though--it might need to use the same trick as ENCLOSE, which rearranges the stack in mid-run.</p>
-<p>It would still be a little odd--in the same way that SHOVE is odd.  One odd thing is that <em>the evaluation of the block on the right has to happen before any evaluations on the left</em>:</p>
-<pre><code>&gt;&gt; (print "left" 1) inline (print "right" [+ 2 + 3])
-right
-left
-== 6
-</code></pre>
-<p>That's just the physics of the situation.  The left looking rightward needs the answer to a question that can't be answered until the right is evaluated.  But it's not just SHOVE that has this property, look at SET-PATH! operation... right before left:</p>
-<pre><code>&gt;&gt; o: make object! [x: 10]
-&gt;&gt; o/(print "left" x): (print "right" 20)
-right
-left
-== 20
-</code></pre>
-<p>The reason for why it has to do that is similar.  I've made a <a href="https://github.com/rebol/rebol-issues/issues/2275#issuecomment-396708575">semi-convincing argument for why this is not a bug</a>, and if there are other constructs which have to do this then it seems less like an anomaly.</p>
-<p>Reading between-the-lines, this would provide a highly generic tool for rewriting the stream of code...you could imagine things that take a VARARGS! in, and give a VARARGS! out.</p>
-<h3>Avoiding Superfluous Stack Levels</h3>
-<p>One area I'd like to see this applied is when you want to avoid introducing a stack level in the debugger.  e.g. the console has to run a block of code, but you don't want to see "DO BLOCK" putting DO on the stack.  Instead the API could just say:</p>
-<pre><code>result = rebRun("inline", block);
-</code></pre>
-<p>This way, when the code inside the block is running, INLINE has already finished its work...handing the feed back to the evaluator.  It will appear there's nothing at all on the stack.</p>
-<p>Because of the trickery involved, I <em>imagine</em> this would end up being slower than DO BLOCK (I'd basically be certain of it), so you wouldn't want to do it unless there was a good reason.  But there may be some cases where code is getting composed or wired up today to accomplish this where it would be faster.  Since it's a hypothetical feature at this point, it's probably best to wait to speculate too much on this.</p>
-            <p><small>2 posts - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/variadic-return-values-not-varargs-return-values/951">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/variadic-return-values-not-varargs-return-values/951</link>
-          <pubDate>Sun, 09 Dec 2018 16:20:00 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-951</guid>
-          <source url="https://forum.rebol.info/t/variadic-return-values-not-varargs-return-values/951.rss">Variadic Return Values (not VARARGS! return values...)</source>
-        </item>
-        <item>
-          <title>Why No-Argument Refinements Are BLACKHOLE! or NULL</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Functions</category>
-          <description><![CDATA[
-            <p>In Rebol2, a refinement's value would be #[true] or #[none]:</p>
-<pre><code>rebol2&gt;&gt; show-me: func [/bar] [print mold bar]
-
-rebol2&gt;&gt; show-me/bar
-true  ; actually LOGIC! #[true], not the WORD! true
-
-rebol2&gt;&gt; foo
-none  ; actually a NONE! value, not the WORD! none
-</code></pre>
-<p><em>As a newbie, I was bothered by this from the get-go...</em> because I couldn't test refinements with AND/OR.  (they don't take #[none])  I hadn't drank the Kool-Aid that ANY/ALL were always a desirable substitute.</p>
-<hr>
-<blockquote>
-<p><strong>NOTE: I never</strong> drank the ANY/ALL supremacy Kool-Aid.  Of course there are a lot of cool uses for them as larger scale control structures--and it's important to know how to use them for streamlining program flow.  But for testing flags?  The ability to do it infix and without delimiters can read much better in many places.</p>
-<p>So Ren-C has adopted infix AND/OR that <a href="https://github.com/rebol/rebol-issues/issues/1879">operate conditionally on ANY-VALUE! and return LOGIC!</a> <em>(they also short-circuit)</em></p>
-<pre><code>ren-c&gt;&gt; flag1: flag2: true
-
-ren-c&gt;&gt; if flag1 and flag2 [print "It allows WORD!s, this comes up often"]
-It allows WORD!s, this comes up often
-
-ren-c&gt;&gt; if all [flag1 flag2] [print "Not everyone loves this (e.g. not me)"]
-Not everyone loves this (e.g. not me)
-
-ren-c&gt;&gt; if (block? flag1) and (empty? flag1) [print "Short-circuit avoids error"]
-; to do this, the second argument to AND/OR is quoted behind the scenes 
-</code></pre>
-</blockquote>
-<hr>
-<p>There were countless debates over whether refinements should just be LOGIC! (as in Red), or if a used refinement should be the WORD! of the refinement (maybe useful for chaining?).  For a time, it seemed murkier when Ren-C introduced NULL...although it all tied up rather nicely in the end!</p>
-<p><strong>But, 2022 UPDATE:</strong> I've cleaned up a bunch of historical rambling of me talking to myself in this thread to pare it down to what's useful.</p>
-<hr>
-<h2>Evolution Led Ren-C to <a href="https://forum.rebol.info/t/pure-and-refined-simplifying-refinements-to-one-or-zero-args/1120">Refinements As Their Own Arguments</a>
-</h2>
-<ul>
-<li>
-<p>Multiple-refinement arguments were a fringe feature, used almost nowhere.  Primarily it just created an inconvenience for 1-argument refinements having to come up with some random name for the argument.</p>
-</li>
-<li>
-<p>With the existence of non-valued NULL, a single argument could represent the state of being used or not, along with the value itself.</p>
-<ul>
-<li>
-<p>The "used" state would be able to hold ANY-VALUE! that could be put in a block.</p>
-</li>
-<li>
-<p>NULL became falsey--so just testing it with IF could cover most "is the refinement used" questions...with specific tests for NULL? when there was risk of conflation with BLANK! or FALSE!</p>
-</li>
-</ul>
-</li>
-<li>
-<p>It simplified the evaluator logic--removing the "refinements pick up every parameter after them" semantic.</p>
-<ul>
-<li>This paved the way for adding more arguments to functions after-the-fact, without worrying about them getting lumped in with the arguments of the existing last refinement.</li>
-</ul>
-</li>
-</ul>
-<h2>But What About Refinements That <em>Don't</em> Take Arguments?</h2>
-<p>This question malingered along longer than I would have liked it to.  <img src="https://forum.rebol.info/images/emoji/twitter/zombie.png?v=9" title=":zombie:" class="emoji" alt=":zombie:"></p>
-<p>For some time it would give you back a WORD! that was the name of the refinement itself:</p>
-<pre><code>old-renc&gt;&gt; show-me: func [/bar] [print mold bar]
-
-old-renc&gt;&gt; show-me/bar
-bar
-
-old-renc&gt;&gt; foo
-; null
-</code></pre>
-<p>I'd advocated for this idea very early on:</p>
-<ul>
-<li>
-<p>Imagine if one function took <code>/only</code> and wrapped another function that also took an <code>/only</code></p>
-</li>
-<li>
-<p>If the wrapper got its ONLY variable for the refinement as the WORD! <code>only</code>...</p>
-<ul>
-<li>
-<p>you could just say <strong><code>inner-function/(only)</code></strong></p>
-<ul>
-<li>
-<p>If you got the refinement, that acts like <strong><code>inner-function/('only)</code></strong></p>
-</li>
-<li>
-<p>If you didn't get the refinement, that would act like <strong><code>inner-function/(null)</code></strong></p>
-</li>
-</ul>
-</li>
-</ul>
-</li>
-<li>
-<p>If you squint your eyes and use your imagination a little, this might seem like a useful tool for chaining.</p>
-</li>
-</ul>
-<p><strong>But the feature was a victim of Ren-C's other successes.</strong>  It's much easier and more efficient to wrap functions with things like ADAPT, ENCLOSE, SPECIALIZE.  The need to write this kind of "tunneling" function is rare: and refinement naming overlap is unlikely if the functions weren't somehow derived from each other.</p>
-<p><em>(It also made building FRAME!s at a low-level more annoying...the value you put in the frames had to be contingent on the refinement name.  And it forced path dispatch steps to permit NULLs, when it didn't allow it anywhere else.  More complexity, for little benefit.)</em></p>
-<h2>So Wouldn't LOGIC! For Argless Refinements be... <em>Logical?</em>
-</h2>
-<p>You might think so.  <img src="https://forum.rebol.info/images/emoji/twitter/robot.png?v=9" title=":robot:" class="emoji" alt=":robot:">  But actually... <em>no</em>.</p>
-<p>There are a number of technical reasons.  Yet an intuitive angle might be to consider how an argument-less refinement contrasts with a refinement that takes an actual LOGIC! argument.</p>
-<pre><code>foo: func [/mutate [logic!]] [...]
-</code></pre>
-<p>This refinement can be NULL (unspecified--e.g. the refinement was not used at all), or #[true] or #[false] when it is specified.  There's three states.</p>
-<p>But an argument-less refinement is really just "used or unused".  So NULL and then a single truthy state... ideally a state that the system understands as meaning <em>"I'm opting in"</em>.</p>
-<h2>The Modern Day: <a href="https://forum.rebol.info/t/sending-values-into-a-blackhole/1347">NULL or BLACKHOLE!</a>  <code>(#)</code>
-</h2>
-<p>While BLANK! has worked nicely as a falsey reified unit type, we've been lacking a truthy unit type.</p>
-<p><strong>But with the unification of issues and characters, the appealing truthy "kind-of-a-unit-type" of # exists.</strong>  And its meaning of "please opt-in" is a good match for refinements.</p>
-<ul>
-<li>Space-wise fits in a single cell with no allocation, like BLANK!</li>
-<li>It's not a series so it's not mutable and has very few operations it responds to.</li>
-<li>It's one easily-visible character.</li>
-<li>And again, it is truthy.</li>
-</ul>
-<h3>Simple To Set, Doesn't Depend on the Refinement Name</h3>
-<pre><code> &gt;&gt; f: make frame! :some-function
- 
- &gt;&gt; f.argless-refinement: if x = y [#]  ; slot will be either null or #
-</code></pre>
-<p>First reflex might be to make a TO-BLACKHOLE or similar:</p>
-<pre><code> &gt;&gt; f.argless-refinement: to-blackhole x = y
-</code></pre>
-<p>But I actually think the <strong><code>if condition [#]</code></strong> looks pretty nice.  It's unambiguous and you get the idea.  "check this box, else leave it empty".  Short and obvious!</p>
-<h3>Blackholes Are Fit For Purpose, and Aligns With Multi-Returns</h3>
-<p>Blackholes were first invented to help "opt-in" scenarios with multi returns, with patterns like:</p>
-<pre><code>if multireturn-var [  ; request for additional work made
-    set multireturn-var do-additional-work
-]
-</code></pre>
-<p>The truthy nature of <strong><code>#</code></strong>, along with being a no-op with SET, made it easy to request the additional work be done while not needing to name a variable to store the output.</p>
-<p>That's no longer needed in multi-return, because <a href="https://forum.rebol.info/t/output-variables-in-multi-return/1859">it proxies variables for you automatically</a>, so you don't need the overhead of SET.</p>
-<p>But it's still a useful feature, and can come in handy with # produced by used refinements!</p>
-<h2>Higher Level Functions Can Add Conveniences!</h2>
-<p>If you think it would be nice to be able to specify an argless refinement with a LOGIC!, guess what... you can!  <em>(Just not when building low-level frames...)</em></p>
-<p>Higher level functions like APPLY are happy to turn a LOGIC! into a NULL or # for you.</p>
-<pre><code>&gt;&gt; apply :append [[a b c] [d e] /only 1 = 1]
-== [a b c [d e]]
-</code></pre>
-<p>SPECIALIZE doesn't do it at time of writing, but maybe it should...</p>
-<pre><code>&gt;&gt; apo: specialize :append [only: 2 = 2]
-** Script Error: Argless Refinement /only Must be either # or NULL
-</code></pre>
-<p>In any case, I just wanted to explain why an argless refinement to your function is going to be showing up as # or NULL, and that's more or less the final (?) answer.</p>
-            <p><small>3 posts - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/why-no-argument-refinements-are-blackhole-or-null/735">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/why-no-argument-refinements-are-blackhole-or-null/735</link>
-          <pubDate>Thu, 12 Jul 2018 21:05:50 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-735</guid>
-          <source url="https://forum.rebol.info/t/why-no-argument-refinements-are-blackhole-or-null/735.rss">Why No-Argument Refinements Are BLACKHOLE! or NULL</source>
         </item>
   </channel>
 </rss>

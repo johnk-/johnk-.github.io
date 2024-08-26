@@ -1,0 +1,164 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Critiquing Red&#39;s Updated APPLY Implementation</title>
+    <link>https://forum.rebol.info/t/critiquing-reds-updated-apply-implementation/2194</link>
+    <description>Ren-C added a super-duper APPLY in August 2021:
+
+https://forum.rebol.info/t/apply-ii-the-revenge/1834
+
+About two years later, I observe Red has published their own implementation of APPLY...with some seeming similarities:
+
+  https://www.red-lang.org/2023/06/dynamic-refinements-and-function.html
+
+But there are significant mechanical and usability differences.
+
+Red inherits complexity from the fact that they didn&#39;t merge refinements and their arguments together.  This keeps them tied to problems that arise from ordering, and keeping the enablement of a refinement in sync with its value(s).  *It&#39;s clear to me that &quot;multi-arg-refinements&quot; has proven to be not worth it in the design vs. having a single unified nullable value for each named argument*...and this is only one of the many places that bear that out.
+
+They do offer an idea how to create something like a FRAME!... but it&#39;s a higher-level usermode concept instead of the lower-level basis for APPLY-like abstractions.  The post gives an implementation called **`make-apply-obj-proto`**:
+
+    red&gt;&gt; o-fctm: make-apply-obj-proto/with &#39;find/case/tail/match [series: [a b c] value: &#39;a]
+    == make object! [
+        series: [a b c]
+        value: &#39;a
+        part: false
+        length: none
+        only: false
+        case: true
+        same: fal...
+
+    red&gt;&gt; apply-object :find o-fctm
+    == [b c]
+
+Ren-C bakes this idea in as the core of function application.  You can build a FRAME! for the function (note the tail of the match is a multi-return...you can get both the begin and end in a single call...so there&#39;s no /TAIL here):
+
+    &gt;&gt; f: make frame! :find/case/match
+    == make frame! [
+        series: ~
+        pattern: ~
+        part: ~
+        skip: ~
+        reverse: ~
+        last: ~
+    ]
+
+Notice /CASE and /MATCH didn&#39;t take arguments, so they have been specialized out of the frame as they were already mentioned as being in use.
+
+Then you can fill in the frame with required (and optional) values:
+
+    &gt;&gt; f.series: [a b c]
+    == [a b c]
+
+    &gt;&gt; f.pattern: &#39;a
+    == a
+
+And it remembers what function it is for, so you can DO it without getting it mixed up.  As a nice bonus, the multi-return gives you the head and the tail if you want it:
+
+    &gt;&gt; [begin end]: do f
+    == [a b c]
+
+    &gt;&gt; begin
+    == [a b c]
+
+    &gt;&gt; end
+    == [b c]
+
+They say of **`make-apply-obj-proto`**: *&quot;But you may see that this is verbose and inefficient, making a whole object just for a call like this. And you&#39;d be right. It&#39;s just an example.  You don&#39;t want to recreate objects like this, especially in a loop. But you don&#39;t have to. You can reuse the object and just change the important values in it.&quot;*
+
+This is the opposite philosophy to Ren-C.  These frames are the foundation of function invocation...and so they are always built.  The keylist of the object lives with the function definition and is pointed to by the frame, and so each instance only takes up the cells of the arguments.
+
+*(Note: If you wanted something directly comparable to **`make-apply-obj-proto`** it really could just be an option passed to APPLY which gave back the frame it builds without calling it.)*
+
+Anyhow... I&#39;m glad they&#39;ve undertaken this... because it brings us closer to assembling comparable examples.  It lays bare the fact that when I undertake &quot;complexity&quot; it is because failure to design the system to handle relevant cases pushes that complexity onto the user...</description>
+    
+    <lastBuildDate>Tue, 20 Aug 2024 06:29:44 +0000</lastBuildDate>
+    <category>Redbol</category>
+    <atom:link href="https://forum.rebol.info/t/critiquing-reds-updated-apply-implementation/2194.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Critiquing Red&#39;s Updated APPLY Implementation</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>Ren-C added a super-duper APPLY in August 2021:</p>
+<aside class="quote quote-modified" data-post="1" data-topic="1834">
+  <div class="title">
+    <div class="quote-controls"></div>
+    <img loading="lazy" alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/40/26_2.png" class="avatar">
+    <a href="https://forum.rebol.info/t/apply-ii-the-revenge/1834">APPLY II: The Revenge!</a> <a class="badge-wrapper  bullet" href="https://forum.rebol.info/c/usage/feature-discover/24"><span class="badge-category-parent-bg" style="background-color: #3AB54A;"></span><span class="badge-category-bg" style="background-color: #3AB54A;"></span><span style="" data-drop-close="true" class="badge-category clear-badge" title="Rebol and Red have quite a few cool features - this is PR for them.">Feature Discover</span></a>
+  </div>
+  <blockquote>
+    ...and by "it's time" I apparently meant "within the next year, maybe"... 
+But better late than never, right?  It's in! 
+
+<a name="refinements-can-be-provided-in-any-order-1" class="anchor" href="https://forum.rebol.info#refinements-can-be-provided-in-any-order-1"></a>Refinements Can be Provided In Any Order
+[a b c d e d e] = apply :append [[a b c] [d e] /dup 2]
+[a b c d e d e] = apply :append [/dup 2 [a b c] [d e]]
+[a b c d e d e] = apply :append [[a b c] /dup 2 [d e]]
+
+[a b c d d] = apply :append [/dup 2 [a b c] [d e] /part 1]
+[a b c d d] = apply :append [[a b c] [d e] /part 1 /dup 2]
+
+
+<a name="any-parameter-not-just-refinements-can-be-used-by-name-2" class="anchor" href="https://forum.rebol.info#any-parameter-not-just-refinements-can-be-used-by-name-2"></a>Any Parameter (Not Just Refinements) Can Be Used B…
+  </blockquote>
+</aside>
+
+<p>About two years later, I observe Red has published their own implementation of APPLY...with some seeming similarities:</p>
+<p><a href="https://www.red-lang.org/2023/06/dynamic-refinements-and-function.html" class="inline-onebox">Red Programming Language: Dynamic Refinements and Function Application</a></p>
+<p>But there are significant mechanical and usability differences.</p>
+<p>Red inherits complexity from the fact that they didn't merge refinements and their arguments together.  This keeps them tied to problems that arise from ordering, and keeping the enablement of a refinement in sync with its value(s).  <em>It's clear to me that "multi-arg-refinements" has proven to be not worth it in the design vs. having a single unified nullable value for each named argument</em>...and this is only one of the many places that bear that out.</p>
+<p>They do offer an idea how to create something like a FRAME!... but it's a higher-level usermode concept instead of the lower-level basis for APPLY-like abstractions.  The post gives an implementation called <strong><code>make-apply-obj-proto</code></strong>:</p>
+<pre><code>red&gt;&gt; o-fctm: make-apply-obj-proto/with 'find/case/tail/match [series: [a b c] value: 'a]
+== make object! [
+    series: [a b c]
+    value: 'a
+    part: false
+    length: none
+    only: false
+    case: true
+    same: fal...
+
+red&gt;&gt; apply-object :find o-fctm
+== [b c]
+</code></pre>
+<p>Ren-C bakes this idea in as the core of function application.  You can build a FRAME! for the function (note the tail of the match is a multi-return...you can get both the begin and end in a single call...so there's no /TAIL here):</p>
+<pre><code>&gt;&gt; f: make frame! :find/case/match
+== make frame! [
+    series: ~
+    pattern: ~
+    part: ~
+    skip: ~
+    reverse: ~
+    last: ~
+]
+</code></pre>
+<p>Notice /CASE and /MATCH didn't take arguments, so they have been specialized out of the frame as they were already mentioned as being in use.</p>
+<p>Then you can fill in the frame with required (and optional) values:</p>
+<pre><code>&gt;&gt; f.series: [a b c]
+== [a b c]
+
+&gt;&gt; f.pattern: 'a
+== a
+</code></pre>
+<p>And it remembers what function it is for, so you can DO it without getting it mixed up.  As a nice bonus, the multi-return gives you the head and the tail if you want it:</p>
+<pre><code>&gt;&gt; [begin end]: do f
+== [a b c]
+
+&gt;&gt; begin
+== [a b c]
+
+&gt;&gt; end
+== [b c]
+</code></pre>
+<p>They say of <strong><code>make-apply-obj-proto</code></strong>: <em>"But you may see that this is verbose and inefficient, making a whole object just for a call like this. And you'd be right. It's just an example.  You don't want to recreate objects like this, especially in a loop. But you don't have to. You can reuse the object and just change the important values in it."</em></p>
+<p>This is the opposite philosophy to Ren-C.  These frames are the foundation of function invocation...and so they are always built.  The keylist of the object lives with the function definition and is pointed to by the frame, and so each instance only takes up the cells of the arguments.</p>
+<p><em>(Note: If you wanted something directly comparable to <strong><code>make-apply-obj-proto</code></strong> it really could just be an option passed to APPLY which gave back the frame it builds without calling it.)</em></p>
+<p>Anyhow... I'm glad they've undertaken this... because it brings us closer to assembling comparable examples.  It lays bare the fact that when I undertake "complexity" it is because failure to design the system to handle relevant cases pushes that complexity onto the user...</p>
+          <p><a href="https://forum.rebol.info/t/critiquing-reds-updated-apply-implementation/2194/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/critiquing-reds-updated-apply-implementation/2194/1</link>
+        <pubDate>Thu, 22 Jun 2023 00:10:25 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-2194-1</guid>
+        <source url="https://forum.rebol.info/t/critiquing-reds-updated-apply-implementation/2194.rss">Critiquing Red&#39;s Updated APPLY Implementation</source>
+      </item>
+  </channel>
+</rss>
