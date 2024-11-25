@@ -1,0 +1,356 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Why No-Argument Refinements Are ~okay~ or ~null~</title>
+    <link>https://forum.rebol.info/t/why-no-argument-refinements-are-okay-or-null/735</link>
+    <description>In Rebol2, a refinement&#39;s value would be #[true] or #[none]:
+
+    rebol2&gt;&gt; show-me: func [/bar] [print mold bar]
+
+    rebol2&gt;&gt; show-me/bar
+    true  ; actually LOGIC! #[true], not the WORD! true
+
+    rebol2&gt;&gt; foo
+    none  ; actually a NONE! value, not the WORD! none
+
+*As a newbie, I was bothered by this from the get-go...* because I couldn&#39;t test refinements with AND/OR.  (they don&#39;t take #[none])  I hadn&#39;t drank the Kool-Aid that ANY/ALL were always a desirable substitute.
+
+---
+
+&gt; **NOTE: I never** drank the ANY/ALL supremacy Kool-Aid.  Of course there are a lot of cool uses for them as larger scale control structures--and it&#39;s important to know how to use them for streamlining program flow.  But for testing flags?  The ability to do it infix and without delimiters can read much better in many places.
+&gt;
+&gt; So Ren-C has adopted infix AND/OR that [operate conditionally on ANY-VALUE! and return LOGIC!](https://github.com/rebol/rebol-issues/issues/1879) *(they also short-circuit)*
+&gt;
+&gt;     ren-c&gt;&gt; flag1: flag2: true
+&gt;
+&gt;     ren-c&gt;&gt; if flag1 and flag2 [print &quot;It allows WORD!s, this comes up often&quot;]
+&gt;     It allows WORD!s, this comes up often
+&gt;
+&gt;     ren-c&gt;&gt; if all [flag1 flag2] [print &quot;Not everyone loves this (e.g. not me)&quot;]
+&gt;     Not everyone loves this (e.g. not me)
+&gt;
+&gt;     ren-c&gt;&gt; if (block? flag1) and (empty? flag1) [print &quot;Short-circuit avoids error&quot;]
+&gt;     ; to do this, the second argument to AND/OR is quoted behind the scenes 
+
+---
+
+There were countless debates over whether refinements should just be LOGIC! (as in Red), or if a used refinement should be the WORD! of the refinement (maybe useful for chaining?).  For a time, it seemed murkier when Ren-C introduced NULL...although it all tied up rather nicely in the end!
+
+---
+
+## Evolution Led Ren-C to [Refinements As Their Own Arguments](https://forum.rebol.info/t/pure-and-refined-simplifying-refinements-to-one-or-zero-args/1120)
+
+* Multiple-refinement arguments were a fringe feature, used almost nowhere.  Primarily it just created an inconvenience for 1-argument refinements having to come up with some random name for the argument.
+
+* With the existence of antiform NULL, a single argument could represent the state of being used or not, along with the value itself.
+
+    * The &quot;used&quot; state would be able to hold any non-antiform value (anything that can be put in a block)
+
+    * NULL became a &quot;branch inhibitor&quot;--so just testing it with IF could cover most &quot;is the refinement used&quot; questions
+
+    * All non-antiform values (and the antiform of ~okay~) eventually became branch triggers
+
+         * This solved all the issues of conflating unused refinements with used ones that were things like BLANK! or the WORD! of FALSE
+
+* It simplified the evaluator logic--removing the &quot;refinements pick up every parameter after them&quot; semantic.
+
+    * This paved the way for adding more arguments to functions after-the-fact, without worrying about them getting lumped in with the arguments of the existing last refinement.
+
+## But What About Refinements That *Don&#39;t* Take Arguments?
+
+This question malingered along longer than I would have liked it to.  :zombie: 
+
+For some time it would give you back a WORD! that was the name of the refinement itself:
+
+    old-renc&gt;&gt; show-me: func [/bar] [print mold bar]
+
+    old-renc&gt;&gt; show-me/bar
+    bar
+
+    old-renc&gt;&gt; foo
+    == ~null~  ; anti
+
+I&#39;d advocated for this idea very early on:
+
+* Imagine if one function took `/only` and wrapped another function that also took an `/only`
+
+* If the wrapper got its ONLY variable for the refinement as the WORD! `only`...
+
+    * you could just say **`inner-function/(only)`**
+
+      * If you got the refinement, that acts like **`inner-function/(&#39;only)`**
+
+      * If you didn&#39;t get the refinement, that would act like **`inner-function/(null)`**
+
+* If you squint your eyes and use your imagination a little, this might seem like a useful tool for chaining.
+
+**But the feature was a victim of Ren-C&#39;s other successes.**  It&#39;s much easier and more efficient to wrap functions with things like ADAPT, ENCLOSE, SPECIALIZE.  The need to write this kind of &quot;tunneling&quot; function is rare: and refinement naming overlap is unlikely if the functions weren&#39;t somehow derived from each other.
+
+*(It also made building FRAME!s at a low-level more annoying...the value you put in the frames had to be contingent on the refinement name.  And it forced path dispatch steps to permit NULLs, when it didn&#39;t allow it anywhere else.  More complexity, for little benefit.)*
+
+## &quot;Wouldn&#39;t LOGIC! For Argless Refinements be... *Logical?*&quot;
+
+You might think so.  :robot:  But actually... *no*.
+
+Even before the design of [Flexible Logic](https://forum.rebol.info/t/flexible-logic-system-terminology/2252) (where FALSE can&#39;t be tested for by a raw IF), it didn&#39;t make sense.
+
+An intuitive angle might be to consider how an argument-less refinement contrasts with a refinement that takes an actual LOGIC! argument.
+
+    foo: func [/mutate [logic!]] [...]
+
+This refinement can be NULL (unspecified--e.g. the refinement was not used at all), or #[true] or #[false] when it is specified.  There&#39;s three states.
+
+But an argument-less refinement is really just &quot;used or unused&quot;.  So NULL and then a single truthy state... ideally a state that the system understands as meaning *&quot;I&#39;m opting in&quot;*.
+
+## The Modern Day: ~NULL~ or ~OKAY~
+
+OKAY is a branch-triggering antiform that exists as the complement to NULL.
+
+    &gt;&gt; 10 &gt; 20
+    == ~null~  ; anti
+
+    &gt;&gt; 10 &lt; 20
+    == ~okay~  ; anti
+
+It&#39;s the perfect choice for an argless refinement.
+
+    &gt;&gt; f: make frame! :some-function
+     
+    &gt;&gt; f.argless-refinement: x = y  ; slot will be null or okay</description>
+    
+    <lastBuildDate>Sun, 01 Sep 2024 15:42:20 +0000</lastBuildDate>
+    <category>Functions</category>
+    <atom:link href="https://forum.rebol.info/t/why-no-argument-refinements-are-okay-or-null/735.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Why No-Argument Refinements Are ~okay~ or ~null~</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p><em>(Note: Lifted this writeup out of another thread that otherwise is useless.)</em></p>
+<aside class="quote no-group quote-modified" data-username="hostilefork" data-post="1" data-topic="735">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<ul>
+<li>With the existence of non-valued NULL, a single argument could represent the state of being used or not, along with the value itself.</li>
+</ul>
+</blockquote>
+</aside>
+<p>Note that Ren-C had undergone hard-fought battles to confront problems like:</p>
+<pre><code>rebol2&gt;&gt; foo: func [/ref arg] [print ["ref:" mold ref "arg:" mold arg]]
+
+rebol2&gt;&gt; foo
+ref: none arg: none
+
+rebol2&gt;&gt; foo/ref &lt;thing&gt;
+ref: true arg: &lt;thing&gt;
+
+rebol2&gt;&gt; foo/ref none
+ref: true arg: none
+
+rebol2&gt;&gt; condition: false
+rebol2&gt;&gt; foo/ref if condition [&lt;thing&gt;]
+ref: true arg: none
+</code></pre>
+<p>The above pattern made it hard for function authors to know if a refinement was in use.  If they tried to go by the <code>arg</code>, they could be ignoring an inconsistent meaning where the caller literally meant to specify a none.  The situation gets worse with multiple refinement arguments.</p>
+<p><em>(Think about a case where you allow arbitrary values to be interleaved into a block with an /INTERLEAVE refinement, but no values will be inserted if the refinement is not intended.  NONE! is one of the legal values, since it can be anything.  If the function author heeds the refinement by name, then looks at the argument to see if there's a NONE!, it will work.  But that prevents them from using the argument's status as none or not.  The situation is confusing and you'd find functions making ad-hoc policy decisions, which may-or-may-not allow you to pass none as a way of backing out of a refinement when you used the refinement on the callsite.)</em></p>
+<p>Gradually, the evaluator was made to keep the refinements' truth or falsehood in sync with the state of the arguments.  Use of a NULL for <em>all</em> of a refinement's arguments at the callsite would make the refinement appear unused to the function, as if the caller had never specified it.  Using NULL for only some of them would raise an error.  And refinement arguments were never allowed to be themselves NULL... they were only nulled when the refinement was unused, and hence trying to access them would be an error.</p>
+<p>This ultimately streamlined even further into the unification of the refinement and the argument itself...reducing the number of random words you'd have to come up with, shrinking call frames, eliminating a "gearshift" in the evaluator that opened doors to AUGMENT-ing frames with new normal arguments <em>after</em> a refinement argument.</p>
+<p>But something to point out is that <strong>because these changes were incremental over time, ideas like the necessity of erroring on null accesses were also something that had to be challenged over time.</strong>  I had a bit of uneasiness about things like:</p>
+<pre><code>rebol2&gt;&gt; foreach [x y] [1 2 3] [
+             print ["x is" x "and y is" y]
+         ]
+
+x is 1 and y is 2
+x is 3 and y is none
+</code></pre>
+<p>Something about running off of the edge of the data and not raising so much as a peep was unsetting.  Doubly so because a NONE! might have actually been literally in the array.  It seemed that once you had the power of NULL to distinguish, that not taking advantage of that with error checking would be a waste...</p>
+<p>But such checks have upsides and downsides.  Look at R3-Alpha:</p>
+<pre><code>r3-alpha&gt;&gt; data: [#[none!] #[unset!] 1020]
+== [none unset! 1020]
+
+r3-alpha&gt;&gt; data/1                          
+== none
+
+r3-alpha&gt;&gt; data/2  ; Note: prints nothing in console (and no newline)
+r3-alpha&gt;&gt; data/3
+== 1020
+
+r3-alpha&gt;&gt; data/4
+== none
+</code></pre>
+<p>Here's Ren-C:</p>
+<pre><code>&gt;&gt; data: [_ ~ 1020]
+== [_ ~ 1020]
+
+&gt;&gt; data.1
+== _
+
+&gt;&gt; data.2
+== ~
+
+&gt;&gt; data.3
+== 1020
+
+&gt;&gt; data.4
+; null
+</code></pre>
+<p>Is this so bad, not to error on <code>data.4</code> or other null cases?  At least a distinct state is being signaled...that you can tell is out of band of what's in a block.</p>
+<p>I think that when all angles are examined about how things have progressed, this makes sense, as does the unused-refinements-are-null change.  It may feel a little more unsafe, but if we're using JavaScript...</p>
+<pre><code>js&gt;&gt; var data = [null]  // can't put undefined in array literal...
+js&gt;&gt; data.push(undefined)  // ...but you can push it (?)
+js&gt;&gt; data.push(1020)
+
+js&gt;&gt; data
+(3) [null, undefined, 1020]
+
+js&gt;&gt; data[0]
+null
+
+js&gt;&gt; data[1]
+undefined
+
+js&gt;&gt; data[2]
+1020
+
+&gt;&gt; data[3]  // out of bounds (fourth element, indices are 0-based)
+undefined
+</code></pre>
+<p>I think Ren-C is leading the way here, and that it's not worth getting bent out of shape over NULL accesses not triggering errors.  <a href="https://forum.rebol.info/t/definitional-errors-as-blank-in-null-out-alternative/1880">The TRY mechanisms</a> are there to pick up the slack when there are questionable uses of a NULL, to make sure it was intended.</p>
+          <p><a href="https://forum.rebol.info/t/why-no-argument-refinements-are-okay-or-null/735/5">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/why-no-argument-refinements-are-okay-or-null/735/5</link>
+        <pubDate>Fri, 06 Dec 2019 02:35:52 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-735-5</guid>
+        <source url="https://forum.rebol.info/t/why-no-argument-refinements-are-okay-or-null/735.rss">Why No-Argument Refinements Are ~okay~ or ~null~</source>
+      </item>
+      <item>
+        <title>Why No-Argument Refinements Are ~okay~ or ~null~</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>In Rebol2, a refinement's value would be #[true] or #[none]:</p>
+<pre><code>rebol2&gt;&gt; show-me: func [/bar] [print mold bar]
+
+rebol2&gt;&gt; show-me/bar
+true  ; actually LOGIC! #[true], not the WORD! true
+
+rebol2&gt;&gt; foo
+none  ; actually a NONE! value, not the WORD! none
+</code></pre>
+<p><em>As a newbie, I was bothered by this from the get-go...</em> because I couldn't test refinements with AND/OR.  (they don't take #[none])  I hadn't drank the Kool-Aid that ANY/ALL were always a desirable substitute.</p>
+<hr>
+<blockquote>
+<p><strong>NOTE: I never</strong> drank the ANY/ALL supremacy Kool-Aid.  Of course there are a lot of cool uses for them as larger scale control structures--and it's important to know how to use them for streamlining program flow.  But for testing flags?  The ability to do it infix and without delimiters can read much better in many places.</p>
+<p>So Ren-C has adopted infix AND/OR that <a href="https://github.com/rebol/rebol-issues/issues/1879">operate conditionally on ANY-VALUE! and return LOGIC!</a> <em>(they also short-circuit)</em></p>
+<pre><code>ren-c&gt;&gt; flag1: flag2: true
+
+ren-c&gt;&gt; if flag1 and flag2 [print "It allows WORD!s, this comes up often"]
+It allows WORD!s, this comes up often
+
+ren-c&gt;&gt; if all [flag1 flag2] [print "Not everyone loves this (e.g. not me)"]
+Not everyone loves this (e.g. not me)
+
+ren-c&gt;&gt; if (block? flag1) and (empty? flag1) [print "Short-circuit avoids error"]
+; to do this, the second argument to AND/OR is quoted behind the scenes 
+</code></pre>
+</blockquote>
+<hr>
+<p>There were countless debates over whether refinements should just be LOGIC! (as in Red), or if a used refinement should be the WORD! of the refinement (maybe useful for chaining?).  For a time, it seemed murkier when Ren-C introduced NULL...although it all tied up rather nicely in the end!</p>
+<hr>
+<h2><a name="p-2435-evolution-led-ren-c-to-refinements-as-their-own-argumentshttpsforumrebolinfotpure-and-refined-simplifying-refinements-to-one-or-zero-args1120-1" class="anchor" href="https://forum.rebol.info#p-2435-evolution-led-ren-c-to-refinements-as-their-own-argumentshttpsforumrebolinfotpure-and-refined-simplifying-refinements-to-one-or-zero-args1120-1"></a>Evolution Led Ren-C to <a href="https://forum.rebol.info/t/pure-and-refined-simplifying-refinements-to-one-or-zero-args/1120">Refinements As Their Own Arguments</a></h2>
+<ul>
+<li>
+<p>Multiple-refinement arguments were a fringe feature, used almost nowhere.  Primarily it just created an inconvenience for 1-argument refinements having to come up with some random name for the argument.</p>
+</li>
+<li>
+<p>With the existence of antiform NULL, a single argument could represent the state of being used or not, along with the value itself.</p>
+<ul>
+<li>
+<p>The "used" state would be able to hold any non-antiform value (anything that can be put in a block)</p>
+</li>
+<li>
+<p>NULL became a "branch inhibitor"--so just testing it with IF could cover most "is the refinement used" questions</p>
+</li>
+<li>
+<p>All non-antiform values (and the antiform of ~okay~) eventually became branch triggers</p>
+<ul>
+<li>This solved all the issues of conflating unused refinements with used ones that were things like BLANK! or the WORD! of FALSE</li>
+</ul>
+</li>
+</ul>
+</li>
+<li>
+<p>It simplified the evaluator logic--removing the "refinements pick up every parameter after them" semantic.</p>
+<ul>
+<li>This paved the way for adding more arguments to functions after-the-fact, without worrying about them getting lumped in with the arguments of the existing last refinement.</li>
+</ul>
+</li>
+</ul>
+<h2><a name="p-2435-but-what-about-refinements-that-dont-take-arguments-2" class="anchor" href="https://forum.rebol.info#p-2435-but-what-about-refinements-that-dont-take-arguments-2"></a>But What About Refinements That <em>Don't</em> Take Arguments?</h2>
+<p>This question malingered along longer than I would have liked it to.  <img src="https://forum.rebol.info/images/emoji/twitter/zombie.png?v=12" title=":zombie:" class="emoji" alt=":zombie:" loading="lazy" width="20" height="20"></p>
+<p>For some time it would give you back a WORD! that was the name of the refinement itself:</p>
+<pre><code>old-renc&gt;&gt; show-me: func [/bar] [print mold bar]
+
+old-renc&gt;&gt; show-me/bar
+bar
+
+old-renc&gt;&gt; foo
+== ~null~  ; anti
+</code></pre>
+<p>I'd advocated for this idea very early on:</p>
+<ul>
+<li>
+<p>Imagine if one function took <code>/only</code> and wrapped another function that also took an <code>/only</code></p>
+</li>
+<li>
+<p>If the wrapper got its ONLY variable for the refinement as the WORD! <code>only</code>...</p>
+<ul>
+<li>
+<p>you could just say <strong><code>inner-function/(only)</code></strong></p>
+<ul>
+<li>
+<p>If you got the refinement, that acts like <strong><code>inner-function/('only)</code></strong></p>
+</li>
+<li>
+<p>If you didn't get the refinement, that would act like <strong><code>inner-function/(null)</code></strong></p>
+</li>
+</ul>
+</li>
+</ul>
+</li>
+<li>
+<p>If you squint your eyes and use your imagination a little, this might seem like a useful tool for chaining.</p>
+</li>
+</ul>
+<p><strong>But the feature was a victim of Ren-C's other successes.</strong>  It's much easier and more efficient to wrap functions with things like ADAPT, ENCLOSE, SPECIALIZE.  The need to write this kind of "tunneling" function is rare: and refinement naming overlap is unlikely if the functions weren't somehow derived from each other.</p>
+<p><em>(It also made building FRAME!s at a low-level more annoying...the value you put in the frames had to be contingent on the refinement name.  And it forced path dispatch steps to permit NULLs, when it didn't allow it anywhere else.  More complexity, for little benefit.)</em></p>
+<h2><a name="p-2435-wouldnt-logic-for-argless-refinements-be-logical-3" class="anchor" href="https://forum.rebol.info#p-2435-wouldnt-logic-for-argless-refinements-be-logical-3"></a>"Wouldn't LOGIC! For Argless Refinements be... <em>Logical?</em>"</h2>
+<p>You might think so.  <img src="https://forum.rebol.info/images/emoji/twitter/robot.png?v=12" title=":robot:" class="emoji" alt=":robot:" loading="lazy" width="20" height="20">  But actually... <em>no</em>.</p>
+<p>Even before the design of <a href="https://forum.rebol.info/t/flexible-logic-system-terminology/2252">Flexible Logic</a> (where FALSE can't be tested for by a raw IF), it didn't make sense.</p>
+<p>An intuitive angle might be to consider how an argument-less refinement contrasts with a refinement that takes an actual LOGIC! argument.</p>
+<pre><code>foo: func [/mutate [logic!]] [...]
+</code></pre>
+<p>This refinement can be NULL (unspecified--e.g. the refinement was not used at all), or #[true] or #[false] when it is specified.  There's three states.</p>
+<p>But an argument-less refinement is really just "used or unused".  So NULL and then a single truthy state... ideally a state that the system understands as meaning <em>"I'm opting in"</em>.</p>
+<h2><a name="p-2435-the-modern-day-null-or-okay-4" class="anchor" href="https://forum.rebol.info#p-2435-the-modern-day-null-or-okay-4"></a>The Modern Day: ~NULL~ or ~OKAY~</h2>
+<p>OKAY is a branch-triggering antiform that exists as the complement to NULL.</p>
+<pre><code>&gt;&gt; 10 &gt; 20
+== ~null~  ; anti
+
+&gt;&gt; 10 &lt; 20
+== ~okay~  ; anti
+</code></pre>
+<p>It's the perfect choice for an argless refinement.</p>
+<pre><code>&gt;&gt; f: make frame! :some-function
+ 
+&gt;&gt; f.argless-refinement: x = y  ; slot will be null or okay
+</code></pre>
+          <p><a href="https://forum.rebol.info/t/why-no-argument-refinements-are-okay-or-null/735/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/why-no-argument-refinements-are-okay-or-null/735/1</link>
+        <pubDate>Thu, 12 Jul 2018 21:05:50 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-735-1</guid>
+        <source url="https://forum.rebol.info/t/why-no-argument-refinements-are-okay-or-null/735.rss">Why No-Argument Refinements Are ~okay~ or ~null~</source>
+      </item>
+  </channel>
+</rss>

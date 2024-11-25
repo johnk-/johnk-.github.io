@@ -1,0 +1,290 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>The Semantics of JOIN</title>
+    <link>https://forum.rebol.info/t/the-semantics-of-join/2333</link>
+    <description>**As @Brett&#39;s critique of yesteryear pointed out, [REJOIN sucked](https://forum.rebol.info/t/rejoin-ugliness-and-the-usefulness-of-tests/248).**
+
+If naming were consistent, you might think from this pattern:
+
+    append a reduce b &lt;=&gt; repend a b
+
+...that the following would have been true:
+
+    join a reduce b &lt;=&gt; rejoin a b  ; one would have perhaps thought?
+
+But no...REJOIN was single arity (and was a mess).
+
+## So REJOIN is in the trash heap, but what about JOIN?
+
+JOIN implicitly reduced, and was basically this:
+
+    join a b &lt;=&gt; append copy a reduce b
+
+But **b** didn&#39;t have to be a BLOCK!, so if it was not, it wasn&#39;t reduced and just left as-is.
+
+    rebol2&gt;&gt; join &quot;abc&quot; [1 + 2 3 + 4]
+    == &quot;abc37&quot;  ; so the block was reduced
+
+    rebol2&gt;&gt; d: 10
+    rebol2&gt;&gt; join &quot;abc&quot; &#39;d
+    == &quot;abcd&quot;  ; not abc10, so the word was *not* reduced
+
+Red did not carry forward this definition:
+
+    &gt;&gt; join
+    *** Script Error: join has no value
+
+## Next-Level JOIN: Allow JOIN  DATATYPE
+
+At some point, it occurred to me that if you could use JOIN with a datatype, it could step in to fill in the desires of REJOIN more clearly:
+
+    &gt;&gt; join binary! [1 + 2 #{DECAFBAD} 2 + 3]
+    == #{03DECAFBAD05}
+
+There really had been expressions of this like:
+
+    rebol2&gt;&gt; rejoin [#{} 1 + 2 #{DECAFBAD} 2 + 3]
+    == #{03DECAFBAD05}
+
+But see Brett&#39;s critique, if the surface-level badness isn&#39;t enough to convince you!
+
+I also wanted to support things that Rebol2 probably meant to, but did not.  This should give a WORD! back:
+
+    rebol2&gt;&gt; join &#39;a &#39;b
+    == &quot;ab&quot;  ; should be word! `ab`
+
+Plus, I thought it might be nice to have a non-reducing variant, done with `@[...]`
+
+    &gt;&gt; join word! @[a 1 + 2]
+    == a1+2
+
+I&#39;ve mentioned elsewhere that I think having *join-like* actions be done with JOIN is superior to being some form of MAKE, when there&#39;s nebulousness for what MAKE means.
+
+## Making Peace (?) With Uneasiness About List Ambiguity
+
+Ergonomically, it&#39;s nice for JOIN to be able to take either a BLOCK! or some other type.
+
+One of the biggest uses of JOIN is with files:
+
+    join directory %foo.txt
+
+It would be annoying if you had to write:
+
+    join directory [%foo.txt]
+
+But then, you have the problem that if you&#39;re joining onto a BLOCK!, then a BLOCK! is a legitimate thing to join:
+
+    &gt;&gt; join [a b] [1 + 2 10 + 20]
+    == [a b 3 30]  ; &quot;traditional&quot; behavior
+
+    &gt;&gt; join [a b] [1 + 2]
+    == [a b [1 + 2 10 + 20]]  ; ...but this could be valid
+
+We could &quot;fix&quot; this by defining JOIN as a non-reducing construct, then have people use SPREAD and REDUCE:
+
+    &gt;&gt; join [a b] spread reduce [1 + 2 10 + 20]
+    == [a b 3 30]
+
+    &gt;&gt; join [a b] [1 + 2 10 + 20]
+    == [a b [1 + 2 10 + 20]]
+
+    &gt;&gt; join [a b] reduce [1 + 2 10 + 20]
+    == [a b [3 30]]
+
+But this doesn&#39;t exactly square with the JOIN of a DATATYPE! case, and the most common desires.
+
+If anything, I&#39;d rather make JOIN always take a **`[...]`** or **`@[...]`** in the second argument, and then create some other non-reducing construct that slaps two things together.
+
+    &gt;&gt; block: [a b]
+
+    &gt;&gt; adjoin block [c d]
+    == [a b [c d]]
+
+    &gt;&gt; adjoin block spread [e f]
+    == [a b [c d] e f]
+
+    &gt;&gt; block
+    == [a b]  ; unmodified (difference from append)
+
+But asking people to write **`(adjoin directory %foo.txt)`** is... ugly.
+
+A compromise is to narrow it, so that you could only use it with single items when joining with non-lists...
+
+    &gt;&gt; join &quot;abc&quot; &quot;def&quot;
+    == &quot;abcdef&quot;
+
+    &gt;&gt; join [a b c] &quot;def&quot;
+    ** Error: JOIN with a list must use [...] or @[...]
+
+This would help steer you away from writing code like **`join list value`** and think it works, to only find it falling down when value becomes a BLOCK!.
+
+## Is REDUCE just JOIN BLOCK! ?
+
+The implementation of JOIN that I&#39;m working on seems like a more powerful REDUCE.
+
+But questions start to arise about the binding... what should the binding be?
+
+    &gt;&gt; join [add 1] [&#39;multiply 2 3]
+    == [add 1 multiply 2 3]
+
+In that case, I&#39;m going to assume the produced block would have the binding of the [add 1] block.  Since multiply is **`&#39;multiply`** and not **`$multiply`** it would be unbound and hence an evaluation would be driven by that first argument&#39;s binding.
+
+But what if you just said:
+
+    &gt;&gt; join block! [&#39;add 1 &#39;multiply 2 3]
+    == [add 1 multiply 2 3]
+
+Before, the second block&#39;s binding was disregarded in the product.  But when there&#39;s no first block to get the binding from, does it assume the binding of the second block?  And how would you get an unbound block if you wanted it?
+
+We could say that you get an unbound block, but if you want a bound block, you&#39;d say:
+
+    &gt;&gt; join $[] [&#39;add 1 &#39;multiply 2 3]
+    == [add 1 multiply 2 3]
+
+Then we have similar questions for things like word!:
+
+    &gt;&gt; join word! [&quot;a&quot; &quot;b&quot;]
+    == ab
+
+I feel that pretty obviously should be unbound.  But words follow different rules:
+
+    &gt;&gt; join $a [&quot;b&quot;]
+    == ab  ; can&#39;t necessarily be bound, just because a was...
+
+That would suggest all words come back unbound from a joining process.
+
+So no shortage of questions.  But in general, I think JOIN is on the right track, and splitting MAKE behaviors that are JOIN-like to it seems good.</description>
+    
+    <lastBuildDate>Sat, 16 Nov 2024 19:54:02 +0000</lastBuildDate>
+    <category>Semantics</category>
+    <atom:link href="https://forum.rebol.info/t/the-semantics-of-join/2333.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>The Semantics of JOIN</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p><strong>As <a class="mention" href="https://forum.rebol.info/u/brett">@Brett</a>'s critique of yesteryear pointed out, <a href="https://forum.rebol.info/t/rejoin-ugliness-and-the-usefulness-of-tests/248">REJOIN sucked</a>.</strong></p>
+<p>If naming were consistent, you might think from this pattern:</p>
+<pre><code>append a reduce b &lt;=&gt; repend a b
+</code></pre>
+<p>...that the following would have been true:</p>
+<pre><code>join a reduce b &lt;=&gt; rejoin a b  ; one would have perhaps thought?
+</code></pre>
+<p>But no...REJOIN was single arity (and was a mess).</p>
+<h2><a name="p-7907-so-rejoin-is-in-the-trash-heap-but-what-about-join-1" class="anchor" href="https://forum.rebol.info#p-7907-so-rejoin-is-in-the-trash-heap-but-what-about-join-1"></a>So REJOIN is in the trash heap, but what about JOIN?</h2>
+<p>JOIN implicitly reduced, and was basically this:</p>
+<pre><code>join a b &lt;=&gt; append copy a reduce b
+</code></pre>
+<p>But <strong>b</strong> didn't have to be a BLOCK!, so if it was not, it wasn't reduced and just left as-is.</p>
+<pre><code>rebol2&gt;&gt; join "abc" [1 + 2 3 + 4]
+== "abc37"  ; so the block was reduced
+
+rebol2&gt;&gt; d: 10
+rebol2&gt;&gt; join "abc" 'd
+== "abcd"  ; not abc10, so the word was *not* reduced
+</code></pre>
+<p>Red did not carry forward this definition:</p>
+<pre><code>&gt;&gt; join
+*** Script Error: join has no value
+</code></pre>
+<h2><a name="p-7907-next-level-join-allow-join-datatype-2" class="anchor" href="https://forum.rebol.info#p-7907-next-level-join-allow-join-datatype-2"></a>Next-Level JOIN: Allow JOIN  DATATYPE</h2>
+<p>At some point, it occurred to me that if you could use JOIN with a datatype, it could step in to fill in the desires of REJOIN more clearly:</p>
+<pre><code>&gt;&gt; join binary! [1 + 2 #{DECAFBAD} 2 + 3]
+== #{03DECAFBAD05}
+</code></pre>
+<p>There really had been expressions of this like:</p>
+<pre><code>rebol2&gt;&gt; rejoin [#{} 1 + 2 #{DECAFBAD} 2 + 3]
+== #{03DECAFBAD05}
+</code></pre>
+<p>But see Brett's critique, if the surface-level badness isn't enough to convince you!</p>
+<p>I also wanted to support things that Rebol2 probably meant to, but did not.  This should give a WORD! back:</p>
+<pre><code>rebol2&gt;&gt; join 'a 'b
+== "ab"  ; should be word! `ab`
+</code></pre>
+<p>Plus, I thought it might be nice to have a non-reducing variant, done with <code>@[...]</code></p>
+<pre><code>&gt;&gt; join word! @[a 1 + 2]
+== a1+2
+</code></pre>
+<p>I've mentioned elsewhere that I think having <em>join-like</em> actions be done with JOIN is superior to being some form of MAKE, when there's nebulousness for what MAKE means.</p>
+<h2><a name="p-7907-making-peace-with-uneasiness-about-list-ambiguity-3" class="anchor" href="https://forum.rebol.info#p-7907-making-peace-with-uneasiness-about-list-ambiguity-3"></a>Making Peace (?) With Uneasiness About List Ambiguity</h2>
+<p>Ergonomically, it's nice for JOIN to be able to take either a BLOCK! or some other type.</p>
+<p>One of the biggest uses of JOIN is with files:</p>
+<pre><code>join directory %foo.txt
+</code></pre>
+<p>It would be annoying if you had to write:</p>
+<pre><code>join directory [%foo.txt]
+</code></pre>
+<p>But then, you have the problem that if you're joining onto a BLOCK!, then a BLOCK! is a legitimate thing to join:</p>
+<pre><code>&gt;&gt; join [a b] [1 + 2 10 + 20]
+== [a b 3 30]  ; "traditional" behavior
+
+&gt;&gt; join [a b] [1 + 2]
+== [a b [1 + 2 10 + 20]]  ; ...but this could be valid
+</code></pre>
+<p>We could "fix" this by defining JOIN as a non-reducing construct, then have people use SPREAD and REDUCE:</p>
+<pre><code>&gt;&gt; join [a b] spread reduce [1 + 2 10 + 20]
+== [a b 3 30]
+
+&gt;&gt; join [a b] [1 + 2 10 + 20]
+== [a b [1 + 2 10 + 20]]
+
+&gt;&gt; join [a b] reduce [1 + 2 10 + 20]
+== [a b [3 30]]
+</code></pre>
+<p>But this doesn't exactly square with the JOIN of a DATATYPE! case, and the most common desires.</p>
+<p>If anything, I'd rather make JOIN always take a <strong><code>[...]</code></strong> or <strong><code>@[...]</code></strong> in the second argument, and then create some other non-reducing construct that slaps two things together.</p>
+<pre><code>&gt;&gt; block: [a b]
+
+&gt;&gt; adjoin block [c d]
+== [a b [c d]]
+
+&gt;&gt; adjoin block spread [e f]
+== [a b [c d] e f]
+
+&gt;&gt; block
+== [a b]  ; unmodified (difference from append)
+</code></pre>
+<p>But asking people to write <strong><code>(adjoin directory %foo.txt)</code></strong> is... ugly.</p>
+<p>A compromise is to narrow it, so that you could only use it with single items when joining with non-lists...</p>
+<pre><code>&gt;&gt; join "abc" "def"
+== "abcdef"
+
+&gt;&gt; join [a b c] "def"
+** Error: JOIN with a list must use [...] or @[...]
+</code></pre>
+<p>This would help steer you away from writing code like <strong><code>join list value</code></strong> and think it works, to only find it falling down when value becomes a BLOCK!.</p>
+<h2><a name="p-7907-is-reduce-just-join-block-4" class="anchor" href="https://forum.rebol.info#p-7907-is-reduce-just-join-block-4"></a>Is REDUCE just JOIN BLOCK! ?</h2>
+<p>The implementation of JOIN that I'm working on seems like a more powerful REDUCE.</p>
+<p>But questions start to arise about the binding... what should the binding be?</p>
+<pre><code>&gt;&gt; join [add 1] ['multiply 2 3]
+== [add 1 multiply 2 3]
+</code></pre>
+<p>In that case, I'm going to assume the produced block would have the binding of the [add 1] block.  Since multiply is <strong><code>'multiply</code></strong> and not <strong><code>$multiply</code></strong> it would be unbound and hence an evaluation would be driven by that first argument's binding.</p>
+<p>But what if you just said:</p>
+<pre><code>&gt;&gt; join block! ['add 1 'multiply 2 3]
+== [add 1 multiply 2 3]
+</code></pre>
+<p>Before, the second block's binding was disregarded in the product.  But when there's no first block to get the binding from, does it assume the binding of the second block?  And how would you get an unbound block if you wanted it?</p>
+<p>We could say that you get an unbound block, but if you want a bound block, you'd say:</p>
+<pre><code>&gt;&gt; join $[] ['add 1 'multiply 2 3]
+== [add 1 multiply 2 3]
+</code></pre>
+<p>Then we have similar questions for things like word!:</p>
+<pre><code>&gt;&gt; join word! ["a" "b"]
+== ab
+</code></pre>
+<p>I feel that pretty obviously should be unbound.  But words follow different rules:</p>
+<pre><code>&gt;&gt; join $a ["b"]
+== ab  ; can't necessarily be bound, just because a was...
+</code></pre>
+<p>That would suggest all words come back unbound from a joining process.</p>
+<p>So no shortage of questions.  But in general, I think JOIN is on the right track, and splitting MAKE behaviors that are JOIN-like to it seems good.</p>
+          <p><a href="https://forum.rebol.info/t/the-semantics-of-join/2333/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/the-semantics-of-join/2333/1</link>
+        <pubDate>Sat, 16 Nov 2024 18:33:29 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-2333-1</guid>
+        <source url="https://forum.rebol.info/t/the-semantics-of-join/2333.rss">The Semantics of JOIN</source>
+      </item>
+  </channel>
+</rss>

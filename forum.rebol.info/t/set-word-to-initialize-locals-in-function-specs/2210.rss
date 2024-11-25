@@ -258,9 +258,100 @@ I do think that I like the idea of SET-WORD! for local initialization... that ru
 
 And I like the idea of bringing `&lt;static&gt;` on board with the same rules.</description>
     
-    <lastBuildDate>Sat, 24 Aug 2024 04:41:16 +0000</lastBuildDate>
+    <lastBuildDate>Fri, 22 Nov 2024 10:08:10 +0000</lastBuildDate>
     <category>Functions</category>
     <atom:link href="https://forum.rebol.info/t/set-word-to-initialize-locals-in-function-specs/2210.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>SET-WORD! To Initialize Locals In Function Specs?</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>When <a href="https://forum.rebol.info/t/dropping-with-in-static/2335">the higher-level FUNCTION code</a> was removed, that removed the code for assigning default values to locals.</p>
+<p>As I mentioned, it was done with GROUP!s:</p>
+<pre><code>/foo: function [arg1 arg2 &lt;local&gt; x y (1 + 2) z (null)] [...body...]
+</code></pre>
+<p>The way it worked was to augment the function's body:</p>
+<pre><code>/foo: function [arg1 arg2 &lt;local&gt; x y z] [
+   y: '3
+   z: ~null~
+   (...body...)
+]
+</code></pre>
+<p>It evaluated the expression once, and then used a ^META of the evaluation product as the thing to assign.</p>
+<h2><a name="p-7926-native-local-handling-brings-long-desired-advantage-1" class="anchor" href="https://forum.rebol.info#p-7926-native-local-handling-brings-long-desired-advantage-1"></a>Native <code>&lt;local&gt;</code> Handling Brings Long-Desired Advantage</h2>
+<aside class="quote no-group quote-modified" data-username="hostilefork" data-post="1" data-topic="2210">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>As it so happens, there's potential to exploit this for efficiency. The frame mechanics have a slot for each local in the function archetype that currently just holds nothing (~ antiform), and it could hold this default value / expression. So it wouldn't just save on typing the local name and then later the name again and the expression...but you're avoiding the need to perform the evaluation to do the assignment on each call!</p>
+</blockquote>
+</aside>
+<p>This theoretical advantage was not realized by the FUNCTION abstraction, as it was just injecting assignments into the body.</p>
+<p>But now that the FUNC native is orchestrating the situation, the advantage is there.</p>
+<h2><a name="p-7926-feature-question-multi-returns-2" class="anchor" href="https://forum.rebol.info#p-7926-feature-question-multi-returns-2"></a>Feature Question: Multi-Returns</h2>
+<p>When I brought up the question of <strong><code>[&lt;local&gt; word: expr]</code></strong> instead of <strong><code>[&lt;local&gt; word (expr)]</code></strong>, I didn't consider whether you could do multi-returns:</p>
+<pre><code>/bar: function [arg &lt;local&gt; [begin end]: (find series "a")] [...]
+</code></pre>
+<p>First of all, I'm not certain that feels like it "belongs" in the spec.  <img src="https://forum.rebol.info/images/emoji/twitter/face_with_raised_eyebrow.png?v=12" title=":face_with_raised_eyebrow:" class="emoji" alt=":face_with_raised_eyebrow:" loading="lazy" width="20" height="20"></p>
+<p>Secondly, this would require some significant redesign.  <img src="https://forum.rebol.info/images/emoji/twitter/fearful.png?v=12" title=":fearful:" class="emoji" alt=":fearful:" loading="lazy" width="20" height="20"></p>
+<p>The problem is, that at the time of the spec processing, there's no object in existence to bind into and do such an evaluation.</p>
+<p>So this would have to somehow collect the words inside the SET-BLOCK, save the expression, make the archetypal frame, bind into the <em>archetypal frame</em> and evaluate into its locals.</p>
+<p>Continuing on this...</p>
+<h2><a name="p-7926-set-words-not-being-bound-has-other-consequences-3" class="anchor" href="https://forum.rebol.info#p-7926-set-words-not-being-bound-has-other-consequences-3"></a>SET-WORD!s Not Being Bound Has Other Consequences</h2>
+<p>Evaluating the expression, and then writing it into a slot of a partially constructed archetypal FRAME! has other things that are ruled out:</p>
+<aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="2210">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>What binding rules is it using? Could you initialize local3 and then say <strong><code>local4: (local2 * arg1)</code></strong>?</p>
+<ul>
+<li>Almost certainly not, and it would just be using the binding of the spec block</li>
+</ul>
+</blockquote>
+</aside>
+<p>So that can't work, because what's happening is that the expression is just being evaluated and put in a spot that represents local4.  No "SET" is actually happening, because there's no completed context to assign it to.</p>
+<p>That rules out other ideas, like <a href="https://forum.rebol.info/t/a-dream-for-debugging-generalized-accessors/2259">assigning an "accessor"</a>.</p>
+<p>When put this way, it makes it seem like using a GROUP! is clearer, because it makes you aware that there's no actual SET-WORD! to assign to.</p>
+<h2><a name="p-7926-does-this-suggest-a-redesign-is-needed-4" class="anchor" href="https://forum.rebol.info#p-7926-does-this-suggest-a-redesign-is-needed-4"></a>Does This Suggest A Redesign Is Needed?</h2>
+<p>The system <em>could</em> generate the archetypal frame, with nothing in the local slots, and then bind the expressions into it and run them...just as they would run had it been an instantiated function.</p>
+<p>So this would be a two-phase thing, that would enable things like multi-returns, accessors, weird-infix-functions that capture the thing they're assigning to in order to know their names...etc.</p>
+<p><strong>It's definitely a lot more than I bargained for when I suggested the feature.</strong>  So what would happen here is that only a subset would be implemented, with the rest being done at a future date...</p>
+<p><strong>What it does point out is the set of things that the GROUP!-based syntax cannot do.</strong></p>
+<pre><code> /foo: function [arg1 arg2 &lt;local&gt; x y (1 + 2) z (null)] [...body...]
+</code></pre>
+<p>So the big question is whether that's by design ("we don't plan to implement anything more, it's a simple low-hanging fruit you can take advantage of if it fits")... or if it's too limited.</p>
+<h2><a name="p-7926-then-is-freeform-dialecting-good-5" class="anchor" href="https://forum.rebol.info#p-7926-then-is-freeform-dialecting-good-5"></a>Then... Is Freeform Dialecting Good?</h2>
+<p>It forces the question of "is the word and set-word mix good"</p>
+<pre><code> /foo: function [arg1 arg2 &lt;local&gt; x y: 1 + 2 z: null] [...body...]
+</code></pre>
+<p><em>Instinctually, I feel uneasy about that.</em></p>
+<p>If we went that direction, I'd kind of rather have all the locals be SET-WORD!, and allow you to chain the assignments:</p>
+<pre><code> /foo: function [arg1 arg2 &lt;local&gt; x: y: z: ~] [...body...]
+</code></pre>
+<p>I think that if people were hinted that they <em>could</em> assign the locals there, and if they found out this gave them an efficiency boost, the feature might be taken advantage of more.</p>
+<p>But they would not be able to be assigned in terms of arguments, so that's a limitation.</p>
+<p>And if it's going to be limited anyway, might it be best to let people in on the limitations and just keep it as WORD! plus GROUP! ?</p>
+<h2><a name="p-7926-leaning-to-stick-with-word-optional-group-6" class="anchor" href="https://forum.rebol.info#p-7926-leaning-to-stick-with-word-optional-group-6"></a>Leaning To: Stick With WORD! + optional GROUP!</h2>
+<p>Really, what we're talking about here is an optimization.</p>
+<ol>
+<li>
+<p>If a local wants a fixed value upon entry to the function on each call, that fixed value can be stored by the archetypal frame and copied into a new instance's cell, at the same cost that initializing it with nothing would cost.</p>
+</li>
+<li>
+<p>If you are initializing a local in such a way, you don't have to repeat its name to initialize it... because you're putting the initial value beside it.</p>
+</li>
+</ol>
+<p>If the function creation process becomes two-pass, doing strange bindings/etc., you're starting to drift from the "optimizing" part of the optimization.  And I'm concerned about the complexity cost of that code.  Thinking about it now, there are details to where I'm not sure how it would work.</p>
+<p>Evaluating a GROUP! and dropping its value into the slot of an incomplete archetype you're building is cheap-as-free, and not complicated.</p>
+<p>It's a natural extension of just listing out locals as words, and I think it turns out to probably be for the best.</p>
+          <p><a href="https://forum.rebol.info/t/set-word-to-initialize-locals-in-function-specs/2210/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/set-word-to-initialize-locals-in-function-specs/2210/2</link>
+        <pubDate>Fri, 22 Nov 2024 04:04:06 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-2210-2</guid>
+        <source url="https://forum.rebol.info/t/set-word-to-initialize-locals-in-function-specs/2210.rss">SET-WORD! To Initialize Locals In Function Specs?</source>
+      </item>
       <item>
         <title>SET-WORD! To Initialize Locals In Function Specs?</title>
         <dc:creator><![CDATA[hostilefork]]></dc:creator>

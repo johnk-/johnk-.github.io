@@ -1,0 +1,335 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Avoid Raised Errors in PACK! (But Feel The Power!)</title>
+    <link>https://forum.rebol.info/t/avoid-raised-errors-in-pack-but-feel-the-power/2206</link>
+    <description>I haven&#39;t been completely thrilled about being able to put raised errors in parameter packs.  But initially, I allowed it:
+
+    &gt;&gt; block: []
+    == []
+
+    &gt;&gt; pack [take block, 10 + 20]
+    ; first in pack of length 2
+    == ~make error! [
+        type: &#39;Script
+        id: &#39;nothing-to-take
+        message: &quot;Can&#39;t TAKE, no value available (consider TRY TAKE)&quot;
+        near: &#39;[take [] **]
+        where: &#39;[take reduce pack console]
+        file: ~null~
+        line: 1
+    ]~  ; anti
+
+Honestly this seems wrong. I allow you to PACK a PACK, and that&#39;s okay. But glossing over the error at time of packing I do not like.
+
+I much prefer:
+
+    &gt;&gt; pack [take block, 10 + 20]
+    ** Script Error: Can&#39;t TAKE, no value available (consider TRY TAKE)
+
+## Only One Use Case: [MAXMATCH-D (and MAXMATCH-C)](https://github.com/metaeducation/ren-c/blob/8516f0fca8ddce40a97e7647a087dc55e065cf3b/tests/parse/examples/maxmatch.parse.test.reb)
+
+In practice, only one place was making use of the ability to put raised errors in packs:
+
+    maxmatch-D: combinator [  ; &quot;(D)efault&quot;
+        {Match maximum of two rules, keeping side effects of both if match}
+        return: &quot;Result of the longest match (favors first parser if equal)&quot;
+           [any-value? pack?]
+        parser1 [action?]
+        parser2 [action?]
+        &lt;local&gt; result1&#39; result2&#39; remainder1 remainder2
+    ][
+        [~^result1&#39;~ remainder1]: parser1 input except e -&gt; [
+            pack [raise e, null]
+        ]
+        [~^result2&#39;~ remainder2]: parser2 input except e -&gt; [
+            pack [raise e, null]
+        ]
+        if raised? unmeta result2&#39; [  ; parser2 didn&#39;t succeed
+            if raised? unmeta result1&#39; [
+                return unmeta result1&#39;  ; neither succeeded
+            ]
+        ] else [  ; parser2 succeeded
+            any [
+                raised? unmeta result1&#39;
+                (index of remainder1) &lt; (index of remainder2)
+            ] then [
+                remainder: remainder2
+                return unmeta result2&#39;
+            ]
+        ]
+        remainder: remainder1
+        return unmeta result1&#39;
+    ]
+
+Two parsers here are called with two results, and this tries to handle the case of when one &quot;result&quot; is a raised error...putting it into the same slot where a result would be.
+
+The problem is that the EXCEPT statement is producing an expression that is targeting a pack.  And in the first slot of that pack is a potentially-anything-value... anything but a raised error, that is.  If you try to cheat and put a non-raised error in that slot, how would you know the parser you called wasn&#39;t just generating an ERROR! value to pass around?  You need another state.
+
+## No Other Choice... Or... Is There?
+
+The second slot is a series position.  You could poke a plain error there, and by virtue of seeing the `remainder1` is an ERROR! and not an ANY-SERIES! you&#39;ll know that parser1 raised an error.
+
+So instead of:
+
+    [~^result1&#39;~ remainder1]: parser1 input except e -&gt; [
+        pack [raise e, null]
+    ]
+
+You&#39;d do:
+
+    [^result1&#39; remainder1]: parser1 input except e -&gt; [
+        pack [~, e]  ; say result1 is trash, and remainder1 is e
+    ]
+
+Your variable names are a bit weird here, because it&#39;s actually **`remainder-or-error-1`**.  But you&#39;ve built an expression that targets the pack.
+
+**But why are we being so stingy about variables?**  Why not expand the pack to three items?
+
+    [^result1&#39; remainder1 /error1]: parser1 input except e -&gt; [
+         pack [~, ~, e]
+    ]
+
+(You have to use the **`/error1`** syntax if the non-erroring parser case returns a pack with only two items in it.  The slash means you&#39;re okay with fewer items in the source pack and it will set error1 to null in that case.)
+
+Or... why are we bothering to make the error case use EXCEPT?  You have TRAP for definitional errors as well.  It returns NULL if no raised error, and the non-raised form of the ERROR! if there was one:
+
+    &gt;&gt; trap [1 + 2]
+    == ~null~  ; anti
+
+    &gt;&gt; trap [1 / 0]
+    == make error! [
+        type: &#39;Math
+        id: &#39;zero-divide
+        message: &quot;attempt to divide by zero&quot;
+        near: &#39;[1 / 0 **]
+        where: &#39;[/ entrap trap console]
+        file: ~null~
+        line: 1
+    ]
+
+Leveraging that gives you basically the cleanest code you could ask for:
+
+    error1: trap [[^result1&#39; remainder1]: parser1 input]
+
+*(Let me point out that the ability to intercept a definitional error coming from PARSER1 by having it &quot;pass through&quot; a SET-BLOCK! (or a SET-WORD!) is a feature to enable precisely this scenario.  None of the assignments will be performed. And **that is the limit** of how far it will jump and be allowed to TRAP before it will be promoted to a failure.  If you&#39;re not up to speed on definitional errors, [read up on them](https://forum.rebol.info/t/fail-vs-return-raise-the-new-age-of-definitional-errors/1852), because they are absolutely critical to coherent error interception.)*
+
+## So Forget About Raised Errors in PACK!
+
+It&#39;s a terrible idea.  I&#39;m making PACK abrupt fail if you try to put a raised error in it.
+
+Compare the original maxmatch-D to this one using TRAP:
+
+    maxmatch-D: combinator [  ; &quot;(D)efault&quot;
+        {Match maximum of two rules, keeping side effects of both if match}
+        return: &quot;Result of the longest match (favors first parser if equal)&quot;
+           [any-value? pack?]
+        parser1 [action?]
+        parser2 [action?]
+        &lt;local&gt; error1 error2 result1&#39; result2&#39; remainder1 remainder2
+    ][
+        error1: trap [[^result1&#39; remainder1]: parser1 input]
+        error2: trap [[^result2&#39; remainder2]: parser2 input]
+        if error2 [  ; parser2 didn&#39;t succeed
+            if error1 [
+                return raise error1  ; neither succeeded
+            ]
+        ] else [  ; parser2 succeeded
+            any [
+                error1
+                (index of remainder1) &lt; (index of remainder2)
+            ] then [
+                remainder: remainder2
+                return unmeta result2&#39;
+            ]
+        ]
+        remainder: remainder1
+        return unmeta result1&#39;
+    ]
+
+Ren-C gives you power and flexibility to solve your problems in better ways... take advantage of that!
+
+:facepunch:</description>
+    
+    <lastBuildDate>Wed, 18 Sep 2024 22:21:30 +0000</lastBuildDate>
+    <category>Errors</category>
+    <atom:link href="https://forum.rebol.info/t/avoid-raised-errors-in-pack-but-feel-the-power/2206.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Avoid Raised Errors in PACK! (But Feel The Power!)</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="2206">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>Honestly this seems wrong. I allow you to PACK a PACK, and that's okay. But glossing over the error at time of packing I do not like.</p>
+<p>I much prefer:</p>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">&gt;&gt; pack [take block, 10 + 20]
+** Script Error: Can't TAKE, no value available (consider TRY TAKE)
+</code></pre>
+</blockquote>
+</aside>
+<aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="2206">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>So Forget About Raised Errors in PACK!</p>
+<p>It's a terrible idea. I'm making PACK abrupt fail if you try to put a raised error in it.</p>
+</blockquote>
+</aside>
+<p>Well, hmmm.  <img src="https://forum.rebol.info/images/emoji/twitter/thinking.png?v=12" title=":thinking:" class="emoji" alt=":thinking:" loading="lazy" width="20" height="20"></p>
+<p><strong>I still believe that PACK should not just assume a definitional error is intentional by default.</strong></p>
+<p>However, it seems to me that in practice, not allowing you to put raised errors in packs <em>at all</em> creates stifling situations where you have to add refinements to every function that wants to speak generically about raised errors, to make them speak in META-protocols <strong><a href="https://forum.rebol.info/t/should-evaluate-next-bomb-on-an-error/1491/3">e.g. <code>EVAL/ENTRAP</code></a></strong></p>
+<p>So I'm adding <strong><code>PACK*</code></strong> which can be used in cases where it is warranted, and it will put raised errors in.  <em>But I suggest trying to avoid it, unless you are writing a truly general routine along the lines of EVAL.</em>  I've shown above that there's usually other ways to attack the problem.</p>
+          <p><a href="https://forum.rebol.info/t/avoid-raised-errors-in-pack-but-feel-the-power/2206/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/avoid-raised-errors-in-pack-but-feel-the-power/2206/2</link>
+        <pubDate>Wed, 18 Sep 2024 21:35:52 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-2206-2</guid>
+        <source url="https://forum.rebol.info/t/avoid-raised-errors-in-pack-but-feel-the-power/2206.rss">Avoid Raised Errors in PACK! (But Feel The Power!)</source>
+      </item>
+      <item>
+        <title>Avoid Raised Errors in PACK! (But Feel The Power!)</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>I haven't been completely thrilled about being able to put raised errors in parameter packs.  But initially, I allowed it:</p>
+<pre><code>&gt;&gt; block: []
+== []
+
+&gt;&gt; pack [take block, 10 + 20]
+; first in pack of length 2
+== ~make error! [
+    type: 'Script
+    id: 'nothing-to-take
+    message: "Can't TAKE, no value available (consider TRY TAKE)"
+    near: '[take [] **]
+    where: '[take reduce pack console]
+    file: ~null~
+    line: 1
+]~  ; anti
+</code></pre>
+<p>Honestly this seems wrong. I allow you to PACK a PACK, and that's okay. But glossing over the error at time of packing I do not like.</p>
+<p>I much prefer:</p>
+<pre><code>&gt;&gt; pack [take block, 10 + 20]
+** Script Error: Can't TAKE, no value available (consider TRY TAKE)
+</code></pre>
+<h2>
+<a name="only-one-use-case-maxmatch-d-and-maxmatch-chttpsgithubcommetaeducationren-cblob8516f0fca8ddce40a97e7647a087dc55e065cf3btestsparseexamplesmaxmatchparsetestreb-1" class="anchor" href="https://forum.rebol.info#only-one-use-case-maxmatch-d-and-maxmatch-chttpsgithubcommetaeducationren-cblob8516f0fca8ddce40a97e7647a087dc55e065cf3btestsparseexamplesmaxmatchparsetestreb-1"></a>Only One Use Case: <a href="https://github.com/metaeducation/ren-c/blob/8516f0fca8ddce40a97e7647a087dc55e065cf3b/tests/parse/examples/maxmatch.parse.test.reb">MAXMATCH-D (and MAXMATCH-C)</a>
+</h2>
+<p>In practice, only one place was making use of the ability to put raised errors in packs:</p>
+<pre><code>maxmatch-D: combinator [  ; "(D)efault"
+    {Match maximum of two rules, keeping side effects of both if match}
+    return: "Result of the longest match (favors first parser if equal)"
+       [any-value? pack?]
+    parser1 [action?]
+    parser2 [action?]
+    &lt;local&gt; result1' result2' remainder1 remainder2
+][
+    [~^result1'~ remainder1]: parser1 input except e -&gt; [
+        pack [raise e, null]
+    ]
+    [~^result2'~ remainder2]: parser2 input except e -&gt; [
+        pack [raise e, null]
+    ]
+    if raised? unmeta result2' [  ; parser2 didn't succeed
+        if raised? unmeta result1' [
+            return unmeta result1'  ; neither succeeded
+        ]
+    ] else [  ; parser2 succeeded
+        any [
+            raised? unmeta result1'
+            (index of remainder1) &lt; (index of remainder2)
+        ] then [
+            remainder: remainder2
+            return unmeta result2'
+        ]
+    ]
+    remainder: remainder1
+    return unmeta result1'
+]
+</code></pre>
+<p>Two parsers here are called with two results, and this tries to handle the case of when one "result" is a raised error...putting it into the same slot where a result would be.</p>
+<p>The problem is that the EXCEPT statement is producing an expression that is targeting a pack.  And in the first slot of that pack is a potentially-anything-value... anything but a raised error, that is.  If you try to cheat and put a non-raised error in that slot, how would you know the parser you called wasn't just generating an ERROR! value to pass around?  You need another state.</p>
+<h2>
+<a name="no-other-choice-or-is-there-2" class="anchor" href="https://forum.rebol.info#no-other-choice-or-is-there-2"></a>No Other Choice... Or... Is There?</h2>
+<p>The second slot is a series position.  You could poke a plain error there, and by virtue of seeing the <code>remainder1</code> is an ERROR! and not an ANY-SERIES! you'll know that parser1 raised an error.</p>
+<p>So instead of:</p>
+<pre><code>[~^result1'~ remainder1]: parser1 input except e -&gt; [
+    pack [raise e, null]
+]
+</code></pre>
+<p>You'd do:</p>
+<pre><code>[^result1' remainder1]: parser1 input except e -&gt; [
+    pack [~, e]  ; say result1 is trash, and remainder1 is e
+]
+</code></pre>
+<p>Your variable names are a bit weird here, because it's actually <strong><code>remainder-or-error-1</code></strong>.  But you've built an expression that targets the pack.</p>
+<p><strong>But why are we being so stingy about variables?</strong>  Why not expand the pack to three items?</p>
+<pre><code>[^result1' remainder1 /error1]: parser1 input except e -&gt; [
+     pack [~, ~, e]
+]
+</code></pre>
+<p>(You have to use the <strong><code>/error1</code></strong> syntax if the non-erroring parser case returns a pack with only two items in it.  The slash means you're okay with fewer items in the source pack and it will set error1 to null in that case.)</p>
+<p>Or... why are we bothering to make the error case use EXCEPT?  You have TRAP for definitional errors as well.  It returns NULL if no raised error, and the non-raised form of the ERROR! if there was one:</p>
+<pre><code>&gt;&gt; trap [1 + 2]
+== ~null~  ; anti
+
+&gt;&gt; trap [1 / 0]
+== make error! [
+    type: 'Math
+    id: 'zero-divide
+    message: "attempt to divide by zero"
+    near: '[1 / 0 **]
+    where: '[/ entrap trap console]
+    file: ~null~
+    line: 1
+]
+</code></pre>
+<p>Leveraging that gives you basically the cleanest code you could ask for:</p>
+<pre><code>error1: trap [[^result1' remainder1]: parser1 input]
+</code></pre>
+<p><em>(Let me point out that the ability to intercept a definitional error coming from PARSER1 by having it "pass through" a SET-BLOCK! (or a SET-WORD!) is a feature to enable precisely this scenario.  None of the assignments will be performed. And <strong>that is the limit</strong> of how far it will jump and be allowed to TRAP before it will be promoted to a failure.  If you're not up to speed on definitional errors, <a href="https://forum.rebol.info/t/fail-vs-return-raise-the-new-age-of-definitional-errors/1852">read up on them</a>, because they are absolutely critical to coherent error interception.)</em></p>
+<h2>
+<a name="so-forget-about-raised-errors-in-pack-3" class="anchor" href="https://forum.rebol.info#so-forget-about-raised-errors-in-pack-3"></a>So Forget About Raised Errors in PACK!</h2>
+<p>It's a terrible idea.  I'm making PACK abrupt fail if you try to put a raised error in it.</p>
+<p>Compare the original maxmatch-D to this one using TRAP:</p>
+<pre><code>maxmatch-D: combinator [  ; "(D)efault"
+    {Match maximum of two rules, keeping side effects of both if match}
+    return: "Result of the longest match (favors first parser if equal)"
+       [any-value? pack?]
+    parser1 [action?]
+    parser2 [action?]
+    &lt;local&gt; error1 error2 result1' result2' remainder1 remainder2
+][
+    error1: trap [[^result1' remainder1]: parser1 input]
+    error2: trap [[^result2' remainder2]: parser2 input]
+    if error2 [  ; parser2 didn't succeed
+        if error1 [
+            return raise error1  ; neither succeeded
+        ]
+    ] else [  ; parser2 succeeded
+        any [
+            error1
+            (index of remainder1) &lt; (index of remainder2)
+        ] then [
+            remainder: remainder2
+            return unmeta result2'
+        ]
+    ]
+    remainder: remainder1
+    return unmeta result1'
+]
+</code></pre>
+<p>Ren-C gives you power and flexibility to solve your problems in better ways... take advantage of that!</p>
+<p><img src="https://forum.rebol.info/images/emoji/twitter/facepunch.png?v=12" title=":facepunch:" class="emoji only-emoji" alt=":facepunch:" loading="lazy" width="20" height="20"></p>
+          <p><a href="https://forum.rebol.info/t/avoid-raised-errors-in-pack-but-feel-the-power/2206/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/avoid-raised-errors-in-pack-but-feel-the-power/2206/1</link>
+        <pubDate>Thu, 22 Aug 2024 19:13:38 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-2206-1</guid>
+        <source url="https://forum.rebol.info/t/avoid-raised-errors-in-pack-but-feel-the-power/2206.rss">Avoid Raised Errors in PACK! (But Feel The Power!)</source>
+      </item>
+  </channel>
+</rss>

@@ -61,20 +61,22 @@ It is technically possible that the array could be locked during enumeration, fl
             <aside class="quote no-group" data-username="hostilefork" data-post="4" data-topic="262">
 <div class="title">
 <div class="quote-controls"></div>
-<img alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/40/26_2.png" class="avatar"> hostilefork:</div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
 <blockquote>
 <p>The deferment does introduce some semantics questions though.  What should happen if there is a BREAK mid-way through?  What about a FAIL?</p>
 </blockquote>
 </aside>
 <p>We have options here, but I went ahead with "go ahead and do the removals" for all exit paths...failing included:</p>
-<aside class="onebox githubcommit">
+<aside class="onebox githubcommit" data-onebox-src="https://github.com/metaeducation/ren-c/commit/2f6ac057f8e9123ae99b59a3a5fd609120059d42">
   <header class="source">
+
       <a href="https://github.com/metaeducation/ren-c/commit/2f6ac057f8e9123ae99b59a3a5fd609120059d42" target="_blank" rel="noopener">github.com/metaeducation/ren-c</a>
   </header>
+
   <article class="onebox-body">
     <div class="github-row">
   <div class="github-icon-container" title="Commit">
-    <svg width="60" height="60" class="github-icon" viewBox="0 0 14 16" aria-hidden="true"><path d="M10.86 7c-.45-1.72-2-3-3.86-3-1.86 0-3.41 1.28-3.86 3H0v2h3.14c.45 1.72 2 3 3.86 3 1.86 0 3.41-1.28 3.86-3H14V7h-3.14zM7 10.2c-1.22 0-2.2-.98-2.2-2.2 0-1.22.98-2.2 2.2-2.2 1.22 0 2.2.98 2.2 2.2 0 1.22-.98 2.2-2.2 2.2z"></path></svg>
+    <svg width="60" height="60" class="github-icon" viewBox="0 0 14 16" aria-hidden="true"><path fill-rule="evenodd" d="M10.86 7c-.45-1.72-2-3-3.86-3-1.86 0-3.41 1.28-3.86 3H0v2h3.14c.45 1.72 2 3 3.86 3 1.86 0 3.41-1.28 3.86-3H14V7h-3.14zM7 10.2c-1.22 0-2.2-.98-2.2-2.2 0-1.22.98-2.2 2.2-2.2 1.22 0 2.2.98 2.2 2.2 0 1.22-.98 2.2-2.2 2.2z"></path></svg>
   </div>
 
   <div class="github-info-container">
@@ -84,15 +86,14 @@ It is technically possible that the array could be locked during enumeration, fl
 
     <div class="github-info">
       <div class="date">
-        committed <span class="discourse-local-date" data-format="ll" data-date="2017-08-23" data-time="02:56:09" data-timezone="UTC">02:56AM - 23 Aug 17 UTC</span>
+        committed <span class="discourse-local-date" data-format="ll" data-date="2017-08-23" data-time="03:13:54" data-timezone="UTC">03:13AM - 23 Aug 17 UTC</span>
       </div>
 
       <div class="user">
         <a href="https://github.com/hostilefork" target="_blank" rel="noopener">
-          <img alt="hostilefork" src="https://avatars1.githubusercontent.com/u/20440?v=4" class="onebox-avatar-inline" width="20" height="20">
+          <img alt="hostilefork" src="https://avatars.githubusercontent.com/u/20440?v=4" class="onebox-avatar-inline" width="20" height="20">
           hostilefork
         </a>
-        
       </div>
 
       <div class="lines" title="changed 11 files with 472 additions and 98 deletions">
@@ -102,22 +103,61 @@ It is technically possible that the array could be locked during enumeration, fl
         </a>
       </div>
     </div>
-
   </div>
 </div>
 
-
   <div class="github-row">
-    <pre class="github-content" style="white-space: normal;">The REMOVE-EACH primitive was unusual because it would perform mutation
-on the very series it was iterating, based on the results of...</pre>
+    <p class="github-body-container">The REMOVE-EACH primitive was unusual because it would perform mutation
+on the v<span class="show-more-container"><a href="https://github.com/metaeducation/ren-c/commit/2f6ac057f8e9123ae99b59a3a5fd609120059d42" target="_blank" rel="noopener" class="show-more">…</a></span><span class="excerpt hidden">ery series it was iterating, based on the results of calling
+into arbitrary user code.  This gives rise to a category of problems,
+one very simple one being:
+
+    data: copy [1 2 3 4]
+    remove-each item data [
+        protect data
+        true
+    ]
+
+Since user code can transition a series from being mutable to being
+immutable, this meant there'd have to be a check of whether that had
+changed on every step of the REMOVE-EACH.  This isn't the only problem,
+but it demonstrates the slippery slope one starts to be on if the
+attempted answer is to add a "did-the-protection-status-change" test
+on every loop iteration.
+
+The need to constantly keep the input array in sync with the removals
+also presented a performance problem, because each removal in a Rebol
+series requires sliding up the remaining data to "close the gap".
+Hence a series of length N that requested a removal on each step would
+wind up doing N-1 "slides" of however much data was remaining, which
+is effectively O(N^2) operations.
+
+This motivated a rethinking of the native, and SERIES_INFO_RUNNING
+(which was used to put temporary holds on blocks for frames) is now
+SERIES_INFO_HOLD, so that it can more generally apply to enumerations
+on strings or binaries.  Besides just being read-only during the life
+of the REMOVE-EACH,, the implementation is changed to not reflect
+any of the requested removals until the operation is completed--either
+normally, by a BREAK, by a THROW, or via a fail().  All exit paths
+then atomically perform the removals.
+
+Different methods are used to accomplish this for arrays vs. strings or
+binaries.  Since values in arrays have header bits which can be used,
+the NODE_FLAG_MARKED (which is not used by GC for in user arrays) is
+used to mark all the removals.  Move_Value and Derelativize then do
+not propagate this flag, so it won't escape the use of the operation.
+No such bit is available for strings or binaries, so they build new
+underlying data arrays which are swapped in to back the input series,
+with the original underlying data freed.</span></p>
   </div>
 
-
   </article>
+
   <div class="onebox-metadata">
     
     
   </div>
+
   <div style="clear: both"></div>
 </aside>
 
@@ -132,20 +172,20 @@ on the very series it was iterating, based on the results of...</pre>
         <title>Remove-each x [for-each map-each remove-each] [x = &#39;remove-each]</title>
         <dc:creator><![CDATA[hostilefork]]></dc:creator>
         <description><![CDATA[
-            <aside class="quote no-group" data-post="3" data-topic="262">
+            <aside class="quote no-group" data-username="Brett" data-post="3" data-topic="262">
 <div class="title">
 <div class="quote-controls"></div>
-<img alt="" width="20" height="20" src="//forum.rebol.info/user_avatar/forum.rebol.info/brett/40/177_2.png" class="avatar"> Brett:</div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/brett/48/177_2.png" class="avatar"> Brett:</div>
 <blockquote>
 <p>I don't recall writing code to add items during a remove-each, possible but probably not.  Seems like something that would be likely to break with an implementation change (funnily enough), and it seems contrary in sense to the operation.</p>
 </blockquote>
 </aside>
 <p>Indeed, you can't use it effectively unless the semantics are pinned down.  And pinning down the semantics means making a commitment to something that ties the hands of the implementation in some ways.</p>
 <p>Immutability is conservative in terms of the semantic burden on the construct.  The only thing it requires is maintaining and checking a locked bit (well, doesn't <em>require</em>, some systems say "don't change it or all bets are off", which given the lack of commitment from R3-Alpha and Red is effectively what you're winding up with).  But if we were going to have any locking at all (e.g. PROTECT) then checking those bits was a sunk cost systemically.</p>
-<aside class="quote no-group" data-post="3" data-topic="262">
+<aside class="quote no-group" data-username="Brett" data-post="3" data-topic="262">
 <div class="title">
 <div class="quote-controls"></div>
-<img alt="" width="20" height="20" src="//forum.rebol.info/user_avatar/forum.rebol.info/brett/40/177_2.png" class="avatar"> Brett:</div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/brett/48/177_2.png" class="avatar"> Brett:</div>
 <blockquote>
 <p>should a remove-each like operation take a bitset as an argument for which elements should be removed?</p>
 </blockquote>

@@ -1,0 +1,188 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Parallel FOR Example</title>
+    <link>https://forum.rebol.info/t/parallel-for-example/2261</link>
+    <description>One goal of Ren-C since the start has been to make sure people can write their own looping constructs that behave like the built-in loops.  (That&#39;s why [definitional return](https://forum.rebol.info/t/what-are-definitional-returns/2191) was so important, which paved the way for many other improvements to come.)
+
+One loop construct requested by @gchiu was the ability to walk through blocks in parallel.  It&#39;s in the tests, but I thought I&#39;d share it here:
+
+    for-parallel: function [
+        return: [any-atom?]
+        vars [block!]
+        blk1 [~void~ any-list?]
+        blk2 [~void~ any-list?]
+        body [block!]
+    ][
+        return while [(not empty? maybe blk1) or (not empty? maybe blk2)] [
+            (vars): pack [(first maybe blk1) (first maybe blk2)]
+
+            repeat 1 body else [  ; if pure NULL it was a BREAK
+                return null
+            ]
+
+            ; They either did a CONTINUE the REPEAT caught, or the body reached
+            ; the end.  ELIDE the increment, so body evaluation is WHILE&#39;s result.
+            ;
+            elide blk1: next maybe blk1
+            elide blk2: next maybe blk2
+        ]
+    ]
+
+You get this behavior:
+
+    &gt;&gt; collect [
+           assert [
+               20 = for-parallel [x y] [a b] [1 2] [
+                   keep :[x y]
+                   y * 10
+               ]
+           ]
+       ]
+    == [[a 1] [b 2]]
+
+There&#39;s a lot of nice little flourishes here.  BREAK and CONTINUE work, thanks to the [loop result protocol](https://forum.rebol.info/t/the-simple-yet-powerful-magic-of-the-loop-result-protocol/609).  Assigning the variables is handled elegantly by multi-return, where a SET-GROUP! retriggers as a SET-BLOCK!.  ELIDE is put to good use to avoid a temporary variable for the loop product.
+
+***&quot;Isn&#39;t it nice... when things just... work?&quot;***
+
+https://www.youtube.com/watch?v=Z57kGB-mI54</description>
+    
+    <lastBuildDate>Tue, 01 Oct 2024 14:17:48 +0000</lastBuildDate>
+    <category>Show &amp; Tell</category>
+    <atom:link href="https://forum.rebol.info/t/parallel-for-example/2261.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Parallel FOR Example</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>In making the change to where <a href="https://forum.rebol.info/t/caching-binding-lookup-and-attachment-binding/2128/6">"strict mode is always enforced"</a>, a problem was noticed with FOR-PARALLEL:</p>
+<aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="2261">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p><code>       (vars): pack [(first maybe blk1) (first maybe blk2)]</code></p>
+</blockquote>
+</aside>
+<p>The caller is passing in a VARS block like <strong><code>[x y]</code></strong>.  And what was happening here was that due to attachment binding, X and Y were just being pushed out as declarations into whatever the binding of that block was.</p>
+<p>That is <em>not</em> what was intended.  What was intended was that X and Y be new definitions for the body of the loop.  <strong>(Good catch, strict mode!  <img src="https://forum.rebol.info/images/emoji/twitter/star2.png?v=12" title=":star2:" class="emoji" alt=":star2:" loading="lazy" width="20" height="20"> )</strong></p>
+<p>Now the tricky part: what to do about it.  The block you get was already bound at the callsite (wasn't quoted)... though despite that, plain words inside of it represent instructions to make new bindings for the body.  So we need to override those bindings if we're going to use it as a SET-BLOCK! to do the assignments.</p>
+<p>Hence <strong><code>vars</code></strong> needs to be "overbound" with new definitions.</p>
+<p>A crude attempt might leverage the mechanics of "decide what to do about SET-BLOCK!" already built into WRAP:</p>
+<pre><code>blk: inside vars compose [(unbind vars):]  ; extract binding to tip
+blk: wrap blk  ; e.g. gen bindings for [[x y]:]
+vars: inside blk blk.1  ; put binding onto unbound block [x y]:
+</code></pre>
+<p>This lets WRAP take care of the "overbinding" because we moved the full binding of the vars block to the tip, and that's what WRAP does.</p>
+<p>But better would be if WRAP just offered this as a fundamental operation.  It could be the behavior applied when you pass it a SET-BLOCK!, but I don't like cueing behavior on type like that for such primitives.</p>
+<p>So it could be <strong><code>wrap:set-block</code></strong>, or as you're passing a block just <strong><code>wrap:set</code></strong> to mean "wrap with set-block semantics".</p>
+<pre><code>vars: wrap:set vars
+</code></pre>
+<h3><a name="p-7810-but-wait-what-about-the-body-face_with_diagonal_mouth-1" class="anchor" href="https://forum.rebol.info#p-7810-but-wait-what-about-the-body-face_with_diagonal_mouth-1"></a>But wait, what about the body?  <img src="https://forum.rebol.info/images/emoji/twitter/face_with_diagonal_mouth.png?v=12" title=":face_with_diagonal_mouth:" class="emoji" alt=":face_with_diagonal_mouth:" loading="lazy" width="20" height="20"></h3>
+<p>The body needs to be bound to the context created for the variables.  And the variables need to be created only once if they're calculated from GROUP!s!</p>
+<p>Okay, this is starting to get complicated.  We need to COMPOSE the block to make sure any GROUP!s are evaluated once--not each time per loop iteration.  And we need an operation that gives us back the context, and binds the variable block.</p>
+<p>It seems WRAP needs a secondary multi-return, to give us back the context it made so we can use it on the body block.</p>
+<pre><code>[vars context]: wrap:set compose vars
+body: overbind context body
+</code></pre>
+<p>Note that it would be "sketchy" if we tried to extract the context from the block result of WRAP.  That block is bound not just to the context made for the variables, but other things (like the context to know how to evaluate embedded groups).  We aren't interested in carrying over the full binding on <strong><code>vars</code></strong> from the callsite that had <strong><code>[x (some-func [blah y])]</code></strong> because SOME-FUNC and BLAH may be visible in the vars block but should not be made visible to the body.</p>
+<p>Crazy stuff...but, this is what you have to do if you want things to <em>actually work</em>.</p>
+          <p><a href="https://forum.rebol.info/t/parallel-for-example/2261/3">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/parallel-for-example/2261/3</link>
+        <pubDate>Tue, 01 Oct 2024 13:37:04 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-2261-3</guid>
+        <source url="https://forum.rebol.info/t/parallel-for-example/2261.rss">Parallel FOR Example</source>
+      </item>
+      <item>
+        <title>Parallel FOR Example</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group quote-modified" data-username="hostilefork" data-post="1" data-topic="2261">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">    ...
+    blk1 [~void~ any-list?]
+    blk2 [~void~ any-list?]
+    body [block!]
+][
+    return while [(not empty? maybe blk1) or (not empty? maybe blk2)] [
+        ...
+</code></pre>
+</blockquote>
+</aside>
+<p>I noticed that in the reduced case of receiving two voids, this will return what WHILE returns if it never runs its body.  That is VOID.</p>
+<p>However, that is contentious with the VOID-in-NULL-out policy.  I wrote <a href="https://forum.rebol.info/t/the-simple-yet-powerful-magic-of-the-loop-result-protocol/609/11">some ponderings on what the right answer should be</a>, and I lean towards saying that loops should obey VOID-in-NULL-out.</p>
+<p>If that were to be heeded here, it would need something like:</p>
+<pre><code>    ...
+    blk1 [~void~ any-list?]
+    blk2 [~void~ any-list?]
+    body [block!]
+][
+    all [void? blk1, void? blk2] then [return null] 
+    return while [(not empty? maybe blk1) or (not empty? maybe blk2)] [
+        ...
+</code></pre>
+<p><em>(There's probably a cleverer way to write it--there usually is--but that's straightforward enough.)</em></p>
+<p>But I'm a little on the fence on if loops should do VOID-in-VOID-out vs. VOID-in-NULL-out, so I'm just going to start paying closer attention to which seems more useful.</p>
+<p>(The answer might depend on the kind of loop.  For instance, MAP-EACH being "expected" to produce a value should contrast it with NULL if it couldn't.  Whereas FOR-EACH and FOR-PARALLEL and such might be more like EVAL and be expected to tunnel whatever evaluative result it gets.)</p>
+          <p><a href="https://forum.rebol.info/t/parallel-for-example/2261/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/parallel-for-example/2261/2</link>
+        <pubDate>Tue, 10 Sep 2024 14:57:25 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-2261-2</guid>
+        <source url="https://forum.rebol.info/t/parallel-for-example/2261.rss">Parallel FOR Example</source>
+      </item>
+      <item>
+        <title>Parallel FOR Example</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>One goal of Ren-C since the start has been to make sure people can write their own looping constructs that behave like the built-in loops.  (That's why <a href="https://forum.rebol.info/t/what-are-definitional-returns/2191">definitional return</a> was so important, which paved the way for many other improvements to come.)</p>
+<p>One loop construct requested by <a class="mention" href="https://forum.rebol.info/u/gchiu">@gchiu</a> was the ability to walk through blocks in parallel.  It's in the tests, but I thought I'd share it here:</p>
+<pre><code>for-parallel: function [
+    return: [any-atom?]
+    vars [block!]
+    blk1 [~void~ any-list?]
+    blk2 [~void~ any-list?]
+    body [block!]
+][
+    return while [(not empty? maybe blk1) or (not empty? maybe blk2)] [
+        (vars): pack [(first maybe blk1) (first maybe blk2)]
+
+        repeat 1 body else [  ; if pure NULL it was a BREAK
+            return null
+        ]
+
+        ; They either did a CONTINUE the REPEAT caught, or the body reached
+        ; the end.  ELIDE the increment, so body evaluation is WHILE's result.
+        ;
+        elide blk1: next maybe blk1
+        elide blk2: next maybe blk2
+    ]
+]
+</code></pre>
+<p>You get this behavior:</p>
+<pre><code>&gt;&gt; collect [
+       assert [
+           20 = for-parallel [x y] [a b] [1 2] [
+               keep :[x y]
+               y * 10
+           ]
+       ]
+   ]
+== [[a 1] [b 2]]
+</code></pre>
+<p>There's a lot of nice little flourishes here.  BREAK and CONTINUE work, thanks to the <a href="https://forum.rebol.info/t/the-simple-yet-powerful-magic-of-the-loop-result-protocol/609">loop result protocol</a>.  Assigning the variables is handled elegantly by multi-return, where a SET-GROUP! retriggers as a SET-BLOCK!.  ELIDE is put to good use to avoid a temporary variable for the loop product.</p>
+<p><em><strong>"Isn't it nice... when things just... work?"</strong></em></p>
+<p><a href="https://www.youtube.com/watch?v=Z57kGB-mI54">Honda - The Cog</a></p>
+
+          <p><a href="https://forum.rebol.info/t/parallel-for-example/2261/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/parallel-for-example/2261/1</link>
+        <pubDate>Mon, 09 Sep 2024 01:03:12 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-2261-1</guid>
+        <source url="https://forum.rebol.info/t/parallel-for-example/2261.rss">Parallel FOR Example</source>
+      </item>
+  </channel>
+</rss>

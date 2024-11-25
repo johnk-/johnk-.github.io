@@ -14,59 +14,39 @@
           <description><![CDATA[
             <p>I mentioned I wanted to study some basic utilities...even more basic than <a href="https://forum.rebol.info/t/greb-grep-using-parse/1818">greb</a>.  Small codebases can put a focus on big design points.</p>
 <p>Here was my off-the-cuff line-reverser (TAC ... reverse CAT, where CAT is like Windows Command Shell's TYPE).  I wrote it a year ago, while I was solely focused on getting READ-LINE to work from piped input cross platform at the time...so almost no thought went into it:</p>
-<pre><code>; %tac.r, version 0.0.1
+<pre><code>; %tac.r, version 0.0.2
 ;
 ; * COLLECT the lines
 ; * REVERSE the collection
 ; * output the result DELIMIT-ed with newline
 ;
-write-stdout try delimit/tail newline reverse collect [
-    until [not keep line: try read-line]
+write-stdout maybe delimit/tail newline reverse collect [
+    until [not keep maybe read-line]
 ]
 </code></pre>
 <p><em>Right off the bat, you can see it's using twice the memory it needs to.</em>   It's collecting a block of strings, and then while that whole block is in memory it merges it into one giant string before output.  At minimum, this should loop and write the strings out of the block out one at a time.  (Though doing it this way does draw attention to an interesting point about DELIMIT, which I'll get to later.)</p>
 <blockquote>
 <p>Note: This line-reversing task is one of those pathological cases that can't be done in a "streaming" way.  You can't start writing anything to the output until you've read the input to the end.  (Doing better needs a random-access I/O PORT! that can SEEK the end of the file and go backwards...but the standard input device can't do this.)</p>
 </blockquote>
-<h2>But First Things First: The Impact of <a href="https://forum.rebol.info/t/definitional-errors-as-blank-in-null-out-alternative/1880">the New TRY Rules</a>
-</h2>
-<p>Recall that the old behavior was that TRY would turn NULL into BLANK! in order to stop functions from raising an error on those NULLs.  So here:</p>
-<ul>
-<li>
-<p>we'd stop KEEP from failing when there are no more lines to READ-LINE from, so it acts as a no-op instead</p>
-</li>
-<li>
-<p>we'd stop WRITE-STDOUT from failing when an empty block is collected and DELIMIT returns NULL:</p>
-<pre><code>write-stdout try delimit/tail newline reverse collect [  ; TRY DELIMIT =&gt; BLANK!
-  until [not keep line: try read-line]  ; TRY READ-LINE =&gt; BLANK!
-]
-</code></pre>
-</li>
-</ul>
-<p>The new way <img src="https://forum.rebol.info/images/emoji/twitter/sparkles.png?v=9" title=":sparkles:" class="emoji" alt=":sparkles:"> is you go ahead and pass the NULL, and the function raises a very narrow error.  This error is caught by a TRY on the function call itself.</p>
-<p>So applying that transformation:</p>
-<pre><code>try write-stdout delimit/tail newline reverse collect [  ; TRY WRITE-STDOUT =&gt; NULL
-    until [not try keep line: read-line]  ; TRY KEEP =&gt; NULL
-]
-</code></pre>
-<h2>Why Does DELIMIT Ever Return NULL ?</h2>
+<h2><a name="p-6074-why-does-delimittail-ever-return-null-1" class="anchor" href="https://forum.rebol.info#p-6074-why-does-delimittail-ever-return-null-1"></a>Why Does DELIMIT/TAIL Ever Return NULL ?</h2>
+<p>The MAYBE in <strong><code>[write-stdout maybe delimit/tail ...]</code></strong> is there because DELIMIT can return NULL.  If it does, we want to opt out of the write (since passing the null would cause a failure)</p>
 <p>One might ask if it should never be able to return NULL when you use /TAIL.  At the moment, it does:</p>
 <pre><code>&gt;&gt; delimit/tail "," ["a" "b"]
 == "a,b,"
 
 &gt;&gt; delimit []
-; null
+== ~null~  ; anti
 
 &gt;&gt; delimit/tail "," []
-; null
+== ~null~  ; anti
 </code></pre>
-<p>Maybe that last one should be "," ?  Perhaps when you have /HEAD or /TAIL, you never get null back.</p>
+<p>Maybe that last one should be "," ?  Perhaps when you have /HEAD or /TAIL, you never get null back?</p>
 <p>But... let's stick to looking at the use cases.</p>
-<h2>What Does %tac.r Want From DELIMIT/TAIL Here?</h2>
+<h2><a name="p-6074-what-does-tacr-want-from-delimittail-here-2" class="anchor" href="https://forum.rebol.info#p-6074-what-does-tacr-want-from-delimittail-here-2"></a>What Does %tac.r Want From DELIMIT/TAIL Here?</h2>
 <p>If we look at the edge case here, there is a difference between these two situations:</p>
-<ul>
+<ol>
 <li>
-<p>The first call to READ-LINE returns an empty string, and the second call returns NULL</p>
+<p>If the first call to READ-LINE returns an empty string, and the second call returns NULL</p>
 <ul>
 <li>
 <p>This happens when you pipe in a 1-byte file containing a single line feed, e.g. a file containing one line that's empty.</p>
@@ -77,7 +57,7 @@ write-stdout try delimit/tail newline reverse collect [
 </ul>
 </li>
 <li>
-<p>The first call to READ-LINE returns NULL</p>
+<p>If the first call to READ-LINE returns NULL</p>
 <ul>
 <li>
 <p>This happens when you pipe in a 0-byte file, e.g. a file containing no lines at all</p>
@@ -87,15 +67,15 @@ write-stdout try delimit/tail newline reverse collect [
 </li>
 </ul>
 </li>
-</ul>
+</ol>
 <p><strong>So perhaps you see why DELIMIT chooses to react with some kind of signal when the block contents vaporize.</strong>  It's precisely because cases like this tend to need some kind of special handling, and it's not good to gloss over that.</p>
-<p>In this case, the empty block (which corresponds to the 0-byte file input, e.g. 0 lines) should result in there being no write to the output.  So the default behavior of TRY WRITE-STDOUT NULL is the right answer.</p>
-<h2>More to Study, I Just Thought That Bit Was Interesting...</h2>
+<p>In this case, the empty block (which corresponds to the 0-byte file input, e.g. 0 lines) should result in there being no write to the output.  So the default behavior of WRITE-STDOUT VOID is the right answer.</p>
+<h2><a name="p-6074-more-to-study-i-just-thought-that-bit-was-interesting-3" class="anchor" href="https://forum.rebol.info#p-6074-more-to-study-i-just-thought-that-bit-was-interesting-3"></a>More to Study, I Just Thought That Bit Was Interesting...</h2>
 <hr>
 <blockquote>
 <p><em>"There are two ways of constructing a software design: One way is to make it so simple that there are obviously no deficiencies, and the other way is to make it so complicated that there are no obvious deficiencies. The first method is far more difficult."</em></p>
 </blockquote>
-            <p><small>1 post - 1 participant</small></p>
+            <p><small>2 posts - 1 participant</small></p>
             <p><a href="https://forum.rebol.info/t/tac-implementation-of-unixs-line-reverser/1883">Read full topic</a></p>
           ]]></description>
           <link>https://forum.rebol.info/t/tac-implementation-of-unixs-line-reverser/1883</link>
@@ -121,24 +101,34 @@ write-stdout try delimit/tail newline reverse collect [
 </blockquote>
 <p>This would be a very small subset of what <a class="mention" href="https://forum.rebol.info/u/blackattr">@BlackATTR</a>'s QUERY could do...but it seems like it wouldn't hurt if we went ahead and made this program as a test and put it in the <a href="https://github.com/metaeducation/ren-c-stdio">ren-c-stdio</a> repository.</p>
 <p>I've already made things like TAC (backwards unix CAT), where the goal is to see how essential and correct we can make things:</p>
-<aside class="onebox githubblob">
+<aside class="onebox githubblob" data-onebox-src="https://github.com/metaeducation/ren-c-stdio/blob/7fc17e5bb36ceeb7f688516ba57db5ad84a923c9/tests/tac.r#L19-L21">
   <header class="source">
+
       <a href="https://github.com/metaeducation/ren-c-stdio/blob/7fc17e5bb36ceeb7f688516ba57db5ad84a923c9/tests/tac.r#L19-L21" target="_blank" rel="noopener">github.com</a>
   </header>
+
   <article class="onebox-body">
     <h4><a href="https://github.com/metaeducation/ren-c-stdio/blob/7fc17e5bb36ceeb7f688516ba57db5ad84a923c9/tests/tac.r#L19-L21" target="_blank" rel="noopener">metaeducation/ren-c-stdio/blob/7fc17e5bb36ceeb7f688516ba57db5ad84a923c9/tests/tac.r#L19-L21</a></h4>
-<pre class="onebox"><code class="lang-r"><ol class="start lines" start="19" style="counter-reset: li-counter 18 ;">
-<li>write-stdout try delimit/tail newline reverse collect [</li>
-<li>    until [not keep line: try read-line]</li>
-<li>]</li>
-</ol></code></pre>
+
+
+
+    <pre class="onebox"><code class="lang-r">
+      <ol class="start lines" start="19" style="counter-reset: li-counter 18 ;">
+          <li>write-stdout try delimit/tail newline reverse collect [</li>
+          <li>    until [not keep line: try read-line]</li>
+          <li>]</li>
+      </ol>
+    </code></pre>
+
 
 
   </article>
+
   <div class="onebox-metadata">
     
     
   </div>
+
   <div style="clear: both"></div>
 </aside>
 

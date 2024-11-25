@@ -1,0 +1,188 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>QUIT Rethink: Antiform Errors, Being Definitional, Etc.</title>
+    <link>https://forum.rebol.info/t/quit-rethink-antiform-errors-being-definitional-etc/2275</link>
+    <description>Let&#39;s say you have script like this:
+
+    Rebol [
+        File: %quitter.r
+    ]
+
+    print &quot;I&#39;m a quitter!&quot;
+    quit
+    print &quot;This doesn&#39;t run&quot;
+
+In Rebol2 if you run it from a prompt with **`do %quitter`**, it will print **`I&#39;m a quitter`** and immediately exit the interpreter.  Red does the same thing. &lt;sub&gt;(though you have to change the header from &quot;Rebol []&quot; to &quot;Red []&quot;)&lt;/sub&gt;
+
+But in R3-Alpha, you get:
+
+    &gt;&gt; do %quitter.r
+    Script: &quot;Untitled&quot; Version: none Date: none
+    I&#39;m a quitter
+    == 0
+
+There&#39;s nuances about QUIT in R3-Alpha as well, that you can see in the HELP:
+
+    USAGE:
+        QUIT /return value /now
+
+    DESCRIPTION:
+        Stops evaluation and exits the interpreter.
+        QUIT is a native value.
+
+    REFINEMENTS:
+        /return -- Returns a value (to prior script or command shell)
+                value -- Note: use integers for command shell
+        /now -- Quit immediately
+
+While Red and Rebol2&#39;s /RETURN only took INTEGER!, R3-Alpha could take any other value...which can be returned to the calling script.
+
+It also offers a /NOW, in case you really did mean you wanted to exit the system entirely.
+
+## &quot;/NOW&quot; Not Being the Default Makes Sense
+
+&quot;Quitting&quot; a script shouldn&#39;t casually force exit from the entire interpreter when you DO it.  So I agree with R3-Alpha&#39;s choice on that.
+
+But I think I prefer moving the /NOW functionality into a different routine, to convey just how different that is.  **`sys.util/exit`** seems like a good way to say it.  That&#39;s a function that breaks the boundaries of what a more polite routine like QUIT can do.
+
+## QUIT Should Be *Able* To Return Arbitrary Values
+
+I think that allowing arbitrary values to be returned to the caller via DO instead of just integers makes a lot of sense.  Rebol2 and Red both let a script return that arbitrary value if it just fell out the bottom of the script... so why shouldn&#39;t you be able to do that with a QUIT parameter?
+
+*(Though actually, I&#39;m not sure that arbitrary values should just fall out the bottom of a DO script.  This would seem to leak values in a lot of cases that weren&#39;t intended... showing information in the console which is irrelevant (at best) or a &quot;security leak&quot; (at worst).  The default should likely be nothing (~ antiform)... which is interpreted as the script succeeding by default (0 exit code).  If you want the script to synthesize a value, you need to explicitly QUIT with that value...[same as with RETURN in FUNC](https://forum.rebol.info/t/how-attached-are-we-to-functions-return-last-result/1219))*
+
+But arbitrary values gives us the question of conflating arbitrary integer return results with exit codes.  You might have a script which wants to return an integer as a count of something, and any non-zero counts could be interpreted as the script having failed.  But if you call this script from the command line, it shouldn&#39;t be treated as if it failed.
+
+**It seems clear to me that this is a job for [definitional errors](https://forum.rebol.info/t/fail-vs-return-raise-the-new-age-of-definitional-errors/1852)!**  QUIT needs to differentiate between returning values &quot;as is&quot; (all of which should represent success if called from the console) or returning raised errors, with the exit code embedded.  This would allow a DO of a script that raised an error to correctly fail by default, if you didn&#39;t handle the error with an EXCEPT.
+
+## What Interface Should QUIT Use?
+
+We need a way to say **quit with 1 as raised error** vs. **quit with 1 as ordinary value**.  I think that the former is probably the more typical meaning.  And I&#39;ll mention that I don&#39;t like /RETURN as the name of any refinement that isn&#39;t dealing with function RETURN.
+
+It&#39;s probably best it&#39;s made to be arity-1.  **`quit 0`** isn&#39;t that much more to type than just **`quit`**, and reinforces that you have a choice there. 
+
+If you said QUIT 0 that would translate into just returning nothing, so you&#39;d get nothing displayed if you called the script from a DO.  But you&#39;d get a 0 exit status from calling it at the command line.
+
+By default you could only pass it integers, but some refinement would switch it over to meaning you want to quit with a value.  Probably something like **`quit/value 1`** would do the trick.  That would give back the literal value 1 to a DO that called it, and look like success with exit status 0 if you called it at the command line.  (Maybe the option to print the result should be offered as a command-line switch, so command-line programs have at least some way to get a non-integer value out of a script that catered to DO from other scripts?)
+
+## Big Thought: Definitional QUIT
+
+Right now catching QUIT is a bit of a black art.
+
+It seems to me that the way this should work is that each QUIT is definitional, throwing back to the DO or IMPORT that rigged up the module structure and ran it.
+
+When you&#39;re running code from the console, that too should have its own QUIT...that just quits the console.  That way, when it gets caught the console can know it caught just the one that was intended for it, and can tidy up.  Not only that, the interface to that QUIT can offer an arity-0 form without affecting the rest of the system.  (Slightly confusing perhaps, but people will figure it out.)
+
+There are some strange consequences of this.  It means that every time you run an evaluation in the console, you&#39;re dealing with a different QUIT--it&#39;s a QUIT that is specifically scoped to that console evaluation.  It can always be found in the same place (e.g. the QUIT variable of the user context)...but it will be refreshed each time there is a new evaluation to be caught.
+
+Further, it means modules can&#39;t QUIT after their initial execution.  This actually makes a lot of sense... who would process that module&#39;s QUIT when it isn&#39;t running on the stack?  You can only quit a module while you&#39;re initializing it...after that point, your only option is to SYS.UTIL/EXIT and terminate the whole interpreter...because there&#39;s nowhere else to meaningfully tie a quit to!  Good stuff.
+
+## This All Looks Quite Good
+
+Seems to fix a lot of suboptimal things related to quitting we&#39;ve had going on.
+
+The code that tried to guess whether non-integer values meant success or not was a very early example I encountered of *&quot;hmmm...this doesn&#39;t seem right&quot;* :thinking: ... it will be nice to rip that out and operate on the basis of isotopic rigor!  :atom_symbol:</description>
+    
+    <lastBuildDate>Sun, 15 Sep 2024 04:30:03 +0000</lastBuildDate>
+    <category>Modules</category>
+    <atom:link href="https://forum.rebol.info/t/quit-rethink-antiform-errors-being-definitional-etc/2275.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>QUIT Rethink: Antiform Errors, Being Definitional, Etc.</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>Definitional quit has a consequence that all definitional features do: <strong>you can't call a subroutine that engages your notion of QUIT unless you pass it your QUIT.</strong></p>
+<p>Hence it isn't possible to call a library function QUIT-IF-TUESDAY and have it psychically know what your meaning of QUIT is.  Your subroutine would have to be phrased more like like <strong>if-tuesday [quit]</strong>.</p>
+<p><em>It's not entirely a bad thing that modules other than your own can't casually quit on your behalf.</em>  I think it likely leads to better design.  But it will be something that confuses people.</p>
+<p>The <strong><code>sys.util/exit</code></strong> function is something people they reach for, if they really want to force the interpreter to exit from any point.  Because it would be used more casually in non-crisis situations, it should probably be re-engineered to do graceful shutdown instead of just calling <strong><code>exit()</code></strong>.  <em>(unless you say something like <strong><code>sys.util/exit:abrupt</code></strong>)</em></p>
+<aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="2275">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>There are some strange consequences of this. It means that every time you run an evaluation in the console, you're dealing with a different QUIT--it's a QUIT that is specifically scoped to that console evaluation. It can always be found in the same place (e.g. the QUIT variable of the user context)...but it will be refreshed each time there is a new evaluation to be caught.</p>
+</blockquote>
+</aside>
+<p>We could make this a bit less antagonistic for the console quit case, by saying that the "real quit" is something called QUIT*.  Then QUIT would call that ever-changing value of QUIT*... while retaining the identity as a function you could wrap up with specializations and adjustments.</p>
+<p>But again...those changes you made would only apply to the console's QUIT.  It wouldn't affect the QUITs of modules or scripts.</p>
+<p>If you wanted to write a wrapper like MY-QUIT which could be used in places that had various different definitions of QUIT, you'd have to pass the quit you're referencing to it, e.g. <strong>my-quit :quit [...]</strong> at every callsite.  We now have the notion of looking up things in blocks, so if you did take a bound block at the callsite you might be able to extract its quit definition from there... <strong>my-quit [...]</strong></p>
+<p>As for a greater macro-facility to be passed the environment at the callsite to do the lookup...well... that's an idea.  But if you made something named QUIT then it would only find itself, unless there was some way to "peek underneath" in the environment to find out what QUIT used to be.  <img src="https://forum.rebol.info/images/emoji/twitter/face_with_spiral_eyes.png?v=12" title=":face_with_spiral_eyes:" class="emoji" alt=":face_with_spiral_eyes:" loading="lazy" width="20" height="20"></p>
+<p>Let's put a pin in all of that.  I've implemented a first cut at the definitional QUIT and it was very pleasant to rip out all the belabored stuff that was there before... and I don't think anyone's going to miss it.</p>
+          <p><a href="https://forum.rebol.info/t/quit-rethink-antiform-errors-being-definitional-etc/2275/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/quit-rethink-antiform-errors-being-definitional-etc/2275/2</link>
+        <pubDate>Sat, 14 Sep 2024 12:04:28 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-2275-2</guid>
+        <source url="https://forum.rebol.info/t/quit-rethink-antiform-errors-being-definitional-etc/2275.rss">QUIT Rethink: Antiform Errors, Being Definitional, Etc.</source>
+      </item>
+      <item>
+        <title>QUIT Rethink: Antiform Errors, Being Definitional, Etc.</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>Let's say you have script like this:</p>
+<pre><code>Rebol [
+    File: %quitter.r
+]
+
+print "I'm a quitter!"
+quit
+print "This doesn't run"
+</code></pre>
+<p>In Rebol2 if you run it from a prompt with <strong><code>do %quitter</code></strong>, it will print <strong><code>I'm a quitter</code></strong> and immediately exit the interpreter.  Red does the same thing. <sub>(though you have to change the header from "Rebol []" to "Red []")</sub></p>
+<p>But in R3-Alpha, you get:</p>
+<pre><code>&gt;&gt; do %quitter.r
+Script: "Untitled" Version: none Date: none
+I'm a quitter
+== 0
+</code></pre>
+<p>There's nuances about QUIT in R3-Alpha as well, that you can see in the HELP:</p>
+<pre><code>USAGE:
+    QUIT /return value /now
+
+DESCRIPTION:
+    Stops evaluation and exits the interpreter.
+    QUIT is a native value.
+
+REFINEMENTS:
+    /return -- Returns a value (to prior script or command shell)
+            value -- Note: use integers for command shell
+    /now -- Quit immediately
+</code></pre>
+<p>While Red and Rebol2's /RETURN only took INTEGER!, R3-Alpha could take any other value...which can be returned to the calling script.</p>
+<p>It also offers a /NOW, in case you really did mean you wanted to exit the system entirely.</p>
+<h2>
+<a name="now-not-being-the-default-makes-sense-1" class="anchor" href="https://forum.rebol.info#now-not-being-the-default-makes-sense-1"></a>"/NOW" Not Being the Default Makes Sense</h2>
+<p>"Quitting" a script shouldn't casually force exit from the entire interpreter when you DO it.  So I agree with R3-Alpha's choice on that.</p>
+<p>But I think I prefer moving the /NOW functionality into a different routine, to convey just how different that is.  <strong><code>sys.util/exit</code></strong> seems like a good way to say it.  That's a function that breaks the boundaries of what a more polite routine like QUIT can do.</p>
+<h2>
+<a name="quit-should-be-able-to-return-arbitrary-values-2" class="anchor" href="https://forum.rebol.info#quit-should-be-able-to-return-arbitrary-values-2"></a>QUIT Should Be <em>Able</em> To Return Arbitrary Values</h2>
+<p>I think that allowing arbitrary values to be returned to the caller via DO instead of just integers makes a lot of sense.  Rebol2 and Red both let a script return that arbitrary value if it just fell out the bottom of the script... so why shouldn't you be able to do that with a QUIT parameter?</p>
+<p><em>(Though actually, I'm not sure that arbitrary values should just fall out the bottom of a DO script.  This would seem to leak values in a lot of cases that weren't intended... showing information in the console which is irrelevant (at best) or a "security leak" (at worst).  The default should likely be nothing (~ antiform)... which is interpreted as the script succeeding by default (0 exit code).  If you want the script to synthesize a value, you need to explicitly QUIT with that value...<a href="https://forum.rebol.info/t/how-attached-are-we-to-functions-return-last-result/1219">same as with RETURN in FUNC</a>)</em></p>
+<p>But arbitrary values gives us the question of conflating arbitrary integer return results with exit codes.  You might have a script which wants to return an integer as a count of something, and any non-zero counts could be interpreted as the script having failed.  But if you call this script from the command line, it shouldn't be treated as if it failed.</p>
+<p><strong>It seems clear to me that this is a job for <a href="https://forum.rebol.info/t/fail-vs-return-raise-the-new-age-of-definitional-errors/1852">definitional errors</a>!</strong>  QUIT needs to differentiate between returning values "as is" (all of which should represent success if called from the console) or returning raised errors, with the exit code embedded.  This would allow a DO of a script that raised an error to correctly fail by default, if you didn't handle the error with an EXCEPT.</p>
+<h2>
+<a name="what-interface-should-quit-use-3" class="anchor" href="https://forum.rebol.info#what-interface-should-quit-use-3"></a>What Interface Should QUIT Use?</h2>
+<p>We need a way to say <strong>quit with 1 as raised error</strong> vs. <strong>quit with 1 as ordinary value</strong>.  I think that the former is probably the more typical meaning.  And I'll mention that I don't like /RETURN as the name of any refinement that isn't dealing with function RETURN.</p>
+<p>It's probably best it's made to be arity-1.  <strong><code>quit 0</code></strong> isn't that much more to type than just <strong><code>quit</code></strong>, and reinforces that you have a choice there.</p>
+<p>If you said QUIT 0 that would translate into just returning nothing, so you'd get nothing displayed if you called the script from a DO.  But you'd get a 0 exit status from calling it at the command line.</p>
+<p>By default you could only pass it integers, but some refinement would switch it over to meaning you want to quit with a value.  Probably something like <strong><code>quit/value 1</code></strong> would do the trick.  That would give back the literal value 1 to a DO that called it, and look like success with exit status 0 if you called it at the command line.  (Maybe the option to print the result should be offered as a command-line switch, so command-line programs have at least some way to get a non-integer value out of a script that catered to DO from other scripts?)</p>
+<h2>
+<a name="big-thought-definitional-quit-4" class="anchor" href="https://forum.rebol.info#big-thought-definitional-quit-4"></a>Big Thought: Definitional QUIT</h2>
+<p>Right now catching QUIT is a bit of a black art.</p>
+<p>It seems to me that the way this should work is that each QUIT is definitional, throwing back to the DO or IMPORT that rigged up the module structure and ran it.</p>
+<p>When you're running code from the console, that too should have its own QUIT...that just quits the console.  That way, when it gets caught the console can know it caught just the one that was intended for it, and can tidy up.  Not only that, the interface to that QUIT can offer an arity-0 form without affecting the rest of the system.  (Slightly confusing perhaps, but people will figure it out.)</p>
+<p>There are some strange consequences of this.  It means that every time you run an evaluation in the console, you're dealing with a different QUIT--it's a QUIT that is specifically scoped to that console evaluation.  It can always be found in the same place (e.g. the QUIT variable of the user context)...but it will be refreshed each time there is a new evaluation to be caught.</p>
+<p>Further, it means modules can't QUIT after their initial execution.  This actually makes a lot of sense... who would process that module's QUIT when it isn't running on the stack?  You can only quit a module while you're initializing it...after that point, your only option is to SYS.UTIL/EXIT and terminate the whole interpreter...because there's nowhere else to meaningfully tie a quit to!  Good stuff.</p>
+<h2>
+<a name="this-all-looks-quite-good-5" class="anchor" href="https://forum.rebol.info#this-all-looks-quite-good-5"></a>This All Looks Quite Good</h2>
+<p>Seems to fix a lot of suboptimal things related to quitting we've had going on.</p>
+<p>The code that tried to guess whether non-integer values meant success or not was a very early example I encountered of <em>"hmmm...this doesn't seem right"</em> <img src="https://forum.rebol.info/images/emoji/twitter/thinking.png?v=12" title=":thinking:" class="emoji" alt=":thinking:" loading="lazy" width="20" height="20"> ... it will be nice to rip that out and operate on the basis of isotopic rigor!  <img src="https://forum.rebol.info/images/emoji/twitter/atom_symbol.png?v=12" title=":atom_symbol:" class="emoji" alt=":atom_symbol:" loading="lazy" width="20" height="20"></p>
+          <p><a href="https://forum.rebol.info/t/quit-rethink-antiform-errors-being-definitional-etc/2275/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/quit-rethink-antiform-errors-being-definitional-etc/2275/1</link>
+        <pubDate>Sat, 14 Sep 2024 08:49:30 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-2275-1</guid>
+        <source url="https://forum.rebol.info/t/quit-rethink-antiform-errors-being-definitional-etc/2275.rss">QUIT Rethink: Antiform Errors, Being Definitional, Etc.</source>
+      </item>
+  </channel>
+</rss>

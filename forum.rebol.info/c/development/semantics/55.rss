@@ -5,8 +5,540 @@
     <link>https://forum.rebol.info/c/development/semantics/55</link>
     <description>Topics in the &#39;Semantics&#39; category While the &quot;Internals&quot; discusses the bits and bytes of how things are implemented, this category is for discussing things design questions of the language... like what &lt;strong&gt;do []&lt;/strong&gt; should return.</description>
     
-      <lastBuildDate>Fri, 03 May 2024 17:27:29 +0000</lastBuildDate>
+      <lastBuildDate>Sat, 16 Nov 2024 18:33:28 +0000</lastBuildDate>
       <atom:link href="https://forum.rebol.info/c/development/semantics/55.rss" rel="self" type="application/rss+xml" />
+        <item>
+          <title>The Semantics of JOIN</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Semantics</category>
+          <description><![CDATA[
+            <p><strong>As <a class="mention" href="https://forum.rebol.info/u/brett">@Brett</a>'s critique of yesteryear pointed out, <a href="https://forum.rebol.info/t/rejoin-ugliness-and-the-usefulness-of-tests/248">REJOIN sucked</a>.</strong></p>
+<p>If naming were consistent, you might think from this pattern:</p>
+<pre><code>append a reduce b &lt;=&gt; repend a b
+</code></pre>
+<p>...that the following would have been true:</p>
+<pre><code>join a reduce b &lt;=&gt; rejoin a b  ; one would have perhaps thought?
+</code></pre>
+<p>But no...REJOIN was single arity (and was a mess).</p>
+<h2><a name="p-7907-so-rejoin-is-in-the-trash-heap-but-what-about-join-1" class="anchor" href="https://forum.rebol.info#p-7907-so-rejoin-is-in-the-trash-heap-but-what-about-join-1"></a>So REJOIN is in the trash heap, but what about JOIN?</h2>
+<p>JOIN implicitly reduced, and was basically this:</p>
+<pre><code>join a b &lt;=&gt; append copy a reduce b
+</code></pre>
+<p>But <strong>b</strong> didn't have to be a BLOCK!, so if it was not, it wasn't reduced and just left as-is.</p>
+<pre><code>rebol2&gt;&gt; join "abc" [1 + 2 3 + 4]
+== "abc37"  ; so the block was reduced
+
+rebol2&gt;&gt; d: 10
+rebol2&gt;&gt; join "abc" 'd
+== "abcd"  ; not abc10, so the word was *not* reduced
+</code></pre>
+<p>Red did not carry forward this definition:</p>
+<pre><code>&gt;&gt; join
+*** Script Error: join has no value
+</code></pre>
+<h2><a name="p-7907-next-level-join-allow-join-datatype-2" class="anchor" href="https://forum.rebol.info#p-7907-next-level-join-allow-join-datatype-2"></a>Next-Level JOIN: Allow JOIN  DATATYPE</h2>
+<p>At some point, it occurred to me that if you could use JOIN with a datatype, it could step in to fill in the desires of REJOIN more clearly:</p>
+<pre><code>&gt;&gt; join binary! [1 + 2 #{DECAFBAD} 2 + 3]
+== #{03DECAFBAD05}
+</code></pre>
+<p>There really had been expressions of this like:</p>
+<pre><code>rebol2&gt;&gt; rejoin [#{} 1 + 2 #{DECAFBAD} 2 + 3]
+== #{03DECAFBAD05}
+</code></pre>
+<p>But see Brett's critique, if the surface-level badness isn't enough to convince you!</p>
+<p>I also wanted to support things that Rebol2 probably meant to, but did not.  This should give a WORD! back:</p>
+<pre><code>rebol2&gt;&gt; join 'a 'b
+== "ab"  ; should be word! `ab`
+</code></pre>
+<p>Plus, I thought it might be nice to have a non-reducing variant, done with <code>@[...]</code></p>
+<pre><code>&gt;&gt; join word! @[a 1 + 2]
+== a1+2
+</code></pre>
+<p>I've mentioned elsewhere that I think having <em>join-like</em> actions be done with JOIN is superior to being some form of MAKE, when there's nebulousness for what MAKE means.</p>
+<h2><a name="p-7907-making-peace-with-uneasiness-about-list-ambiguity-3" class="anchor" href="https://forum.rebol.info#p-7907-making-peace-with-uneasiness-about-list-ambiguity-3"></a>Making Peace (?) With Uneasiness About List Ambiguity</h2>
+<p>Ergonomically, it's nice for JOIN to be able to take either a BLOCK! or some other type.</p>
+<p>One of the biggest uses of JOIN is with files:</p>
+<pre><code>join directory %foo.txt
+</code></pre>
+<p>It would be annoying if you had to write:</p>
+<pre><code>join directory [%foo.txt]
+</code></pre>
+<p>But then, you have the problem that if you're joining onto a BLOCK!, then a BLOCK! is a legitimate thing to join:</p>
+<pre><code>&gt;&gt; join [a b] [1 + 2 10 + 20]
+== [a b 3 30]  ; "traditional" behavior
+
+&gt;&gt; join [a b] [1 + 2]
+== [a b [1 + 2 10 + 20]]  ; ...but this could be valid
+</code></pre>
+<p>We could "fix" this by defining JOIN as a non-reducing construct, then have people use SPREAD and REDUCE:</p>
+<pre><code>&gt;&gt; join [a b] spread reduce [1 + 2 10 + 20]
+== [a b 3 30]
+
+&gt;&gt; join [a b] [1 + 2 10 + 20]
+== [a b [1 + 2 10 + 20]]
+
+&gt;&gt; join [a b] reduce [1 + 2 10 + 20]
+== [a b [3 30]]
+</code></pre>
+<p>But this doesn't exactly square with the JOIN of a DATATYPE! case, and the most common desires.</p>
+<p>If anything, I'd rather make JOIN always take a <strong><code>[...]</code></strong> or <strong><code>@[...]</code></strong> in the second argument, and then create some other non-reducing construct that slaps two things together.</p>
+<pre><code>&gt;&gt; block: [a b]
+
+&gt;&gt; adjoin block [c d]
+== [a b [c d]]
+
+&gt;&gt; adjoin block spread [e f]
+== [a b [c d] e f]
+
+&gt;&gt; block
+== [a b]  ; unmodified (difference from append)
+</code></pre>
+<p>But asking people to write <strong><code>(adjoin directory %foo.txt)</code></strong> is... ugly.</p>
+<p>A compromise is to narrow it, so that you could only use it with single items when joining with non-lists...</p>
+<pre><code>&gt;&gt; join "abc" "def"
+== "abcdef"
+
+&gt;&gt; join [a b c] "def"
+** Error: JOIN with a list must use [...] or @[...]
+</code></pre>
+<p>This would help steer you away from writing code like <strong><code>join list value</code></strong> and think it works, to only find it falling down when value becomes a BLOCK!.</p>
+<h2><a name="p-7907-is-reduce-just-join-block-4" class="anchor" href="https://forum.rebol.info#p-7907-is-reduce-just-join-block-4"></a>Is REDUCE just JOIN BLOCK! ?</h2>
+<p>The implementation of JOIN that I'm working on seems like a more powerful REDUCE.</p>
+<p>But questions start to arise about the binding... what should the binding be?</p>
+<pre><code>&gt;&gt; join [add 1] ['multiply 2 3]
+== [add 1 multiply 2 3]
+</code></pre>
+<p>In that case, I'm going to assume the produced block would have the binding of the [add 1] block.  Since multiply is <strong><code>'multiply</code></strong> and not <strong><code>$multiply</code></strong> it would be unbound and hence an evaluation would be driven by that first argument's binding.</p>
+<p>But what if you just said:</p>
+<pre><code>&gt;&gt; join block! ['add 1 'multiply 2 3]
+== [add 1 multiply 2 3]
+</code></pre>
+<p>Before, the second block's binding was disregarded in the product.  But when there's no first block to get the binding from, does it assume the binding of the second block?  And how would you get an unbound block if you wanted it?</p>
+<p>We could say that you get an unbound block, but if you want a bound block, you'd say:</p>
+<pre><code>&gt;&gt; join $[] ['add 1 'multiply 2 3]
+== [add 1 multiply 2 3]
+</code></pre>
+<p>Then we have similar questions for things like word!:</p>
+<pre><code>&gt;&gt; join word! ["a" "b"]
+== ab
+</code></pre>
+<p>I feel that pretty obviously should be unbound.  But words follow different rules:</p>
+<pre><code>&gt;&gt; join $a ["b"]
+== ab  ; can't necessarily be bound, just because a was...
+</code></pre>
+<p>That would suggest all words come back unbound from a joining process.</p>
+<p>So no shortage of questions.  But in general, I think JOIN is on the right track, and splitting MAKE behaviors that are JOIN-like to it seems good.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/the-semantics-of-join/2333">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/the-semantics-of-join/2333</link>
+          <pubDate>Sat, 16 Nov 2024 18:33:28 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2333</guid>
+          <source url="https://forum.rebol.info/t/the-semantics-of-join/2333.rss">The Semantics of JOIN</source>
+        </item>
+        <item>
+          <title>Embracing A &quot;Useless&quot; Definition of TO</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Semantics</category>
+          <description><![CDATA[
+            <p>Many years ago, I thought about <strong><a href="https://forum.rebol.info/t/hacking-away-on-the-to-and-make-matrix/649">trying to untangle of the TO and MAKE matrix</a></strong>.  These operations are notoriously unpredictable in historical Redbol.</p>
+<p>I tried putting some stakes in the ground about what I believed <em>had</em> to be true.  It was difficult because I could not think of too many.</p>
+<p>One thing I said was that TO should always create a "new" value (if the value was not immediate).  And I felt like this should be true:</p>
+<pre><code>to (type of value) value
+; ...same as...
+copy value
+</code></pre>
+<p>Grasping for any stake in the ground I could find, I was pretty sure that TO of a string representation of an integer to an integer should give you the integer:</p>
+<pre><code>&gt;&gt; to integer! "1020"
+== 1020  ; we know this, at least? (one hopes...)
+</code></pre>
+<p>And the reverse, one would think, as well:</p>
+<pre><code>&gt;&gt; to text! 1020
+== "1020"  ; what else *could* it be?  codepoint 1020? -&gt; "ϼ"
+</code></pre>
+<p>But beyond that it was hard to think of the pattern.</p>
+<h2><a name="p-7876-coming-back-to-an-old-idea-reversibility-1" class="anchor" href="https://forum.rebol.info#p-7876-coming-back-to-an-old-idea-reversibility-1"></a>Coming Back To An Old Idea: Reversibility</h2>
+<p>When I first encountered Rebol and was made aware of these problems, I suggested TO should be reversible:</p>
+<pre><code>value1 = to (type of value1) to type2 value1
+</code></pre>
+<p>However, this gave what <em>appeared</em> to be very "unexciting" options for behavior:</p>
+<pre><code>&gt;&gt; to block! 1
+== [1]
+
+&gt;&gt; to integer! [1]
+== 1
+
+&gt;&gt; to integer! [...anything else in a block that's not integer...]
+** Error.  Always.
+</code></pre>
+<p>That particular idea was was so long ago that I don't have direct quotes on hand of people saying "nah, that sucks, TO could barely do anything."  But I'm pretty sure it was panned by basically everyone I suggested it to.  I guess I agreed, because I dropped it.</p>
+<p><strong>Coming back to it now, and seeing it in a new light, I see this as much more useful than I used to.</strong>  Especially when compared to the historical mess that makes TO nigh-unusable.</p>
+<p>And in fact, it fits in with several Rebol2/Red behaviors that I'd thought were kind of pointless before:</p>
+<pre><code>&gt;&gt; to integer! &lt;1&gt;
+== 1
+
+&gt;&gt; to tag! 1
+== &lt;1&gt;
+</code></pre>
+<p>The use I didn't see at the time was the frequent need when dialecting to push values out of band, into some other type, without losing their meaning.  If you have a dialect in which integers already mean something, but you want a way of pushing some integer-oriented instruction in there...you can use these kinds of operations.</p>
+<p>Definitional errors in Ren-C make this convenient, since checking if something fits the pattern is quick, you just throw in a TRY and the antiform error that's the return result of the TO will be suppressed, giving you a "falsey" null:</p>
+<pre><code>&gt;&gt; thing: &lt;a b&gt;
+
+&gt;&gt; to integer! thing
+** Error: Cannot TO convert &lt;a b&gt; to integer
+
+&gt;&gt; try to integer! thing
+== ~null~  ; anti
+</code></pre>
+<p>The more I look at it the more useful it appears.  And it helps give clarity to the MAKE vs. TO division.  If you have something that isn't shaped like this, then <em>maybe</em> MAKE is the right place to put it.  For example:</p>
+<pre><code>&gt;&gt; to percent! 1
+== 1%
+
+&gt;&gt; to integer! 1%
+== 1
+
+&gt;&gt; make percent! 1
+== 100%
+</code></pre>
+<p><em>(Note: I think ENCODE + DECODE is a better place for binary conversions, e.g. ENCODE 'IEEE-754 is better than MAKE BINARY! of a decimal because that could mean many things, and ENCODE can have more parameterization for single vs. double precision, etc.  I don't know<br>
+if TO BINARY! should work at all, but if it does, I'd probably agree with the Rebol2 choice to give the binary representation of the UTF-8 string... e.g. (to binary! 1020) as #{31303230} ... and use more explicit future-proof routines to encode with specified byte size and endianness.)</em></p>
+<h2><a name="p-7876-reversibility-rules-out-rounding-2" class="anchor" href="https://forum.rebol.info#p-7876-reversibility-rules-out-rounding-2"></a>Reversibility Rules Out Rounding</h2>
+<p>In order to get losslessness in the representation, you can't throw out information.</p>
+<p>So this works:</p>
+<pre><code>&gt;&gt; to integer! 1.0
+== 1
+
+&gt;&gt; to decimal! 1
+== 1.0
+</code></pre>
+<p>But this does not:</p>
+<pre><code> &gt;&gt; to integer! 1.5
+ ** Error: Can't TO INTEGER! a DECIMAL! w/digits after decimal point
+</code></pre>
+<p>I don't think that's a problem, because that seems like a job for ROUND.  Unfortunately, R3-Alpha and Red do something dumb:</p>
+<pre><code>rebol2&gt;&gt; round 1.5
+== 2
+
+red&gt;&gt; round 1.5
+== 2.0
+
+r3-alpha&gt;&gt; round 1.5
+== 2.0
+</code></pre>
+<p>It seems this was part of a shift to try and preserve the input type, to facilitate things like rounding MONEY!:</p>
+<pre><code>r3-alpha&gt;&gt; round $1.50
+== $2
+</code></pre>
+<p>So I guess the way the thinking went was that if you want to keep MONEY! as MONEY! when you round it, all types should act that way.</p>
+<p>I think the relationship between INTEGER! and DECIMAL!, which lack decoration, suggests something more intimate where the type can be lost.  If you don't want to lose it, ROUND:TO 1.0</p>
+<pre><code>&gt;&gt; round 1.5
+== 2
+
+&gt;&gt; round:to 1.5 1
+== 2
+
+&gt;&gt; round:to 1.5 1.0
+== 2.0
+</code></pre>
+<h2><a name="p-7876-blank-pretty-much-has-to-mean-empty-3" class="anchor" href="https://forum.rebol.info#p-7876-blank-pretty-much-has-to-mean-empty-3"></a>BLANK! Pretty Much Has To Mean Empty</h2>
+<p>If we're talking about equivalencies, we now know this:</p>
+<pre><code>&gt;&gt; for-each 'x _ [print "Doesn't run"]
+== ~void~  ; anti
+
+&gt;&gt; empty? _
+== ~okay~  ; anti
+</code></pre>
+<p>And so really, it seems that the TO conversion of BLANK! has only one set of answers to fit into the family of reversibility:</p>
+<pre><code>&gt;&gt; to block! _
+== []
+
+&gt;&gt; to text! _
+== ""
+
+&gt;&gt; to blank! &lt;&gt;
+== _
+
+&gt;&gt; to blank! #{}
+== _
+</code></pre>
+<p>And if you try to TO BLANK! anything that's not conceptually empty, you'd get an error.</p>
+<pre><code>&gt;&gt; to blank! &lt;a&gt;
+** Error: ...
+</code></pre>
+<p>I don't know if there's a motivating case for saying <strong>to integer! _</strong> should pick something like 0 as an answer, though Rebol2 did something of that sort:</p>
+<pre><code>rebol2&gt;&gt; to integer! none
+== 0
+</code></pre>
+<p>Neither Red nor R3-Alpha carried that forward, <a href="https://github.com/metaeducation/rebol-issues/issues/1018">though it was discussed</a></p>
+<h2><a name="p-7876-can-be-checked-in-the-implementation-4" class="anchor" href="https://forum.rebol.info#p-7876-can-be-checked-in-the-implementation-4"></a>Can Be Checked In The Implementation</h2>
+<p>I've started hacking this through, and it's gone relatively well.  TO dispatches <em><strong>to the type it's converting from</strong></em>, with the type being converted to as the argument.</p>
+<p>And it's nice in the sense that the TO native driving the process can also check the reversibility constraint in the debug build, to give it some teeth.</p>
+<p><em>(I've rigged up some interesting frame mechanics to enable doing this reversal efficiently, that have sped up other parts of the system (like CASCADE) with "downlevel shifting", that can bypass a trampoline bounce...)</em></p>
+<p>Anyway, things are a mess right now with a couple hundred broken tests to painfully sift through.  But I think the reversibility rule is good... biggest questions are whether that relaxes in terms of spacing...</p>
+<pre><code>&gt;&gt; to block! "  1    2  "
+== [1 2]  ; legal?
+</code></pre>
+<p>This would suggest you would have to compare with the trimmed/canonized version of your input.</p>
+<p>Also, issues of string representations.</p>
+<pre><code>&gt;&gt; b: to block! "--{1}--"
+== ["1"]  ; legal?
+</code></pre>
+<p>So there are some pain points, but chipping away at them.</p>
+            <p><small>2 posts - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/embracing-a-useless-definition-of-to/2325">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/embracing-a-useless-definition-of-to/2325</link>
+          <pubDate>Fri, 08 Nov 2024 17:57:07 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2325</guid>
+          <source url="https://forum.rebol.info/t/embracing-a-useless-definition-of-to/2325.rss">Embracing A &quot;Useless&quot; Definition of TO</source>
+        </item>
+        <item>
+          <title>Bitten By Right Side Evaluation First</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Semantics</category>
+          <description><![CDATA[
+            <p>I was writing some code like this:</p>
+<pre><code>while [not tail? info] [
+    if find leaders info.1.name [
+        leader-protos.(info.1.name): take info
+    ] else [
+        info: next info
+    ]
+]
+</code></pre>
+<p>Due to the post title you probably already see the bug.  TAKE INFO on the right hand side runs <em>before</em> the <strong>info.1.name</strong>.  So it's inserting under the next name.</p>
+<p>I think we can (and should) precalculate the groups on the left hand side.  Basically walk the tuple and push its elements to the stack before doing the right hand side evaluation.</p>
+            <p><small>3 posts - 2 participants</small></p>
+            <p><a href="https://forum.rebol.info/t/bitten-by-right-side-evaluation-first/2301">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/bitten-by-right-side-evaluation-first/2301</link>
+          <pubDate>Sat, 28 Sep 2024 17:53:43 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2301</guid>
+          <source url="https://forum.rebol.info/t/bitten-by-right-side-evaluation-first/2301.rss">Bitten By Right Side Evaluation First</source>
+        </item>
+        <item>
+          <title>META:LITE - When You Don&#39;t Want Quasiforms</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Semantics</category>
+          <description><![CDATA[
+            <p>There was a time before quasiforms existed, but where there was generic quoting.</p>
+<p>It was in this time that META was invented.  It did the only thing it could do:</p>
+<ul>
+<li>
+<p>When you META'd a plain (or quoted) thing, it got one quote level added</p>
+</li>
+<li>
+<p>When you META'd an "antiform" you would get a plain version of the thing</p>
+</li>
+</ul>
+<p>So it worked like this:</p>
+<pre><code>&gt;&gt; meta first [(d e f)]
+== '(d e f)
+
+&gt;&gt; meta first ['(d e f)]
+== ''(d e f)
+
+&gt;&gt; spread [a b c]
+== (a b c)  ; "antiform"
+
+&gt;&gt; meta spread [a b c]
+== (a b c)
+</code></pre>
+<p><em>(That's not how it works now--for good reasons.  Not only is it a bit too easy to get confused about whether a meta protocol is in effect, the absence of quasiforms leaves a representational hole for values that produce antiforms under evaluation.  But I won't rewrite a <a href="https://forum.rebol.info/t/a-justification-of-generalized-isotopes/1918">A Justification Of Generalized Iostopes</a> here, this post has another purpose.)</em></p>
+<h2>
+<a name="another-historical-twist-meta-of-null-was-null-1" class="anchor" href="https://forum.rebol.info#another-historical-twist-meta-of-null-was-null-1"></a>Another Historical Twist: META of NULL was NULL</h2>
+<p>NULL was an outlier--at various times having no quoted form (and at other times being considered a quote of nothingness, e.g. the lone apostrophe (<strong><code>'</code></strong>)).</p>
+<p>I don't exactly remember what state NULL was in at the time META was being invented.  But regardless, it was initially decided that META and UNMETA of NULL could just give null back.</p>
+<p>This actually turned out to frequently be useful...for instance <a href="https://forum.rebol.info/t/demonstrating-for-both-loop-composability-for-the-win/1833">when writing a loop wrapper like FOR-BOTH</a></p>
+<pre><code>for-both: func [var blk1 blk2 body] [  ; the historical formulation
+    return unmeta all [
+        meta for-each var blk1 body  ; META NULL =&gt; NULL allows chaining BREAK
+        meta for-each var blk2 body
+    ]
+]
+</code></pre>
+<p>Though while it was useful there, plenty of places needed to speak fully abstractly about all possible states.  So as the model shaped up, META of NULL fit into the regular pattern of all things having reified metaforms, giving <strong><code>~null~</code></strong>.</p>
+<h2>
+<a name="i-wanted-a-metalitehttpswwwyoutubecomwatchvimv0g-4cycw-2" class="anchor" href="https://forum.rebol.info#i-wanted-a-metalitehttpswwwyoutubecomwatchvimv0g-4cycw-2"></a><a href="https://www.youtube.com/watch?v=Imv0g-4cycw">I Wanted A META:LITE</a>
+</h2>
+<p>The idea of a META variation that passed through keywords as-is came along as <strong><code>meta:lite</code></strong>.</p>
+<pre><code>&gt;&gt; meta:lite [a b c]
+== '[a b c]
+
+&gt;&gt; spread [a b c]
+== ~(a b c)~  ; null
+
+&gt;&gt; meta:lite spread [a b c]
+== ~(a b c)~
+
+&gt;&gt; meta:lite null
+== ~null~  ; anti
+
+&gt;&gt; meta:lite first [~null~ ~void~]
+== '~null~
+</code></pre>
+<p>So today's META:LITE still produces quasiforms for antiforms--just not for the <code>~null~</code> and <code>~void~</code> antiforms (and I now imagine it should probably pass through <code>~okay~</code> and <code>~end~</code> and <code>~NaN~</code> as well):</p>
+<pre><code>/for-both: func [var blk1 blk2 body] [
+    return unmeta:lite all [
+        meta:lite for-each var blk1 body  ; meta:lite null =&gt; ~null~ antiform
+        meta:lite for-each var blk2 body  ; meta:lite void =&gt; ~void~ antiform
+    ]
+]
+</code></pre>
+<h2>
+<a name="but-what-if-metalite-didnt-make-any-quasiforms-at-all-3" class="anchor" href="https://forum.rebol.info#but-what-if-metalite-didnt-make-any-quasiforms-at-all-3"></a>But What If META:LITE Didn't Make <em>Any</em> Quasiforms At All?</h2>
+<p>By design, <a href="https://forum.rebol.info/t/quasiforms-arent-super-friendly-and-they-shouldnt-be/2273">quasiforms are not very friendly</a>.  So if you have an antiform in your hand... and you know you have an antiform in your hand... it's easy to take a step to a quasiform, but you need another step to get back to a plain form you can interact with.</p>
+<p>So why not have META:LITE take care of it?</p>
+<pre><code>&gt;&gt; meta:lite null
+== ~null~  ; anti
+
+&gt;&gt; meta:lite spread [a b c]
+== (a b c)
+</code></pre>
+<p>This doesn't make a difference to things like FOR-BOTH.  They'll still work--plain forms are just as truthy as quasiforms for the meta states.  They just have to remember to use UNMETA:LITE on the reverse end.  <em>(If you use plain UNMETA it will catch your error, as UNMETA does not accept plain forms.)</em></p>
+<p>It might seem random to pair up the feature of not making quasiforms with passing thru null and void.  But I actually think the kinds of places where you'd want one behavior do overlap significantly with the other.</p>
+<p>And we're really just running out of terms, here.  Throwing another nuance in to say <em>"I want partial META, but only partial in the sense that I'm passing through null and void, not partial in terms of the other antiforms--make those quasiforms"</em> is just starting to go beyond the ability to give names to.</p>
+<p>So in my head, having META:LITE be formulated as "do what META would do in a historical world where quasiforms and meta-nulls didn't exist" feels pretty good.</p>
+<h2>
+<a name="its-still-fundamentally-a-valid-meta-4" class="anchor" href="https://forum.rebol.info#its-still-fundamentally-a-valid-meta-4"></a>It's Still Fundamentally a "Valid META"</h2>
+<p>I couldn't really think of a good name for the operation besides just saying it was an alternate behavior of META. "Lite" is a bit strange but I felt it fit.</p>
+<p>Note that it doesn't make sense as a refinement to REIFY.  Because being willing to produce something that can't be put in a block fundamentally undermines what the word REIFY means.  (<strong><code>reify:...NOT!</code></strong>)</p>
+<p>The thing about META:LITE is that it really is giving you a full-spectrum meta representation of what you had in your hand.  Every input state maps to a unique output state.  The default META happens to also be a fully reifying operation as well...but here we are saying that's not intrinsic to "a meta operation".</p>
+<p><em>(Would there be any use for a META that passes through <em>all</em> antiforms--not just the antiform words--and just quotes everything else?  That's more a variation of QUOTE than it is a variation of META.  I can't offhand think of a case where that would ever be useful.)</em></p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/meta-lite-when-you-dont-want-quasiforms/2296">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/meta-lite-when-you-dont-want-quasiforms/2296</link>
+          <pubDate>Mon, 23 Sep 2024 13:42:44 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2296</guid>
+          <source url="https://forum.rebol.info/t/meta-lite-when-you-dont-want-quasiforms/2296.rss">META:LITE - When You Don&#39;t Want Quasiforms</source>
+        </item>
+        <item>
+          <title>The Meaning of the FORM String Operation</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Semantics</category>
+          <description><![CDATA[
+            <p>So FORM's vague job is to give a "human readable representation" of the data it's given.</p>
+<p>So for TEXT!, it gives you a representation of the string without delimiters--in contrast to MOLD, which gives you the delimiters:</p>
+<pre><code>&gt;&gt; form "hello world"
+== "hello world"
+
+&gt;&gt; mold "hello world"
+== {"hello world"}
+</code></pre>
+<p>And you're probably thinking <em>"Uh...FORM of a text string is a no-op.  Why would you do that?"</em></p>
+<p>The idea is that there are things other than text which do what the delimiters.  Such as TAG!</p>
+<pre><code>&gt;&gt; form &lt;hello world&gt;
+== "&lt;hello world&gt;"
+
+&gt;&gt; mold &lt;hello world&gt;
+== "&lt;hello world&gt;"
+</code></pre>
+<p>What if you don't want delimiters on your TAG!s and such?  Well... for any string-ish type, thanks to UTF-8 we have a <em>super efficient</em> operation called AS TEXT! which aliases any type as a string.  It reuses the memory:</p>
+<pre><code>&gt;&gt; tag: &lt;hello world&gt;
+
+&gt;&gt; text: as text! &lt;hello world&gt;
+== "hello world"
+
+&gt;&gt; append tag "ly Ren-C user"
+== &lt;hello worldly Ren-C user&gt;
+
+&gt;&gt; text
+== "hello worldly Ren-C user"
+</code></pre>
+<p>You can use it on ANY-WORD! as well, and it will give you a read-only string... and not have the sigils:</p>
+<pre><code>&gt;&gt; as text! '$var
+== "var"
+</code></pre>
+<p>I have an inkling that over the subset of operations to which you can use both TO and AS, that you should get the same result... just a copy:</p>
+<pre><code>&gt;&gt; tag: &lt;hello world&gt;
+
+&gt;&gt; text: to text! &lt;hello world&gt;  ; TO TEXT!, not AS TEXT!
+== "hello world"
+
+&gt;&gt; append tag "ly Ren-C user"
+== &lt;hello worldly Ren-C user&gt;
+
+&gt;&gt; text
+== "hello world"
+</code></pre>
+<h2>
+<a name="so-form-adds-delimiters-and-toas-text-does-not-1" class="anchor" href="https://forum.rebol.info#so-form-adds-delimiters-and-toas-text-does-not-1"></a>So FORM adds delimiters, and TO+AS TEXT! Does Not...</h2>
+<p>...BUT...let's go back:</p>
+<pre><code>&gt;&gt; form "hello world"
+== "hello world"
+
+&gt;&gt; form &lt;hello world&gt;
+== "&lt;hello world&gt;"
+</code></pre>
+<p>Why again is FORM a no-op on text, but adds delimiters to tags?</p>
+<h2>
+<a name="and-how-about-blocks-2" class="anchor" href="https://forum.rebol.info#and-how-about-blocks-2"></a>And How About Blocks?</h2>
+<p>The block behavior of FORM historically strikes me as not terribly useful:</p>
+<pre><code>rebol2/red&gt;&gt; form [I am [:a "block" that:] &lt;is&gt; (being formed)]
+== "I am a block that &lt;is&gt; being formed"
+
+r3-alpha&gt;&gt; form [I am [:a "block" that:] &lt;is&gt; (being formed)]
+== "I am :a block that: &lt;is&gt; being formed"
+</code></pre>
+<p>How often do you want to take a bunch of material and throw away decorations from some of it, and flatten out all the lists with no processing but spaces?</p>
+<p>I don't think I've ever used that.  I see more use in MOLD SPREAD, which it seems like R3-Alpha was edging toward and didn't quite get there.</p>
+<pre><code>&gt;&gt; mold spread [I am [:a "block" that:] &lt;is&gt; (being "formed")]
+== {(I am :a "block" that: &lt;is&gt; (being "formed"))}
+</code></pre>
+<h2>
+<a name="who-is-calling-form-and-why-are-they-calling-it-3" class="anchor" href="https://forum.rebol.info#who-is-calling-form-and-why-are-they-calling-it-3"></a>Who is Calling FORM (and why are they calling it?)</h2>
+<p>The variance in behaviors across R3-Alpha and Red show what is usually true when you see variation--<em>people don't know why the thing exists, find out it has random behavior, then avoid using it in favor of other things</em>.</p>
+<p>Most uses seem to be turning WORD! to string, and turning TAG! to string with some assurance it will have the delimiters on it.  Nobody really uses it on blocks.</p>
+<p>I don't yet have a complete answer for either getting rid of it, or defining it rigorously.  But I'm going to start paying more attention to it.</p>
+            <p><small>2 posts - 2 participants</small></p>
+            <p><a href="https://forum.rebol.info/t/the-meaning-of-the-form-string-operation/2288">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/the-meaning-of-the-form-string-operation/2288</link>
+          <pubDate>Fri, 20 Sep 2024 09:16:05 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2288</guid>
+          <source url="https://forum.rebol.info/t/the-meaning-of-the-form-string-operation/2288.rss">The Meaning of the FORM String Operation</source>
+        </item>
+        <item>
+          <title>Make REPLACE/ALL Default Semantics of REPLACE?</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Semantics</category>
+          <description><![CDATA[
+            <p>Pretty much every time I use REPLACE, I mean REPLACE/ALL.  But I get bitten because I forget the /ALL.</p>
+<pre><code>&gt;&gt; string: "I am pretty sure I feel like I usually want to REPLACE/ALL"
+
+&gt;&gt; replace string "I" "You"
+== "You am pretty sure I feel like I usually want to REPLACE/ALL"
+</code></pre>
+<p>Grammar aside, I don't feel like there's a natural boundedness on REPLACE.  It seems to me the exception is replacing just one thing, e.g. REPLACE/ONE.</p>
+<p>Does anyone have a good argument for why REPLACE shouldn't replace all by default?</p>
+<p>It would also be nice to know if any replacements were done.  A multi-return parameter which was the count of replacements--or null if no replacements made--would be very useful.</p>
+            <p><small>3 posts - 2 participants</small></p>
+            <p><a href="https://forum.rebol.info/t/make-replace-all-default-semantics-of-replace/2269">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/make-replace-all-default-semantics-of-replace/2269</link>
+          <pubDate>Wed, 11 Sep 2024 13:33:15 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2269</guid>
+          <source url="https://forum.rebol.info/t/make-replace-all-default-semantics-of-replace/2269.rss">Make REPLACE/ALL Default Semantics of REPLACE?</source>
+        </item>
         <item>
           <title>The Truthiness of Nothing</title>
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
@@ -118,7 +650,7 @@ Hello
 <hr>
 <p>A better axis of orneryness that may actually catch more problems in practice is: <strong><a href="https://forum.rebol.info/t/making-call-raise-a-definitional-error-for-bad-exit-codes/2068/2">Should Nothing be Illegal in Comparisons</a></strong></p>
 <p>(I point out in that discussion that simply disabling the ability to check nothing for truthiness/falseyness is kind of a strange counterpart to a routine that returns--say--an INTEGER! in all cases, where you get zero information from testing an integer conditionally but without anything to stop you...making the disablement of testing nothing conditionally seem like a fairly empty gesture.)</p>
-            <p><small>2 posts - 1 participant</small></p>
+            <p><small>3 posts - 1 participant</small></p>
             <p><a href="https://forum.rebol.info/t/the-truthiness-of-nothing/2180">Read full topic</a></p>
           ]]></description>
           <link>https://forum.rebol.info/t/the-truthiness-of-nothing/2180</link>
@@ -366,7 +898,7 @@ return unmeta result'  ; return successful parser result
 <p>Reserving the pure NULL return value for BREAK means you can get that communication of when BREAK was encountered out of the return result.  And in this case, CONTINUE is just supposed to bypass the remainder of code in BODY and go on parsing.  So it works.</p>
 <p>But it's suboptimal as the binding of the body to BREAK and CONTINUE happens on each run instead of once.  Doing that more efficiently would need some new techniques and case studies.</p>
 <p>Overall though, it's progress...in the sense that there's an answer that works slowly, vs. not working at all!</p>
-            <p><small>1 post - 1 participant</small></p>
+            <p><small>2 posts - 1 participant</small></p>
             <p><a href="https://forum.rebol.info/t/definitional-break-and-continue-the-time-is-now/2066">Read full topic</a></p>
           ]]></description>
           <link>https://forum.rebol.info/t/definitional-break-and-continue-the-time-is-now/2066</link>
@@ -523,139 +1055,6 @@ qe.clause-list: union qe.clause-list word
           <source url="https://forum.rebol.info/t/union-intersect-difference-and-splices/2058.rss">UNION, INTERSECT, DIFFERENCE...and Splices</source>
         </item>
         <item>
-          <title>MAYBE IF conditionals went back to returning NULL on Failure?</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Semantics</category>
-          <description><![CDATA[
-            <p>A while ago, I made void more friendly... to say that void variables could be fetched without using GET-WORD! access or other fanfare:</p>
-<pre><code>&gt;&gt; x: void
-
-&gt;&gt; append [a b c] x
-== [a b c]
-</code></pre>
-<p>My rationale was something along the lines of <em>"well, if you make a void variable, then you get what you were asking for"</em>.</p>
-<p>A little bit unsettling is how easy you can make voids if something like your branches in a CASE or SWITCH are not exhaustive.  For instance:</p>
-<pre><code>lib: switch config.platform [
-    'Windows [%windows.lib]
-    'Linux [%linux.a]
-]
-</code></pre>
-<p>You've now got LIB as VOID.  It's a little uncomfortable for me to think about how such casual creation of voids makes a thing that will go around opting out of things, but those opt-outs produce NULL via the void-in-null-out protocol, so you should find out about it eventually.  My other argument was that if you didn't want this, then you should just throw in a FAIL at the ending:</p>
-<pre><code>lib: switch config.platform [
-    'Windows [%windows.lib]
-    'Linux [%linux.a]
-    fail  ; not so hard to do this if you don't want VOIDs
-]
-</code></pre>
-<h2>
-<a name="butwhat-if-you-want-a-null-1" class="anchor" href="https://forum.rebol.info#butwhat-if-you-want-a-null-1"></a>But...What if you <em>WANT</em> a NULL?</h2>
-<p>As it happens, due to the <a href="https://forum.rebol.info/t/the-fallout-from-the-switch-fallout-feature/312">SWITCH and CASE "Fallout" Feature</a>, this also works with things like NULL:</p>
-<pre><code>lib: switch config.platform [
-    'Windows [%windows.lib]
-    'Linux [%linux.a]
-    null
-]
-</code></pre>
-<p>Basically if you give an evaluative clause with no branch, the clause drops out if it is reached.</p>
-<p>It is <em>weird</em>, but it's foreignness doesn't necessarily make it <em>bad</em>.  Though were it a CASE statement, some people might gravitate toward an always-TRUE branch as not violating the structure:</p>
-<pre><code>lib: case [
-    config.platform = 'Windows [%windows.lib]
-    config.platform = 'Linux [%linux.a]
-    true [null]
-]
-</code></pre>
-<p>But SWITCH has no equivalent, so its either the fallout feature or an ELSE (which won't please <a class="mention" href="https://forum.rebol.info/u/rgchris">@rgchris</a> and I think I prefer fallout)</p>
-<pre><code>lib: switch config.platform [
-    'Windows [%windows.lib]
-    'Linux [%linux.a]
-] else [null]
-</code></pre>
-<h2>
-<a name="or-is-this-a-job-for-a-void-to-null-operator-2" class="anchor" href="https://forum.rebol.info#or-is-this-a-job-for-a-void-to-null-operator-2"></a>Or Is This A Job For A VOID-TO-NULL Operator?</h2>
-<p>I thought maybe TRY could nullify-voids, but this creates conflation of disabling raised errors returned by branches.  e.g. what if the Windows branch tried to READ a nonexistent file?</p>
-<pre><code>lib: try switch config.platform [
-    'Windows [read %windowslibname.txt]  ; imagine raises error
-    'Linux [%linux.a]
-]
-</code></pre>
-<p>Not being able to open the file would conflate with not taking a branch--no good.  This shows the use of TRY to convert voids to nulls is clearly a poor idea, and that needs to be a special purpose function.</p>
-<p>So TRY is off the table at this point; it's an ignore-raised-error-and-continue.</p>
-<p>MAYBE makes more sense as NULL-TO-VOID and serves well in that purpose.</p>
-<p>DEVOID is a cryptic name that was actually proposed to turn VOIDs to NIHILs for vaporization in situations that didn't naturally vaporize voids:</p>
-<pre><code>&gt;&gt; 1 + 2 void
-
-&gt;&gt; 1 + 2 devoid void
-== 3
-</code></pre>
-<p>So I will call this something like NULLIFY-IF-VOID until a better idea comes along.  Clearly not great for everyday use.</p>
-<h2>
-<a name="or-is-this-cold-feet-on-void-from-failed-conditionals-3" class="anchor" href="https://forum.rebol.info#or-is-this-cold-feet-on-void-from-failed-conditionals-3"></a>Or... Is This Cold Feet on Void From Failed Conditionals?</h2>
-<p>Production of voids from failed conditionals was motivated almost entirely by wanting IFs to vanish quietly when they don't take their branch.  At first it was just COMPOSE:</p>
-<pre><code> &gt;&gt; compose [&lt;a&gt; (if false [&lt;b&gt;]) &lt;c&gt;]
- == [&lt;a&gt; &lt;b&gt;]
-</code></pre>
-<p>But this spread to things like REDUCE, ANY, ALL, etc.</p>
-<pre><code>&gt;&gt; reduce [1 + 2 if false [30] 100 + 200]
-== [3 300]
-
-&gt;&gt; all [&lt;a&gt; if false [&lt;b&gt;] if true [&lt;c&gt;]]
-== &lt;c&gt;
-</code></pre>
-<p>In terms of composability and convenience, it's hard for me to think this isn't the right answer.  It feels like they get mutilated if you have to throw in a NULL-TO-VOID (what I've called "MAYBE")</p>
-<pre><code>&gt;&gt; compose [&lt;a&gt; (maybe if false [&lt;b&gt;]) &lt;c&gt;]
-== [&lt;a&gt; &lt;b&gt;]
-
-&gt;&gt; reduce [1 + 2 maybe if false [30] 100 + 200]
-== [3 300]
-
-&gt;&gt; all [&lt;a&gt; maybe if false [&lt;b&gt;] maybe if true [&lt;c&gt;]]
-== &lt;c&gt;
-</code></pre>
-<p>But perhaps it's only a good answer for IF, because it has one branch and you're very aware that it takes its branch or it doesn't?  Maybe twistier constructs like SWITCH and CASE should be more conservative and evaluate to NULL when a branch isn't taken...?  <img src="https://forum.rebol.info/images/emoji/twitter/face_with_raised_eyebrow.png?v=12" title=":face_with_raised_eyebrow:" class="emoji" alt=":face_with_raised_eyebrow:" loading="lazy" width="20" height="20"></p>
-<p>I don't like it for a couple of reasons, but a big one is that it feels like it throws a wrench into equivalencies.  e.g. I'd like:</p>
-<pre><code> unmeta* any [
-     meta* if condition1 [branch1]
-     meta* if condition2 [branch2]
- ]
-</code></pre>
-<p>...to be the same as:</p>
-<pre><code>case [
-   condition1 [branch1]
-   condition2 [branch2]
-]
-</code></pre>
-<p>Having transformations which relate constructs together means people can build on reliable parts.  The response of ANY when all expressions void out is to give a VOID, and that's by design.</p>
-<p>So, hmm.</p>
-<h2>
-<a name="or-are-void-variables-the-problem-4" class="anchor" href="https://forum.rebol.info#or-are-void-variables-the-problem-4"></a>...Or Are Void Variables The Problem?</h2>
-<p>There could be some kind of rule, that variables are not allowed to hold voids...and if you assign void to a variable it becomes null.</p>
-<pre><code> &gt;&gt; void? x: if false [&lt;a&gt;]
- == ~true~  ; isotope
-
- &gt;&gt; x
- == ~null~  ; isotope
-</code></pre>
-<p>Proposals along these lines have been entertained before.  I don't think I like it, and I feel like void variables should be legal.</p>
-<h2>
-<a name="i-think-im-committed-to-untaken-branches-as-void-5" class="anchor" href="https://forum.rebol.info#i-think-im-committed-to-untaken-branches-as-void-5"></a>I Think I'm Committed To Untaken Branches As VOID...</h2>
-<p>But as with most things here, I think the fun is letting people play language designer and making their own choices.</p>
-<p>If pure VOID means no branch taken, you can pipe the constructs:</p>
-<pre><code>case: chain [:case, :void-to-null]
-</code></pre>
-<p>And that's it.  You could choose to do this for CASE and SWITCH so they'd need a MAYBE to vanish quietly, and leave IF alone.</p>
-<p>But it's important to look at all the angles...!</p>
-            <p><small>1 post - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/maybe-if-conditionals-went-back-to-returning-null-on-failure/2047">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/maybe-if-conditionals-went-back-to-returning-null-on-failure/2047</link>
-          <pubDate>Mon, 14 Aug 2023 17:08:18 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-2047</guid>
-          <source url="https://forum.rebol.info/t/maybe-if-conditionals-went-back-to-returning-null-on-failure/2047.rss">MAYBE IF conditionals went back to returning NULL on Failure?</source>
-        </item>
-        <item>
           <title>COMMA! and GROUP! Error Parity, e.g. (1 +) and 1,</title>
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
           <category>Semantics</category>
@@ -664,8 +1063,7 @@ qe.clause-list: union qe.clause-list word
 <aside class="quote no-group quote-modified" data-username="hostilefork" data-post="1" data-topic="1387">
 <div class="title">
 <div class="quote-controls"></div>
-<img loading="lazy" alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/40/26_2.png" class="avatar"><a href="https://forum.rebol.info/t/the-language-worlds-weirdest-comma-mechanic/1387/1">The Language World's Weirdest COMMA! Mechanic</a>
-</div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"><a href="https://forum.rebol.info/t/the-language-worlds-weirdest-comma-mechanic/1387/1">The Language World's Weirdest COMMA! Mechanic</a></div>
 <blockquote>
 <pre><code>&gt;&gt; all [1 +, 2 3 + 4]
 ** Script Error: + is missing its value2 argument
@@ -707,8 +1105,7 @@ qe.clause-list: union qe.clause-list word
 <p>Starting the next fresh evaluation step clears the BARRIER_HIT state.</p>
 </li>
 </ul>
-<h2>
-<a name="an-early-weakness-noted-literal-arguments-1" class="anchor" href="https://forum.rebol.info#an-early-weakness-noted-literal-arguments-1"></a>An Early Weakness Noted: Literal Arguments</h2>
+<h2><a name="p-6650-an-early-weakness-noted-literal-arguments-1" class="anchor" href="https://forum.rebol.info#p-6650-an-early-weakness-noted-literal-arguments-1"></a>An Early Weakness Noted: Literal Arguments</h2>
 <p>I quickly spotted the case of taking the next argument literally (remember that <strong>the x</strong> is just <strong>x</strong>):</p>
 <pre><code>the, 1 + 2
 ; vs
@@ -732,8 +1129,7 @@ qe.clause-list: union qe.clause-list word
 == ,
 </code></pre>
 <p>Or it could be an error unless you say <strong>THE/COMMA</strong>, which would force use of (2).</p>
-<h2>
-<a name="but-would-simpler-be-better-2" class="anchor" href="https://forum.rebol.info#but-would-simpler-be-better-2"></a>But... Would Simpler Be Better?</h2>
+<h2><a name="p-6650-but-would-simpler-be-better-2" class="anchor" href="https://forum.rebol.info#p-6650-but-would-simpler-be-better-2"></a>But... Would Simpler Be Better?</h2>
 <p>The existing designs predate NIHIL (an isotopic empty pack).  One major aspect of nihil is that almost no functions will accept it as a parameter.</p>
 <p>So we might ask how different COMMA! needs to be from reaching a nihil state, e.g. a COMMENT?  Would this be sensible as being equivalent mechanics:</p>
 <pre><code>&gt;&gt; all [1 +, "hi" 2 3 + 4]
@@ -743,8 +1139,7 @@ qe.clause-list: union qe.clause-list word
 ** Script Error: + is missing its value2 argument
 </code></pre>
 <p>e.g. <strong>How bad would it be if the BARRIER_HIT mechanics went away, and we simply leveraged the idea that commas evaluated to nihil...and most functions refuse nihil arguments?</strong></p>
-<h2>
-<a name="downside-of-simplicity-behavior-in-pack-3" class="anchor" href="https://forum.rebol.info#downside-of-simplicity-behavior-in-pack-3"></a>Downside of Simplicity: Behavior in PACK!</h2>
+<h2><a name="p-6650-downside-of-simplicity-behavior-in-pack-3" class="anchor" href="https://forum.rebol.info#p-6650-downside-of-simplicity-behavior-in-pack-3"></a>Downside of Simplicity: Behavior in PACK!</h2>
 <p>I decided to test this idea of making COMMA! evaluate NIHIL just like a comment would.  But found trouble because I had code that was doing something like this:</p>
 <pre><code>[a b]: pack [1 + 2, 10 + 20]
 </code></pre>
@@ -759,8 +1154,7 @@ qe.clause-list: union qe.clause-list word
 </code></pre>
 <p><strong>This suggests either that you can't use commas in PACK, -or- that PACK needs to be proactive about skipping over the commas at source level.</strong>  So long as PACK is based on REDUCE-EACH, then that suggests REDUCE-EACH needs to be able to skip commas...because you wouldn't be able to distinguish the cases based on the NIHIL evaluation product alone.</p>
 <p>Something to notice about that idea is that if it's literally looking for commas, that means you can't make your own comma-like construct that acts like a barrier.</p>
-<h2>
-<a name="another-wrinkle-set-block-with-comma-on-right-4" class="anchor" href="https://forum.rebol.info#another-wrinkle-set-block-with-comma-on-right-4"></a>Another Wrinkle: SET-BLOCK! with Comma on Right</h2>
+<h2><a name="p-6650-another-wrinkle-set-block-with-comma-on-right-4" class="anchor" href="https://forum.rebol.info#p-6650-another-wrinkle-set-block-with-comma-on-right-4"></a>Another Wrinkle: SET-BLOCK! with Comma on Right</h2>
 <p>If you were to write something like this, it wouldn't give an error:</p>
 <pre><code>&gt;&gt; [/a /b]: ,
 == ~null~  ; isotope
@@ -777,8 +1171,7 @@ qe.clause-list: union qe.clause-list word
 == ~[]~
 </code></pre>
 <p>These don't offhand seem that bad, and maybe could even be seen as good if you look at it from a certain point of view.  But it does show that the "stopping power" of commas isn't bullteproof.</p>
-<h2>
-<a name="what-about-thenelseetc-5" class="anchor" href="https://forum.rebol.info#what-about-thenelseetc-5"></a>What About THEN/ELSE/etc. ?</h2>
+<h2><a name="p-6650-what-about-thenelseetc-5" class="anchor" href="https://forum.rebol.info#p-6650-what-about-thenelseetc-5"></a>What About THEN/ELSE/etc. ?</h2>
 <p>THEN and ELSE are enfix and treat their left hand side evaluatively:</p>
 <pre><code>(1 + 2, then [print "what happens here?"])
 </code></pre>
@@ -789,8 +1182,7 @@ qe.clause-list: union qe.clause-list word
 <pre><code>(then [print "what happens here?"])
 </code></pre>
 <p>Today, there are mechanics that make the left hand side look like an <code>&lt;end&gt;</code> condition...which falls under the complexity of BARRIER_HIT.</p>
-<h2>
-<a name="alternative-evaluator-skips-over-comma-when-possible-6" class="anchor" href="https://forum.rebol.info#alternative-evaluator-skips-over-comma-when-possible-6"></a>Alternative: Evaluator Skips Over COMMA! When Possible</h2>
+<h2><a name="p-6650-alternative-evaluator-skips-over-comma-when-possible-6" class="anchor" href="https://forum.rebol.info#p-6650-alternative-evaluator-skips-over-comma-when-possible-6"></a>Alternative: Evaluator Skips Over COMMA! When Possible</h2>
 <p>This would mean if you wrote something like:</p>
 <pre><code>&gt;&gt; do/next [, , , 1 + 2, , 10 + 20] 'pos
 == 3
@@ -801,8 +1193,7 @@ qe.clause-list: union qe.clause-list word
 <p><em>I think this is how things worked long ago before the BARRIER_HIT flag was introduced.</em>  The concept was that a literal barrier (was <strong><code>|</code></strong>, now <strong><code>,</code></strong>) would be greedily consumed in interstitial evaluations, but raise errors otherwise.</p>
 <p>This way, a COMMA! could just stay un-consumed by the evaluator.  Function calls gathering their argument would look ahead and say "hey is there <em>either</em> an end of block or a COMMA!" and if so, not run an evaluation and report an <code>&lt;end&gt;</code> condition.  This could be reported for arbitrarily many arguments...and so long as they were endable you would receive that condition.  In other words: the BARRIER_HIT flag was conveyed merely by a lagging comma that would stick around.</p>
 <p><em>This feels very regressive, because every stepwise evaluating function inherits this complexity.</em>  The nice consequence of saying that COMMA! just evaluates to NIHIL is that it triggers the same handling you would use for COMMENT-like functions.</p>
-<h2>
-<a name="on-balance-i-think-the-barrier_hit-flag-has-to-die-7" class="anchor" href="https://forum.rebol.info#on-balance-i-think-the-barrier_hit-flag-has-to-die-7"></a>On Balance, I Think the BARRIER_HIT Flag Has To Die</h2>
+<h2><a name="p-6650-on-balance-i-think-the-barrier_hit-flag-has-to-die-7" class="anchor" href="https://forum.rebol.info#p-6650-on-balance-i-think-the-barrier_hit-flag-has-to-die-7"></a>On Balance, I Think the BARRIER_HIT Flag Has To Die</h2>
 <p><strong>I'm bullish on COMMA! as a great addition to the language.</strong>  But the various hoops that are jumped through to try and make it mimic the end of a block seem like a bridge too far.</p>
 <p>To me, having commas vaporize is neat tech... and the idea is that if you handle things like COMMENT and ELIDE you get the comma handling for free.  This seems quite elegant to me.</p>
 <p>Maybe functions like REDUCE-EACH need a refinement that lets you detect commas differently:</p>
@@ -834,8 +1225,7 @@ Hi!
 </code></pre>
 <p>Then instead of people directly testing for NIHIL? most people could test for NOTHING? or VAPOR? which meant either nihil or isotopic comma.  :-/</p>
 <p>Some crazy ideas here, but I think on balance that trying to make commas "bulletproof" leads to more confusion and problems than just making them do whatever comments do, with meta-REDUCE-EACH skipping them by default.</p>
-<h2>
-<a name="this-means-killing-off-user-defined-expression-barriers-8" class="anchor" href="https://forum.rebol.info#this-means-killing-off-user-defined-expression-barriers-8"></a>This Means Killing Off User-Defined Expression Barriers</h2>
+<h2><a name="p-6650-this-means-killing-off-user-defined-expression-barriers-8" class="anchor" href="https://forum.rebol.info#p-6650-this-means-killing-off-user-defined-expression-barriers-8"></a>This Means Killing Off User-Defined Expression Barriers</h2>
 <p>Paring it down such that NIHIL results are "mean" enough to stop evaluations for all practical purposes, the special flag for letting functions cause the BARRIER_HIT flag can be dropped too.  This was made available via the TWEAK function:</p>
 <pre><code>//=//// DETAILS_FLAG_IS_BARRIER ///////////////////////////////////////////=//
 //
@@ -868,79 +1258,109 @@ Hi!
           <source url="https://forum.rebol.info/t/comma-and-group-error-parity-e-g-1-and-1/2212.rss">COMMA! and GROUP! Error Parity, e.g. (1 +) and 1,</source>
         </item>
         <item>
-          <title>Should ANY and ALL Vaporize VOID (or require ELIDE-IF-VOID ?)</title>
+          <title>How Does BLANK! Interact With Strings?</title>
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
           <category>Semantics</category>
           <description><![CDATA[
-            <p>I've written up how <a href="https://forum.rebol.info/t/invisibility-reviewed-through-modern-eyes/2034">the evolution of invisibility gave rise to VOID vs. NIHIL</a>.</p>
-<p>The default evaluator (and UPARSE) accept that void is "nothing" and can't be put in blocks.  But they don't vaporize VOID on a whim: it will still be the result of expressions whose last result is a void.</p>
-<pre><code>&gt;&gt; 1 + 2 if false [&lt;a&gt;]
-; void
+            <p>Experiments have run the gamut to where a plain BLANK! once would opt out of appending to a series, and you had to quote it to append it:</p>
+<pre><code>experiment&gt;&gt; append [a b] _
+= [a b]
+
+experiment&gt;&gt; append [a b] quote _
+== [a b _]
 </code></pre>
-<p>On the other hand, the empty parameter pack of NIHIL truly vaporizes unless you pipe it around with ^META:</p>
-<pre><code>&gt;&gt; 1 + 2 nihil
-== 3
+<p>But the satisfying world we have now is that anything you can pick out of a block will append as-is to another block.  So adding a blank is additive:</p>
+<pre><code>&gt;&gt; append [a b] _
+== [a b _]
 </code></pre>
-<p>This means it's up to constructs to decide if they want to erase voids or not.  DELIMIT does, so you will see that reflected in things like UNSPACED:</p>
-<pre><code>&gt;&gt; unspaced ["A" if false ["B"] "C"]
-== "AC"
+<p>It feels like a decent fit to say that appending a blank to a string is additive...since VOID and such are available if you want to opt out:</p>
+<pre><code>&gt;&gt; append "ab" _
+== "ab "
 </code></pre>
-<p>COMPOSE vaporizes void slots (and errors on null ones).  <a href="https://forum.rebol.info/t/vaporizing-failed-conditionals-in-reduce/1665">REDUCE is currently vaporizing VOID</a> because it seems like the default people want.</p>
+<p>Though it raises the question of what BINARY! should do:</p>
+<pre><code>&gt;&gt; append #{0102} _
+== ???
+</code></pre>
+<p>It seems that adding a UTF-8 representation is the story for ASCII:</p>
+<pre><code>&gt;&gt; as binary! "AB"
+== #{4142}
+
+&gt;&gt; append #{0102} "AB"
+= #{01024142}
+</code></pre>
+<p>But when it comes to integers, strings append the molded form...while binaries just add one byte, not the bytes of the formed string of the integer:</p>
+<pre><code>&gt;&gt; append "ab" 10
+== "ab10"
+
+&gt;&gt; append #{0102} 10
+== #{01020A}
+</code></pre>
+<p>A bit of a mixed bag, that could support arguments that BLANK! could be "the space of binaries" (e.g. #{00})</p>
+<pre><code>&gt;&gt; append #{0102} _
+== #{010200}
+</code></pre>
+<p>But I think that's not so useful.  It's more likely that the character representation of space is useful:</p>
+<pre><code>&gt;&gt; to binary! #" "
+== #{20}
+
+&gt;&gt; append #{0102} _
+== #{010220}
+</code></pre>
+<p>Ren-C FIND and PARSE mechanics already allows you to search for strings in BINARY!, implicitly looking for the UTF-8 representation.</p>
 <h2>
-<a name="should-any-and-all-vaporize-voids-1" class="anchor" href="https://forum.rebol.info#should-any-and-all-vaporize-voids-1"></a>Should ANY and ALL Vaporize Voids?</h2>
-<p>To me, this is a bit of a tough decision.</p>
-<p>VOID is neither truthy nor falsey, and IF will reject it:</p>
-<pre><code>&gt;&gt; if (if false [true]) [&lt;unreachable&gt;]
-** Error: IF doesn't accept VOID as its condition argument
-</code></pre>
-<p>When there was no VOID/NIHIL distinction, then ANY and ALL were backed into a corner.  If they decided to error on void, you couldn't use an ELIDE or ASSERT in the middle of them.  If they didn't error on VOID then the risk was that you could write something like <strong><code>all [1 = 1, 2 = 2, value]</code></strong> and if VALUE was just incidentally void you'd get the 2 = 2 result as ~true~.</p>
-<p>Today, things like ELIDE and ASSERT return NIHIL and can be safely vaporized by ANY and ALL, while retaining the choice to error on voids as not being true or false.  If you really want to erase voids, we can have something that converts voids to nihil called ELIDE-IF-VOID</p>
-<pre><code>&gt;&gt; value: void
+<a name="what-if-_-was-really-the-canon-representation-of-space-chars-1" class="anchor" href="https://forum.rebol.info#what-if-_-was-really-the-canon-representation-of-space-chars-1"></a>What If _ Was Really The Canon Representation of Space Chars?</h2>
+<pre><code>&gt;&gt; pick "ab " 3
+== _
 
-&gt;&gt; all [1 = 1, 2 = 2, value]
-** Error: VALUE is VOID which is neither truthy nor falsey
+&gt;&gt; #" "
+== _
 
-&gt;&gt; all [1 = 1, 2 = 2, elide-if-void value]
+&gt;&gt; char? _
+== ~true~  ; isotope
+
+&gt;&gt; space? _
 == ~true~  ; isotope
 </code></pre>
-<h2>
-<a name="things-like-for-bothhttpsforumrebolinfotdemonstrating-for-both-loop-composability-for-the-win1833-would-get-more-awkward-2" class="anchor" href="https://forum.rebol.info#things-like-for-bothhttpsforumrebolinfotdemonstrating-for-both-loop-composability-for-the-win1833-would-get-more-awkward-2"></a>Things Like <a href="https://forum.rebol.info/t/demonstrating-for-both-loop-composability-for-the-win/1833">FOR-BOTH</a> Would Get More Awkward...</h2>
-<p>I was fairly proud of this formulation:</p>
-<pre><code>for-both: func ['var blk1 blk2 body] [
-    return unmeta* all [
-        meta* for-each (var) blk1 body
-        meta* for-each (var) blk2 body
-    ]
-]
-</code></pre>
-<p>(I wound up deciding that META would meta-raise everything--including pure null and void--so the asterisks were probably best included there for the alternative formulation.)</p>
-<p>But if ALL and ANY errored on void, and you had to erase it, this would become:</p>
-<pre><code>for-both: func ['var blk1 blk2 body] [
-    return unmeta* all [
-        elide-if-void meta* for-each (var) blk1 body
-        elide-if-void meta* for-each (var) blk2 body
-    ]
-]
-</code></pre>
-<p>If I put on my formalism hat, I can see how this is <em>safer</em>.  But I've made similar arguments about why I don't want this:</p>
-<pre><code>&gt;&gt; compose [a (if false ['b]) c]
-** Error: COMPOSE cannot erase VOID (use ELIDE-IF-VOID if intentional)
+<p>I've mentioned that single character intents are on the rise... we could call quoted void (apostrophe) "blank" and it could be used in contexts where you want to say there's no value:</p>
+<pre><code>&gt;&gt; blank? first [']
+== ~true~  ; isotope
 
-&gt;&gt; compose [a (elide-if-void if false ['b]) c]
-== [a c]
+&gt;&gt; blank
+== '
 </code></pre>
-<p>It is admittedly a bit different in ANY and ALL's case, because they're mixing in a test for truthiness.  But erasing voids by default has other advantages in writing wild control constructs.</p>
-<p>I'm really torn on this, as it's right on the edge.  <strong>But when all things are mostly equal, safety isn't as compelling as enabling creativity in my current view of the language.</strong>  I think I'm going to wait until I see a really bad consequence of vaporizing the voids here... it hasn't broken any real code yet, and it has proven its convenience.</p>
-            <p><small>1 post - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/should-any-and-all-vaporize-void-or-require-elide-if-void/2040">Read full topic</a></p>
+<p>You'd still have _ as an evaluator-inert dialecting part that can't be redefined.  You just would need to use something like <strong>#</strong> or <strong>'</strong> or <strong>~</strong> in cases where you had a slot that could be either any character -or- some out of band thing.</p>
+<p>Off the top of my head, I can see a few problems.  If _ became a character literal, it shouldn't be used for vacant spots in paths.  So let's say paths start using this "new blank":</p>
+<pre><code>&gt;&gt; as block! first [/a]
+== [' a]
+</code></pre>
+<p>Doesn't look too bad, but if you want to parse it you need double apostrophes to match those spots:</p>
+<pre><code>parse [/a] [into path! ['' 'a]]
+</code></pre>
+<p>This is because a single apostrophe is matched as void, e.g. matches without advancing the parse position.  <a href="https://forum.rebol.info/t/parse-behavior-for-words-that-lookup-to-quoted/2038">And it wouldn't work if you used a word to reference the blank</a>:</p>
+<pre><code>&gt;&gt; parse [/a] [into path! [blank 'a]]
+** Error: To match a QUOTED! you must use @blank
+
+&gt;&gt; parse [/a] [into path! [@blank 'a]]  ; would need to do this...
+== a
+</code></pre>
+<p>But it's not awful, and at least it doesn't silently treat the quote as a vanishing rule.</p>
+<p><strong>It's still kind of an interesting thought to make _ the literal char! of space.</strong>  Still inert, still usable in dialects.  It would leave <strong><code>'</code></strong> and <strong><code>~</code></strong> as "friendly nothing" and "unfriendly nothing".</p>
+<pre><code>&gt;&gt; spread first [']  ; would return void
+
+&gt;&gt; spread first [~]
+** Error: Cannot spread meta-NONE
+</code></pre>
+<p>Either way, I think the conclusion here is that <strong>append #{0102} _</strong> should be <strong>#{010220}</strong></p>
+            <p><small>2 posts - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/how-does-blank-interact-with-strings/2287">Read full topic</a></p>
           ]]></description>
-          <link>https://forum.rebol.info/t/should-any-and-all-vaporize-void-or-require-elide-if-void/2040</link>
-          <pubDate>Thu, 29 Jun 2023 02:09:57 +0000</pubDate>
+          <link>https://forum.rebol.info/t/how-does-blank-interact-with-strings/2287</link>
+          <pubDate>Mon, 26 Jun 2023 17:39:20 +0000</pubDate>
           <discourse:topicPinned>No</discourse:topicPinned>
           <discourse:topicClosed>No</discourse:topicClosed>
           <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-2040</guid>
-          <source url="https://forum.rebol.info/t/should-any-and-all-vaporize-void-or-require-elide-if-void/2040.rss">Should ANY and ALL Vaporize VOID (or require ELIDE-IF-VOID ?)</source>
+          <guid isPermaLink="false">forum.rebol.info-topic-2287</guid>
+          <source url="https://forum.rebol.info/t/how-does-blank-interact-with-strings/2287.rss">How Does BLANK! Interact With Strings?</source>
         </item>
         <item>
           <title>Correct Formulation of ME and MY</title>
@@ -1159,7 +1579,8 @@ it strictly follows the rule: `number-of-segments = 1 + number-of-delimiters", n
 <p>So there's a couple of ways to look at it.</p>
 <p>But I have a philosophy about these things where I want edge cases to be "noisy", because usually they require special handling.  I might even say:</p>
 <pre><code>&gt;&gt; split "" ","
-== ~null~  ; isotope</code></pre>
+== ~null~  ; isotope
+</code></pre>
             <p><small>1 post - 1 participant</small></p>
             <p><a href="https://forum.rebol.info/t/split-semantics/1998">Read full topic</a></p>
           ]]></description>
@@ -1172,52 +1593,6 @@ it strictly follows the rule: `number-of-segments = 1 + number-of-delimiters", n
           <source url="https://forum.rebol.info/t/split-semantics/1998.rss">SPLIT Semantics</source>
         </item>
         <item>
-          <title>Should ELSE be FALSE-reactive? (in addition to void and null?)</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Semantics</category>
-          <description><![CDATA[
-            <p>Historically one might have asked why ELSE doesn't think falseness is something worth reacting to:</p>
-<pre><code>&gt;&gt; 1 = 2 else [print "Why not print?"]
-Why not print?  ; seems not so bad, right?
-</code></pre>
-<p>The idea was panned, because <code>#[false]</code> was <em>a value</em> and ELSE's main job was to react to the situation of a branching construct that didn't produce a value:</p>
-<pre><code>&gt;&gt; math-broken: if 1 = 1 [false] else [true]
-== #[false]  ; if this were #[true], math seems broken
-</code></pre>
-<p>But now, the actual falsey <code>~false~</code> state is isotopic.  And some years of struggle with the parallel problem of what to do with branches that returned "non-values" bore curious fruit: a box that could hold a "non-value" like a null.</p>
-<pre><code>&gt;&gt; if false [null]
-== ~null~  ; isotope
-     ^-- there is no result
-
-&gt;&gt; if true [null]
-== ~[~null~]~  ; isotope
-     ^-- there is a result and it is null
-</code></pre>
-<p>Isotopic blocks containing one element will decay to that one element in most situations.  But ELSE is sensitive to the difference via a ^META parameter.  If someone has gone through the effort to box up a null or void vs leave it as a plain isotope, the ELSE assumes it's a meaningful result and should pass it on.  And conditional expressions know to do this; they box up nulls and voids if they are produced by executing branches.</p>
-<p><strong>The same technique could work for false.</strong></p>
-<pre><code>&gt;&gt; if 1 = 1 [false]
-== ~[~false~]~  ; isotope
-
-&gt;&gt; if 1 = 1 [false] else [true]
-== ~[~false~]~  ; isotope
-
-&gt;&gt; math-broken: if 1 = 1 [false] else [true]
-== ~false~  ; isotope
-</code></pre>
-<p>It's barely any additional work for conditionals to do on top of what they're doing already.  Although it can result in branches producing false to cost a small bit more than they do today <em>(I wouldn't worry about it, these single element boxes could be optimized if it was a problem)</em></p>
-<p>But I don't know how useful it would actually be.  <img src="https://forum.rebol.info/images/emoji/twitter/man_shrugging.png?v=9" title=":man_shrugging:" class="emoji" alt=":man_shrugging:">  Just writing down the observation.</p>
-            <p><small>4 posts - 2 participants</small></p>
-            <p><a href="https://forum.rebol.info/t/should-else-be-false-reactive-in-addition-to-void-and-null/1991">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/should-else-be-false-reactive-in-addition-to-void-and-null/1991</link>
-          <pubDate>Sun, 27 Nov 2022 06:00:32 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-1991</guid>
-          <source url="https://forum.rebol.info/t/should-else-be-false-reactive-in-addition-to-void-and-null/1991.rss">Should ELSE be FALSE-reactive? (in addition to void and null?)</source>
-        </item>
-        <item>
           <title>Line Continuation and Arity Bugs: Thoughts?</title>
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
           <category>Semantics</category>
@@ -1225,7 +1600,8 @@ Why not print?  ; seems not so bad, right?
             <p>At one point in time, there was no way to pass something to RETURN that represented a VOID.  Because voids completely vanished.  If you had a function that took an argument--and a void thing came after it--the evaluator would just keep retriggering until it found a value or hit the end.</p>
 <p>This led to the only way of being able to return a void to be to have truly nothing after it.  So RETURN became effectively arity-0 or arity-1.  If you passed it no argument, it would consider itself VOID.  It even had the nice property of being able to chain functions that themselves might be void.</p>
 <p>Given that RETURN was doing this, some other functions followed suit.  QUIT could take an argument or not.  CONTINUE could as well.</p>
-<h2>But I Just Got Bit By a Variadic QUIT Bug</h2>
+<h2>
+<a name="but-i-just-got-bit-by-a-variadic-quit-bug-1" class="anchor" href="https://forum.rebol.info#but-i-just-got-bit-by-a-variadic-quit-bug-1"></a>But I Just Got Bit By a Variadic QUIT Bug</h2>
 <p>Without thinking about it, I tried to end some code prematurely by injecting a quit:</p>
 <pre><code> some stuff I wanted to run
 
@@ -1234,11 +1610,13 @@ Why not print?  ; seems not so bad, right?
  some stuff I wanted to avoid running
 </code></pre>
 <p>And that QUIT ran the stuff I didn't want to run anyway, because it was variadic.</p>
-<h2>My Kneejerk Reaction Was To Kill The Variadicness</h2>
-<p>The original case of RETURN has changed, because so-called "non-interstitial invisibility" is dead.  You can only make expressions void in their totality--not when used as arguments.  Doing otherwise caused more harm than good.</p>
-<p>Hence <strong><code>return void</code></strong> is a perfectly fine thing to write <em>(or <strong><code>return ~</code></strong> if you prefer the quasiform of void, which you probably don't, but it might come in handy somewhere if you've defined VOID to mean something else)</em></p>
-<p>I'd been thinking that argument-less RETURN would thus go back to returning the default unfriendly value (currently called NONE, a <strong><code>~[]~</code></strong> isotope, e.g. a parameter pack with absolutely no values in it).  But maybe we shouldn't support argument-less RETURN at all.</p>
-<h2>But Variadics Can Be Neat</h2>
+<h2>
+<a name="my-kneejerk-reaction-was-to-kill-the-variadicness-2" class="anchor" href="https://forum.rebol.info#my-kneejerk-reaction-was-to-kill-the-variadicness-2"></a>My Kneejerk Reaction Was To Kill The Variadicness</h2>
+<p>The original case of RETURN has changed, because so-called "non-interstitial invisibility" is dead.  You can only make expressions vanish in their totality--not when used as arguments.  Doing otherwise caused more harm than good.</p>
+<p>Hence <strong><code>return nihil</code></strong> is a perfectly fine thing to write.</p>
+<p>I'd been thinking that argument-less RETURN would thus go back to returning "NOTHING" (the default meaningless value).  But maybe we shouldn't support argument-less RETURN at all.</p>
+<h2>
+<a name="but-variadics-can-be-neat-3" class="anchor" href="https://forum.rebol.info#but-variadics-can-be-neat-3"></a>But Variadics Can Be Neat</h2>
 <p>I guess RETURN could always take an argument, and we go back to CONTINUE/WITH and QUIT/WITH.</p>
 <p>But those are uglier.</p>
 <p>We might question the behavior of the system just randomly slurping up arguments from enusing lines?  Especially when APPLY has such a convenient notation now, of <strong>some-func/ [...]</strong></p>
@@ -1302,7 +1680,8 @@ Why not print?  ; seems not so bad, right?
 </code></pre>
 <p>Nothing about the design makes this happen automatically.  REDUCE has historically errored on isotopes.  So code has to be added to override that.</p>
 <p>I'm guessing most people would be in favor of having the splicing behavior.  Arguments that say that there should be a 1:1 correspondence between expressions and values in a REDUCE are already pretty much out the window, since VOID elements vanish (including conditionals that don't take any branch).</p>
-<h2>DELIMIT Would Presumably Want It Too</h2>
+<h2>
+<a name="delimit-would-presumably-want-it-too-1" class="anchor" href="https://forum.rebol.info#delimit-would-presumably-want-it-too-1"></a>DELIMIT Would Presumably Want It Too</h2>
 <p>I've complained in the past that the often random-seeming treatments of blocks in Rebol2 functions like REJOIN lead to problems--and that it would be better if people had to be explicit about their intent.  This offers the ability to "inherit" whatever the enclosing delimiting strategy is, and fold into the existing operation (technically more efficient):</p>
 <pre><code>&gt;&gt; block: ["c" "d"]
 
@@ -1328,57 +1707,6 @@ Why not print?  ; seems not so bad, right?
           <discourse:topicArchived>No</discourse:topicArchived>
           <guid isPermaLink="false">forum.rebol.info-topic-1917</guid>
           <source url="https://forum.rebol.info/t/should-reduce-heed-spread/1917.rss">Should REDUCE Heed SPREAD?</source>
-        </item>
-        <item>
-          <title>Ideas About a More General Meaning for TRY</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Semantics</category>
-          <description><![CDATA[
-            <p>TRY was changed from a "blank-in, null-out" meaning to use definitional errors.  This allowed NULL to be both the input and the output...without risking inadvertently trapping errors from arbitrary depths.  You'll really be intercepting the error emitted by the function just called:</p>
-<pre><code>&gt;&gt; first null
-** Error: FIRST on NULL requires use of TRY
-
-&gt;&gt; try first null
-; null
-</code></pre>
-<p>I mentioned something, which was that a "You need a TRY" ERROR! was actually able to carry a payload, saying what the TRY'd outcome value should be.  <em>(The only rule would be that a function emitting such an error should not have any side effects if it emits one of these errors.)</em></p>
-<p>If we embrace this, it could really open the doors to what TRY means.  Various constructs could offer meanings for what the TRY actually does:</p>
-<pre><code>&gt;&gt; unquote first ['abc]
-== abc
-
-&gt;&gt; unquote first [def]
-** Error: Can't Unquote Plain WORD!, use TRY if Intentional
-
-&gt;&gt; try unquote first [def]
-== def
-</code></pre>
-<p>I'm sort of leaning to believing that this more general meaning of TRY may be much more interesting than the "null propagating" sense.  There's kind of an explosion of potential for the "couldn't do what you asked me to do, but if that's what you meant..." outcomes.</p>
-<p>At one point I suggested it would be nice to be able to have a COLLECT that didn't actually KEEP anything return NULL, so it could be ELSE-reactive.  That meant if you really wanted an empty block, you'd have to do something like <strong><code>any [collect [...], copy []]</code></strong> which was ugly.  But the error could hold a freshly-copied block to be the result of a TRY:</p>
-<pre><code>&gt;&gt; collect [keep if false [&lt;not kept&gt;]]
-** Error: COLLECT didn't KEEP anything, use TRY if intended
-
-&gt;&gt; try collect [keep if false [&lt;not kept&gt;]]
-== []
-</code></pre>
-<p>There are various technical reasons why ELSE can't be reactive to TRY-style errors.  One fairly important one would be that if you used ELSE with a branching construct, it wouldn't be able to tell the difference between a branch that had a TRY-error and no branch taken:</p>
-<pre><code>&gt;&gt; case [true [unquote first [def]]] else [print "Took branch, runs due to UNQUOTE"]
-Took branch, runs due to UNQUOTE  ; this would be bad
-</code></pre>
-<p>But... maybe the trick could be that if you pass ELSE a function that takes an argument, it assumes that means you handle TRY-style errors?  (Because otherwise it could only be void/null... why take an arg?)</p>
-<pre><code>&gt;&gt; (unquote first [def]) else arg -&gt; [print ["TRY error" arg]]
-TRY error def
-</code></pre>
-<p>It's a weird thought.  Anyway, just wanted to write up the TRY concept...</p>
-            <p><small>1 post - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/ideas-about-a-more-general-meaning-for-try/1912">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/ideas-about-a-more-general-meaning-for-try/1912</link>
-          <pubDate>Tue, 09 Aug 2022 13:28:03 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-1912</guid>
-          <source url="https://forum.rebol.info/t/ideas-about-a-more-general-meaning-for-try/1912.rss">Ideas About a More General Meaning for TRY</source>
         </item>
         <item>
           <title>Weird Idea: LIB/APPEND Runs, but LIB.APPEND Doesn&#39;t?</title>
@@ -1476,7 +1804,7 @@ Boo!
 *** Stack: twosie? to-logic 
 </code></pre>
 <p>If <strong>x</strong> turns out to be a FUNCTION!, it is invoked by the references inside the body.  Which can cause unwanted side effects, as well as arbitrarily cryptic errors.</p>
-<h2>How Was This Mitigated?</h2>
+<h2><a name="p-6174-how-was-this-mitigated-1" class="anchor" href="https://forum.rebol.info#p-6174-how-was-this-mitigated-1"></a>How Was This Mitigated?</h2>
 <p>You <em>could</em> restrict the set of accepted types, and exclude functions.  But if you make it only accept INTEGER! and BLOCK! that undermines the aspect that the function's job is to do testing.</p>
 <p>Doing it "right" is annoying, putting colons on every access...possibly omitting some when the value is in a context where the program logic would say it can't be a function at that point.</p>
 <pre><code>twosie?: func [x] [
@@ -1504,7 +1832,7 @@ Boo!
 <p>This is fairly unsatisfying as well.  It breaks easily if someone reorganizes the code and doesn't realize the test has to come first, or if there has to be additional handling and skipping all the code that uses the variable isn't the desired semantic.</p>
 <p><strong>This situation is a tax on users, who are continuously torn between writing obvious code that is broken... vs. cluttered code that winds up being made more brittle due to the maintenance of the clutter.</strong></p>
 <p>It would clearly be ideal if the obvious code was also correct.</p>
-<h2>The Nuanced Compromise Of Isotopic ACTION!s</h2>
+<h2><a name="p-6174-the-nuanced-compromise-of-isotopic-actions-2" class="anchor" href="https://forum.rebol.info#p-6174-the-nuanced-compromise-of-isotopic-actions-2"></a>The Nuanced Compromise Of Isotopic ACTION!s</h2>
 <p>Something that occurred to me was to ask what would happen if there were two kinds of actions:</p>
 <ul>
 <li>
@@ -1771,136 +2099,6 @@ red&gt;&gt; pos
           <discourse:topicArchived>No</discourse:topicArchived>
           <guid isPermaLink="false">forum.rebol.info-topic-1846</guid>
           <source url="https://forum.rebol.info/t/pushing-the-potential-of-polyglot-polymorphic-do/1846.rss">Pushing the Potential of Polyglot Polymorphic DO</source>
-        </item>
-        <item>
-          <title>Handling MATCH and &quot;Falsey&quot; Types</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Semantics</category>
-          <description><![CDATA[
-            <p>MATCH has a fundamental safety issue:</p>
-<pre><code>&gt;&gt; match [&lt;opt&gt; integer!] 3
-== 3
-
-&gt;&gt; match [&lt;opt&gt; integer!] "notaninteger"
-; null
-
-&gt;&gt; match [&lt;opt&gt; integer!] null
-== ???
-</code></pre>
-<p>This returns "heavy null".  Once upon a time, heavy null was not auto-decayed when passed to functions like IF:</p>
-<pre><code>&gt;&gt; if (match [&lt;opt&gt; integer!] null) [print "Yes it matched!"]
-** Error: IF does not accept heavy null without a ^META condition
-</code></pre>
-<p>But it came to be that for general ergonomics, heavy nulls had to decay to plain nulls when passed to normal parameters.  Otherwise, they would be too invasive.</p>
-<p>So for now, a "passing null" is conflated with a "didn't pass" signal.  It will work with THEN, but be incorrect with IF.</p>
-<h1>
-<a name="so-what-to-do-about-match-and-its-bretheren-1" class="anchor" href="https://forum.rebol.info#so-what-to-do-about-match-and-its-bretheren-1"></a>So What To Do About MATCH and its bretheren?</h1>
-<p>Seems the alternative options are:</p>
-<ol>
-<li>
-<p><em>Don't worry about it.</em>  If you write <strong>match [logic!] 1 = 2</strong> you get back a <strong>~false~</strong> isotope and should you write an expression like <strong>if (match [logic!] 1 = 2) [print "Match!]</strong> you get what you deserve.</p>
-</li>
-<li>
-<p><em>Use a different isotope.</em>  Let's say that <strong><code>match [&lt;opt&gt;] null</code></strong> is simply <strong>~matched~ (isotope)</strong>.  It wouldn't have the decaying property, but would have the invalidness property of not being logic testable</p>
-</li>
-<li>
-<p><em>Have a MATCH/FALSEY variant.</em>  Let plain <strong>match</strong> on a falsey thing trigger an error and if you write <strong>if match/falsey ...</strong> then you clearly do know what you're doing so it becomes like case (1).</p>
-</li>
-<li>
-<p><em>Make all conditional arguments take ^META arguments for their conditions.</em>  This would put the responsibility for checking for isotopes on them, and they'd uniquely disallow them before UNMETA'ing them and then testing for truth/falsehood.</p>
-</li>
-</ol>
-<p>Option (4) is too taxing...impacting not just the interface to IF but the implementation of CASE and any conditional construct.</p>
-<p>(3) punts the ball down the road a bit, but might not suit Chris.</p>
-<h2>
-<a name="option-5-adjust-did-as-isotope-tolerant-not-null-httpsforumrebolinfotdropping-find-while-if-unless-select-etc4982uhostilefork-2" class="anchor" href="https://forum.rebol.info#option-5-adjust-did-as-isotope-tolerant-not-null-httpsforumrebolinfotdropping-find-while-if-unless-select-etc4982uhostilefork-2"></a>Option 5. <a href="https://forum.rebol.info/t/dropping-find-while-if-unless-select-etc/498/2">Adjust <code>(DID ...)</code> as isotope-tolerant <code>(NOT NULL? ...)</code></a>
-</h2>
-<p>Another answer...</p>
-<p>If you find yourself in a situation where isotopes are giving you a problem, switch to <strong>did match</strong> (or decay match, if you're trying to get the value and not test it as a condition)</p>
-<p><em>I wouldn't reach for this by default.</em>  You're fine most of the time... if your MATCH doesn't contain <code>[&lt;opt&gt; logic! blank!]</code>.  It's only these quirky edge cases where it's better to let the isotopes give you a localized and clear error than wind up on a wild goose chase for why the program is acting strangely.</p>
-<p>Beginners might be cautious and write things like <strong>did match</strong> or <strong>did parse</strong> all over the place, if they're scared of missing a case.  But there's no need to write <strong>if did match integer! value</strong>, because you're testing for a value that can't possibly be false...it's an integer! or null.  Experts would use it sparingly, in cases like <strong>if match typeset value</strong>, in case the typeset gets expanded into things including falsey values, when you're not fully cognizant of that happening.</p>
-<p>This broadens the service of DID across the board, to do what it was originally intended to do: transform functions that return non-LOGIC! values and NULL as soft failure to give logic results.  It can handle historical edge cases with an elegant touch, without burdening code that knows itself well enough to not hit those cases.</p>
-            <p><small>4 posts - 2 participants</small></p>
-            <p><a href="https://forum.rebol.info/t/handling-match-and-falsey-types/2080">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/handling-match-and-falsey-types/2080</link>
-          <pubDate>Sun, 15 May 2022 08:44:26 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-2080</guid>
-          <source url="https://forum.rebol.info/t/handling-match-and-falsey-types/2080.rss">Handling MATCH and &quot;Falsey&quot; Types</source>
-        </item>
-        <item>
-          <title>About the Semantics category</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Semantics</category>
-          <description><![CDATA[
-            <p>While the "Internals" discusses the bits and bytes of how things are implemented, this category is for discussing things design questions of the language... like what <strong>do []</strong> should return.</p>
-            <p><small>1 post - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/about-the-semantics-category/1789">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/about-the-semantics-category/1789</link>
-          <pubDate>Wed, 16 Feb 2022 03:48:39 +0000</pubDate>
-          <discourse:topicPinned>Yes</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-1789</guid>
-          <source url="https://forum.rebol.info/t/about-the-semantics-category/1789.rss">About the Semantics category</source>
-        </item>
-        <item>
-          <title>&quot;Destructuring&quot; in FOR-EACH</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Semantics</category>
-          <description><![CDATA[
-            <p><a class="mention" href="https://forum.rebol.info/u/gchiu">@gchiu</a> wrote some code that made a list of drugs and filenames related to those drugs:</p>
-<pre><code> drugs: [
-     ["Benzbromarone" "SA1537.pdf"]
-     ["Teriparatide" "SA1139.pdf"]
-     ["Adalimumab" "SA1847.pdf"]
-     ["Etanercept" "SA1812.pdf"]
- ]
-</code></pre>
-<p>This is inconvenient to enumerate.  It won't work if you say:</p>
-<pre><code>for-each [drugname filename] [...]
-</code></pre>
-<p>Because what you get then is two successive blocks... e.g. drugname winds up being <strong>["Benzbromarone" "SA1537.pdf"]</strong> and then filename is <strong>["Teriparatide" "SA1139.pdf"]</strong>.</p>
-<p>If this were to work, it would have to offer something like:</p>
-<pre><code>for-each [[drugname filename]] [...]
-</code></pre>
-<p>That could communicate that the information you were looking for was actually in a nested block level.</p>
-<p>Though we don't want to get too literal with the dialect.  If you have:</p>
-<pre><code> drugs: [
-     ("Benzbromarone" "SA1537.pdf")
-     ("Teriparatide" "SA1139.pdf")
-     ("Adalimumab" "SA1847.pdf")
-     ("Etanercept" "SA1812.pdf")
- ]
-</code></pre>
-<p>...we don't want to make the meaning of GROUP!s in FOR-EACH have to be related to this structure, because we use groups to say that the variable's name is calculated.  :-/</p>
-<p>Similarly, we might imagine more interesting meanings for blocks in FOR-EACH than to point out a nested block level.  Maybe this would be done with quoted blocks and quoted groups?</p>
-<pre><code>for-each ['(drugname filename)] [...]
-</code></pre>
-<p>It gets a bit hairy because you're starting to tread into parsing territory.  Hard to know where to stop.</p>
-<p>Since I'm not sure I just switched Graham's case to use a flat block.</p>
-<pre><code> drugs: [
-     "Benzbromarone" "SA1537.pdf"
-     "Teriparatide" "SA1139.pdf"
-     "Adalimumab" "SA1847.pdf"
-     "Etanercept" "SA1812.pdf"
- ]
-</code></pre>
-<p>But it should be thought about more.</p>
-            <p><small>2 posts - 2 participants</small></p>
-            <p><a href="https://forum.rebol.info/t/destructuring-in-for-each/1738">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/destructuring-in-for-each/1738</link>
-          <pubDate>Mon, 04 Oct 2021 20:08:43 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-1738</guid>
-          <source url="https://forum.rebol.info/t/destructuring-in-for-each/1738.rss">&quot;Destructuring&quot; in FOR-EACH</source>
         </item>
   </channel>
 </rss>

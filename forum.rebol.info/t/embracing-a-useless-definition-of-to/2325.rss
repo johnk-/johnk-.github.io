@@ -1,0 +1,403 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Embracing A &quot;Useless&quot; Definition of TO</title>
+    <link>https://forum.rebol.info/t/embracing-a-useless-definition-of-to/2325</link>
+    <description>Many years ago, I thought about **[trying to untangle of the TO and MAKE matrix](https://forum.rebol.info/t/hacking-away-on-the-to-and-make-matrix/649)**.  These operations are notoriously unpredictable in historical Redbol.
+
+I tried putting some stakes in the ground about what I believed *had* to be true.  It was difficult because I could not think of too many.
+
+One thing I said was that TO should always create a &quot;new&quot; value (if the value was not immediate).  And I felt like this should be true:
+
+    to (type of value) value
+    ; ...same as...
+    copy value
+
+Grasping for any stake in the ground I could find, I was pretty sure that TO of a string representation of an integer to an integer should give you the integer:
+
+    &gt;&gt; to integer! &quot;1020&quot;
+    == 1020  ; we know this, at least? (one hopes...)
+
+And the reverse, one would think, as well:
+
+    &gt;&gt; to text! 1020
+    == &quot;1020&quot;  ; what else *could* it be?  codepoint 1020? -&gt; &quot;ϼ&quot;
+
+But beyond that it was hard to think of the pattern.
+
+## Coming Back To An Old Idea: Reversibility
+
+When I first encountered Rebol and was made aware of these problems, I suggested TO should be reversible:
+
+    value1 = to (type of value1) to type2 value1
+
+However, this gave what *appeared* to be very &quot;unexciting&quot; options for behavior:
+
+    &gt;&gt; to block! 1
+    == [1]
+
+    &gt;&gt; to integer! [1]
+    == 1
+
+    &gt;&gt; to integer! [...anything else in a block that&#39;s not integer...]
+    ** Error.  Always.
+
+That particular idea was was so long ago that I don&#39;t have direct quotes on hand of people saying &quot;nah, that sucks, TO could barely do anything.&quot;  But I&#39;m pretty sure it was panned by basically everyone I suggested it to.  I guess I agreed, because I dropped it.
+
+**Coming back to it now, and seeing it in a new light, I see this as much more useful than I used to.**  Especially when compared to the historical mess that makes TO nigh-unusable.
+
+And in fact, it fits in with several Rebol2/Red behaviors that I&#39;d thought were kind of pointless before:
+
+    &gt;&gt; to integer! &lt;1&gt;
+    == 1
+
+    &gt;&gt; to tag! 1
+    == &lt;1&gt;
+
+The use I didn&#39;t see at the time was the frequent need when dialecting to push values out of band, into some other type, without losing their meaning.  If you have a dialect in which integers already mean something, but you want a way of pushing some integer-oriented instruction in there...you can use these kinds of operations.
+
+Definitional errors in Ren-C make this convenient, since checking if something fits the pattern is quick, you just throw in a TRY and the antiform error that&#39;s the return result of the TO will be suppressed, giving you a &quot;falsey&quot; null:
+
+    &gt;&gt; thing: &lt;a b&gt;
+
+    &gt;&gt; to integer! thing
+    ** Error: Cannot TO convert &lt;a b&gt; to integer
+
+    &gt;&gt; try to integer! thing
+    == ~null~  ; anti
+
+The more I look at it the more useful it appears.  And it helps give clarity to the MAKE vs. TO division.  If you have something that isn&#39;t shaped like this, then *maybe* MAKE is the right place to put it.  For example:
+
+    &gt;&gt; to percent! 1
+    == 1%
+
+    &gt;&gt; to integer! 1%
+    == 1
+
+    &gt;&gt; make percent! 1
+    == 100%
+
+*(Note: I think ENCODE + DECODE is a better place for binary conversions, e.g. ENCODE &#39;IEEE-754 is better than MAKE BINARY! of a decimal because that could mean many things, and ENCODE can have more parameterization for single vs. double precision, etc.  I don&#39;t know
+if TO BINARY! should work at all, but if it does, I&#39;d probably agree with the Rebol2 choice to give the binary representation of the UTF-8 string... e.g. (to binary! 1020) as #{31303230} ... and use more explicit future-proof routines to encode with specified byte size and endianness.)*
+
+## Reversibility Rules Out Rounding
+
+In order to get losslessness in the representation, you can&#39;t throw out information.
+
+So this works:
+
+    &gt;&gt; to integer! 1.0
+    == 1
+
+    &gt;&gt; to decimal! 1
+    == 1.0
+
+But this does not:
+
+     &gt;&gt; to integer! 1.5
+     ** Error: Can&#39;t TO INTEGER! a DECIMAL! w/digits after decimal point
+
+I don&#39;t think that&#39;s a problem, because that seems like a job for ROUND.  Unfortunately, R3-Alpha and Red do something dumb:
+
+    rebol2&gt;&gt; round 1.5
+    == 2
+
+    red&gt;&gt; round 1.5
+    == 2.0
+
+    r3-alpha&gt;&gt; round 1.5
+    == 2.0
+
+It seems this was part of a shift to try and preserve the input type, to facilitate things like rounding MONEY!:
+
+    r3-alpha&gt;&gt; round $1.50
+    == $2
+
+So I guess the way the thinking went was that if you want to keep MONEY! as MONEY! when you round it, all types should act that way.
+
+I think the relationship between INTEGER! and DECIMAL!, which lack decoration, suggests something more intimate where the type can be lost.  If you don&#39;t want to lose it, ROUND:TO 1.0
+
+    &gt;&gt; round 1.5
+    == 2
+ 
+    &gt;&gt; round:to 1.5 1
+    == 2
+
+    &gt;&gt; round:to 1.5 1.0
+    == 2.0
+
+## BLANK! Pretty Much Has To Mean Empty
+
+If we&#39;re talking about equivalencies, we now know this:
+
+    &gt;&gt; for-each &#39;x _ [print &quot;Doesn&#39;t run&quot;]
+    == ~void~  ; anti
+
+    &gt;&gt; empty? _
+    == ~okay~  ; anti
+
+And so really, it seems that the TO conversion of BLANK! has only one set of answers to fit into the family of reversibility:
+
+    &gt;&gt; to block! _
+    == []
+
+    &gt;&gt; to text! _
+    == &quot;&quot;
+
+    &gt;&gt; to blank! &lt;&gt;
+    == _
+
+    &gt;&gt; to blank! #{}
+    == _
+
+And if you try to TO BLANK! anything that&#39;s not conceptually empty, you&#39;d get an error.
+
+    &gt;&gt; to blank! &lt;a&gt;
+    ** Error: ...
+
+I don&#39;t know if there&#39;s a motivating case for saying **to integer! _** should pick something like 0 as an answer, though Rebol2 did something of that sort:
+
+    rebol2&gt;&gt; to integer! none
+    == 0
+
+Neither Red nor R3-Alpha carried that forward, [though it was discussed](https://github.com/metaeducation/rebol-issues/issues/1018)
+
+## Can Be Checked In The Implementation
+
+I&#39;ve started hacking this through, and it&#39;s gone relatively well.  TO dispatches ***to the type it&#39;s converting from***, with the type being converted to as the argument.
+
+And it&#39;s nice in the sense that the TO native driving the process can also check the reversibility constraint in the debug build, to give it some teeth.
+
+*(I&#39;ve rigged up some interesting frame mechanics to enable doing this reversal efficiently, that have sped up other parts of the system (like CASCADE) with &quot;downlevel shifting&quot;, that can bypass a trampoline bounce...)*
+
+Anyway, things are a mess right now with a couple hundred broken tests to painfully sift through.  But I think the reversibility rule is good... biggest questions are whether that relaxes in terms of spacing...
+
+    &gt;&gt; to block! &quot;  1    2  &quot;
+    == [1 2]  ; legal?
+
+This would suggest you would have to compare with the trimmed/canonized version of your input.
+
+Also, issues of string representations.
+
+    &gt;&gt; b: to block! &quot;--{1}--&quot;
+    == [&quot;1&quot;]  ; legal?
+
+So there are some pain points, but chipping away at them.</description>
+    
+    <lastBuildDate>Fri, 15 Nov 2024 00:30:48 +0000</lastBuildDate>
+    <category>Semantics</category>
+    <atom:link href="https://forum.rebol.info/t/embracing-a-useless-definition-of-to/2325.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Embracing A &quot;Useless&quot; Definition of TO</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>So as a first cut of getting family of equivalencies and reversibility, I wound up with something like this:</p>
+<pre><code>&gt;&gt; to path! [a.b c.d]
+== a.b/c.d  ; what we have "assumed" from history
+
+&gt;&gt; to block! 'a.b/c.d
+== [a.b c.d]  ; add in reversibility requirement
+
+&gt;&gt; to text! [a.b c.d]
+== "a.b c.d"
+
+&gt;&gt; to path! "a.b c.d"
+== a.b/c.d  ; being consistent within the equivalencies
+</code></pre>
+<p>This was making it a given that TO PATH! of a BLOCK! of items would item-wise join the things into a path.</p>
+<p>When you turn the crank with the other rules about reversible transformations and equivalencies, that's just what you get.</p>
+<p>BUT if all string classes act equivalently, then it breaks a behavior that was relied upon pretty heavily:</p>
+<pre><code> &gt;&gt; to file! 'foo/baz.bar
+ == %"foo baz.bar"  ; historical code was expecting %foo/baz.bar
+</code></pre>
+<p>It's a pretty uphill argument to say that's good.</p>
+<h3><a name="p-7893-in-order-to-maintain-the-equivalencies-i-am-promoting-and-fix-this-i-think-we-have-to-push-away-from-the-idea-that-to-is-the-tool-you-reach-for-to-make-sequences-from-blocks-1" class="anchor" href="https://forum.rebol.info#p-7893-in-order-to-maintain-the-equivalencies-i-am-promoting-and-fix-this-i-think-we-have-to-push-away-from-the-idea-that-to-is-the-tool-you-reach-for-to-make-sequences-from-blocks-1"></a>In order to maintain the equivalencies I am promoting, and fix this, I think we have to push away from the idea that TO is the tool you reach for to make sequences from blocks.</h3>
+<p>It forces our hand to:</p>
+<pre><code>&gt;&gt; to block! 'a.b/c.d
+== [a.b/c.d]
+
+&gt;&gt; to path! [a.b/c.d]
+== a.b/c.d
+</code></pre>
+<p>But as I've tried to explain, these are useful things--more than was realized.</p>
+<p>And all is not lost...and arguably improved...because we have JOIN.  Right now I'm suggesting it would come in two varieties... reducing and non-reducing, based on whether you use a <strong><code>[...]</code></strong> or <strong><code>@[...]</code></strong></p>
+<pre><code>&gt;&gt; join path! ['a.b 'c.d]
+== a.b/c.d
+
+&gt;&gt; join path! @[a.b c.d]
+== a.b/c.d
+
+&gt;&gt; block: [a.b c.d]
+
+&gt;&gt; inert block
+== @[a.b c.d]
+
+&gt;&gt; join path! inert block
+== a.b/c.d
+</code></pre>
+<p>So there's some flexibility there.</p>
+<h3><a name="p-7893-this-continues-to-shake-the-foundations-of-what-we-might-have-thought-we-knew-about-to-but-it-feels-like-a-path-of-improvement-2" class="anchor" href="https://forum.rebol.info#p-7893-this-continues-to-shake-the-foundations-of-what-we-might-have-thought-we-knew-about-to-but-it-feels-like-a-path-of-improvement-2"></a>This continues to shake the foundations of what we might have thought we knew about TO, but it feels like a path of improvement.</h3>
+<p>Honestly, isn't JOIN clearer than TO, in terms of telling you what's going on?</p>
+          <p><a href="https://forum.rebol.info/t/embracing-a-useless-definition-of-to/2325/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/embracing-a-useless-definition-of-to/2325/2</link>
+        <pubDate>Fri, 15 Nov 2024 00:27:17 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-2325-2</guid>
+        <source url="https://forum.rebol.info/t/embracing-a-useless-definition-of-to/2325.rss">Embracing A &quot;Useless&quot; Definition of TO</source>
+      </item>
+      <item>
+        <title>Embracing A &quot;Useless&quot; Definition of TO</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>Many years ago, I thought about <strong><a href="https://forum.rebol.info/t/hacking-away-on-the-to-and-make-matrix/649">trying to untangle of the TO and MAKE matrix</a></strong>.  These operations are notoriously unpredictable in historical Redbol.</p>
+<p>I tried putting some stakes in the ground about what I believed <em>had</em> to be true.  It was difficult because I could not think of too many.</p>
+<p>One thing I said was that TO should always create a "new" value (if the value was not immediate).  And I felt like this should be true:</p>
+<pre><code>to (type of value) value
+; ...same as...
+copy value
+</code></pre>
+<p>Grasping for any stake in the ground I could find, I was pretty sure that TO of a string representation of an integer to an integer should give you the integer:</p>
+<pre><code>&gt;&gt; to integer! "1020"
+== 1020  ; we know this, at least? (one hopes...)
+</code></pre>
+<p>And the reverse, one would think, as well:</p>
+<pre><code>&gt;&gt; to text! 1020
+== "1020"  ; what else *could* it be?  codepoint 1020? -&gt; "ϼ"
+</code></pre>
+<p>But beyond that it was hard to think of the pattern.</p>
+<h2><a name="p-7876-coming-back-to-an-old-idea-reversibility-1" class="anchor" href="https://forum.rebol.info#p-7876-coming-back-to-an-old-idea-reversibility-1"></a>Coming Back To An Old Idea: Reversibility</h2>
+<p>When I first encountered Rebol and was made aware of these problems, I suggested TO should be reversible:</p>
+<pre><code>value1 = to (type of value1) to type2 value1
+</code></pre>
+<p>However, this gave what <em>appeared</em> to be very "unexciting" options for behavior:</p>
+<pre><code>&gt;&gt; to block! 1
+== [1]
+
+&gt;&gt; to integer! [1]
+== 1
+
+&gt;&gt; to integer! [...anything else in a block that's not integer...]
+** Error.  Always.
+</code></pre>
+<p>That particular idea was was so long ago that I don't have direct quotes on hand of people saying "nah, that sucks, TO could barely do anything."  But I'm pretty sure it was panned by basically everyone I suggested it to.  I guess I agreed, because I dropped it.</p>
+<p><strong>Coming back to it now, and seeing it in a new light, I see this as much more useful than I used to.</strong>  Especially when compared to the historical mess that makes TO nigh-unusable.</p>
+<p>And in fact, it fits in with several Rebol2/Red behaviors that I'd thought were kind of pointless before:</p>
+<pre><code>&gt;&gt; to integer! &lt;1&gt;
+== 1
+
+&gt;&gt; to tag! 1
+== &lt;1&gt;
+</code></pre>
+<p>The use I didn't see at the time was the frequent need when dialecting to push values out of band, into some other type, without losing their meaning.  If you have a dialect in which integers already mean something, but you want a way of pushing some integer-oriented instruction in there...you can use these kinds of operations.</p>
+<p>Definitional errors in Ren-C make this convenient, since checking if something fits the pattern is quick, you just throw in a TRY and the antiform error that's the return result of the TO will be suppressed, giving you a "falsey" null:</p>
+<pre><code>&gt;&gt; thing: &lt;a b&gt;
+
+&gt;&gt; to integer! thing
+** Error: Cannot TO convert &lt;a b&gt; to integer
+
+&gt;&gt; try to integer! thing
+== ~null~  ; anti
+</code></pre>
+<p>The more I look at it the more useful it appears.  And it helps give clarity to the MAKE vs. TO division.  If you have something that isn't shaped like this, then <em>maybe</em> MAKE is the right place to put it.  For example:</p>
+<pre><code>&gt;&gt; to percent! 1
+== 1%
+
+&gt;&gt; to integer! 1%
+== 1
+
+&gt;&gt; make percent! 1
+== 100%
+</code></pre>
+<p><em>(Note: I think ENCODE + DECODE is a better place for binary conversions, e.g. ENCODE 'IEEE-754 is better than MAKE BINARY! of a decimal because that could mean many things, and ENCODE can have more parameterization for single vs. double precision, etc.  I don't know<br>
+if TO BINARY! should work at all, but if it does, I'd probably agree with the Rebol2 choice to give the binary representation of the UTF-8 string... e.g. (to binary! 1020) as #{31303230} ... and use more explicit future-proof routines to encode with specified byte size and endianness.)</em></p>
+<h2><a name="p-7876-reversibility-rules-out-rounding-2" class="anchor" href="https://forum.rebol.info#p-7876-reversibility-rules-out-rounding-2"></a>Reversibility Rules Out Rounding</h2>
+<p>In order to get losslessness in the representation, you can't throw out information.</p>
+<p>So this works:</p>
+<pre><code>&gt;&gt; to integer! 1.0
+== 1
+
+&gt;&gt; to decimal! 1
+== 1.0
+</code></pre>
+<p>But this does not:</p>
+<pre><code> &gt;&gt; to integer! 1.5
+ ** Error: Can't TO INTEGER! a DECIMAL! w/digits after decimal point
+</code></pre>
+<p>I don't think that's a problem, because that seems like a job for ROUND.  Unfortunately, R3-Alpha and Red do something dumb:</p>
+<pre><code>rebol2&gt;&gt; round 1.5
+== 2
+
+red&gt;&gt; round 1.5
+== 2.0
+
+r3-alpha&gt;&gt; round 1.5
+== 2.0
+</code></pre>
+<p>It seems this was part of a shift to try and preserve the input type, to facilitate things like rounding MONEY!:</p>
+<pre><code>r3-alpha&gt;&gt; round $1.50
+== $2
+</code></pre>
+<p>So I guess the way the thinking went was that if you want to keep MONEY! as MONEY! when you round it, all types should act that way.</p>
+<p>I think the relationship between INTEGER! and DECIMAL!, which lack decoration, suggests something more intimate where the type can be lost.  If you don't want to lose it, ROUND:TO 1.0</p>
+<pre><code>&gt;&gt; round 1.5
+== 2
+
+&gt;&gt; round:to 1.5 1
+== 2
+
+&gt;&gt; round:to 1.5 1.0
+== 2.0
+</code></pre>
+<h2><a name="p-7876-blank-pretty-much-has-to-mean-empty-3" class="anchor" href="https://forum.rebol.info#p-7876-blank-pretty-much-has-to-mean-empty-3"></a>BLANK! Pretty Much Has To Mean Empty</h2>
+<p>If we're talking about equivalencies, we now know this:</p>
+<pre><code>&gt;&gt; for-each 'x _ [print "Doesn't run"]
+== ~void~  ; anti
+
+&gt;&gt; empty? _
+== ~okay~  ; anti
+</code></pre>
+<p>And so really, it seems that the TO conversion of BLANK! has only one set of answers to fit into the family of reversibility:</p>
+<pre><code>&gt;&gt; to block! _
+== []
+
+&gt;&gt; to text! _
+== ""
+
+&gt;&gt; to blank! &lt;&gt;
+== _
+
+&gt;&gt; to blank! #{}
+== _
+</code></pre>
+<p>And if you try to TO BLANK! anything that's not conceptually empty, you'd get an error.</p>
+<pre><code>&gt;&gt; to blank! &lt;a&gt;
+** Error: ...
+</code></pre>
+<p>I don't know if there's a motivating case for saying <strong>to integer! _</strong> should pick something like 0 as an answer, though Rebol2 did something of that sort:</p>
+<pre><code>rebol2&gt;&gt; to integer! none
+== 0
+</code></pre>
+<p>Neither Red nor R3-Alpha carried that forward, <a href="https://github.com/metaeducation/rebol-issues/issues/1018">though it was discussed</a></p>
+<h2><a name="p-7876-can-be-checked-in-the-implementation-4" class="anchor" href="https://forum.rebol.info#p-7876-can-be-checked-in-the-implementation-4"></a>Can Be Checked In The Implementation</h2>
+<p>I've started hacking this through, and it's gone relatively well.  TO dispatches <em><strong>to the type it's converting from</strong></em>, with the type being converted to as the argument.</p>
+<p>And it's nice in the sense that the TO native driving the process can also check the reversibility constraint in the debug build, to give it some teeth.</p>
+<p><em>(I've rigged up some interesting frame mechanics to enable doing this reversal efficiently, that have sped up other parts of the system (like CASCADE) with "downlevel shifting", that can bypass a trampoline bounce...)</em></p>
+<p>Anyway, things are a mess right now with a couple hundred broken tests to painfully sift through.  But I think the reversibility rule is good... biggest questions are whether that relaxes in terms of spacing...</p>
+<pre><code>&gt;&gt; to block! "  1    2  "
+== [1 2]  ; legal?
+</code></pre>
+<p>This would suggest you would have to compare with the trimmed/canonized version of your input.</p>
+<p>Also, issues of string representations.</p>
+<pre><code>&gt;&gt; b: to block! "--{1}--"
+== ["1"]  ; legal?
+</code></pre>
+<p>So there are some pain points, but chipping away at them.</p>
+          <p><a href="https://forum.rebol.info/t/embracing-a-useless-definition-of-to/2325/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/embracing-a-useless-definition-of-to/2325/1</link>
+        <pubDate>Fri, 08 Nov 2024 17:57:08 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-2325-1</guid>
+        <source url="https://forum.rebol.info/t/embracing-a-useless-definition-of-to/2325.rss">Embracing A &quot;Useless&quot; Definition of TO</source>
+      </item>
+  </channel>
+</rss>

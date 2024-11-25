@@ -1,0 +1,107 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>API Abrupt Failures and Unstable Antiforms: rebDelegate()</title>
+    <link>https://forum.rebol.info/t/api-abrupt-failures-and-unstable-antiforms-rebdelegate/2281</link>
+    <description>So there&#39;s been a very interesting development in terms of handling things like errors or failures in the API.
+
+It used to be that we hit a bit of a snag when code wanted to raise an error, because your C code would look something like:
+
+     if (eof)
+        rebElide(&quot;fail {End of file reached}&quot;);
+
+You&#39;ve called an API with no return value, and you&#39;re asking it to abruptly fail... besides terminating the program, what else can it do?
+
+The only way to get control back to the interpreter in C is to use **[`setjmp()/longjmp()`](https://en.cppreference.com/w/c/program/setjmp)**, which is one of those &quot;let&#39;s completely break the execution model&quot; things *(and if you are using C++ it will corrupt your code completely, by skipping destructors)*.
+
+If you&#39;re using C++, there&#39;s exceptions that are safe with respect to destructors, but it&#39;s still dodgy territory for you to call an API that throws them.  And it puts us in a situation where the client of the API has to care whether the interpreter was built to use exceptions or `setjmp()/longjmp()`...which it should not have to care about.
+
+*(Note: for the very creative way Ren-C has abstracted exceptions, [witness the brilliance of what should be named **`%sys-rescue.h`**](https://github.com/metaeducation/ren-c/blob/8516f0fca8ddce40a97e7647a087dc55e065cf3b/src/include/sys-trap.h))*
+
+## Now There&#39;s rebDelegate() + rebContinue()
+
+If your code is inside a native, you now have another option... *to make the return value you give back to the interpreter a signal to run more code*.
+
+    if (eof)
+       return rebDelegate(&quot;fail {End of file reached}&quot;);
+
+This is a much cleaner idea, because you&#39;ve given control back to the interpreter (even though your native is still technically &quot;on the stack&quot; for error-tracing purposes).  You&#39;re not crossing any of your code&#39;s stack with an exception or a longjmp...just trusting the interpreter to do whatever it does.
+
+*(In the case of abrupt failure the mechanics do happen to employ a longjmp or exception.  But it&#39;s under tight control that isn&#39;t your problem, and it&#39;s immediately trapped by the trampoline and converted into a cooperative throw, so it crosses very few stack levels..)*
+
+## Also: It&#39;s How To Synthesize Unstable Antiforms
+
+The notion of a handle to a &quot;Value&quot; exported by the API is like the notion of something you can hold in a variable in the system.  So you can&#39;t hold packs or raised errors in them--only their meta/quasi forms.
+
+That is a very wise decision.  But for a time it presented a puzzle: how could a native written using only the libRebol API return a pack or raised error, etc?
+
+Now we know.  *You pass back the code that produces them as a delegation.*
+
+I have a reasonable idea for how to do a polymorphic **`rebPack()`** which could be used as a delegation,:
+
+    return rebPack(...);  // would act like rebDelegate(&quot;pack [&quot;, ..., &quot;]&quot;)
+
+But also let you synthesize them in a code stream...
+
+    rebElide(&quot;[a b]: @&quot;, rebPack(rebI(1), rebT(&quot;hello&quot;)));
+
+I think this can be done ([due to the magic of @](https://forum.rebol.info/t/why-isnt-a-precise-synonym-for-the/2215)).  The two cases just have to handle the instruction that rebPack() produces differently.
+
+The important thing to observe though is that **`Value* pack = rebPack(...);`** would give a compile-time error.
+
+## Flexible And Fun
+
+Going back over old code right now in the stdio module, I&#39;m impressed at just how clean everything is getting.  This is truly seamless interop.
+
+Looking forward to revisiting what C++ and smart pointers can do to make it even better.</description>
+    
+    <lastBuildDate>Mon, 16 Sep 2024 14:39:45 +0000</lastBuildDate>
+    <category>Language Bridging</category>
+    <atom:link href="https://forum.rebol.info/t/api-abrupt-failures-and-unstable-antiforms-rebdelegate/2281.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>API Abrupt Failures and Unstable Antiforms: rebDelegate()</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>So there's been a very interesting development in terms of handling things like errors or failures in the API.</p>
+<p>It used to be that we hit a bit of a snag when code wanted to raise an error, because your C code would look something like:</p>
+<pre><code> if (eof)
+    rebElide("fail {End of file reached}");
+</code></pre>
+<p>You've called an API with no return value, and you're asking it to abruptly fail... besides terminating the program, what else can it do?</p>
+<p>The only way to get control back to the interpreter in C is to use <strong><a href="https://en.cppreference.com/w/c/program/setjmp"><code>setjmp()/longjmp()</code></a></strong>, which is one of those "let's completely break the execution model" things <em>(and if you are using C++ it will corrupt your code completely, by skipping destructors)</em>.</p>
+<p>If you're using C++, there's exceptions that are safe with respect to destructors, but it's still dodgy territory for you to call an API that throws them.  And it puts us in a situation where the client of the API has to care whether the interpreter was built to use exceptions or <code>setjmp()/longjmp()</code>...which it should not have to care about.</p>
+<p><em>(Note: for the very creative way Ren-C has abstracted exceptions, <a href="https://github.com/metaeducation/ren-c/blob/8516f0fca8ddce40a97e7647a087dc55e065cf3b/src/include/sys-trap.h">witness the brilliance of what should be named <strong><code>%sys-rescue.h</code></strong></a>)</em></p>
+<h2>
+<a name="now-theres-rebdelegate-rebcontinue-1" class="anchor" href="https://forum.rebol.info#now-theres-rebdelegate-rebcontinue-1"></a>Now There's rebDelegate() + rebContinue()</h2>
+<p>If your code is inside a native, you now have another option... <em>to make the return value you give back to the interpreter a signal to run more code</em>.</p>
+<pre><code>if (eof)
+   return rebDelegate("fail {End of file reached}");
+</code></pre>
+<p>This is a much cleaner idea, because you've given control back to the interpreter (even though your native is still technically "on the stack" for error-tracing purposes).  You're not crossing any of your code's stack with an exception or a longjmp...just trusting the interpreter to do whatever it does.</p>
+<p><em>(In the case of abrupt failure the mechanics do happen to employ a longjmp or exception.  But it's under tight control that isn't your problem, and it's immediately trapped by the trampoline and converted into a cooperative throw, so it crosses very few stack levels..)</em></p>
+<h2>
+<a name="also-its-how-to-synthesize-unstable-antiforms-2" class="anchor" href="https://forum.rebol.info#also-its-how-to-synthesize-unstable-antiforms-2"></a>Also: It's How To Synthesize Unstable Antiforms</h2>
+<p>The notion of a handle to a "Value" exported by the API is like the notion of something you can hold in a variable in the system.  So you can't hold packs or raised errors in them--only their meta/quasi forms.</p>
+<p>That is a very wise decision.  But for a time it presented a puzzle: how could a native written using only the libRebol API return a pack or raised error, etc?</p>
+<p>Now we know.  <em>You pass back the code that produces them as a delegation.</em></p>
+<p>I have a reasonable idea for how to do a polymorphic <strong><code>rebPack()</code></strong> which could be used as a delegation,:</p>
+<pre><code>return rebPack(...);  // would act like rebDelegate("pack [", ..., "]")
+</code></pre>
+<p>But also let you synthesize them in a code stream...</p>
+<pre><code>rebElide("[a b]: @", rebPack(rebI(1), rebT("hello")));
+</code></pre>
+<p>I think this can be done (<a href="https://forum.rebol.info/t/why-isnt-a-precise-synonym-for-the/2215">due to the magic of @</a>).  The two cases just have to handle the instruction that rebPack() produces differently.</p>
+<p>The important thing to observe though is that <strong><code>Value* pack = rebPack(...);</code></strong> would give a compile-time error.</p>
+<h2>
+<a name="flexible-and-fun-3" class="anchor" href="https://forum.rebol.info#flexible-and-fun-3"></a>Flexible And Fun</h2>
+<p>Going back over old code right now in the stdio module, I'm impressed at just how clean everything is getting.  This is truly seamless interop.</p>
+<p>Looking forward to revisiting what C++ and smart pointers can do to make it even better.</p>
+          <p><a href="https://forum.rebol.info/t/api-abrupt-failures-and-unstable-antiforms-rebdelegate/2281/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/api-abrupt-failures-and-unstable-antiforms-rebdelegate/2281/1</link>
+        <pubDate>Mon, 16 Sep 2024 12:44:59 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-2281-1</guid>
+        <source url="https://forum.rebol.info/t/api-abrupt-failures-and-unstable-antiforms-rebdelegate/2281.rss">API Abrupt Failures and Unstable Antiforms: rebDelegate()</source>
+      </item>
+  </channel>
+</rss>

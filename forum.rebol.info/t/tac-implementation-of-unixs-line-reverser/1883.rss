@@ -7,41 +7,23 @@
 
 Here was my off-the-cuff line-reverser (TAC ... reverse CAT, where CAT is like Windows Command Shell&#39;s TYPE).  I wrote it a year ago, while I was solely focused on getting READ-LINE to work from piped input cross platform at the time...so almost no thought went into it:
 
-    ; %tac.r, version 0.0.1
+    ; %tac.r, version 0.0.2
     ;
     ; * COLLECT the lines
     ; * REVERSE the collection
     ; * output the result DELIMIT-ed with newline
     ;
-    write-stdout try delimit/tail newline reverse collect [
-        until [not keep line: try read-line]
+    write-stdout maybe delimit/tail newline reverse collect [
+        until [not keep maybe read-line]
     ]
 
 *Right off the bat, you can see it&#39;s using twice the memory it needs to.*   It&#39;s collecting a block of strings, and then while that whole block is in memory it merges it into one giant string before output.  At minimum, this should loop and write the strings out of the block out one at a time.  (Though doing it this way does draw attention to an interesting point about DELIMIT, which I&#39;ll get to later.)
 
 &gt; Note: This line-reversing task is one of those pathological cases that can&#39;t be done in a &quot;streaming&quot; way.  You can&#39;t start writing anything to the output until you&#39;ve read the input to the end.  (Doing better needs a random-access I/O PORT! that can SEEK the end of the file and go backwards...but the standard input device can&#39;t do this.)
 
-## But First Things First: The Impact of [the New TRY Rules](https://forum.rebol.info/t/definitional-errors-as-blank-in-null-out-alternative/1880)
+## Why Does DELIMIT/TAIL Ever Return NULL ?
 
-Recall that the old behavior was that TRY would turn NULL into BLANK! in order to stop functions from raising an error on those NULLs.  So here:
-
-* we&#39;d stop KEEP from failing when there are no more lines to READ-LINE from, so it acts as a no-op instead
-
-* we&#39;d stop WRITE-STDOUT from failing when an empty block is collected and DELIMIT returns NULL:
-
-      write-stdout try delimit/tail newline reverse collect [  ; TRY DELIMIT =&gt; BLANK!
-        until [not keep line: try read-line]  ; TRY READ-LINE =&gt; BLANK!
-      ]
-
-The new way :sparkles: is you go ahead and pass the NULL, and the function raises a very narrow error.  This error is caught by a TRY on the function call itself.
-
-So applying that transformation:
-
-    try write-stdout delimit/tail newline reverse collect [  ; TRY WRITE-STDOUT =&gt; NULL
-        until [not try keep line: read-line]  ; TRY KEEP =&gt; NULL
-    ]
-
-## Why Does DELIMIT Ever Return NULL ?
+The MAYBE in **`[write-stdout maybe delimit/tail ...]`** is there because DELIMIT can return NULL.  If it does, we want to opt out of the write (since passing the null would cause a failure)
 
 One might ask if it should never be able to return NULL when you use /TAIL.  At the moment, it does:
 
@@ -49,12 +31,12 @@ One might ask if it should never be able to return NULL when you use /TAIL.  At 
     == &quot;a,b,&quot;
 
     &gt;&gt; delimit []
-    ; null
+    == ~null~  ; anti
 
     &gt;&gt; delimit/tail &quot;,&quot; []
-    ; null
+    == ~null~  ; anti
 
-Maybe that last one should be &quot;,&quot; ?  Perhaps when you have /HEAD or /TAIL, you never get null back.
+Maybe that last one should be &quot;,&quot; ?  Perhaps when you have /HEAD or /TAIL, you never get null back?
 
 But... let&#39;s stick to looking at the use cases.
 
@@ -62,13 +44,13 @@ But... let&#39;s stick to looking at the use cases.
 
 If we look at the edge case here, there is a difference between these two situations:
 
-* The first call to READ-LINE returns an empty string, and the second call returns NULL
+1. If the first call to READ-LINE returns an empty string, and the second call returns NULL
 
     * This happens when you pipe in a 1-byte file containing a single line feed, e.g. a file containing one line that&#39;s empty.
 
     * With the code above, COLLECT produces the block **`[&quot;&quot;]`** for this case
 
-* The first call to READ-LINE returns NULL
+2. If the first call to READ-LINE returns NULL
 
     * This happens when you pipe in a 0-byte file, e.g. a file containing no lines at all
 
@@ -76,75 +58,108 @@ If we look at the edge case here, there is a difference between these two situat
 
 **So perhaps you see why DELIMIT chooses to react with some kind of signal when the block contents vaporize.**  It&#39;s precisely because cases like this tend to need some kind of special handling, and it&#39;s not good to gloss over that.
 
-In this case, the empty block (which corresponds to the 0-byte file input, e.g. 0 lines) should result in there being no write to the output.  So the default behavior of TRY WRITE-STDOUT NULL is the right answer.
+In this case, the empty block (which corresponds to the 0-byte file input, e.g. 0 lines) should result in there being no write to the output.  So the default behavior of WRITE-STDOUT VOID is the right answer.
 
 ## More to Study, I Just Thought That Bit Was Interesting...
 
 ---
 &gt; *&quot;There are two ways of constructing a software design: One way is to make it so simple that there are obviously no deficiencies, and the other way is to make it so complicated that there are no obvious deficiencies. The first method is far more difficult.&quot;*</description>
     
-    <lastBuildDate>Sat, 16 Jul 2022 04:25:03 +0000</lastBuildDate>
+    <lastBuildDate>Sun, 15 Sep 2024 22:05:58 +0000</lastBuildDate>
     <category>System Tools</category>
     <atom:link href="https://forum.rebol.info/t/tac-implementation-of-unixs-line-reverser/1883.rss" rel="self" type="application/rss+xml" />
       <item>
         <title>`tac` : Implementation of UNIX&#39;s line reverser</title>
         <dc:creator><![CDATA[hostilefork]]></dc:creator>
         <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="1883">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p><code>until [not keep maybe read-line]</code></p>
+</blockquote>
+</aside>
+<p>The interface for READ-LINE and friends was made before the existence of <a href="https://forum.rebol.info/t/fail-vs-return-raise-the-new-age-of-definitional-errors/1852">definitional errors</a>.</p>
+<p>There were three return states:</p>
+<ul>
+<li>
+<p>Multi-return pack of <strong>~[string data, end of file flag]~</strong></p>
+</li>
+<li>
+<p>NULL</p>
+</li>
+<li>
+<p>An ~escape~ antiform (no longer <a href="https://forum.rebol.info/t/renaming-antiword-time-to-call-it-keyword/2277">a legal "keyword"</a>)</p>
+</li>
+</ul>
+<p>The case of the ~escape~ antiform pretty clearly should be a definitional error.  We can see that it would screw up programs like TAC, with the antiform being truthy.  (The original choice was made when they were ornery.)</p>
+<p>If you aren't rigged up to handle the user canceling (via EXCEPT) then it should create an error and the program should halt. You don't want it to be conflated with NULL as an ordinary "no more input available, normal completion" condition, and you don't want it to be something that is a branch trigger (which is everything but null these days).</p>
+<p>The reason for the end of file flag is that you could do a READ and the other side of the pipe could hang up... not strictly at the point of a newline.  Returning NULL in that case might throw away data you were interested in getting.  So this was a way of letting you know if it wasn't really a complete string--if you cared.</p>
+<h2><a name="p-7681-the-eof-flag-can-be-ignored-and-is-a-mistake-1" class="anchor" href="https://forum.rebol.info#p-7681-the-eof-flag-can-be-ignored-and-is-a-mistake-1"></a>The EOF Flag Can Be Ignored, And Is A Mistake</h2>
+<p>The secondary-return-result-EOF isn't a good design, as casual usage will conflate reading an incomplete line with reading a complete line.  The other side can hang up on you, and you won't know it.</p>
+<p>I think a better answer here is to have a :RAW mode which includes the newline at the end of the string you get.  Then you can detect if the newline is there or not.  If it's not, your read was prematurely interrupted.</p>
+<pre><code>if not (line: read-line:raw except [print "Escape!", quit 1]) [
+    print "No more input left to read."
+    quit 0
+]
+if newline &lt;&gt; try last line [  ; need TRY, since string may be empty
+   print ["Incomplete line was read:" mold line]
+   quit 2
+]
+try take/last line  ; again, TRY in case string is empty
+print ["Complete line read:" mold line]
+quit 0
+</code></pre>
+<p>So that gives you coverage of what this layer of abstraction can provide you.</p>
+<p>If you don't use the /RAW mode, then the other end of the pipe disconnecting in mid line would cause an abrupt failure.</p>
+<p>Seems good to me.</p>
+          <p><a href="https://forum.rebol.info/t/tac-implementation-of-unixs-line-reverser/1883/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/tac-implementation-of-unixs-line-reverser/1883/2</link>
+        <pubDate>Sun, 15 Sep 2024 22:05:58 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1883-2</guid>
+        <source url="https://forum.rebol.info/t/tac-implementation-of-unixs-line-reverser/1883.rss">`tac` : Implementation of UNIX&#39;s line reverser</source>
+      </item>
+      <item>
+        <title>`tac` : Implementation of UNIX&#39;s line reverser</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
             <p>I mentioned I wanted to study some basic utilities...even more basic than <a href="https://forum.rebol.info/t/greb-grep-using-parse/1818">greb</a>.  Small codebases can put a focus on big design points.</p>
 <p>Here was my off-the-cuff line-reverser (TAC ... reverse CAT, where CAT is like Windows Command Shell's TYPE).  I wrote it a year ago, while I was solely focused on getting READ-LINE to work from piped input cross platform at the time...so almost no thought went into it:</p>
-<pre><code>; %tac.r, version 0.0.1
+<pre><code>; %tac.r, version 0.0.2
 ;
 ; * COLLECT the lines
 ; * REVERSE the collection
 ; * output the result DELIMIT-ed with newline
 ;
-write-stdout try delimit/tail newline reverse collect [
-    until [not keep line: try read-line]
+write-stdout maybe delimit/tail newline reverse collect [
+    until [not keep maybe read-line]
 ]
 </code></pre>
 <p><em>Right off the bat, you can see it's using twice the memory it needs to.</em>   It's collecting a block of strings, and then while that whole block is in memory it merges it into one giant string before output.  At minimum, this should loop and write the strings out of the block out one at a time.  (Though doing it this way does draw attention to an interesting point about DELIMIT, which I'll get to later.)</p>
 <blockquote>
 <p>Note: This line-reversing task is one of those pathological cases that can't be done in a "streaming" way.  You can't start writing anything to the output until you've read the input to the end.  (Doing better needs a random-access I/O PORT! that can SEEK the end of the file and go backwards...but the standard input device can't do this.)</p>
 </blockquote>
-<h2>But First Things First: The Impact of <a href="https://forum.rebol.info/t/definitional-errors-as-blank-in-null-out-alternative/1880">the New TRY Rules</a>
-</h2>
-<p>Recall that the old behavior was that TRY would turn NULL into BLANK! in order to stop functions from raising an error on those NULLs.  So here:</p>
-<ul>
-<li>
-<p>we'd stop KEEP from failing when there are no more lines to READ-LINE from, so it acts as a no-op instead</p>
-</li>
-<li>
-<p>we'd stop WRITE-STDOUT from failing when an empty block is collected and DELIMIT returns NULL:</p>
-<pre><code>write-stdout try delimit/tail newline reverse collect [  ; TRY DELIMIT =&gt; BLANK!
-  until [not keep line: try read-line]  ; TRY READ-LINE =&gt; BLANK!
-]
-</code></pre>
-</li>
-</ul>
-<p>The new way <img src="https://forum.rebol.info/images/emoji/twitter/sparkles.png?v=9" title=":sparkles:" class="emoji" alt=":sparkles:"> is you go ahead and pass the NULL, and the function raises a very narrow error.  This error is caught by a TRY on the function call itself.</p>
-<p>So applying that transformation:</p>
-<pre><code>try write-stdout delimit/tail newline reverse collect [  ; TRY WRITE-STDOUT =&gt; NULL
-    until [not try keep line: read-line]  ; TRY KEEP =&gt; NULL
-]
-</code></pre>
-<h2>Why Does DELIMIT Ever Return NULL ?</h2>
+<h2><a name="p-6074-why-does-delimittail-ever-return-null-1" class="anchor" href="https://forum.rebol.info#p-6074-why-does-delimittail-ever-return-null-1"></a>Why Does DELIMIT/TAIL Ever Return NULL ?</h2>
+<p>The MAYBE in <strong><code>[write-stdout maybe delimit/tail ...]</code></strong> is there because DELIMIT can return NULL.  If it does, we want to opt out of the write (since passing the null would cause a failure)</p>
 <p>One might ask if it should never be able to return NULL when you use /TAIL.  At the moment, it does:</p>
 <pre><code>&gt;&gt; delimit/tail "," ["a" "b"]
 == "a,b,"
 
 &gt;&gt; delimit []
-; null
+== ~null~  ; anti
 
 &gt;&gt; delimit/tail "," []
-; null
+== ~null~  ; anti
 </code></pre>
-<p>Maybe that last one should be "," ?  Perhaps when you have /HEAD or /TAIL, you never get null back.</p>
+<p>Maybe that last one should be "," ?  Perhaps when you have /HEAD or /TAIL, you never get null back?</p>
 <p>But... let's stick to looking at the use cases.</p>
-<h2>What Does %tac.r Want From DELIMIT/TAIL Here?</h2>
+<h2><a name="p-6074-what-does-tacr-want-from-delimittail-here-2" class="anchor" href="https://forum.rebol.info#p-6074-what-does-tacr-want-from-delimittail-here-2"></a>What Does %tac.r Want From DELIMIT/TAIL Here?</h2>
 <p>If we look at the edge case here, there is a difference between these two situations:</p>
-<ul>
+<ol>
 <li>
-<p>The first call to READ-LINE returns an empty string, and the second call returns NULL</p>
+<p>If the first call to READ-LINE returns an empty string, and the second call returns NULL</p>
 <ul>
 <li>
 <p>This happens when you pipe in a 1-byte file containing a single line feed, e.g. a file containing one line that's empty.</p>
@@ -155,7 +170,7 @@ write-stdout try delimit/tail newline reverse collect [
 </ul>
 </li>
 <li>
-<p>The first call to READ-LINE returns NULL</p>
+<p>If the first call to READ-LINE returns NULL</p>
 <ul>
 <li>
 <p>This happens when you pipe in a 0-byte file, e.g. a file containing no lines at all</p>
@@ -165,10 +180,10 @@ write-stdout try delimit/tail newline reverse collect [
 </li>
 </ul>
 </li>
-</ul>
+</ol>
 <p><strong>So perhaps you see why DELIMIT chooses to react with some kind of signal when the block contents vaporize.</strong>  It's precisely because cases like this tend to need some kind of special handling, and it's not good to gloss over that.</p>
-<p>In this case, the empty block (which corresponds to the 0-byte file input, e.g. 0 lines) should result in there being no write to the output.  So the default behavior of TRY WRITE-STDOUT NULL is the right answer.</p>
-<h2>More to Study, I Just Thought That Bit Was Interesting...</h2>
+<p>In this case, the empty block (which corresponds to the 0-byte file input, e.g. 0 lines) should result in there being no write to the output.  So the default behavior of WRITE-STDOUT VOID is the right answer.</p>
+<h2><a name="p-6074-more-to-study-i-just-thought-that-bit-was-interesting-3" class="anchor" href="https://forum.rebol.info#p-6074-more-to-study-i-just-thought-that-bit-was-interesting-3"></a>More to Study, I Just Thought That Bit Was Interesting...</h2>
 <hr>
 <blockquote>
 <p><em>"There are two ways of constructing a software design: One way is to make it so simple that there are obviously no deficiencies, and the other way is to make it so complicated that there are no obvious deficiencies. The first method is far more difficult."</em></p>

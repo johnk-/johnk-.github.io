@@ -21,24 +21,22 @@ So maybe you would have some syntax in POINTFREE for that where you put a placeh
 
     append-10: pointfree [append _ 10]
 
-*(Note: The name **pointfree** is deliberately chosen as bad, since it won&#39;t be taken for other reasons...and also reinforces the term for Rebol programmers unused to FP concepts.  What I&#39;m actually thinking is that this will be folded into lambda as the behavior when you don&#39;t use a block.  So **(-&gt; append _ 10)** for example.)*
-
-&gt; **UPDATE:** To eliminate potential accidents, it was unbundled from lambda and uses the similar-but-notably-distinct notation **`&lt;-`** now.
+*(Note: **pointfree** may not be the best name, but it won&#39;t be taken for other reasons...and reinforces the term for Rebol programmers unused to FP concepts.  There may be a nicer name.)*
 
 ## Writing This In Usermode In Historical Rebol Is Non-Trivial
 
-If you think writing a reliable POINTFREE yourself would be easy in Rebol2/Red, I would invite you to try.  There&#39;s a lot to get right with parameter analysis and ordering refinements; beyond the average user.  It doesn&#39;t get much easier if you are coding inside the system, either.
+If you think writing a reliable POINTFREE yourself would be easy in Rebol2/Red, **I invite you to try**.  There&#39;s a lot to get right with parameter analysis and ordering refinements; beyond the average user.  It doesn&#39;t get much easier if you are coding inside the system, either.
 
 It would also be noticeably slower, using any method in near-reach.  The only mechanisms would involve creating a whole new function spec, where the evaluator would have to pass parameters to that function...then start evaluating again to make a nested call...type checking all over again.
 
-Ren-C has several tricks up its sleeve, including a new tool introduced today for writing your own specializations.  That&#39;s the ability to MAKE ACTION! out of a FRAME! with some of its parameters filled.  And since you can MAKE FRAME! out of an ACTION!, this provides a convenient round-trip:
+Ren-C has several tricks up its sleeve, including the duality between FRAME! and ACTION as &quot;antiform FRAME!&quot;.  This provides a convenient round-trip:
 
     &gt;&gt; data: [a b c]
 
     &gt;&gt; f: make frame! :append
-    &gt;&gt; f/series: data
+    &gt;&gt; f.series: data
 
-    &gt;&gt; apd: make action! f
+    &gt;&gt; apd: runs f
     &gt;&gt; apd [d e f]
 
     &gt;&gt; data
@@ -58,76 +56,122 @@ So if you have someone writing **pointfree [append/dup ...]** you don&#39;t worr
 
 There&#39;s also more unlocked by the idea of [refinements naming their 0-or-1 arguments](https://forum.rebol.info/t/pure-and-refined-simplifying-refinements-to-one-or-zero-args/1120).  We&#39;ve seen it open doors with [AUGMENT](https://forum.rebol.info/t/augment-add-parameters-and-refinements-after-the-fact/1216), but it helps here and elsewhere.
 
+---
+
 ## A Start on the Vision of POINTFREE
 
-This usermode implementation is incomplete and raises some issues (including that I&#39;m not totally thrilled with the @var skippable syntax in EVALUATE).
+Below is a draft usermode implementation.  It is incomplete and raises some issues.  The biggest issue is that it only lets you specialize by example at one level of depth.  So you can&#39;t write:
 
-But it shows relatively little code taking care of some rather complex acrobatics.  I&#39;d hope it wouldn&#39;t be too far beyond the reach of a novice to write:
+    &gt;&gt; apde-spread: pointfree [append _ spread]
 
-    pointfree: func [
-        {Specialize by example: https://en.wikipedia.org/wiki/Tacit_programming}
+    &gt;&gt; apde-spread [a b c] [d e]
+    == [a b c d e]
 
-        return: [action!]
-        block [block!]
+That would require some kind of recursive process--the call to SPREAD in the parameter slot for APPEND would have to be done using POINTFREE as well.
+
+Moreover, there&#39;s a semantic question of when to capture variables.  If you write:
+
+    &gt;&gt; x: 10
+
+    &gt;&gt; add-x: pointfree [add x]
+
+    &gt;&gt; x: 20
+
+    &gt;&gt; add-x 1000
+    == ???
+
+...do you want to add the value of X as it was at the moment of specialization, and get 1010?  Or to add its current value and get 1020?  If you wrote out a function you&#39;d get 1020, and I&#39;d think the more common desire (and you should have to say **pointfree compose [add (x)]** to get the former intent).  But as written now you get 1010, so a different mechanism is needed.
+
+All that said, this implementation shows relatively little code, that&#39;s taking care of some rather complex acrobatics!  I&#39;d hope it wouldn&#39;t be too far beyond the reach of a novice to write.
+
+### POINTFREE* Is Lower-Level, Takes Applicand Separate From Args
+
+This layer takes FRAME! and BLOCK! as two separate arguments.  If the user does:
+
+    &gt;&gt; apde: pointfree* :append [_ [d e]]
+
+Then the blank signals an unspecialized slot.  So that would be like writing:
+
+    &gt;&gt; apde: specialize :append [value: [d e]]  ; leave series unspecialized
+
+    &gt;&gt; apde [a b c]
+    == [a b c [d e]]
+
+Note that Variadics are not supported at this time.  And there&#39;s an ongoing effort to improve [parameter reflection](https://forum.rebol.info/t/representing-everything-about-a-parameter-except-its-name/1459/6?u=hostilefork), but this is what we have at the moment.
+
+    pointfree*: func* [
+        &quot;Specialize by example: https://en.wikipedia.org/wiki/Tacit_programming&quot;
+
+        return: [action?]
+        frame [&lt;unrun&gt; frame!]
+        block &quot;Invocation by example (BLANK!s are unspecialized)&quot;
+            [block!]
+        &lt;local&gt; params var
     ][
-        let action: (match action! any [
-            if match [word! path!] :block/1 [get block/1]
-            :block/1
-        ]) else [
-            fail &quot;POINTFREE requires ACTION! argument at head of block&quot;
-        ]
-        block: next block  ; rest of block is invocation by example
+        frame: copy frame  ; if given e.g. APPEND&#39;s frame, don&#39;t mutate it!
 
-        ; If we did a GET of a PATH! it will come back as a partially specialized
-        ; function, where the refinements are reported as normal args at the
-        ; right spot in the evaluation order.  (e.g. GET &#39;APPEND/DUP returns a
-        ; function where DUP is a plain WORD! parameter in the third spot).
-        ;
-        ; We prune out any unused refinements for convenience.
-        ;
-        let params: map-each w parameters of :action [
-            match [word! lit-word! get-word!] w  ; !!! what about skippable params?
-        ]
+        for-each param (parameters of frame) [
+            if tail? block [break]  ; no more args, leave rest unspecialized
 
-        let frame: make frame! :action  ; all frame fields default to NULL
+            match [word! lit-word? get-word!] param else [
+                continue  ; skip unused refinements
+            ]
 
-        ; Step through the block we are given--first looking to see if there is
-        ; a BLANK! in the slot where a parameter was accepted.  If it is blank,
-        ; then leave the parameter null in the frame.  Otherwise take one step
-        ; of evaluation or literal (as appropriate) and put the parameter in the
-        ; frame slot.
-        ;
-        let var
-        iterate params [
             case [
-                blank? :block/1 [block: next block]
-
-                word? params/1 [
-                    if not block: evaluate @var block [
-                        break  ; ran out of args, assume remaining unspecialized
-                    ]
-                    frame/(params/1): :var
-                ]
-                
-                all [
-                    lit-word? params/1
-                    match [group! get-word! get-path!] :block/1
-                ][
-                    frame/(params/1): reeval :block/1
+                blank? block.1 [  ; means leave unspecialized
                     block: next block
                 ]
 
-                default [  ; hard literal argument or non-escaped soft literal
-                    frame/(params/1): :block/1
+                match word! param [  ; ordinary parameter
+                    [block frame.(param)]: evaluate/next block
+                ]
+
+                all [
+                    match [get-word!] param  ; soft literal parameter
+                    match [group! get-word! get-tuple!] block.1
+                ][
+                    frame.(param): reeval block.1
+                    block: next block
+                ]
+
+                &lt;default&gt; [  ; hard literal or non-escaped soft literal
+                    frame.(param): block.1
                     block: next block
                 ]
             ]
         ]
 
-        ; We now create an action out of the frame.  NULL parameters are taken as
-        ; being unspecialized and gathered at the callsite.
-        ;
-        return make action! :frame
+        if not tail? block [
+            fail/blame [
+                &quot;Unused argument data at end of POINTFREE block&quot;
+            ] $block
+        ]
+
+        return runs frame
+    ]
+
+### Higher-Level POINTFREE Includes the Applicand In The BLOCK!
+
+This higher-level version wants the name of an action at the head of the block, e.g.
+
+    pointfree [append _ [d e]]
+    =&gt;
+    pointfree* :append [_ [d e]]
+    
+It does this by specializing out the frame on the interface of POINTFREE* and just taking a block.  Then when it&#39;s called, it overwrites the dummy specialization with a frame from the first block element, and updates the block to be one step forward.
+
+    pointfree: specialize (adapt get $pointfree* [
+        frame: (match frame! any [  ; no SET-WORD! namecache
+            if match [word! path!] block.1 [
+                unrun get/any inside block block.1
+            ]
+        ]) else [
+            fail &quot;POINTFREE requires FRAME! argument at head of block&quot;
+        ]
+
+        block: next block
+    ])[
+        frame: unrun get $panic/value  ; overwritten, best to be something mean
     ]</description>
     
     <lastBuildDate>Thu, 26 Jan 2023 18:05:31 +0000</lastBuildDate>
@@ -137,23 +181,12 @@ But it shows relatively little code taking care of some rather complex acrobatic
         <title>Looking into a *usermode* POINTFREE</title>
         <dc:creator><![CDATA[hostilefork]]></dc:creator>
         <description><![CDATA[
-            <aside class="quote no-group" data-username="hostilefork" data-post="5" data-topic="1236">
-<div class="title">
-<div class="quote-controls"></div>
-<img alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/40/26_2.png" class="avatar"> hostilefork:</div>
-<blockquote>
-<p>POINTFREE is pretty awesome and I find it comes in handy a lot.</p>
-</blockquote>
-</aside>
-<p>POINTFREE is very cool, but I'm removing its usage from bootstrap...because changes I want to make break it.  And it's hard to fix and redesign such things when the system won't boot.</p>
-<p>While I <em>could</em> remove its bootstrap usage... and then make my next task after the changes be to work through it and put it back in the bootstrap, I'm actually not going to.  I'm just going to leave in a file on the side, as part of the test scripts--<em>for now</em>.  I'm going to leave it broken until such time as it's a priority to fix it.</p>
-<p><em>I can't make everything a focus, and am mentioning this just to talk out loud about the need to become more mercenary.</em></p>
-<p><strong><a href="https://forum.rebol.info/t/introducing-the-hackable-usermode-parse-uparse/1529">The big "what's possible in usermode" showcase is UPARSE.</a></strong>  And it stands on the shoulders of all the efforts like POINTFREE that came before it.  But the demand to keep all of these experiments working -and- try using them in the boot process is too much.</p>
-          <p><a href="https://forum.rebol.info/t/looking-into-a-usermode-pointfree/1236/8">Read full topic</a></p>
+            <p>A post was split to a new topic: <a href="https://forum.rebol.info/t/shorthand-interface-and-symbol-name-for-pointfree/2263">Shorthand Interface and Symbol/Name for POINTFREE</a></p>
+          <p><a href="https://forum.rebol.info/t/looking-into-a-usermode-pointfree/1236/2">Read full topic</a></p>
         ]]></description>
-        <link>https://forum.rebol.info/t/looking-into-a-usermode-pointfree/1236/8</link>
-        <pubDate>Thu, 26 Jan 2023 18:05:31 +0000</pubDate>
-        <guid isPermaLink="false">forum.rebol.info-post-1236-8</guid>
+        <link>https://forum.rebol.info/t/looking-into-a-usermode-pointfree/1236/2</link>
+        <pubDate>Tue, 10 Sep 2024 13:01:45 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1236-2</guid>
         <source url="https://forum.rebol.info/t/looking-into-a-usermode-pointfree/1236.rss">Looking into a *usermode* POINTFREE</source>
       </item>
       <item>
@@ -163,7 +196,7 @@ But it shows relatively little code taking care of some rather complex acrobatic
             <aside class="quote no-group" data-username="okram" data-post="6" data-topic="1236">
 <div class="title">
 <div class="quote-controls"></div>
-<img alt="" width="20" height="20" src="https://forum.rebol.info/letter_avatar_proxy/v4/letter/o/b9bd4f/40.png" class="avatar"> okram:</div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/letter_avatar_proxy/v4/letter/o/b9bd4f/48.png" class="avatar"> okram:</div>
 <blockquote>
 <p>POINTFREE would not have to deal with the placeholder syntax, if you provide a FLIP that exchanges the order of the arguments of a function.</p>
 </blockquote>
@@ -202,12 +235,12 @@ But it shows relatively little code taking care of some rather complex acrobatic
 <aside class="quote no-group" data-username="okram" data-post="6" data-topic="1236">
 <div class="title">
 <div class="quote-controls"></div>
-<img alt="" width="20" height="20" src="https://forum.rebol.info/letter_avatar_proxy/v4/letter/o/b9bd4f/40.png" class="avatar"> okram:</div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/letter_avatar_proxy/v4/letter/o/b9bd4f/48.png" class="avatar"> okram:</div>
 <blockquote>
 <p>P.S.Richard Bird, Oege de Moor. Algebra of Programming. It's quite old, but if you haven't seen it yet: I think it's very much worth reading.</p>
 </blockquote>
 </aside>
-<p>Oege worked with my group briefly at Microsoft Research many, many years ago...seems he's gone on to building a fairly popular thing (LGTM).  I tried to use it, but it doesn't work on forked repos.  Maybe I'll try it again when this project gets renamed/re-launched...whenever that is... <img src="https://forum.rebol.info/images/emoji/twitter/hourglass.png?v=9" title=":hourglass:" class="emoji" alt=":hourglass:"></p>
+<p>Oege worked with my group briefly at Microsoft Research many, many years ago...seems he's gone on to building a fairly popular thing (LGTM).  I tried to use it, but it doesn't work on forked repos.  Maybe I'll try it again when this project gets renamed/re-launched...whenever that is... <img src="https://forum.rebol.info/images/emoji/twitter/hourglass.png?v=12" title=":hourglass:" class="emoji" alt=":hourglass:" loading="lazy" width="20" height="20"></p>
           <p><a href="https://forum.rebol.info/t/looking-into-a-usermode-pointfree/1236/7">Read full topic</a></p>
         ]]></description>
         <link>https://forum.rebol.info/t/looking-into-a-usermode-pointfree/1236/7</link>
@@ -232,42 +265,6 @@ But it shows relatively little code taking care of some rather complex acrobatic
       </item>
       <item>
         <title>Looking into a *usermode* POINTFREE</title>
-        <dc:creator><![CDATA[hostilefork]]></dc:creator>
-        <description><![CDATA[
-            <aside class="quote no-group quote-modified" data-post="1" data-topic="1236">
-<div class="title">
-<div class="quote-controls"></div>
-<img alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/40/26_2.png" class="avatar"> hostilefork:</div>
-<blockquote>
-<p>This usermode implementation is incomplete and raises some issues (...)  But it shows relatively little code taking care of some rather complex acrobatics. I'd hope it wouldn't be too far beyond the reach of a novice to write.</p>
-</blockquote>
-</aside>
-<p>POINTFREE is pretty awesome and I find it comes in handy a lot.</p>
-<p>I had even taken the step of folding its behavior into lambda (which was recently renamed from the JavaScript-like <strong><code>=&gt;</code></strong> to the Haskell-like <strong><code>-&gt;</code></strong>... for a couple of plausibly-good reasons):</p>
-<pre><code>&gt;&gt; ap10: (-&gt; append _ 10)
-
-&gt;&gt; ap10 [a b c]
-== a b c 10
-</code></pre>
-<p>But it does make me somewhat uneasy with all the variadic voodoo to make that happen.  I'm especially concerned that people might mix them up, and do a POINTFREE specialization when they meant a lambda, simply because they forgot to put in a BLOCK!.</p>
-<p>I've had a hard time imagining what &lt;- should do... especially because if -&gt; is a function generator, it would seem kind of weird if &lt;- was something vastly different.  So I think this points to a balanced choice to turn this around so that <strong><code>&lt;-</code></strong> is the very "weird" variadic POINTFREE generator, while <strong><code>-&gt;</code></strong> is lambda, and always requires a BLOCK! of code on its right.</p>
-<pre><code>&gt;&gt; whatever: x -&gt; [print ["lambda always goes to a block" x]]
-
-&gt;&gt; ap10: (&lt;- append _ 10)  ; pointfree never has anything on left
-
-&gt;&gt; ap10 [a b c]
-== a b c 10
-</code></pre>
-<p>Seems learnable enough?</p>
-          <p><a href="https://forum.rebol.info/t/looking-into-a-usermode-pointfree/1236/5">Read full topic</a></p>
-        ]]></description>
-        <link>https://forum.rebol.info/t/looking-into-a-usermode-pointfree/1236/5</link>
-        <pubDate>Tue, 06 Oct 2020 19:47:43 +0000</pubDate>
-        <guid isPermaLink="false">forum.rebol.info-post-1236-5</guid>
-        <source url="https://forum.rebol.info/t/looking-into-a-usermode-pointfree/1236.rss">Looking into a *usermode* POINTFREE</source>
-      </item>
-      <item>
-        <title>Looking into a *usermode* POINTFREE</title>
         <dc:creator><![CDATA[IngoHohmann]]></dc:creator>
         <description><![CDATA[
             <p>Having to use PowerShell at work, I really do like the way you can compose with pipes, where you can stick a new step at the end.<br>
@@ -283,69 +280,38 @@ With rebol you sometimes have to bracket the next step around your current evalu
         <title>Looking into a *usermode* POINTFREE</title>
         <dc:creator><![CDATA[jhgorse]]></dc:creator>
         <description><![CDATA[
-            <p>I was noodling on this, trying to get the concept boiled down to a more concrete visual. The most familiar of the Wikipedia examples was the UNIX pipe:<br>
-</p><aside class="onebox wikipedia">
+            <p>I was noodling on this, trying to get the concept boiled down to a more concrete visual. The most familiar of the Wikipedia examples was the UNIX pipe:</p><aside class="onebox wikipedia" data-onebox-src="https://en.wikipedia.org/wiki/Tacit_programming#UNIX_pipeline">
   <header class="source">
-      <a href="https://en.wikipedia.org/wiki/Tacit_programming#UNIX_pipeline" target="_blank" rel="nofollow noopener">en.wikipedia.org</a>
+
+      <a href="https://en.wikipedia.org/wiki/Tacit_programming#UNIX_pipeline" target="_blank" rel="noopener nofollow ugc">en.wikipedia.org</a>
   </header>
+
   <article class="onebox-body">
     
 
-<h3><a href="https://en.wikipedia.org/wiki/Tacit_programming#UNIX_pipeline" target="_blank" rel="nofollow noopener">Tacit programming | UNIX pipeline</a></h3>
+<h3><a href="https://en.wikipedia.org/wiki/Tacit_programming#UNIX_pipeline" target="_blank" rel="noopener nofollow ugc">Tacit programming</a></h3>
 
-<p>In UNIX scripting the functions are computer programs which receive data from standard input and send the results to standard output.  For example,
- is a tacit or point-free composition which returns the counts of its arguments and the arguments, in the order of decreasing counts.  The 'sort' and 'uniq' are the functions, the '-c' and '-rn' control the functions, but the arguments are not mentioned.  The '|' is the composition operator.
-</p>
+<p>Tacit programming, also called point-free style, is a programming paradigm in which function definitions do not identify the arguments (or "points") on which they operate. Instead the definitions merely compose other functions, among which are combinators that manipulate the arguments. Tacit programming is of theoretical interest, because the strict use of composition results in programs that are well adapted for equational reasoning. It is also the natural style of certain programming languag Un...</p>
 
   </article>
+
   <div class="onebox-metadata">
     
     
   </div>
+
   <div style="clear: both"></div>
 </aside>
-<p></p>
+
 <p>I was momentarily disappointed that you did not implement it in C, because then I would have had a better chance of understanding what was going on. A selfish thought, I know. Though I do tend to "think" in C as it is the highest level language in which I can reasonably assume what the underlying hardware is doing in order to honor what was specified in the imperative-procedural program. C to asm is relatively straight forward. So it is a sort of a short cut for the conceptual model.</p>
 <p>As I envision how to implement POINTFREE in the procedural paradigm, I suspect control-flow would get inverted as is often done in C driver interfaces with function pointers. IIRC that is how the UNIX pipes are done using the read()/write() syscalls for passing stdout to stdin (<em>without making a copy of the data</em>).</p>
 <p>So the problem reduces to a buffer that gets passed around and modified. The challenge is maintaining type information. These solutions tend to be domain specific and never flexible enough to handle all or most of what the clever electrical and computer engineers and scientists of old have abused the ordering of bits to represent values of things. I believe this is what led to the notion that Alan Kay was going after when he coined "object-oriented", the idea that the data comes with the code necessary to use the data. It's deeper and hairier than that, but at a first approximation, about it.</p>
 <p>Onward. =)</p>
-<p>Cheers,<br>
-Joe Gorse</p>
           <p><a href="https://forum.rebol.info/t/looking-into-a-usermode-pointfree/1236/3">Read full topic</a></p>
         ]]></description>
         <link>https://forum.rebol.info/t/looking-into-a-usermode-pointfree/1236/3</link>
         <pubDate>Thu, 31 Oct 2019 15:20:22 +0000</pubDate>
         <guid isPermaLink="false">forum.rebol.info-post-1236-3</guid>
-        <source url="https://forum.rebol.info/t/looking-into-a-usermode-pointfree/1236.rss">Looking into a *usermode* POINTFREE</source>
-      </item>
-      <item>
-        <title>Looking into a *usermode* POINTFREE</title>
-        <dc:creator><![CDATA[hostilefork]]></dc:creator>
-        <description><![CDATA[
-            <p>I've committed this experiment, and given it the notation <code>&lt;-</code></p>
-<pre><code>bump-up: (&lt;- add 1)
-bump-down: (&lt;- subtract _ 1)
-</code></pre>
-<p>There is some error handling:</p>
-<pre><code>&gt;&gt; ap12invalid: (&lt;- append _ 1 2)
-** Error: Unused argument data at end of POINTFREE block
-
-&gt;&gt; ap1twice: (&lt;- append/dup _ 1 2)
-
-&gt;&gt; ap1twice [a b c]
-== [a b c 1 1]
-</code></pre>
-<p>So if you want to mess with it and offer comments (e.g. <a class="mention" href="https://forum.rebol.info/u/ingohohmann">@IngoHohmann</a>, <a class="mention" href="https://forum.rebol.info/u/giuliolunati">@giuliolunati</a>, <a class="mention" href="https://forum.rebol.info/u/orr721">@orr721</a>  then do).  Also Giulio...if you didn't notice, the pthreads build should be running again so give that a shot.</p>
-<h2>It's Time To Start Looking for the Complexity Limit</h2>
-<p>I actually started writing this feature in C, before stopping and saying <em>"wait, the whole point is that a user should be able to write this"</em>.</p>
-<p>So that's when I realized it was time to look at the MAKE ACTION! from a FRAME! feature.  And there's a laundry list of ways in which it doesn't quite combine right with variadics or enfix or skippable parameters etc...or functions you want to actually pass null to.</p>
-<p>But I don't want to address those problems by writing POINTFREE as a native.  I want to stick to the idea that it can be done accurately in usermode.</p>
-<p>This is challenging stuff, but still very cool.</p>
-          <p><a href="https://forum.rebol.info/t/looking-into-a-usermode-pointfree/1236/2">Read full topic</a></p>
-        ]]></description>
-        <link>https://forum.rebol.info/t/looking-into-a-usermode-pointfree/1236/2</link>
-        <pubDate>Wed, 30 Oct 2019 16:23:29 +0000</pubDate>
-        <guid isPermaLink="false">forum.rebol.info-post-1236-2</guid>
         <source url="https://forum.rebol.info/t/looking-into-a-usermode-pointfree/1236.rss">Looking into a *usermode* POINTFREE</source>
       </item>
       <item>
@@ -365,21 +331,18 @@ bump-down: (&lt;- subtract _ 1)
 <p>So maybe you would have some syntax in POINTFREE for that where you put a placeholder in spots that you wanted implicitly picked up.  Maybe BLANK! as a default:</p>
 <pre><code>append-10: pointfree [append _ 10]
 </code></pre>
-<p><em>(Note: The name <strong>pointfree</strong> is deliberately chosen as bad, since it won't be taken for other reasons...and also reinforces the term for Rebol programmers unused to FP concepts.  What I'm actually thinking is that this will be folded into lambda as the behavior when you don't use a block.  So <strong>(-&gt; append _ 10)</strong> for example.)</em></p>
-<blockquote>
-<p><strong>UPDATE:</strong> To eliminate potential accidents, it was unbundled from lambda and uses the similar-but-notably-distinct notation <strong><code>&lt;-</code></strong> now.</p>
-</blockquote>
+<p><em>(Note: <strong>pointfree</strong> may not be the best name, but it won't be taken for other reasons...and reinforces the term for Rebol programmers unused to FP concepts.  There may be a nicer name.)</em></p>
 <h2>
 <a name="writing-this-in-usermode-in-historical-rebol-is-non-trivial-1" class="anchor" href="https://forum.rebol.info#writing-this-in-usermode-in-historical-rebol-is-non-trivial-1"></a>Writing This In Usermode In Historical Rebol Is Non-Trivial</h2>
-<p>If you think writing a reliable POINTFREE yourself would be easy in Rebol2/Red, I would invite you to try.  There's a lot to get right with parameter analysis and ordering refinements; beyond the average user.  It doesn't get much easier if you are coding inside the system, either.</p>
+<p>If you think writing a reliable POINTFREE yourself would be easy in Rebol2/Red, <strong>I invite you to try</strong>.  There's a lot to get right with parameter analysis and ordering refinements; beyond the average user.  It doesn't get much easier if you are coding inside the system, either.</p>
 <p>It would also be noticeably slower, using any method in near-reach.  The only mechanisms would involve creating a whole new function spec, where the evaluator would have to pass parameters to that function...then start evaluating again to make a nested call...type checking all over again.</p>
-<p>Ren-C has several tricks up its sleeve, including a new tool introduced today for writing your own specializations.  That's the ability to MAKE ACTION! out of a FRAME! with some of its parameters filled.  And since you can MAKE FRAME! out of an ACTION!, this provides a convenient round-trip:</p>
+<p>Ren-C has several tricks up its sleeve, including the duality between FRAME! and ACTION as "antiform FRAME!".  This provides a convenient round-trip:</p>
 <pre><code>&gt;&gt; data: [a b c]
 
 &gt;&gt; f: make frame! :append
-&gt;&gt; f/series: data
+&gt;&gt; f.series: data
 
-&gt;&gt; apd: make action! f
+&gt;&gt; apd: runs f
 &gt;&gt; apd [d e f]
 
 &gt;&gt; data
@@ -396,74 +359,111 @@ bump-down: (&lt;- subtract _ 1)
 </code></pre>
 <p>So if you have someone writing <strong>pointfree [append/dup ...]</strong> you don't worry...just GET the PATH!, and the function you are handed back doesn't even report DUP as a refinement.  It's a normal parameter now.</p>
 <p>There's also more unlocked by the idea of <a href="https://forum.rebol.info/t/pure-and-refined-simplifying-refinements-to-one-or-zero-args/1120">refinements naming their 0-or-1 arguments</a>.  We've seen it open doors with <a href="https://forum.rebol.info/t/augment-add-parameters-and-refinements-after-the-fact/1216">AUGMENT</a>, but it helps here and elsewhere.</p>
+<hr>
 <h2>
 <a name="a-start-on-the-vision-of-pointfree-2" class="anchor" href="https://forum.rebol.info#a-start-on-the-vision-of-pointfree-2"></a>A Start on the Vision of POINTFREE</h2>
-<p>This usermode implementation is incomplete and raises some issues (including that I'm not totally thrilled with the <span class="mention">@var</span> skippable syntax in EVALUATE).</p>
-<p>But it shows relatively little code taking care of some rather complex acrobatics.  I'd hope it wouldn't be too far beyond the reach of a novice to write:</p>
-<pre><code>pointfree: func [
-    {Specialize by example: https://en.wikipedia.org/wiki/Tacit_programming}
+<p>Below is a draft usermode implementation.  It is incomplete and raises some issues.  The biggest issue is that it only lets you specialize by example at one level of depth.  So you can't write:</p>
+<pre><code>&gt;&gt; apde-spread: pointfree [append _ spread]
 
-    return: [action!]
-    block [block!]
+&gt;&gt; apde-spread [a b c] [d e]
+== [a b c d e]
+</code></pre>
+<p>That would require some kind of recursive process--the call to SPREAD in the parameter slot for APPEND would have to be done using POINTFREE as well.</p>
+<p>Moreover, there's a semantic question of when to capture variables.  If you write:</p>
+<pre><code>&gt;&gt; x: 10
+
+&gt;&gt; add-x: pointfree [add x]
+
+&gt;&gt; x: 20
+
+&gt;&gt; add-x 1000
+== ???
+</code></pre>
+<p>...do you want to add the value of X as it was at the moment of specialization, and get 1010?  Or to add its current value and get 1020?  If you wrote out a function you'd get 1020, and I'd think the more common desire (and you should have to say <strong>pointfree compose [add (x)]</strong> to get the former intent).  But as written now you get 1010, so a different mechanism is needed.</p>
+<p>All that said, this implementation shows relatively little code, that's taking care of some rather complex acrobatics!  I'd hope it wouldn't be too far beyond the reach of a novice to write.</p>
+<h3>
+<a name="pointfree-is-lower-level-takes-applicand-separate-from-args-3" class="anchor" href="https://forum.rebol.info#pointfree-is-lower-level-takes-applicand-separate-from-args-3"></a>POINTFREE* Is Lower-Level, Takes Applicand Separate From Args</h3>
+<p>This layer takes FRAME! and BLOCK! as two separate arguments.  If the user does:</p>
+<pre><code>&gt;&gt; apde: pointfree* :append [_ [d e]]
+</code></pre>
+<p>Then the blank signals an unspecialized slot.  So that would be like writing:</p>
+<pre><code>&gt;&gt; apde: specialize :append [value: [d e]]  ; leave series unspecialized
+
+&gt;&gt; apde [a b c]
+== [a b c [d e]]
+</code></pre>
+<p>Note that Variadics are not supported at this time.  And there's an ongoing effort to improve <a href="https://forum.rebol.info/t/representing-everything-about-a-parameter-except-its-name/1459/6">parameter reflection</a>, but this is what we have at the moment.</p>
+<pre><code>pointfree*: func* [
+    "Specialize by example: https://en.wikipedia.org/wiki/Tacit_programming"
+
+    return: [action?]
+    frame [&lt;unrun&gt; frame!]
+    block "Invocation by example (BLANK!s are unspecialized)"
+        [block!]
+    &lt;local&gt; params var
 ][
-    let action: (match action! any [
-        if match [word! path!] :block/1 [get block/1]
-        :block/1
-    ]) else [
-        fail "POINTFREE requires ACTION! argument at head of block"
-    ]
-    block: next block  ; rest of block is invocation by example
+    frame: copy frame  ; if given e.g. APPEND's frame, don't mutate it!
 
-    ; If we did a GET of a PATH! it will come back as a partially specialized
-    ; function, where the refinements are reported as normal args at the
-    ; right spot in the evaluation order.  (e.g. GET 'APPEND/DUP returns a
-    ; function where DUP is a plain WORD! parameter in the third spot).
-    ;
-    ; We prune out any unused refinements for convenience.
-    ;
-    let params: map-each w parameters of :action [
-        match [word! lit-word! get-word!] w  ; !!! what about skippable params?
-    ]
+    for-each param (parameters of frame) [
+        if tail? block [break]  ; no more args, leave rest unspecialized
 
-    let frame: make frame! :action  ; all frame fields default to NULL
+        match [word! lit-word? get-word!] param else [
+            continue  ; skip unused refinements
+        ]
 
-    ; Step through the block we are given--first looking to see if there is
-    ; a BLANK! in the slot where a parameter was accepted.  If it is blank,
-    ; then leave the parameter null in the frame.  Otherwise take one step
-    ; of evaluation or literal (as appropriate) and put the parameter in the
-    ; frame slot.
-    ;
-    let var
-    iterate params [
         case [
-            blank? :block/1 [block: next block]
-
-            word? params/1 [
-                if not block: evaluate @var block [
-                    break  ; ran out of args, assume remaining unspecialized
-                ]
-                frame/(params/1): :var
-            ]
-            
-            all [
-                lit-word? params/1
-                match [group! get-word! get-path!] :block/1
-            ][
-                frame/(params/1): reeval :block/1
+            blank? block.1 [  ; means leave unspecialized
                 block: next block
             ]
 
-            default [  ; hard literal argument or non-escaped soft literal
-                frame/(params/1): :block/1
+            match word! param [  ; ordinary parameter
+                [block frame.(param)]: evaluate/next block
+            ]
+
+            all [
+                match [get-word!] param  ; soft literal parameter
+                match [group! get-word! get-tuple!] block.1
+            ][
+                frame.(param): reeval block.1
+                block: next block
+            ]
+
+            &lt;default&gt; [  ; hard literal or non-escaped soft literal
+                frame.(param): block.1
                 block: next block
             ]
         ]
     ]
 
-    ; We now create an action out of the frame.  NULL parameters are taken as
-    ; being unspecialized and gathered at the callsite.
-    ;
-    return make action! :frame
+    if not tail? block [
+        fail/blame [
+            "Unused argument data at end of POINTFREE block"
+        ] $block
+    ]
+
+    return runs frame
+]
+</code></pre>
+<h3>
+<a name="higher-level-pointfree-includes-the-applicand-in-the-block-4" class="anchor" href="https://forum.rebol.info#higher-level-pointfree-includes-the-applicand-in-the-block-4"></a>Higher-Level POINTFREE Includes the Applicand In The BLOCK!</h3>
+<p>This higher-level version wants the name of an action at the head of the block, e.g.</p>
+<pre><code>pointfree [append _ [d e]]
+=&gt;
+pointfree* :append [_ [d e]]
+</code></pre>
+<p>It does this by specializing out the frame on the interface of POINTFREE* and just taking a block.  Then when it's called, it overwrites the dummy specialization with a frame from the first block element, and updates the block to be one step forward.</p>
+<pre><code>pointfree: specialize (adapt get $pointfree* [
+    frame: (match frame! any [  ; no SET-WORD! namecache
+        if match [word! path!] block.1 [
+            unrun get/any inside block block.1
+        ]
+    ]) else [
+        fail "POINTFREE requires FRAME! argument at head of block"
+    ]
+
+    block: next block
+])[
+    frame: unrun get $panic/value  ; overwritten, best to be something mean
 ]
 </code></pre>
           <p><a href="https://forum.rebol.info/t/looking-into-a-usermode-pointfree/1236/1">Read full topic</a></p>

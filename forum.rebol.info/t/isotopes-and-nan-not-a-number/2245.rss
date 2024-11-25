@@ -1,0 +1,627 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Isotopes and NaN (Not a Number)</title>
+    <link>https://forum.rebol.info/t/isotopes-and-nan-not-a-number/2245</link>
+    <description>Prior to the existence of isotopes--when only VOID and NULL existed as outliers--I had an idea that VOIDs and NULLs could act as the *quiet NaN* and *signaling NaN* forms of  [&quot;not-a-number&quot; (NaN)](https://en.wikipedia.org/wiki/NaN).  The goal of this is to allow math handling to be more graceful, without needing to set up TRAPs and such--you can be selective about which operations you are willing to have fail, and supply code to fill in such cases.
+
+## Original Idea: Math Ops Follow [VOID-IN-NULL-OUT](https://forum.rebol.info/t/the-void-in-null-out-protocol/1880)
+
+This was the proposed behavior for NULL as signaling NaN and VOID as quiet NaN:
+
+    &gt;&gt; square-root -1
+    == ~null~  ; anti
+
+    &gt;&gt; maybe square-root -1
+    == ~void~  ; anti
+
+    &gt;&gt; 1 + square-root -1
+    ** Error: + doesn&#39;t accept NULL for its value2 argument
+
+    &gt;&gt; 1 + (square-root -1 else [10])  ; selective handling
+    == 11
+
+    &gt;&gt; 1 + maybe square-root -1  ; propagation
+    == ~null~  ; anti
+
+## But I Don&#39;t Like VOID as Quiet NaN (and It Breaks Compares)
+
+I prefer that when void arguments are received by math functions, **[they return the other operand](https://forum.rebol.info/t/opting-out-of-math-functions-with-void/2244)** (with the exception of void divisors)...not a noisy NaN.
+
+    &gt;&gt; 10 * if 1 &gt; 100 [20]
+    == 10
+
+Also, Wikipedia has a little table about how NaNs work with comparisons:
+
+&gt; Comparison between NaN and any floating-point value  *x*  (including NaN and ±∞)
+&gt;
+&gt; * **NaN ≥ x** =&gt; *Always False*
+&gt; * **NaN ≤  x** =&gt; *Always False*
+&gt; * **NaN &gt; x** =&gt; *Always False*
+&gt; * **NaN &lt; x** =&gt; *Always False*
+&gt; * **NaN = x** =&gt; *Always False*
+&gt; * **NaN ≠ x** =&gt; *Always True*
+
+Look at that last case.  If VOID is the quiet NaN, you can&#39;t have that comparison returning NULL, because it would be falsey instead of truthy...so VOID-in-NULL-out breaks down here:
+
+    &gt;&gt; 10 != (1 + try square-root -1)
+    ** Error: != doesn&#39;t accept NULL for its value2 argument
+
+    &gt;&gt; 10 = (maybe 1 + maybe square-root -1)
+    == ~null~  ; anti  ...not a LOGIC!, but it is falsey, so uh...perhaps? :-/
+
+    &gt;&gt; 10 != (maybe 1 + maybe square-root -1)
+    == ~null~  ; anti  ...okay, now that&#39;s just wrong.
+
+*(I&#39;ve made similar observations about [VOID-in-NULL-out with LOGIC! returning functions](https://forum.rebol.info/t/the-void-in-null-out-protocol/1880/8?u=hostilefork) before.)*
+
+Beyond not liking VOID for quiet NaN, I&#39;m not hot on NULL being the noisy NaN either.
+  
+## New Idea: Signaling is Error Antiform, Quiet is ~NaN~ Antiform
+
+A lot of design space opened up with the [introduction of generalized isotopes](https://forum.rebol.info/t/a-justification-of-generalized-isotopes/1918).
+
+So I think signaling NaN should be [an error antiform](https://forum.rebol.info/t/fail-vs-return-raise-the-new-age-of-definitional-errors/1852).  And quiet NaN should probably just be the ~NaN~ WORD! antiform.
+
+TRY typically converts antiform errors to NULL, so they don&#39;t promote to abrupt failures.  But if TRY converted the specific NaN error antiform to the ~NaN~ word antiform, we could avoid having to come up with a special word for &quot;MATH-TRY&quot;.
+
+(This makes me think that quiet ~NaN~ word antiform should be falsey, so the usage pattern can line up with other null-bearing TRY instances...and I imagine MAYBE should also turn quiet ~NaN~ to VOID, for similar reasons.)
+
+Anyway, here&#39;s how this would play out:
+
+    &gt;&gt; square-root -1  ; unhandled raised error return promotes to abrupt failure
+    ** Error: Not a Number
+
+    &gt;&gt; try square-root -1  ; TRY intercepts raised error before it abruptly fails
+    == ~NaN~  ; anti
+
+    &gt;&gt; 1 + square-root -1
+    ** Error: Not a Number  ; was promoted to abrupt failure before + could see it
+
+    &gt;&gt; 1 + try square-root -1  ; TRY makes quiet ~NaN~, then + propagates
+    == ~NaN~  ; anti
+
+    &gt;&gt; 10 != (1 + try square-root -1)
+    == ~true~  ; anti
+
+    &gt;&gt; 10 = (1 + try square-root -1)
+    == ~false~  ; anti
+
+    &gt;&gt; 1 + ((try square-root -1) else [10])
+    == 11
+
+    &gt;&gt; 1 + any [square-root -1, 10]
+    ** Error: Not a Number
+
+    &gt;&gt; 1 + any [try square-root -1, 10]
+    == 11
+
+## I Think That Looks Solid
+
+Another day, [another success story for isotopes](https://forum.rebol.info/t/the-theory-of-meta-representability/2217).  Definitionally raised error antiforms provide the mechanics to make an interceptible error by contract as a return value that isn&#39;t itself an abrupt failure, but promotes to abrupt failure when not anticipated.  :atom_symbol: 
+
+And it&#39;s cool that we have another WORD! antiform state that has the properties we want, while not being able to be put in blocks... but which has a quasi state that can, if you need to pipe things around:
+
+    &gt;&gt; try sqrt -1
+    == ~NaN~  ; anti
+    
+    &gt;&gt; block: append [1 2 3] try sqrt -1
+    ** Error: append doesn&#39;t accept ~NaN~ antiform as its value argument
+
+    &gt;&gt; block: append [1 2 3] meta try sqrt -1
+    == [1 2 3 ~NaN~]
+
+    &gt;&gt; block.4
+    == ~NaN~
+
+    &gt;&gt; 10 + block.4
+    ** Error: + doesn&#39;t accept ~NaN~ quasiform as its value2 argument
+
+    &gt;&gt; unmeta block.4
+    == ~NaN~  ; anti
+
+    &gt;&gt; 10 + unmeta block.4
+    == ~NaN~  ; anti
+
+And heck, **`raise ~NaN~`** could produce the error antiform, bringing things full circle.</description>
+    
+    <lastBuildDate>Wed, 04 Sep 2024 06:57:16 +0000</lastBuildDate>
+    <category>Math</category>
+    <atom:link href="https://forum.rebol.info/t/isotopes-and-nan-not-a-number/2245.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Isotopes and NaN (Not a Number)</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <h2><a name="p-7554-a-red-sorting-issue-provides-a-further-case-study-1" class="anchor" href="https://forum.rebol.info#p-7554-a-red-sorting-issue-provides-a-further-case-study-1"></a>A Red Sorting Issue Provides a Further Case Study</h2>
+<aside class="onebox githubissue" data-onebox-src="https://github.com/red/red/issues/3396">
+  <header class="source">
+
+      <a href="https://github.com/red/red/issues/3396" target="_blank" rel="noopener">github.com/red/red</a>
+  </header>
+
+  <article class="onebox-body">
+    <div class="github-row">
+  <div class="github-icon-container" title="Issue" data-github-private-repo="false">
+	  <svg width="60" height="60" class="github-icon" viewBox="0 0 14 16" aria-hidden="true"><path fill-rule="evenodd" d="M7 2.3c3.14 0 5.7 2.56 5.7 5.7s-2.56 5.7-5.7 5.7A5.71 5.71 0 0 1 1.3 8c0-3.14 2.56-5.7 5.7-5.7zM7 1C3.14 1 0 4.14 0 8s3.14 7 7 7 7-3.14 7-7-3.14-7-7-7zm1 3H6v5h2V4zm0 6H6v2h2v-2z"></path></svg>
+  </div>
+
+  <div class="github-info-container">
+    <h4>
+      <a href="https://github.com/red/red/issues/3396" target="_blank" rel="noopener">sort trips on NaNs</a>
+    </h4>
+
+    <div class="github-info">
+      <div class="date">
+        opened <span class="discourse-local-date" data-format="ll" data-date="2018-05-22" data-time="15:19:05" data-timezone="UTC">03:19PM - 22 May 18 UTC</span>
+      </div>
+
+
+      <div class="user">
+        <a href="https://github.com/hiiamboris" target="_blank" rel="noopener">
+          <img alt="hiiamboris" src="https://avatars.githubusercontent.com/u/25307049?v=4" class="onebox-avatar-inline" width="20" height="20">
+          hiiamboris
+        </a>
+      </div>
+    </div>
+
+    <div class="labels">
+        <span style="display:inline-block;margin-top:2px;background-color: #B8B8B8;padding: 2px;border-radius: 4px;color: #fff;margin-left: 3px;">
+          type.review
+        </span>
+    </div>
+  </div>
+</div>
+
+  <div class="github-row">
+    <p class="github-body-container">### Steps to reproduce the problem
+```
+sort [1.#inf -1.0 1.#nan 1.0 -1.#inf 1.<span class="show-more-container"><a href="" rel="noopener" class="show-more">…</a></span><span class="excerpt hidden">#nan 0]
+sort/reverse [1.#inf -1.0 1.#nan 1.0 -1.#inf 1.#nan 0]
+```
+
+### Actual behavior
+```
+&gt;&gt; sort [1.#inf -1.0 1.#nan 1.0 -1.#inf 1.#nan 0]
+== [-1.0 1.#INF 1.#NaN -1.#INF 1.0 1.#NaN 0]
+&gt;&gt; sort/reverse [1.#inf -1.0 1.#nan 1.0 -1.#inf 1.#nan 0]
+== [1.#INF -1.0 1.#NaN 1.0 -1.#INF 1.#NaN 0]
+```
+As you can see NaNs sort of "delimit" the sorting groups: `sort` does not pass values around them. This makes the output of `sort` depend on the order in which values in the block were laid out. Which is not what one expects from `sort`, right?
+
+### Expected behavior
+Forward sort might produce any of the following:
+```
+== [-1.#INF -1.0 0 1.0 1.#INF 1.#NaN 1.#NaN]
+== [1.#NaN 1.#NaN -1.#INF -1.0 0 1.0 1.#INF]
+```
+and reverse sort any of:
+```
+== [1.#INF 1.0 0 -1.0 -1.#INF 1.#NaN 1.#NaN]
+== [1.#NaN 1.#NaN 1.#INF 1.0 0 -1.0 -1.#INF]
+```
+Doesn't matter at which end are NaNs, but
+```
+x: reverse sort copy [1.#inf -1.0 1.#nan 1.0 -1.#inf 1.#nan 0]
+y: sort/reverse copy [1.#inf -1.0 1.#nan 1.0 -1.#inf 1.#nan 0]
+r: yes
+repeat i length? x [
+   set [a b] reduce [x/:i y/:i]
+   r: all [ r
+      any [ a = b                 ;-- equal
+         all [a &lt;&gt; a  b &lt;&gt; b]     ;-- both are NaNs
+      ]
+   ]
+]
+```
+should hold true.
+
+### Red and platform version
+```
+-----------RED &amp; PLATFORM VERSION----------- 
+RED: [ branch: "master" tag: #v0.6.3 ahead: 703 date: 10-May-2018/3:19:55 commit: #7c5f402062ac67fbd6078592ca477bbe91a56f92 ]
+PLATFORM: [ name: "Windows 7 Service Pack 1" OS: 'Windows arch: 'x86-64 version: 6.1.1 build: 7601 ]
+--------------------------------------------
+```</span></p>
+  </div>
+
+  </article>
+
+  <div class="onebox-metadata">
+    
+    
+  </div>
+
+  <div style="clear: both"></div>
+</aside>
+
+<p>qtxie says:</p>
+<blockquote>
+<p>You cannot sort <code>NaN</code> as it's not equal to any float values, and neither greater nor lesser than any float values. <a href="https://en.wikipedia.org/wiki/NaN#Comparison_with_NaN" class="inline-onebox">NaN - Wikipedia</a></p>
+</blockquote>
+<p>hiiamboris says:</p>
+<blockquote>
+<p>I suggest that <code>sort</code> should treat NaNs <em>as if</em> these were of different <em>type</em> than floats. Although it's a design decision that should be taken by the core team only.</p>
+</blockquote>
+<p>Gregg says kind of what I say above:</p>
+<blockquote>
+<p>The question for me is not what IEEE says, but what makes Red b) produce the most useful result that is easy to reason about¹ (e.g. NaNs group together and other values are sorted correctly), and a) not look stupid.</p>
+</blockquote>
+<p>Beyond that, they have <a href="https://github.com/red/red/issues/5362">a bunch of bugs that arise when some given function (e.g. max)</a> isn't consciously written to handle the NaN or other anomalous states.  The bugs they've logged aren't the only ones they have--merely the ones someone tripped over and complained about--it's a systemic problem.</p>
+<p>Rebol2 and R3-Alpha avoided the problem by just not having the representations.  But if they're going to exist (and I think they likely should), it seems clear to me that it's better if a routine that takes FLOAT! not be getting these states unless their typecheck interface says they can handle them.  A parameter typecheck error is better than just doing something random or wrong.</p>
+<p>Antiform word! <code>~NaN~</code>... and definitional error! NaN... working together... have cross-cutting benefits to sorting this all out.  I believe similar arguments apply to the <code>~+inf~</code>, <code>~-inf~</code>, <code>~+0~</code> and <code>~-0~</code> cases, assuming that supporting them does more good than harm.</p>
+          <p><a href="https://forum.rebol.info/t/isotopes-and-nan-not-a-number/2245/8">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/isotopes-and-nan-not-a-number/2245/8</link>
+        <pubDate>Wed, 04 Sep 2024 05:59:46 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-2245-8</guid>
+        <source url="https://forum.rebol.info/t/isotopes-and-nan-not-a-number/2245.rss">Isotopes and NaN (Not a Number)</source>
+      </item>
+      <item>
+        <title>Isotopes and NaN (Not a Number)</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="bradrn" data-post="6" data-topic="2245">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/bradrn/48/365_2.png" class="avatar"> bradrn:</div>
+<blockquote>
+<p>It would be a nice representation, if only IEEE 754 hadn’t already defined them as valid floating-point numbers.</p>
+</blockquote>
+</aside>
+<p>I don't consider myself beholden to IEEE 754, any more than I consider myself beholden to ISO 8601, or <strong><a href="https://en.wikipedia.org/wiki/ISO_3103">ISO 3103</a></strong>.  Rebol is a rebellion, after all.  <img src="https://forum.rebol.info/images/emoji/twitter/teapot.png?v=12" title=":teapot:" class="emoji" alt=":teapot:" loading="lazy" width="20" height="20"></p>
+<p><strong><a href="https://forum.rebol.info/t/isotopes-and-nan-not-a-number/2245/5">Review my list of benefits above (UPDATED).</a></strong></p>
+<p><img src="https://forum.rebol.info/images/emoji/twitter/point_up.png?v=12" title=":point_up:" class="emoji only-emoji" alt=":point_up:" loading="lazy" width="20" height="20"></p>
+<p><strong>Remember: this is coming from a place where Rebol2 and R3-Alpha made the decision to simplify programmers' lives by guarding them from the nasties altogether.</strong>  You are the sort of person clearly who would prefer to go all-in (though your biases may change with time...)</p>
+<p>But this is a middle ground.  I'm sure there'd be someone out there would be mad when their spew of IEEE 754 literals in a text file from another language--with crazy states--didn't load without tweaking.  Yet someone else out there is going to be glad they didn't just get streaming wild numbers into their program, that math blithely tolerated and caused baffling results.  I'm pretty sure most Rebol programs are going to be in the latter category--which is what drove the original decision to prohibit the states.</p>
+<p><em>"I don't know what the secret to success is.  But the secret to failure is trying to please everybody."</em></p>
+<aside class="quote no-group" data-username="bradrn" data-post="6" data-topic="2245">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/bradrn/48/365_2.png" class="avatar"> bradrn:</div>
+<blockquote>
+<p>It seems very wrong to me that floats with the same representation should be split up between two (or more) different types.</p>
+</blockquote>
+</aside>
+<p>Strongly agree.  This is why only the antiforms would be legal.</p>
+<p>They could still BINARY! convert as their IEEE representation (or textually convert):</p>
+<pre><code>&gt;&gt; sqrt -1
+== ~NaN~ ; anti
+
+&gt;&gt; to binary! sqrt -1
+== #{FFF8000000000000}
+</code></pre>
+<p>Though I've never cared for the implicit choice of encoding on that.  It's why I like <a href="https://forum.rebol.info/t/binary-dialected-encoding-decoding-instead-of-to-conversions/1270">ENBIN and DEBIN</a>.</p>
+<p>So I'd rather that be something like:</p>
+<pre><code>&gt;&gt; encode @IEEE-754 (sqrt -1)
+== #{FFF8000000000000}
+</code></pre>
+<p><em>(Note that I am a stickler for not conflating quasiforms with their antiform state, e.g. I would not allow <strong><code>encode @IEEE-754 '~NaN~</code></strong>.  I consider being committed to not doing such conflations to be a critical aspect of isotopic design.  Though I can't control what people do in their own functions, and maybe someone has a good reason to do it...but I'm doubtful.)</em></p>
+<p>Automatically converting the IEEE 754 notation to the ~NaN~ quasiform in loading blocks is clearly bad mojo.  It's not only injecting an unexpected type for what you might have thought was a FLOAT!, the quasiform is not semantically an actual NaN until you unmeta it.  So I'd say that <strong><code>1.#NaN</code></strong> is simply an error as far as the scanner is concerned (which is the case historically and today).  But the error could guide you to the existence of <code>~NaN~</code> if you wished to go that route... and if the literal wasn't actually the by-product of some error or unexpected condition (which I imagine 99% of the time it would be).</p>
+          <p><a href="https://forum.rebol.info/t/isotopes-and-nan-not-a-number/2245/7">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/isotopes-and-nan-not-a-number/2245/7</link>
+        <pubDate>Wed, 04 Sep 2024 00:49:20 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-2245-7</guid>
+        <source url="https://forum.rebol.info/t/isotopes-and-nan-not-a-number/2245.rss">Isotopes and NaN (Not a Number)</source>
+      </item>
+      <item>
+        <title>Isotopes and NaN (Not a Number)</title>
+        <dc:creator><![CDATA[bradrn]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group quote-modified" data-username="hostilefork" data-post="5" data-topic="2245">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>Well, I'm more committed to the definitional error part than what they get turned into.</p>
+</blockquote>
+</aside>
+<p>In that case, a suggestion: allow antiforms of INTEGER! and FLOAT! to act as definitional errors too. That gives you antiform NaNs ‘for free’, and I can see applications beyond that too (e.g. for representing return codes).</p>
+<aside class="quote no-group quote-modified" data-username="hostilefork" data-post="5" data-topic="2245">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>My instincts on containing these make me think being antiforms makes more sense--and it also would be a nice representation.</p>
+</blockquote>
+</aside>
+<p>It would be a nice representation, if only IEEE 754 hadn’t already defined them as valid floating-point numbers. It seems very wrong to me that floats with the same representation should be split up between two (or more) different types.</p>
+          <p><a href="https://forum.rebol.info/t/isotopes-and-nan-not-a-number/2245/6">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/isotopes-and-nan-not-a-number/2245/6</link>
+        <pubDate>Wed, 04 Sep 2024 00:25:49 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-2245-6</guid>
+        <source url="https://forum.rebol.info/t/isotopes-and-nan-not-a-number/2245.rss">Isotopes and NaN (Not a Number)</source>
+      </item>
+      <item>
+        <title>Isotopes and NaN (Not a Number)</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="bradrn" data-post="4" data-topic="2245">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/bradrn/48/365_2.png" class="avatar"> bradrn:</div>
+<blockquote>
+<p>Haven’t read the rest of the discussion, but these things (as well as the NaNs) shouldn’t be antiforms. They should be <em>numbers</em> — ordinary floating-point numbers, as defined by the relevant standards.</p>
+</blockquote>
+</aside>
+<p>So you're saying Not-a-Number should be...a number?  I thought you were <a href="https://forum.rebol.info/t/quasiforms-stable-unstable-isotopes-simpler-terminology/2005/4">all about logic and consistency in terminology</a>.  <img src="https://forum.rebol.info/images/emoji/twitter/slight_smile.png?v=12" title=":slight_smile:" class="emoji" alt=":slight_smile:" loading="lazy" width="20" height="20"></p>
+<pre><code>red&gt;&gt; sqrt -1
+== 1.#NaN
+
+red&gt;&gt; number? sqrt -1
+== true
+</code></pre>
+<aside class="quote no-group" data-username="bradrn" data-post="4" data-topic="2245">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/bradrn/48/365_2.png" class="avatar"> bradrn:</div>
+<blockquote>
+<p>Making them a different type will become an exercise in frustration, as floating-point numbers suddenly start turning into other types unexpectedly.</p>
+</blockquote>
+</aside>
+<p>Well, I'm more intractably committed to the definitional error part than what the defused errors get turned into.  But still feeling pretty confident about the worth of the antiform NaN...</p>
+<ul>
+<li>
+<p>I like the clean notation.</p>
+</li>
+<li>
+<p>I like the falseyness.</p>
+</li>
+<li>
+<p>I like that you can't casually put NaN in blocks (but you have means to meta-represent them if you consciously need that...and it makes sense this handling would closely align to how ~null~ and ~void~ and ~ are dealt with).</p>
+</li>
+<li>
+<p>I like that functions which take floating point numbers wouldn't take these by default unless they said they did, e.g. <strong><code>arg [~NaN~ float!]</code></strong></p>
+</li>
+<li>
+<p>I like that functions which don't specify <strong><code>return: [~NaN~ float!]</code></strong> can't return a NaN.</p>
+<ul>
+<li>Currently we wouldn't be able to stop a function from returning the Signaling form of NaN.  Because we do not limit the definitional errors that are legal for a function to return--any function can raise any error.  But we should be enforcing contracts...and breaking the contract should trigger an abrupt "you broke the contract" failure.   Maybe something like FENCE! in function specs could list the IDs of the errors that were legal?  <strong><code>return: [float! {not-a-number}]</code></strong></li>
+</ul>
+</li>
+<li>
+<p>I like that before you PRINT or WRITE or otherwise do anything to propagate these values, you get a little speedbump where you need to triage the antiform--<em>because these are exceptional states that don't occur in 99% of correctly functioning Rebol programs</em>.</p>
+</li>
+<li>
+<p>I like the idea that--as with historical Rebol--trying to LOAD a NaN float literal like <strong><code>1.#NaN</code></strong> will give you an error, because 99% of the time that is likely representative of an unexpected condition upstream in your input vs. an intentional desire to give you a FLOAT!.  It's another place where forcing triage is preferred.  Once switched to a ~NaN~ quasiform it is no longer a FLOAT!, forcing conscious handling with UNMETA or DEGRADE.</p>
+</li>
+</ul>
+<p>Those attributes would not be accomplished with a floating point literal form and plowing along with other languages' status quo.</p>
+<p>Anyway...we'll have to look at practical examples.  I'm pretty sure my idea is a good path to take.  Though as I say, I don't use Rebol for math (or really anything for math, the kinds of programs I tend to wind up working on don't need a whole lot of it).</p>
+          <p><a href="https://forum.rebol.info/t/isotopes-and-nan-not-a-number/2245/5">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/isotopes-and-nan-not-a-number/2245/5</link>
+        <pubDate>Wed, 04 Sep 2024 00:17:40 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-2245-5</guid>
+        <source url="https://forum.rebol.info/t/isotopes-and-nan-not-a-number/2245.rss">Isotopes and NaN (Not a Number)</source>
+      </item>
+      <item>
+        <title>Isotopes and NaN (Not a Number)</title>
+        <dc:creator><![CDATA[bradrn]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="2" data-topic="2245">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>As for the rest of the discussion, it's more than I want to tackle right now. But maybe <a class="mention" href="https://forum.rebol.info/u/bradrn">@bradrn</a> has ideas on whether we'd need <strong><code>~+inf~</code></strong>, <strong><code>~-inf~</code></strong>, <strong><code>~+0~</code></strong> and <strong><code>~-0~</code></strong> antiforms...</p>
+</blockquote>
+</aside>
+<p>Haven’t read the rest of the discussion, but these things (as well as the NaNs) shouldn’t be antiforms. They should be <em>numbers</em> — ordinary floating-point numbers, as defined by the relevant standards. Making them a different type will become an exercise in frustration, as floating-point numbers suddenly start turning into other types unexpectedly.</p>
+          <p><a href="https://forum.rebol.info/t/isotopes-and-nan-not-a-number/2245/4">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/isotopes-and-nan-not-a-number/2245/4</link>
+        <pubDate>Wed, 04 Sep 2024 00:12:44 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-2245-4</guid>
+        <source url="https://forum.rebol.info/t/isotopes-and-nan-not-a-number/2245.rss">Isotopes and NaN (Not a Number)</source>
+      </item>
+      <item>
+        <title>Isotopes and NaN (Not a Number)</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="2245">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>Wikipedia has a little table about how NaNs work with comparisons:</p>
+</blockquote>
+</aside>
+<p>There's another rule, which is that one NaN can't equal another NaN.  That's easy enough to throw in.</p>
+<p>However...</p>
+<aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="2245">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">&gt;&gt; block: append [1 2 3] meta try sqrt -1
+== [1 2 3 ~NaN~]
+
+&gt;&gt; block.4
+== ~NaN~
+</code></pre>
+</blockquote>
+</aside>
+<p>Once you META or REIFY a NaN, you get an ordinary quasi-word part.  The special handling won't apply.</p>
+<p>So meta-NaN would equal a meta-NaN.</p>
+<pre><code>&gt;&gt; block.4 = block.4
+== ~true~  ; anti
+
+&gt;&gt; (unmeta block.4) = (unmeta block.4)
+== ~false~  ; anti
+</code></pre>
+<p>A bit weird, but, that's the way this particular cookie bounces.  <img src="https://forum.rebol.info/images/emoji/twitter/cookie.png?v=12" title=":cookie:" class="emoji" alt=":cookie:" loading="lazy" width="20" height="20"></p>
+          <p><a href="https://forum.rebol.info/t/isotopes-and-nan-not-a-number/2245/3">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/isotopes-and-nan-not-a-number/2245/3</link>
+        <pubDate>Tue, 03 Sep 2024 23:45:01 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-2245-3</guid>
+        <source url="https://forum.rebol.info/t/isotopes-and-nan-not-a-number/2245.rss">Isotopes and NaN (Not a Number)</source>
+      </item>
+      <item>
+        <title>Isotopes and NaN (Not a Number)</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>Red has added non-signaling NaN support:</p>
+<pre><code>red&gt;&gt; sqrt -1
+== 1.#NaN
+
+red&gt;&gt; 10 = sqrt -1
+== false
+
+red&gt;&gt; 1 + sqrt -1
+== 1.#NaN
+
+red&gt;&gt; 1 = sqrt -1
+== false
+
+red&gt;&gt; 1 != sqrt -1
+== true
+</code></pre>
+<p>It's considered to be a FLOAT! type, and is truthy:</p>
+<pre><code>red&gt;&gt; type? sqrt -1
+== float!
+
+red&gt;&gt; any [(1 + sqrt -1) 1020]
+== 1.#NaN
+</code></pre>
+<p>But they don't have a signaling form.</p>
+<p>Historical Rebol2 and R3-Alpha do not support NaN at all.</p>
+<h2><a name="p-7545-old-discussion-on-nan-from-the-r3-alpha-issue-database-1" class="anchor" href="https://forum.rebol.info#p-7545-old-discussion-on-nan-from-the-r3-alpha-issue-database-1"></a>Old Discussion on NaN From The R3-Alpha Issue Database</h2>
+<p>It also wanders into topics like positive and negative zero and infinity.</p>
+<p><a href="https://github.com/metaeducation/rebol-issues/issues/1902" class="inline-onebox">my view of the nan/inf arithmetic · Issue #1902 · metaeducation/rebol-issues · GitHub</a></p>
+<p>BrianH says:</p>
+<blockquote>
+<p>The main problem is that for people doing scientific calculations Inf and NaN are values that are expected, and which they have been trained to deal with and require in some cases.</p>
+<p>However, for people not doing scientific calculations (i.e. regular programmers), those are values that they need to avoid. (...)</p>
+<p>You might notice that these are conflicting requirements. This is why scientists often use different programming languages than the ones that regular programmers use, or special versions of the regular languages, or special libraries for the regular languages. And this is why the vast majority of programmers don't use those languages, or versions, or libraries.</p>
+<p>So, what would be the best way for REBOL to support those conflicting requirements?</p>
+</blockquote>
+<p>Feel like I've found the best way.  <img src="https://forum.rebol.info/images/emoji/twitter/slight_smile.png?v=12" title=":slight_smile:" class="emoji" alt=":slight_smile:" loading="lazy" width="20" height="20">  Though you could ADAPT your math functions to squash the definitional NaN errors on their inputs without needing to do TRY if you want.</p>
+<p>As for the rest of the discussion, it's more than I want to tackle right now.  But maybe <a class="mention" href="https://forum.rebol.info/u/bradrn">@bradrn</a> has ideas on whether we'd need <strong><code>~+inf~</code></strong>, <strong><code>~-inf~</code></strong>, <strong><code>~+0~</code></strong> and <strong><code>~-0~</code></strong> antiforms...</p>
+          <p><a href="https://forum.rebol.info/t/isotopes-and-nan-not-a-number/2245/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/isotopes-and-nan-not-a-number/2245/2</link>
+        <pubDate>Tue, 03 Sep 2024 23:39:40 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-2245-2</guid>
+        <source url="https://forum.rebol.info/t/isotopes-and-nan-not-a-number/2245.rss">Isotopes and NaN (Not a Number)</source>
+      </item>
+      <item>
+        <title>Isotopes and NaN (Not a Number)</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>Prior to the existence of isotopes--when only VOID and NULL existed as outliers--I had an idea that VOIDs and NULLs could act as the <em>quiet NaN</em> and <em>signaling NaN</em> forms of  <a href="https://en.wikipedia.org/wiki/NaN">"not-a-number" (NaN)</a>.  The goal of this is to allow math handling to be more graceful, without needing to set up TRAPs and such--you can be selective about which operations you are willing to have fail, and supply code to fill in such cases.</p>
+<h2><a name="p-7539-original-idea-math-ops-follow-void-in-null-outhttpsforumrebolinfotthe-void-in-null-out-protocol1880-1" class="anchor" href="https://forum.rebol.info#p-7539-original-idea-math-ops-follow-void-in-null-outhttpsforumrebolinfotthe-void-in-null-out-protocol1880-1"></a>Original Idea: Math Ops Follow <a href="https://forum.rebol.info/t/the-void-in-null-out-protocol/1880">VOID-IN-NULL-OUT</a></h2>
+<p>This was the proposed behavior for NULL as signaling NaN and VOID as quiet NaN:</p>
+<pre><code>&gt;&gt; square-root -1
+== ~null~  ; anti
+
+&gt;&gt; maybe square-root -1
+== ~void~  ; anti
+
+&gt;&gt; 1 + square-root -1
+** Error: + doesn't accept NULL for its value2 argument
+
+&gt;&gt; 1 + (square-root -1 else [10])  ; selective handling
+== 11
+
+&gt;&gt; 1 + maybe square-root -1  ; propagation
+== ~null~  ; anti
+</code></pre>
+<h2><a name="p-7539-but-i-dont-like-void-as-quiet-nan-and-it-breaks-compares-2" class="anchor" href="https://forum.rebol.info#p-7539-but-i-dont-like-void-as-quiet-nan-and-it-breaks-compares-2"></a>But I Don't Like VOID as Quiet NaN (and It Breaks Compares)</h2>
+<p>I prefer that when void arguments are received by math functions, <strong><a href="https://forum.rebol.info/t/opting-out-of-math-functions-with-void/2244">they return the other operand</a></strong> (with the exception of void divisors)...not a noisy NaN.</p>
+<pre><code>&gt;&gt; 10 * if 1 &gt; 100 [20]
+== 10
+</code></pre>
+<p>Also, Wikipedia has a little table about how NaNs work with comparisons:</p>
+<blockquote>
+<p>Comparison between NaN and any floating-point value  <em>x</em>  (including NaN and ±∞)</p>
+<ul>
+<li><strong>NaN ≥ x</strong> =&gt; <em>Always False</em></li>
+<li><strong>NaN ≤  x</strong> =&gt; <em>Always False</em></li>
+<li><strong>NaN &gt; x</strong> =&gt; <em>Always False</em></li>
+<li><strong>NaN &lt; x</strong> =&gt; <em>Always False</em></li>
+<li><strong>NaN = x</strong> =&gt; <em>Always False</em></li>
+<li><strong>NaN ≠ x</strong> =&gt; <em>Always True</em></li>
+</ul>
+</blockquote>
+<p>Look at that last case.  If VOID is the quiet NaN, you can't have that comparison returning NULL, because it would be falsey instead of truthy...so VOID-in-NULL-out breaks down here:</p>
+<pre><code>&gt;&gt; 10 != (1 + try square-root -1)
+** Error: != doesn't accept NULL for its value2 argument
+
+&gt;&gt; 10 = (maybe 1 + maybe square-root -1)
+== ~null~  ; anti  ...not a LOGIC!, but it is falsey, so uh...perhaps? :-/
+
+&gt;&gt; 10 != (maybe 1 + maybe square-root -1)
+== ~null~  ; anti  ...okay, now that's just wrong.
+</code></pre>
+<p><em>(I've made similar observations about <a href="https://forum.rebol.info/t/the-void-in-null-out-protocol/1880/8">VOID-in-NULL-out with LOGIC! returning functions</a> before.)</em></p>
+<p>Beyond not liking VOID for quiet NaN, I'm not hot on NULL being the noisy NaN either.</p>
+<h2><a name="p-7539-new-idea-signaling-is-error-antiform-quiet-is-nan-antiform-3" class="anchor" href="https://forum.rebol.info#p-7539-new-idea-signaling-is-error-antiform-quiet-is-nan-antiform-3"></a>New Idea: Signaling is Error Antiform, Quiet is ~NaN~ Antiform</h2>
+<p>A lot of design space opened up with the <a href="https://forum.rebol.info/t/a-justification-of-generalized-isotopes/1918">introduction of generalized isotopes</a>.</p>
+<p>So I think signaling NaN should be <a href="https://forum.rebol.info/t/fail-vs-return-raise-the-new-age-of-definitional-errors/1852">an error antiform</a>.  And quiet NaN should probably just be the ~NaN~ WORD! antiform.</p>
+<p>TRY typically converts antiform errors to NULL, so they don't promote to abrupt failures.  But if TRY converted the specific NaN error antiform to the ~NaN~ word antiform, we could avoid having to come up with a special word for "MATH-TRY".</p>
+<p>(This makes me think that quiet ~NaN~ word antiform should be falsey, so the usage pattern can line up with other null-bearing TRY instances...and I imagine MAYBE should also turn quiet ~NaN~ to VOID, for similar reasons.)</p>
+<p>Anyway, here's how this would play out:</p>
+<pre><code>&gt;&gt; square-root -1  ; unhandled raised error return promotes to abrupt failure
+** Error: Not a Number
+
+&gt;&gt; try square-root -1  ; TRY intercepts raised error before it abruptly fails
+== ~NaN~  ; anti
+
+&gt;&gt; 1 + square-root -1
+** Error: Not a Number  ; was promoted to abrupt failure before + could see it
+
+&gt;&gt; 1 + try square-root -1  ; TRY makes quiet ~NaN~, then + propagates
+== ~NaN~  ; anti
+
+&gt;&gt; 10 != (1 + try square-root -1)
+== ~true~  ; anti
+
+&gt;&gt; 10 = (1 + try square-root -1)
+== ~false~  ; anti
+
+&gt;&gt; 1 + ((try square-root -1) else [10])
+== 11
+
+&gt;&gt; 1 + any [square-root -1, 10]
+** Error: Not a Number
+
+&gt;&gt; 1 + any [try square-root -1, 10]
+== 11
+</code></pre>
+<h2><a name="p-7539-i-think-that-looks-solid-4" class="anchor" href="https://forum.rebol.info#p-7539-i-think-that-looks-solid-4"></a>I Think That Looks Solid</h2>
+<p>Another day, <a href="https://forum.rebol.info/t/the-theory-of-meta-representability/2217">another success story for isotopes</a>.  Definitionally raised error antiforms provide the mechanics to make an interceptible error by contract as a return value that isn't itself an abrupt failure, but promotes to abrupt failure when not anticipated.  <img src="https://forum.rebol.info/images/emoji/twitter/atom_symbol.png?v=12" title=":atom_symbol:" class="emoji" alt=":atom_symbol:" loading="lazy" width="20" height="20"></p>
+<p>And it's cool that we have another WORD! antiform state that has the properties we want, while not being able to be put in blocks... but which has a quasi state that can, if you need to pipe things around:</p>
+<pre><code>&gt;&gt; try sqrt -1
+== ~NaN~  ; anti
+
+&gt;&gt; block: append [1 2 3] try sqrt -1
+** Error: append doesn't accept ~NaN~ antiform as its value argument
+
+&gt;&gt; block: append [1 2 3] meta try sqrt -1
+== [1 2 3 ~NaN~]
+
+&gt;&gt; block.4
+== ~NaN~
+
+&gt;&gt; 10 + block.4
+** Error: + doesn't accept ~NaN~ quasiform as its value2 argument
+
+&gt;&gt; unmeta block.4
+== ~NaN~  ; anti
+
+&gt;&gt; 10 + unmeta block.4
+== ~NaN~  ; anti
+</code></pre>
+<p>And heck, <strong><code>raise ~NaN~</code></strong> could produce the error antiform, bringing things full circle.</p>
+          <p><a href="https://forum.rebol.info/t/isotopes-and-nan-not-a-number/2245/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/isotopes-and-nan-not-a-number/2245/1</link>
+        <pubDate>Tue, 03 Sep 2024 19:51:33 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-2245-1</guid>
+        <source url="https://forum.rebol.info/t/isotopes-and-nan-not-a-number/2245.rss">Isotopes and NaN (Not a Number)</source>
+      </item>
+  </channel>
+</rss>
