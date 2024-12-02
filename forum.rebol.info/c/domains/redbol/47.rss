@@ -5,8 +5,180 @@
     <link>https://forum.rebol.info/c/domains/redbol/47</link>
     <description>Topics in the &#39;Redbol&#39; category Issues regarding compatibility and emulation of &lt;a href=&quot;http://www.rebol.com/docs/docs.html&quot;&gt;Rebol2&lt;/a&gt; and &lt;a href=&quot;https://www.red-lang.org/p/about.html&quot;&gt;Red&lt;/a&gt;, as well as other things that would loosely be considered &quot;Rebol-family&quot; languages.</description>
     
-      <lastBuildDate>Tue, 20 Aug 2024 19:49:55 +0000</lastBuildDate>
+      <lastBuildDate>Sun, 01 Dec 2024 12:40:58 +0000</lastBuildDate>
       <atom:link href="https://forum.rebol.info/c/domains/redbol/47.rss" rel="self" type="application/rss+xml" />
+        <item>
+          <title>The %rebol.r Boot File From Rebol 1.0</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Redbol</category>
+          <description><![CDATA[
+            <p>While we don't have the C source code for Rebol 1.0, we do have the <code>%rebol.r</code> initialization file:</p>
+<p><a href="https://gist.github.com/hostilefork/d6cfac90141688bd41b1b38a9a203b02" class="inline-onebox">Rebol 1.0.2 Initialization File (October 7, 1998) · GitHub</a></p>
+<p>It would seem that if there were an ability to pack source code in with the executable, they would have done it...given that the Quick Start says <em>"do not modify <code>rebol.r</code>. If you accidentally do modify <code>rebol.r</code>, reinstall it."</em></p>
+<p><em><strong>Hence this is probably the entire portion of Rebol 1.0 that's written in Rebol, e.g. the whole "Mezzanine".</strong></em></p>
+<p>It says:</p>
+<pre><code>;;; Note: Code in rebol.r runs in the system context.  The system
+;;; context [has] all the built in bindings of the user context, but also
+;;; has extra bindings to allow rebol to be bootstrapped.  Many of the 
+;;; rebol functions available in user code are actually written in
+;;; terms of simpler rebol natives, or in terms of special
+;;; system natives.
+
+;;; REBOL reserves the right to change the system natives at any time, 
+;;; so you shouldn't depend on them for portable code.
+</code></pre>
+<h1><a name="p-7953-remarks-on-contents-in-no-particular-order-1" class="anchor" href="https://forum.rebol.info#p-7953-remarks-on-contents-in-no-particular-order-1"></a>Remarks On Contents, In No Particular Order</h1>
+<h2><a name="p-7953-func-definition-2" class="anchor" href="https://forum.rebol.info#p-7953-func-definition-2"></a>FUNC Definition</h2>
+<pre><code>func: make function! [args body] [make function! :args :body]
+</code></pre>
+<p>I found it a bit interesting that the <a href="https://forum.rebol.info/t/rebol-1-0-2-users-guide/2340/6#p-7944-func-shortcut-5">User Guide talked about how FUNC was defined</a>, as an illustrative example, of an important thing for users to know about.  (It turns out there's a <a href="https://www.rebol.com/docs/core23/rebolcore-9.html">brief mention in the Rebol2 User's Guide</a>, but the Rebol 1.0 Guide writes it up twice, probably on accident.)</p>
+<p>It's worth pointing out that there's big questions even in this seemingly simple definition.  Such as, should a function copy its arguments or body?  What should this do?</p>
+<pre><code> body: [print "Hello"]
+ foo: func [] body
+ append body [print "Goodbye"]
+ bar: func [] body
+</code></pre>
+<p>Does <strong>foo</strong> print just "Hello", or does it print "Hello" and "Goodbye"?</p>
+<p>I don't yet know what Rebol1 did, but Rebol2's MAKE FUNCTION! would <em>not</em> copy the body.  So FUNC would do a deep copy as the "higher level" operator, before passing it to MAKE FUNCTION!.</p>
+<p>But during bootstrap, it used a definition of FUNC that <em>didn't</em> copy the body, for performance reasons...which it switched over to the copying implementation at the end of boot.  <img src="https://forum.rebol.info/images/emoji/twitter/roll_eyes.png?v=12" title=":roll_eyes:" class="emoji" alt=":roll_eyes:" loading="lazy" width="20" height="20"></p>
+<p>Some version of these crazy optimizations are on the table for future Ren-C.</p>
+<h2><a name="p-7953-print-prin-probe-3" class="anchor" href="https://forum.rebol.info#p-7953-print-prin-probe-3"></a>PRINT, PRIN, PROBE</h2>
+<pre><code>write-block-or-element:
+    make function! [port element] [
+             do
+                if block? :element [:write-block] else [:form-to-port]
+                :port
+                :element]
+
+write-block: func [port block] [    ; !!! needs work
+    foreach element :block [form-to-port :port :element form-to-port :port " "]
+]
+
+prin: func [value] [
+    if block? :value [write-block output-port reduce :value]
+    else [form-to-port output-port :value]
+    exit
+]
+
+print: func [value] [
+    prin :value
+    linefeed-port output-port
+    exit
+]
+
+probe: func [value] [
+     prin " PROBE --&gt; "
+     send output-port :value
+     linefeed-port output-port
+     :value
+ ]
+</code></pre>
+<p>Weird.  (and prints a space after every element, so you get a space at the end of the line vs. just delimited between, etc.)</p>
+<p>At least one interesting aspect of this is to see the rigid "EXIT" at the end to make sure that PRIN and PRINT don't leak a result on accident.  Things like this feel like a vindication of Ren-C's <a href="https://forum.rebol.info/t/implicit-execution-of-return-in-functions-bad/1656">requirement to use a RETURN</a> in order to give back a result from FUNC (but not LAMBDA).</p>
+<h2><a name="p-7953-is-as-to-logic-4" class="anchor" href="https://forum.rebol.info#p-7953-is-as-to-logic-4"></a>IS? as TO-LOGIC</h2>
+<pre><code>is?: func [value] [not not :value]
+</code></pre>
+<p>This was called TRUE? in Rebol2, and I very much disliked the ambiguity of that vs. testing to see if a value was <code>= #[true]</code> the LOGIC! literal.</p>
+<p>I wrote something up about <a href="http://blog.hostilefork.com/did-programming-opposite-of-not/">how DID could be the opposite of NOT</a> (which even goes together as DIDN'T for DID NOT).  But due to some various shades of meaning the current state is that it means THEN? and DIDN'T means ELSE? as prefix tests for the trigger conditions that would run THEN or ELSE.  It needs thought.</p>
+<p>Anyway, interesting to see the choice of <code>IS?</code> here.</p>
+<h2><a name="p-7953-a-recursive-folding-any-and-all-interrobang-5" class="anchor" href="https://forum.rebol.info#p-7953-a-recursive-folding-any-and-all-interrobang-5"></a>A Recursive Folding ANY and ALL <img src="https://forum.rebol.info/images/emoji/twitter/interrobang.png?v=12" title=":interrobang:" class="emoji" alt=":interrobang:" loading="lazy" width="20" height="20"></h2>
+<pre><code>any: func [block] [
+    eval-one block
+        make function! [value rest] [
+            if not value [any rest]
+            else [value]
+        ]
+        make function! [value] [value]
+]
+
+all: func [block] [
+    eval-one block
+        make function! [value rest] [
+            if is? value [all rest]
+            else [false]
+        ]
+        make function! [value] [value]
+]
+</code></pre>
+<p>So this is based on a function called EVAL-ONE, that takes a list and two functions.  It isn't defined in %rebol.r and isn't in the reference guide either.  But it's a right fold with early termination.</p>
+<p>One can definitely imagine the Joe Marshall and Carl friction on this (<em>"why all you making all these these usermode functions and calls, why not just use a loop?"</em>).</p>
+<p>While there's a time and a place for this, I do think that if you are starting to push out into the usermode layers and finding this mentality is driving it...you're going to end up with something that isn't hitting the mark that Rebol was aiming at.</p>
+<h2><a name="p-7953-why-is-pick-so-weird-6" class="anchor" href="https://forum.rebol.info#p-7953-why-is-pick-so-weird-6"></a>Why Is PICK So Weird?</h2>
+<pre><code>pick: func [series index] [
+  do make function! [offset] [
+    if (:offset + index? :series) &lt;= 1
+        [none]
+    else [do make function! [disp] [
+            if (length? :disp) = 0 
+               [none]
+            else
+               [&amp;peek :disp 0]
+            ] skip :series if :offset &lt; 0 [:offset] else [:offset - 1]
+         ]
+    ] if logic? :index [if :index [1] else [2]] else [:index]
+]
+</code></pre>
+<p>My guess here is that the pattern:</p>
+<pre><code>do make function! [arg] [...code with arg...] value-for-arg
+</code></pre>
+<p>...is probably some holdover from before USE existed.  Or maybe USE is just an abstraction built on functions, and so it's done this way for optimization.  I dunno.</p>
+<h2><a name="p-7953-poor-mans-export-7" class="anchor" href="https://forum.rebol.info#p-7953-poor-mans-export-7"></a>Poor-Man's EXPORT</h2>
+<pre><code>;;; These functions can be defined in terms of system natives that are
+;;; not available in the user context.  Since we made the functions in 
+;;; this context, the values of the words in the body are relative to
+;;; this context.  But we place the functions in the user context so
+;;; that the users can call them.  This allows the user to call the
+;;; system natives through a defined API in a controlled manner.
+
+user-functions: [
+    dir? [file] [do func [info] [info/dir?] info? :file]
+    size? [file] [do func [info] [info/size] info? :file]
+    ...
+]
+
+foreach [name args body] user-functions [
+    context-set user-context name func args body
+]
+</code></pre>
+<p>So the comment says what's going on here, it's the attempt to push functions out into the user context when they're implemented in terms of functions that aren't available in the user context.  I'm not sure what's not available <em>(these implementations of DIR? and FILE? are based on INFO?, is that not exported to the user context?)</em></p>
+<p>As far as I know, there's nothing like this in Rebol2 (there's no separate <code>user-context</code> from a <code>system-context</code>, is there?)  Interesting if that was something that disappeared in Rebol2 and came back in Rebol3.</p>
+<h2><a name="p-7953-more-modularization-eval-reduce-takes-context-8" class="anchor" href="https://forum.rebol.info#p-7953-more-modularization-eval-reduce-takes-context-8"></a>More Modularization: EVAL-REDUCE Takes Context</h2>
+<pre><code>if not none? REBOL/script [
+    if exists? REBOL/script [
+        do make function! [] [
+                top-level-continuation: :return
+                if not REBOL/silent [
+                        linefeed
+                        prin "Loading script "
+                        print REBOL/script]
+                eval-reduce [do REBOL/script] user-context
+                ]
+        ]
+    ]
+</code></pre>
+<p>Rebol1 seems to have been working with modularization ideas, because even during startup, the script you pass on the command line is run via something called EVAL-REDUCE that takes a parameter of where to do the evaluation.</p>
+<p>So definitely a shame that Rebol2 seems to have moved away from the idea that evaluations needed to be done in a context.</p>
+<h2><a name="p-7953-catch-is-defined-in-terms-of-catch-func-9" class="anchor" href="https://forum.rebol.info#p-7953-catch-is-defined-in-terms-of-catch-func-9"></a>CATCH is defined in terms of CATCH-FUNC</h2>
+<p>We know from the <code>user-functions</code> exporting that this:</p>
+<pre><code>catch [word block] [catch-func func reduce [word] :block]
+</code></pre>
+<p>Is actually:</p>
+<pre><code>catch: func [word block] [catch-func func reduce [word] :block]
+</code></pre>
+<p>Since there's no type checking, there's a <code>:BLOCK</code> GET-WORD! just to be sure it's not a function, I guess?  And then it's FUNC's job to do a check in its implementation.  But then, why not <code>:WORD</code> just to be sure WORD! isn't a function you're calling?  <em>(I like pointing this out, due to Ren-C's better answers to this issue...avoiding the "pox of documenting what you <strong>don't</strong> know")</em></p>
+<p>So the idea of using functions as proxies for "virtual binding" is the <em>old way</em>.  What's going on here is that the block contains code that wants to be bound to whatever the throw construct is, and so that block is made the body of a function, that you call and pass the thing you want bound to that name as the argument.  (COLLECT+KEEP worked this way).  But it's undesirable, because it means you've lost the fluidity of having the currency of a structural BLOCK!...replaced with the black box of a function just because you wanted to bind something.</p>
+<p>I'm pretty sure this CATCH mechanic (being called a "continuation") is stackful and can't do anything too bizarre, but I'd like an executable to try and ensure that.</p>
+            <p><small>2 posts - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/the-rebol-r-boot-file-from-rebol-1-0/2344">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/the-rebol-r-boot-file-from-rebol-1-0/2344</link>
+          <pubDate>Sun, 01 Dec 2024 12:40:58 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2344</guid>
+          <source url="https://forum.rebol.info/t/the-rebol-r-boot-file-from-rebol-1-0/2344.rss">The %rebol.r Boot File From Rebol 1.0</source>
+        </item>
         <item>
           <title>More History Mining: Rebol 3.0 Front Line Blog</title>
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
@@ -910,6 +1082,24 @@ halt</code></pre>
           <source url="https://forum.rebol.info/t/old-idea-from-dockimbel-for-rebol2-rebol3-red/1814.rss">Old Idea from DocKimbel For Rebol2 =&gt; Rebol3/Red</source>
         </item>
         <item>
+          <title>REBOL 1.0 Retrospective</title>
+          <dc:creator><![CDATA[DefinitionalUsername]]></dc:creator>
+          <category>Redbol</category>
+          <description><![CDATA[
+            <p>I was reading about some of the design choices in REBOL, and came upon Joe Marshall's writings where he talks about the changes between REBOL 1 and 2 (missing continuations, changed scoping rules, absence of tail recursion, etc.). This made me curious about the differences between the two version; however, I can't find anything related to REBOL 1 on the internet (save for a Scheme compiler).</p>
+<p>Will it be possible to share the manual/guide/documentation for REBOL 1 here? It is a piece of history, and it'll be a shame if it just disappears.</p>
+            <p><small>2 posts - 2 participants</small></p>
+            <p><a href="https://forum.rebol.info/t/rebol-1-0-retrospective/1788">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/rebol-1-0-retrospective/1788</link>
+          <pubDate>Mon, 14 Feb 2022 03:29:26 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-1788</guid>
+          <source url="https://forum.rebol.info/t/rebol-1-0-retrospective/1788.rss">REBOL 1.0 Retrospective</source>
+        </item>
+        <item>
           <title>Could Ren-C and Red Interoperate (and if so, *should* they?)</title>
           <dc:creator><![CDATA[Cplus]]></dc:creator>
           <category>Redbol</category>
@@ -1748,90 +1938,6 @@ append matrix [10 10] ;-- perhaps should add a row to the matrix?  :-/
           <discourse:topicArchived>No</discourse:topicArchived>
           <guid isPermaLink="false">forum.rebol.info-topic-815</guid>
           <source url="https://forum.rebol.info/t/user-defined-types-in-r3-alpha-and-red/815.rss">User-Defined Types in R3-Alpha and Red</source>
-        </item>
-        <item>
-          <title>Beginnings of the &quot;Redbol&quot; Module</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Redbol</category>
-          <description><![CDATA[
-            <p>There have been three areas of backwards compatibility effort so far:</p>
-<ul>
-<li>
-<p><strong>r3-legacy</strong> - This started as a collection of runtime switches and shim code to revert Ren-C to act like R3-Alpha.  Over time the runtime switches were phased out, as more and more adaptation could be accomplished in usermode.</p>
-</li>
-<li>
-<p><strong>warnings</strong> - Various constructs were changed to offer warnings or errors.  So rather than UNSET? just start acting completely different, it gave a deprecation message.</p>
-</li>
-<li>
-<p><strong>r3-future</strong> - This is a shim which would allow an R3-Alpha to be used for bootstrap, so that the bootstrap code could be written in more modern/idiomatic Ren-C.</p>
-</li>
-</ul>
-<hr>
-<p>I've gone ahead and factored out r3-legacy to its own file, <a href="https://github.com/metaeducation/ren-c/blob/master/scripts/redbol.reb" rel="nofollow noopener">%redbol.reb</a> -- the renewed focus of this will be to be Rebol2/Red compatibility.</p>
-<p>It's not a module yet, but it makes a pretty good pathological test case of a module...due to how much it alters the system.  It wants to export something like UNSET? with the "old" meaning (similar to NULL?), while at the same time use the current meaning within its own implementation.  Right now I've just boxed all the definitions inside of something called EMULATE which binds it into lib, but modules may need to offer support for this kind of situation more generally.</p>
-<p>Then I've broken out the warnings into <a href="https://github.com/metaeducation/ren-c/blob/master/scripts/r2warn.reb" rel="nofollow noopener">%r2warn.reb</a>.  There really is overlap with what knowledge it takes to emulate Rebol2 along with what it would take to warn someone writing to new conventions where something might have a confusing new behavior.  So it would be nice to have whether there is emulation, warnings, or both... just as options on %redbol.reb.  But right now modules don't do parameterizations (beyond versioning) so let's hold that thought.</p>
-<p>With the direction headed toward emulation and legacy support coming from files outside the core, I've gone ahead and bitten the bullet and pulled all the support for things like PAREN! or FOREACH or other things.  They "weren't causing any trouble", but they were cluttering things.  I'd like to see any hypothetical user who would be depending on those definitions to be hacking on %redbol.reb, to be able to pick all or part of what they wanted...and try and start getting the core tightened up so it's easy to see what's there.</p>
-<h3>There's some really impressive stuff going on here</h3>
-<p>When you look at the code, it's really pretty awesome.  Even something small, like <a href="https://forum.rebol.info/t/justifiable-asymmetry-to-on-block/751">the change to the splicing behavior</a>:</p>
-<pre><code>oldsplicer: helper [
-    func [action [action!]] [
-        adapt :action [
-            all [not only | any-array? :series | any-path? :value] then [
-                value: as block! value ;-- guarantees splicing
-            ]
-            ;-- fall through to action's normal implementation
-        ]
-    ]
-]
-
-append: emulate [oldsplicer :append]
-insert: emulate [oldsplicer :insert]
-change: emulate [oldsplicer :change]
-</code></pre>
-<p>Ren-C's behavior changed to the point of being able to say appending a PATH! didn't splice unless it was to another path.  And here you have a surgical tweak that can reverse this--in usermode.  All while giving you the same interface and refinements for the functions.</p>
-<p>You can try and imagine yourself what doing this would be like in Rebol2, R3-Alpha, or Red.</p>
-<h3>Modules are hard and there's a long road ahead, there</h3>
-<p>We see that JavaScript still doesn't have modules sorted out--and it's been quite a long time with a world of people working on it.  Rebol's landscape is even more complex.  And modules are very tied up in binding, which still has a lot of open questions.</p>
-<p>What I think has to happen is that I have to sit down and look at the fundamentals.  I don't see how anything too big can happen too soon, so really it's probably just going to be one feature at a time.</p>
-            <p><small>2 posts - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/beginnings-of-the-redbol-module/755">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/beginnings-of-the-redbol-module/755</link>
-          <pubDate>Wed, 25 Jul 2018 05:35:17 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-755</guid>
-          <source url="https://forum.rebol.info/t/beginnings-of-the-redbol-module/755.rss">Beginnings of the &quot;Redbol&quot; Module</source>
-        </item>
-        <item>
-          <title>Requirements List for the Redbol Compatibility Module</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Redbol</category>
-          <description><![CDATA[
-            <p>There needs to be some candidate Rebol2/Red/R3-Alpha-ish codebase to be the guinea pig for the "Redbol" emulation module.  I'm going to sacrifice my <a href="http://draem.hostilefork.com/" rel="nofollow noopener">Draem</a> blog generator to stay in the world of Redbol compatibility.  It doesn't make me tremendously happy to hold it back--but I've already been holding it back for the purposes of testing <code>&lt;r3-legacy&gt;</code>.  So this just means a little bit more holding back.</p>
-<p>That will require backporting it to Rebol2.  Then I will twist up <code>&lt;r3-legacy&gt;</code> until it can run it also.  And if I haven't strangled myself with my own tongue by then, I will see what I can do to run it under Red.  Then rename <code>&lt;r3-legacy&gt;</code> to <code>&lt;redbol&gt;</code> and try and get the module-based approach going.</p>
-<p>It's not terribly ambitious code, though it does need Markdown processing.  Hopefully that's already been addressed in Red or Rebol2 somewhere.</p>
-<h3>"Redbol"</h3>
-<p>In this sense I'm using the term "Redbol" to mean <em>"roughly the language agreed upon  represented by Rebol2 and Red"</em>.  If Red and Rebol2 agree on something, and R3-Alpha made another choice, it doesn't seem to me to make much sense for this compatibility layer to pick R3-Alpha's choice out of principle--even if it's arguably a better choice.  The point is emulation, not arguing.</p>
-<p>This needs to be done with actual modules, isolating the behavior so that a Redbol module can be called from a Ren-C module, and vice-versa.  How things have been done so far with <code>&lt;r3-legacy&gt;</code> can't handle that.  It just mucks up the user context.</p>
-<h3>Thoughts on baseline?</h3>
-<p>Rebol2 was skinned to incorporate many of R3-Alpha features via something known as "R2/Forward".  Since we're not necessarily looking at <em>exact</em> compatibility with any of Rebol2/Red/R3-Alpha, it's reasonable to say that someone using the Redbol emulation would likely have a few little stubs loaded.</p>
-<p><em>(So to run a Redbol codebase in Rebol2 you'd use <code>%redbol.r</code>, to run it in Red you'd use <code>%redbol.red</code>, and in Ren-C you'd tag your module as <code>Depends: &lt;redbol&gt;</code> or whatever the way that winds up working.  I don't think a <code>%redbol.r3</code> would be used by anyone, and things like the indexing are impractical to bend from within an R3-Alpha binary.)</em></p>
-<p>So given that, does anyone have any "known" lists of tweaks they know each would need?  What did Red change from Rebol2 that's favorable, unfavorable?  Most of what I've got going on compatibility so far is code in the <a href="https://github.com/metaeducation/ren-c/blob/f2a4fa199eb341315d856563a50aee040855e49f/src/mezz/mezz-legacy.r#L625" rel="nofollow noopener"><code>%mezz-legacy.r</code></a>, so that's going to be the starting point for Ren-C's <code>&lt;redbol&gt;</code>...the question is just what more will be needed than that.</p>
-<hr>
-<p>My main intention is just to get a proof of concept going, and then those interested can see what's involved and hack on it as they notice things it could do more compatibly.  I'm not going to spearhead any protracted development process for it.</p>
-<p>But if someone has a relatively simple Rebol2 script and wants to put in a bit of elbow grease to see it run under emulation, maybe you could post about it here and explain what challenges (if any) there would be.</p>
-            <p><small>21 posts - 4 participants</small></p>
-            <p><a href="https://forum.rebol.info/t/requirements-list-for-the-redbol-compatibility-module/722">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/requirements-list-for-the-redbol-compatibility-module/722</link>
-          <pubDate>Tue, 03 Jul 2018 14:29:04 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-722</guid>
-          <source url="https://forum.rebol.info/t/requirements-list-for-the-redbol-compatibility-module/722.rss">Requirements List for the Redbol Compatibility Module</source>
         </item>
   </channel>
 </rss>

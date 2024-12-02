@@ -5,8 +5,75 @@
     <link>https://forum.rebol.info/c/development/optimization/53</link>
     <description>Topics in the &#39;Optimization&#39; category This is a category for discussing performance and optimization ideas.</description>
     
-      <lastBuildDate>Sat, 28 Sep 2024 23:35:31 +0000</lastBuildDate>
+      <lastBuildDate>Sun, 01 Dec 2024 00:50:53 +0000</lastBuildDate>
       <atom:link href="https://forum.rebol.info/c/development/optimization/53.rss" rel="self" type="application/rss+xml" />
+        <item>
+          <title>The Probably-False Economy of EVAL Consuming FRAME!</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Optimization</category>
+          <description><![CDATA[
+            <p>The earliest design usages for FRAME! were for things like ENCLOSE.</p>
+<p>ENCLOSE builds the frame for the function you're enclosing, then passes the frame to a function that can manipulate the frame, and invoke it with EVAL (or not invoke it at all, if it wishes).</p>
+<p>Here's a sort of simple historical example:</p>
+<pre><code>/foo: func [a b] [
+   let result: a + b
+   a: b: ~&lt;whatever&gt;~  ; functions can modify args/locals for any reason
+   return result
+]
+
+/bar: enclose foo/ (lambda [f [frame!]] [
+    let b: f.b
+    f.a: f.a * 10
+    (eval f) + b
+])
+
+&gt;&gt; bar 100 10
+== 1020  ; ((a * 10) + b) + b
+</code></pre>
+<p>You'll notice above that I didn't write:</p>
+<pre><code>/bar: enclose foo/ (lambda [f [frame!]] [
+    f.a: f.a * 10
+    (eval f) + f.b
+])
+</code></pre>
+<p>This is because EVAL of a FRAME! would "consume" the frame, and trying to use <strong><code>f.b</code></strong> after the EVAL would raise an error.  In other words, memory was not allocated as it usually would be for a new frame to do the call...but the fields of the frame were the actual values being used.</p>
+<p>I overwrote <strong><code>a</code></strong> and <strong><code>b</code></strong> to make the point that once that EVAL is called, you can't rely on any particular state of a frame's variables.  In the general case, they can be changed to anything.</p>
+<h2><a name="p-7936-eval-copy-f-is-easy-and-so-is-saving-variables-right-1" class="anchor" href="https://forum.rebol.info#p-7936-eval-copy-f-is-easy-and-so-is-saving-variables-right-1"></a><code>(eval copy f)</code> is Easy, and So Is Saving Variables, Right?</h2>
+<p>The premise I was going on was that it seemed like it would be wasteful...especially in scenarios like an ENCLOSE, to make another copy of the frame's data.</p>
+<p>And I figured usually you wouldn't need to refer to anything from the frame's input state after you called it.</p>
+<p>So you had two choices: either evaluate a copy of the frame, or save any variables you were interested in as locals.</p>
+<h2><a name="p-7936-it-turns-out-to-be-incredibly-common-to-save-variables-2" class="anchor" href="https://forum.rebol.info#p-7936-it-turns-out-to-be-incredibly-common-to-save-variables-2"></a>It Turns Out To Be Incredibly Common To Save Variables</h2>
+<p>I didn't know when originally trying to optimize the feature how often an ENCLOSE would need to talk about the input fields after an EVAL call.</p>
+<p>But empirically I'd say you need the fields at least half the time.  You actually want it more often than that when you consider debugging--you often want to print some information about the input parameters after you've done the EVAL.</p>
+<h2><a name="p-7936-let-b-fb-costs-much-more-than-mallocmemcpy-3" class="anchor" href="https://forum.rebol.info#p-7936-let-b-fb-costs-much-more-than-mallocmemcpy-3"></a><code>(let b: f.b)</code> Costs Much More Than <code>malloc()+memcpy()</code></h2>
+<p>When you come down to it, relatively speaking: <em>Evaluator cycles are expensive</em>.  <em>Tuple lookup is expensive</em>.  <em>Assignment is expensive</em>.  <em>LET statements are expensive</em>.</p>
+<p>That's because this is an interpreted language, and running code in the interpreter involves pushing and popping entities that represent interpreter stack levels.  There's all kinds of C data structures and layers of C function calls as the gears of the machinery turn...whether your operation be simple or complex.  That's just the name of the game... <strong>a + b</strong> in a generalized evaluator is going to be at least 100x more costly than adding two integers in C, which is basically just a single CPU instruction.</p>
+<p>So if you have to do <em>any</em> mitigation of losing the frame data by adding interpreted code, not only are you having to junk up what you're writing...but you're also paying much more than you would have if the system had just gone ahead and made a copy.</p>
+<h2><a name="p-7936-explaining-why-you-cant-is-lamer-than-it-just-works-4" class="anchor" href="https://forum.rebol.info#p-7936-explaining-why-you-cant-is-lamer-than-it-just-works-4"></a>Explaining Why You Can't Is Lamer Than <em>"It Just Works"</em></h2>
+<p>People understand that if they have a FRAME! for APPEND and they EVAL it, that the series is going to be mutated.</p>
+<p>But they're going to understand less that the series field of the frame is not available at all to them after the call.</p>
+<p>It's kind of a no-brainer to say that if the two approaches were at all comparable in speed or overall performance, that the more useful behavior should be the default.</p>
+<p><em>And I actually believe the more useful behavior is faster in the general case...by avoiding additional intepreter cycles to save frame fields in variables.</em></p>
+<h2><a name="p-7936-free-f-could-use-free-as-an-intrinsic-if-you-want-5" class="anchor" href="https://forum.rebol.info#p-7936-free-f-could-use-free-as-an-intrinsic-if-you-want-5"></a><code>(free f)</code> Could Use FREE As An Intrinsic If You Want</h2>
+<p><strong><a href="https://forum.rebol.info/t/intrinsics-functions-without-frames/2050">FREE could be trivially made Intrinsic</a>.</strong></p>
+<p>If profiling suggested that something like an ENCLOSE on a function with a large frame was affecting your bottom line by not freeing the frame, you could just free it after the EVAL.  That would leave behind nothing but a tiny useless stub (to avoid latent references in other cells from crashing the GC), so you'd get the same end result as the historical EVAL.</p>
+<p>I'm betting that having EVAL be able to be intrinsic when it takes one argument, and making FREE intrinsic would be faster than trying to do some weird refinement like <strong><code>eval:free</code></strong> to fold both into one operation...because refinement processing has its own cost, which I <em>think</em> would be greater.</p>
+<p>But an optimized <strong><code>eval-free</code></strong> might be worth making, I don't know.  However its mechanic would simply be to natively fold the free in after the EVAL, instead of trying to make EVAL take over the frame and use its memory.</p>
+<p>My guess is that using EVAL-FREE won't be a benefit most of the time if you add any evaluator cycles to save a variable because of it.</p>
+<h1><a name="p-7936-hence-eval-will-no-longer-consume-frame-6" class="anchor" href="https://forum.rebol.info#p-7936-hence-eval-will-no-longer-consume-frame-6"></a>Hence, EVAL Will No Longer Consume FRAME!</h1>
+<p>This makes the "action-is-frame" duality even more solid, because as frames are passed around in the system there won't be "consume frame vs. don't" flags involved.</p>
+<p>You'll just either free the frame after you've applied it, or you won't.  <img src="https://forum.rebol.info/images/emoji/twitter/man_shrugging.png?v=12" title=":man_shrugging:" class="emoji" alt=":man_shrugging:" loading="lazy" width="20" height="20"></p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/the-probably-false-economy-of-eval-consuming-frame/2339">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/the-probably-false-economy-of-eval-consuming-frame/2339</link>
+          <pubDate>Sun, 01 Dec 2024 00:50:53 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2339</guid>
+          <source url="https://forum.rebol.info/t/the-probably-false-economy-of-eval-consuming-frame/2339.rss">The Probably-False Economy of EVAL Consuming FRAME!</source>
+        </item>
         <item>
           <title>A Pattern-Matching Optimized MAP (?)</title>
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
@@ -315,7 +382,7 @@ VARLIST  [self |  10 |  20 ]   ; 4 platform pointers per cell
 <p>The worry is that the number of concerns being exposed to users is such that the properties of "the kind frame you can run is different enough that you basically have to think of it as a different type".</p>
 <p>To avoid that in this case, it's better to do the freezing implicitly vs. saying that you need a special routine like RUNS to bless a frame as runnable.  This way, RUNS can be understood as simply taking in a plain frame! and giving back an isotopic frame!... something you could easily write yourself.</p>
 <p>Crafting a uniformity of experience with FRAME! so it doesn't feel like it's making up for a missing ACTION! type is certainly something to continue to be mindful of.  But performance needs to be minded too at some point, so I'm doing what I can about that.</p>
-            <p><small>3 posts - 1 participant</small></p>
+            <p><small>4 posts - 1 participant</small></p>
             <p><a href="https://forum.rebol.info/t/performance-implications-of-antiform-frame-is-action/2083">Read full topic</a></p>
           ]]></description>
           <link>https://forum.rebol.info/t/performance-implications-of-antiform-frame-is-action/2083</link>
@@ -1842,61 +1909,6 @@ orange
           <discourse:topicArchived>No</discourse:topicArchived>
           <guid isPermaLink="false">forum.rebol.info-topic-1468</guid>
           <source url="https://forum.rebol.info/t/web-build-performance-stats/1468.rss">Web Build Performance Stats</source>
-        </item>
-        <item>
-          <title>Moving Away From &quot;NULL termination&quot; (END!) of BLOCK!s</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Optimization</category>
-          <description><![CDATA[
-            <p>Ren-C preserved an idea from R3-Alpha...which was that there would be a cell type byte reserved to signal the end of an array.  This is a bit like how null terminators are used with C strings.  However, arrays also tracked their length.  So it was redundant information.</p>
-<p>In R3-Alpha, the special cells were given the END! datatype.  Sometimes you would see bugs that would leak the existence of this internal type to the user.  Ren-C hid it more effectively, by not making it an actual "type".</p>
-<p>On the plus side, this provides a clean-looking way to walk through the values in an array:</p>
-<pre><code>Cell* item = Array_Head(array);  // first cell pointer in the array
-for (; Not_End(item); ++item) {
-    ...
-}
-</code></pre>
-<p>However, there are several downsides:</p>
-<ul>
-<li>
-<p><strong>You have to pay for a dereference on each step.</strong>  item is a pointer, and you have to follow that pointer to its memory location to read a byte there to see if you've reached the end.  This probably isn't <em>that</em> bad, because odds are you are going to be working with that memory inside the loop anyway.  But maybe you aren't...and you certainly aren't going to be for the last cell.</p>
-</li>
-<li>
-<p><strong>You typically wind up paying a cell's worth of cost for this convenience.</strong>  If your array is empty, it still needs space for at least one cell.  If your array has one cell, it needs space for two.  If it has two it needs space for three, etc.  This isn't just an extra byte (as in C '\0' termination)...it's 4 platform pointers.  So 32 bytes of oft-wasted space on 64-bit platforms for a mostly empty cell.</p>
-</li>
-<li>
-<p><strong>But rounding up by 1 is even worse than wasting one cell...</strong> because it propagates to rounding up in the memory pool block size, and memory pools are sized in multiples of 2 (2, 4, 8, 16, etc).  So if what you really want is a two-cell array--e.g. enough for <strong>a/b</strong>, you move up to the next size and take a chunk from the 4-cell pool.  A 4-cell array needs to come from the 8-cell pool.  Etc.</p>
-</li>
-</ul>
-<h2>
-<a name="should-we-scrap-this-idea-1" class="anchor" href="https://forum.rebol.info#should-we-scrap-this-idea-1"></a>Should We Scrap This Idea?</h2>
-<p>It's bothered me for a while, but since it might make enumeration faster in some cases I've let it hang around.  Having a terminator has helped catch out of bounds cases more easily.</p>
-<p><strong>But I think the time has come to demote termination to a debug-build-only practice.</strong>  It's gotten in the way of too many interesting optimizations.</p>
-<p>Data point: Red doesn't do it.  They just store the pointer to the tail of the data (in the slot where R3-Alpha stored the length).  It works either way since you can calculate the length by subtracting the head from the tail...or calculate the tail by adding the length to the head.  I'd imagine the tail is needed more often.</p>
-<p>The code isn't usually that much worse:</p>
-<pre><code>Cell* item = Array_Head(array);
-Cell* tail = Array_Tail(array);
-for (; item != tail; ++item) {
-    ...
-}
-</code></pre>
-<p>But sometimes there were cases that a function would be passed a Cell* resident in an array, without passing the array also.  And then it would enumerate that value forward until it reached an end.  Such routines aren't all that common, but a few do exist.  They'd need to be revisited.</p>
-<p>It's not that huge a deal, and kind of trivial in the scheme of things.  But it would touch a lot of code.  <img src="https://forum.rebol.info/images/emoji/twitter/frowning.png?v=12" title=":frowning:" class="emoji" alt=":frowning:" loading="lazy" width="20" height="20">  But, as usual in Ren-C...the asserts can keep it running.</p>
-<h2>
-<a name="end-signals-would-still-exist-2" class="anchor" href="https://forum.rebol.info#end-signals-would-still-exist-2"></a>END signals would still exist</h2>
-<p>The END cell type is important for other reasons.  It's used in rebEND as a terminator for C va_list arguments, and that's not going away.  There are other applications which are beyond the scope of this post to explain.</p>
-<p>And as I say, termination of some kind would probably continue in debug builds.  So they might over-allocate to have enough room at the tail to put an end cell, just to get errors to trigger if you went past the limit.</p>
-<p>So let's not malign the END marker too much.  It has been a valuable contributor.  <img src="https://forum.rebol.info/images/emoji/twitter/medal_sports.png?v=12" title=":medal_sports:" class="emoji" alt=":medal_sports:" loading="lazy" width="20" height="20"></p>
-            <p><small>3 posts - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/moving-away-from-null-termination-end-of-block-s/1445">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/moving-away-from-null-termination-end-of-block-s/1445</link>
-          <pubDate>Wed, 30 Dec 2020 10:29:18 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-1445</guid>
-          <source url="https://forum.rebol.info/t/moving-away-from-null-termination-end-of-block-s/1445.rss">Moving Away From &quot;NULL termination&quot; (END!) of BLOCK!s</source>
         </item>
   </channel>
 </rss>

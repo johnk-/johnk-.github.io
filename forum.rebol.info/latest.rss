@@ -5,8 +5,511 @@
     <link>https://forum.rebol.info/latest</link>
     <description>Latest topics</description>
     
-      <lastBuildDate>Thu, 21 Nov 2024 22:06:22 +0000</lastBuildDate>
+      <lastBuildDate>Sun, 01 Dec 2024 12:40:58 +0000</lastBuildDate>
       <atom:link href="https://forum.rebol.info/latest.rss" rel="self" type="application/rss+xml" />
+        <item>
+          <title>The %rebol.r Boot File From Rebol 1.0</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Redbol</category>
+          <description><![CDATA[
+            <p>While we don't have the C source code for Rebol 1.0, we do have the <code>%rebol.r</code> initialization file:</p>
+<p><a href="https://gist.github.com/hostilefork/d6cfac90141688bd41b1b38a9a203b02" class="inline-onebox">Rebol 1.0.2 Initialization File (October 7, 1998) · GitHub</a></p>
+<p>It would seem that if there were an ability to pack source code in with the executable, they would have done it...given that the Quick Start says <em>"do not modify <code>rebol.r</code>. If you accidentally do modify <code>rebol.r</code>, reinstall it."</em></p>
+<p><em><strong>Hence this is probably the entire portion of Rebol 1.0 that's written in Rebol, e.g. the whole "Mezzanine".</strong></em></p>
+<p>It says:</p>
+<pre><code>;;; Note: Code in rebol.r runs in the system context.  The system
+;;; context [has] all the built in bindings of the user context, but also
+;;; has extra bindings to allow rebol to be bootstrapped.  Many of the 
+;;; rebol functions available in user code are actually written in
+;;; terms of simpler rebol natives, or in terms of special
+;;; system natives.
+
+;;; REBOL reserves the right to change the system natives at any time, 
+;;; so you shouldn't depend on them for portable code.
+</code></pre>
+<h1><a name="p-7953-remarks-on-contents-in-no-particular-order-1" class="anchor" href="https://forum.rebol.info#p-7953-remarks-on-contents-in-no-particular-order-1"></a>Remarks On Contents, In No Particular Order</h1>
+<h2><a name="p-7953-func-definition-2" class="anchor" href="https://forum.rebol.info#p-7953-func-definition-2"></a>FUNC Definition</h2>
+<pre><code>func: make function! [args body] [make function! :args :body]
+</code></pre>
+<p>I found it a bit interesting that the <a href="https://forum.rebol.info/t/rebol-1-0-2-users-guide/2340/6#p-7944-func-shortcut-5">User Guide talked about how FUNC was defined</a>, as an illustrative example, of an important thing for users to know about.  (It turns out there's a <a href="https://www.rebol.com/docs/core23/rebolcore-9.html">brief mention in the Rebol2 User's Guide</a>, but the Rebol 1.0 Guide writes it up twice, probably on accident.)</p>
+<p>It's worth pointing out that there's big questions even in this seemingly simple definition.  Such as, should a function copy its arguments or body?  What should this do?</p>
+<pre><code> body: [print "Hello"]
+ foo: func [] body
+ append body [print "Goodbye"]
+ bar: func [] body
+</code></pre>
+<p>Does <strong>foo</strong> print just "Hello", or does it print "Hello" and "Goodbye"?</p>
+<p>I don't yet know what Rebol1 did, but Rebol2's MAKE FUNCTION! would <em>not</em> copy the body.  So FUNC would do a deep copy as the "higher level" operator, before passing it to MAKE FUNCTION!.</p>
+<p>But during bootstrap, it used a definition of FUNC that <em>didn't</em> copy the body, for performance reasons...which it switched over to the copying implementation at the end of boot.  <img src="https://forum.rebol.info/images/emoji/twitter/roll_eyes.png?v=12" title=":roll_eyes:" class="emoji" alt=":roll_eyes:" loading="lazy" width="20" height="20"></p>
+<p>Some version of these crazy optimizations are on the table for future Ren-C.</p>
+<h2><a name="p-7953-print-prin-probe-3" class="anchor" href="https://forum.rebol.info#p-7953-print-prin-probe-3"></a>PRINT, PRIN, PROBE</h2>
+<pre><code>write-block-or-element:
+    make function! [port element] [
+             do
+                if block? :element [:write-block] else [:form-to-port]
+                :port
+                :element]
+
+write-block: func [port block] [    ; !!! needs work
+    foreach element :block [form-to-port :port :element form-to-port :port " "]
+]
+
+prin: func [value] [
+    if block? :value [write-block output-port reduce :value]
+    else [form-to-port output-port :value]
+    exit
+]
+
+print: func [value] [
+    prin :value
+    linefeed-port output-port
+    exit
+]
+
+probe: func [value] [
+     prin " PROBE --&gt; "
+     send output-port :value
+     linefeed-port output-port
+     :value
+ ]
+</code></pre>
+<p>Weird.  (and prints a space after every element, so you get a space at the end of the line vs. just delimited between, etc.)</p>
+<p>At least one interesting aspect of this is to see the rigid "EXIT" at the end to make sure that PRIN and PRINT don't leak a result on accident.  Things like this feel like a vindication of Ren-C's <a href="https://forum.rebol.info/t/implicit-execution-of-return-in-functions-bad/1656">requirement to use a RETURN</a> in order to give back a result from FUNC (but not LAMBDA).</p>
+<h2><a name="p-7953-is-as-to-logic-4" class="anchor" href="https://forum.rebol.info#p-7953-is-as-to-logic-4"></a>IS? as TO-LOGIC</h2>
+<pre><code>is?: func [value] [not not :value]
+</code></pre>
+<p>This was called TRUE? in Rebol2, and I very much disliked the ambiguity of that vs. testing to see if a value was <code>= #[true]</code> the LOGIC! literal.</p>
+<p>I wrote something up about <a href="http://blog.hostilefork.com/did-programming-opposite-of-not/">how DID could be the opposite of NOT</a> (which even goes together as DIDN'T for DID NOT).  But due to some various shades of meaning the current state is that it means THEN? and DIDN'T means ELSE? as prefix tests for the trigger conditions that would run THEN or ELSE.  It needs thought.</p>
+<p>Anyway, interesting to see the choice of <code>IS?</code> here.</p>
+<h2><a name="p-7953-a-recursive-folding-any-and-all-interrobang-5" class="anchor" href="https://forum.rebol.info#p-7953-a-recursive-folding-any-and-all-interrobang-5"></a>A Recursive Folding ANY and ALL <img src="https://forum.rebol.info/images/emoji/twitter/interrobang.png?v=12" title=":interrobang:" class="emoji" alt=":interrobang:" loading="lazy" width="20" height="20"></h2>
+<pre><code>any: func [block] [
+    eval-one block
+        make function! [value rest] [
+            if not value [any rest]
+            else [value]
+        ]
+        make function! [value] [value]
+]
+
+all: func [block] [
+    eval-one block
+        make function! [value rest] [
+            if is? value [all rest]
+            else [false]
+        ]
+        make function! [value] [value]
+]
+</code></pre>
+<p>So this is based on a function called EVAL-ONE, that takes a list and two functions.  It isn't defined in %rebol.r and isn't in the reference guide either.  But it's a right fold with early termination.</p>
+<p>One can definitely imagine the Joe Marshall and Carl friction on this (<em>"why all you making all these these usermode functions and calls, why not just use a loop?"</em>).</p>
+<p>While there's a time and a place for this, I do think that if you are starting to push out into the usermode layers and finding this mentality is driving it...you're going to end up with something that isn't hitting the mark that Rebol was aiming at.</p>
+<h2><a name="p-7953-why-is-pick-so-weird-6" class="anchor" href="https://forum.rebol.info#p-7953-why-is-pick-so-weird-6"></a>Why Is PICK So Weird?</h2>
+<pre><code>pick: func [series index] [
+  do make function! [offset] [
+    if (:offset + index? :series) &lt;= 1
+        [none]
+    else [do make function! [disp] [
+            if (length? :disp) = 0 
+               [none]
+            else
+               [&amp;peek :disp 0]
+            ] skip :series if :offset &lt; 0 [:offset] else [:offset - 1]
+         ]
+    ] if logic? :index [if :index [1] else [2]] else [:index]
+]
+</code></pre>
+<p>My guess here is that the pattern:</p>
+<pre><code>do make function! [arg] [...code with arg...] value-for-arg
+</code></pre>
+<p>...is probably some holdover from before USE existed.  Or maybe USE is just an abstraction built on functions, and so it's done this way for optimization.  I dunno.</p>
+<h2><a name="p-7953-poor-mans-export-7" class="anchor" href="https://forum.rebol.info#p-7953-poor-mans-export-7"></a>Poor-Man's EXPORT</h2>
+<pre><code>;;; These functions can be defined in terms of system natives that are
+;;; not available in the user context.  Since we made the functions in 
+;;; this context, the values of the words in the body are relative to
+;;; this context.  But we place the functions in the user context so
+;;; that the users can call them.  This allows the user to call the
+;;; system natives through a defined API in a controlled manner.
+
+user-functions: [
+    dir? [file] [do func [info] [info/dir?] info? :file]
+    size? [file] [do func [info] [info/size] info? :file]
+    ...
+]
+
+foreach [name args body] user-functions [
+    context-set user-context name func args body
+]
+</code></pre>
+<p>So the comment says what's going on here, it's the attempt to push functions out into the user context when they're implemented in terms of functions that aren't available in the user context.  I'm not sure what's not available <em>(these implementations of DIR? and FILE? are based on INFO?, is that not exported to the user context?)</em></p>
+<p>As far as I know, there's nothing like this in Rebol2 (there's no separate <code>user-context</code> from a <code>system-context</code>, is there?)  Interesting if that was something that disappeared in Rebol2 and came back in Rebol3.</p>
+<h2><a name="p-7953-more-modularization-eval-reduce-takes-context-8" class="anchor" href="https://forum.rebol.info#p-7953-more-modularization-eval-reduce-takes-context-8"></a>More Modularization: EVAL-REDUCE Takes Context</h2>
+<pre><code>if not none? REBOL/script [
+    if exists? REBOL/script [
+        do make function! [] [
+                top-level-continuation: :return
+                if not REBOL/silent [
+                        linefeed
+                        prin "Loading script "
+                        print REBOL/script]
+                eval-reduce [do REBOL/script] user-context
+                ]
+        ]
+    ]
+</code></pre>
+<p>Rebol1 seems to have been working with modularization ideas, because even during startup, the script you pass on the command line is run via something called EVAL-REDUCE that takes a parameter of where to do the evaluation.</p>
+<p>So definitely a shame that Rebol2 seems to have moved away from the idea that evaluations needed to be done in a context.</p>
+<h2><a name="p-7953-catch-is-defined-in-terms-of-catch-func-9" class="anchor" href="https://forum.rebol.info#p-7953-catch-is-defined-in-terms-of-catch-func-9"></a>CATCH is defined in terms of CATCH-FUNC</h2>
+<p>We know from the <code>user-functions</code> exporting that this:</p>
+<pre><code>catch [word block] [catch-func func reduce [word] :block]
+</code></pre>
+<p>Is actually:</p>
+<pre><code>catch: func [word block] [catch-func func reduce [word] :block]
+</code></pre>
+<p>Since there's no type checking, there's a <code>:BLOCK</code> GET-WORD! just to be sure it's not a function, I guess?  And then it's FUNC's job to do a check in its implementation.  But then, why not <code>:WORD</code> just to be sure WORD! isn't a function you're calling?  <em>(I like pointing this out, due to Ren-C's better answers to this issue...avoiding the "pox of documenting what you <strong>don't</strong> know")</em></p>
+<p>So the idea of using functions as proxies for "virtual binding" is the <em>old way</em>.  What's going on here is that the block contains code that wants to be bound to whatever the throw construct is, and so that block is made the body of a function, that you call and pass the thing you want bound to that name as the argument.  (COLLECT+KEEP worked this way).  But it's undesirable, because it means you've lost the fluidity of having the currency of a structural BLOCK!...replaced with the black box of a function just because you wanted to bind something.</p>
+<p>I'm pretty sure this CATCH mechanic (being called a "continuation") is stackful and can't do anything too bizarre, but I'd like an executable to try and ensure that.</p>
+            <p><small>2 posts - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/the-rebol-r-boot-file-from-rebol-1-0/2344">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/the-rebol-r-boot-file-from-rebol-1-0/2344</link>
+          <pubDate>Sun, 01 Dec 2024 12:40:58 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2344</guid>
+          <source url="https://forum.rebol.info/t/the-rebol-r-boot-file-from-rebol-1-0/2344.rss">The %rebol.r Boot File From Rebol 1.0</source>
+        </item>
+        <item>
+          <title>The Probably-False Economy of EVAL Consuming FRAME!</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Optimization</category>
+          <description><![CDATA[
+            <p>The earliest design usages for FRAME! were for things like ENCLOSE.</p>
+<p>ENCLOSE builds the frame for the function you're enclosing, then passes the frame to a function that can manipulate the frame, and invoke it with EVAL (or not invoke it at all, if it wishes).</p>
+<p>Here's a sort of simple historical example:</p>
+<pre><code>/foo: func [a b] [
+   let result: a + b
+   a: b: ~&lt;whatever&gt;~  ; functions can modify args/locals for any reason
+   return result
+]
+
+/bar: enclose foo/ (lambda [f [frame!]] [
+    let b: f.b
+    f.a: f.a * 10
+    (eval f) + b
+])
+
+&gt;&gt; bar 100 10
+== 1020  ; ((a * 10) + b) + b
+</code></pre>
+<p>You'll notice above that I didn't write:</p>
+<pre><code>/bar: enclose foo/ (lambda [f [frame!]] [
+    f.a: f.a * 10
+    (eval f) + f.b
+])
+</code></pre>
+<p>This is because EVAL of a FRAME! would "consume" the frame, and trying to use <strong><code>f.b</code></strong> after the EVAL would raise an error.  In other words, memory was not allocated as it usually would be for a new frame to do the call...but the fields of the frame were the actual values being used.</p>
+<p>I overwrote <strong><code>a</code></strong> and <strong><code>b</code></strong> to make the point that once that EVAL is called, you can't rely on any particular state of a frame's variables.  In the general case, they can be changed to anything.</p>
+<h2><a name="p-7936-eval-copy-f-is-easy-and-so-is-saving-variables-right-1" class="anchor" href="https://forum.rebol.info#p-7936-eval-copy-f-is-easy-and-so-is-saving-variables-right-1"></a><code>(eval copy f)</code> is Easy, and So Is Saving Variables, Right?</h2>
+<p>The premise I was going on was that it seemed like it would be wasteful...especially in scenarios like an ENCLOSE, to make another copy of the frame's data.</p>
+<p>And I figured usually you wouldn't need to refer to anything from the frame's input state after you called it.</p>
+<p>So you had two choices: either evaluate a copy of the frame, or save any variables you were interested in as locals.</p>
+<h2><a name="p-7936-it-turns-out-to-be-incredibly-common-to-save-variables-2" class="anchor" href="https://forum.rebol.info#p-7936-it-turns-out-to-be-incredibly-common-to-save-variables-2"></a>It Turns Out To Be Incredibly Common To Save Variables</h2>
+<p>I didn't know when originally trying to optimize the feature how often an ENCLOSE would need to talk about the input fields after an EVAL call.</p>
+<p>But empirically I'd say you need the fields at least half the time.  You actually want it more often than that when you consider debugging--you often want to print some information about the input parameters after you've done the EVAL.</p>
+<h2><a name="p-7936-let-b-fb-costs-much-more-than-mallocmemcpy-3" class="anchor" href="https://forum.rebol.info#p-7936-let-b-fb-costs-much-more-than-mallocmemcpy-3"></a><code>(let b: f.b)</code> Costs Much More Than <code>malloc()+memcpy()</code></h2>
+<p>When you come down to it, relatively speaking: <em>Evaluator cycles are expensive</em>.  <em>Tuple lookup is expensive</em>.  <em>Assignment is expensive</em>.  <em>LET statements are expensive</em>.</p>
+<p>That's because this is an interpreted language, and running code in the interpreter involves pushing and popping entities that represent interpreter stack levels.  There's all kinds of C data structures and layers of C function calls as the gears of the machinery turn...whether your operation be simple or complex.  That's just the name of the game... <strong>a + b</strong> in a generalized evaluator is going to be at least 100x more costly than adding two integers in C, which is basically just a single CPU instruction.</p>
+<p>So if you have to do <em>any</em> mitigation of losing the frame data by adding interpreted code, not only are you having to junk up what you're writing...but you're also paying much more than you would have if the system had just gone ahead and made a copy.</p>
+<h2><a name="p-7936-explaining-why-you-cant-is-lamer-than-it-just-works-4" class="anchor" href="https://forum.rebol.info#p-7936-explaining-why-you-cant-is-lamer-than-it-just-works-4"></a>Explaining Why You Can't Is Lamer Than <em>"It Just Works"</em></h2>
+<p>People understand that if they have a FRAME! for APPEND and they EVAL it, that the series is going to be mutated.</p>
+<p>But they're going to understand less that the series field of the frame is not available at all to them after the call.</p>
+<p>It's kind of a no-brainer to say that if the two approaches were at all comparable in speed or overall performance, that the more useful behavior should be the default.</p>
+<p><em>And I actually believe the more useful behavior is faster in the general case...by avoiding additional intepreter cycles to save frame fields in variables.</em></p>
+<h2><a name="p-7936-free-f-could-use-free-as-an-intrinsic-if-you-want-5" class="anchor" href="https://forum.rebol.info#p-7936-free-f-could-use-free-as-an-intrinsic-if-you-want-5"></a><code>(free f)</code> Could Use FREE As An Intrinsic If You Want</h2>
+<p><strong><a href="https://forum.rebol.info/t/intrinsics-functions-without-frames/2050">FREE could be trivially made Intrinsic</a>.</strong></p>
+<p>If profiling suggested that something like an ENCLOSE on a function with a large frame was affecting your bottom line by not freeing the frame, you could just free it after the EVAL.  That would leave behind nothing but a tiny useless stub (to avoid latent references in other cells from crashing the GC), so you'd get the same end result as the historical EVAL.</p>
+<p>I'm betting that having EVAL be able to be intrinsic when it takes one argument, and making FREE intrinsic would be faster than trying to do some weird refinement like <strong><code>eval:free</code></strong> to fold both into one operation...because refinement processing has its own cost, which I <em>think</em> would be greater.</p>
+<p>But an optimized <strong><code>eval-free</code></strong> might be worth making, I don't know.  However its mechanic would simply be to natively fold the free in after the EVAL, instead of trying to make EVAL take over the frame and use its memory.</p>
+<p>My guess is that using EVAL-FREE won't be a benefit most of the time if you add any evaluator cycles to save a variable because of it.</p>
+<h1><a name="p-7936-hence-eval-will-no-longer-consume-frame-6" class="anchor" href="https://forum.rebol.info#p-7936-hence-eval-will-no-longer-consume-frame-6"></a>Hence, EVAL Will No Longer Consume FRAME!</h1>
+<p>This makes the "action-is-frame" duality even more solid, because as frames are passed around in the system there won't be "consume frame vs. don't" flags involved.</p>
+<p>You'll just either free the frame after you've applied it, or you won't.  <img src="https://forum.rebol.info/images/emoji/twitter/man_shrugging.png?v=12" title=":man_shrugging:" class="emoji" alt=":man_shrugging:" loading="lazy" width="20" height="20"></p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/the-probably-false-economy-of-eval-consuming-frame/2339">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/the-probably-false-economy-of-eval-consuming-frame/2339</link>
+          <pubDate>Sun, 01 Dec 2024 00:50:53 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2339</guid>
+          <source url="https://forum.rebol.info/t/the-probably-false-economy-of-eval-consuming-frame/2339.rss">The Probably-False Economy of EVAL Consuming FRAME!</source>
+        </item>
+        <item>
+          <title>Simplifying Refinement Promotion</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Functions</category>
+          <description><![CDATA[
+            <p>There are two modes of partial specialization which Ren-C has supported.</p>
+<p>One form would be like if APPEND takes something like :DUP and fixes it to a value:</p>
+<pre><code>&gt;&gt; append2: specialize append/ [dup: 2]
+
+&gt;&gt; append2 [a b c] &lt;d&gt;
+== [a b c &lt;d&gt; &lt;d&gt;]
+</code></pre>
+<p>Then there's a trickier kind of specialization, which is to ask for the parameter but not specify it... thus just increasing the arity:</p>
+<pre><code>&gt;&gt; appenddup: append:dup/
+
+&gt;&gt; appenddup [a b c] &lt;d&gt; 4
+== [a b c &lt;d&gt; &lt;d&gt; &lt;d&gt; &lt;d&gt;]
+</code></pre>
+<p>The second form is pretty unusual in the language world.  There doesn't seem to be much prior art in "the conversion of optional parameters to required parameters" (at least I don't know any, and the AIs I asked don't know any).</p>
+<p>Since it's pretty different from what what people think of as partial specialization, let's call it <strong>"refinement promotion"</strong>.</p>
+<h2><a name="p-7935-refinement-promotion-is-tricky-1" class="anchor" href="https://forum.rebol.info#p-7935-refinement-promotion-is-tricky-1"></a>Refinement Promotion Is <em>Tricky</em></h2>
+<p>Something that has been non-negotiable in the design is the straightforward array of parameters and locals that specify a function interface.</p>
+<p>Refinements are defined in some order in that array.  But you are not required to use them in that order.</p>
+<p>So consider a definition like:</p>
+<pre><code> /foo: func [a [integer!] :b [integer!] :c [integer!]] [...]
+</code></pre>
+<p>Someone might do refinement promotion of this as <strong><code>foo:c:b/</code></strong> - this makes it seem to the caller a function originally written with spec:</p>
+<pre><code> [a [integer!] c [integer!] b [integer!]]
+</code></pre>
+<p>The techniques so far have tried to mimic the way that refinements work.  So <strong><code>get $foo:c:b</code></strong> would produce a function that was accompanied by a <strong><code>[c b]</code></strong> array, that would get pushed when running the promoted function.  The elements in the array would not just have the words, but those words would have binding information to say what index those words were found at in the parameter array.</p>
+<p>But since the underlying array is left the same, this means every time you want to know something like "what's the first unspecialized normal argument" you have to mimic the refinement gathering process.  It convoluted the process quite a lot, and really went against the idea of the implementation being "simple".</p>
+<h2><a name="p-7935-q-is-this-really-required-to-support-a-yes-2" class="anchor" href="https://forum.rebol.info#p-7935-q-is-this-really-required-to-support-a-yes-2"></a>Q: Is This Really Required To Support?  (A: Yes)</h2>
+<p>This may not seem like a super-common need.  But if you're implementing a dialect that wants to support calling functions with refinements, it's pretty important.</p>
+<p>Let's say you're implementing something like <a href="https://forum.rebol.info/t/if-action-combinators-dont-impress-what-will/1608">the feature in UPARSE that lets you call functions</a>:</p>
+<pre><code>&gt;&gt; data: copy ""
+
+&gt;&gt; parse ["a" "b"] [some [/append:dup (data) text! (2)]]
+
+&gt;&gt; data
+== "aabb"
+</code></pre>
+<p>Basically, if <strong><code>(get $/append:dup)</code></strong> can come back with a function that you can query for its parameters and get answers just like it was any other function, then support for refinements comes basically for free.</p>
+<h2><a name="p-7935-should-the-varlist-just-be-rewritten-3" class="anchor" href="https://forum.rebol.info#p-7935-should-the-varlist-just-be-rewritten-3"></a>Should The VarList Just Be Rewritten?</h2>
+<p>If you look at what a modern SPECIALIZE followed by AUGMENT can do, they can hide parameters...and then add back parameters with the same name.  Which parameters are visible depend on the "phase" of the frame.</p>
+<p>So why couldn't refinement promotion be done just by making a new function interface that removes the argument as a refinement, and adds it back as a regular argument... then has a dispatch phase that moves the argument data to its old position for the subsequent phases?</p>
+<p>It's not particularly "cheap" to do that, space-wise.  You'd need a new VarList* and a new Phase*, and the Phase would have to remember the new and old positions to do the rewrite.  But it would make parameter enumeration blunt and simple, because you'd really just be enumerating the parameters in order.</p>
+<p>There'd be some cases where the position of the refinement would allow it to just be naturally rewritten to be a regular argument, and that could be optimized for.</p>
+<h2><a name="p-7935-what-about-when-you-have-lots-of-local-4" class="anchor" href="https://forum.rebol.info#p-7935-what-about-when-you-have-lots-of-local-4"></a>What About When You Have Lots of <code>&lt;local&gt;</code>?</h2>
+<p>This is kind of the dark side of the simple FRAME! model, which is that if you use it to create a lot of local variables, then operations like SPECIALIZE and AUGMENT which do VarList manipulation have to make copies of everything for the new VarList...including a bunch of locals that aren't changing at all in each new form.</p>
+<pre><code>/foo: func [x [text!] y [tag!] &lt;local&gt; a b c d e f g h i j k l m n o p] [
+    ... 19 frame cells (includes RETURN) ...
+]
+
+/bar: augment foo/ [z [integer!]]  ; z is last item in new 20 item frame
+</code></pre>
+<p>Refinement promotion would become another one of these situations that would do seemingly unnecessary duplication.</p>
+<p>It would be possible in cases like this to create smaller frames and then proxy the results into larger ones, essentially simulating what a user might do to manually call FOO from a new function BAR which had a frame with 3 elements.</p>
+<pre><code>/bar: lambda [x [text!] y [tag!] z [integer!]] [
+    foo x y  ; imagine doing this, but with faster internal mechanics
+]
+</code></pre>
+<p>Some calculation could be done where the size of the frame justified it.  I have a feeling that the frame would have to be reasonably large before a technique like this would be beneficial.</p>
+<h2><a name="p-7935-what-about-refinements-at-headhttpsforumrebolinfotrefinement-arguments-at-head-of-args-list-not-tail2331-5" class="anchor" href="https://forum.rebol.info#p-7935-what-about-refinements-at-headhttpsforumrebolinfotrefinement-arguments-at-head-of-args-list-not-tail2331-5"></a>What About <a href="https://forum.rebol.info/t/refinement-arguments-at-head-of-args-list-not-tail/2331">Refinements At Head</a>?</h2>
+<p>Well, in that case, you would <em>have</em> to build a new VarList* that extracted the arguments, and then proxy them into position for the new interface.</p>
+<p>At least one wouldn't be worried about the "bloated copies of locals" situation.</p>
+<h2><a name="p-7935-souse-the-auxiliary-array-simulating-refinements-6" class="anchor" href="https://forum.rebol.info#p-7935-souse-the-auxiliary-array-simulating-refinements-6"></a>So...Use The Auxiliary Array Simulating Refinements?</h2>
+<p>The code for simulating refinements when asking simple questions like <em>"what's the first unspecialized normal arg"</em> is unappealingly complex. <img src="https://forum.rebol.info/images/emoji/twitter/nauseated_face.png?v=12" title=":nauseated_face:" class="emoji" alt=":nauseated_face:" loading="lazy" width="20" height="20"></p>
+<p>Making it further unappealing is that when you have this array of refinements "off to the side" but still allow people to fill in slots in frames to specialize out arguments, you end up needing to have "reconciliation"...because those frame slots that are referenced by this out-of-band array are no longer part of the refinement promotion.</p>
+<pre><code>&gt;&gt; f: make frame! append:dup:part/  ; has auxiliary [dup part]
+
+&gt;&gt; f.dup: 3  ; what cleans up [dup part] to just [part] ?
+</code></pre>
+<p>I've talked about not knowing about what "moment" to do these kinds of fixes, and I'm increasingly looking for ways to avoid there being any such moment.  If the physical experience of the frame was that DUP and PART were ordinary parameters and not refinements, then it "just works".</p>
+<h2><a name="p-7935-the-dumb-mechanical-answer-is-likely-best-7" class="anchor" href="https://forum.rebol.info#p-7935-the-dumb-mechanical-answer-is-likely-best-7"></a>The "Dumb" Mechanical Answer Is Likely Best</h2>
+<p>I sometimes forget just how much I take for granted in Ren-C, regarding the ability to compose functions together.</p>
+<p>The "inefficient" idea of making a new parameter list and then proxying the arguments into position would be more efficient than having to create and evaluate an interpreted function that had to manually copy the parameters.</p>
+<p>There's a huge tax created by having to compose an off-to-the-side parameter reordering list in with the frame variables, and that tax is paid by <em>any code</em> that wants to interpret the list.  It's just too big a tax to pay.</p>
+<p>It pains me a bit to delete it, because it was hard to write and seemed clever at the time.  But techniques have advanced...and while the auxiliary list may have seemed somewhat optimal for storage, it's no longer the right choice.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/simplifying-refinement-promotion/2338">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/simplifying-refinement-promotion/2338</link>
+          <pubDate>Sat, 30 Nov 2024 21:20:38 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2338</guid>
+          <source url="https://forum.rebol.info/t/simplifying-refinement-promotion/2338.rss">Simplifying Refinement Promotion</source>
+        </item>
+        <item>
+          <title>UPARSE Combinator Return Conventions: Reviewed</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Parsing</category>
+          <description><![CDATA[
+            <p>UPARSE was an early client of multiple return values, at a time when they worked by assigning variables local to your frame, which were then proxied to items in a SET-BLOCK!:</p>
+<pre><code> /multi-returner: func [
+     return: [integer!]
+     secondary: [integer!]  ; SET-WORD! indicated another return
+ ][
+     secondary: 20
+     return 10
+ ]
+
+ &gt;&gt; [ten twenty]: multi-returner
+ == 10
+
+ &gt;&gt; ten
+ == 10
+
+ &gt;&gt; twenty
+ == 20
+</code></pre>
+<p>This basically made every multi-return function a kind of infix operation, that was able to take a SET-BLOCK! on its left hand side.  <a href="https://forum.rebol.info/t/multiple-return-values-via-infix/1257">(In fact, it was prototyped using infix.)</a></p>
+<p>But this method had composability problems, and was defeated by abstraction of any sort, even the most minor forms:</p>
+<pre><code> &gt;&gt; [ten twenty]: (multi-returner)
+ ** Error: even this wouldn't work
+</code></pre>
+<p>So the method gave way to returning antiform BLOCK!s.  These represented parameter packs that would "decay" to their first item in most circumstances...but SET-BLOCK!s were one of the cases that could pick them apart (though you could design other operations as well).</p>
+<pre><code> /multi-returner: func [
+     return: [~[integer! integer!]~]
+ ][
+     return pack [10 20]
+ ]
+</code></pre>
+<p>You can read all about it in <strong><a href="https://forum.rebol.info/t/the-history-of-multi-return-in-ren-c/1134">The History of Multi-Return in Ren-C</a></strong></p>
+<h2><a name="p-7932-so-local-proxies-diedbut-uparse-mimicked-them-1" class="anchor" href="https://forum.rebol.info#p-7932-so-local-proxies-diedbut-uparse-mimicked-them-1"></a>So Local Proxies Died...But UPARSE Mimicked Them</h2>
+<p>Just because the mechanics got rid of local proxies doesn't mean you can't fake them.  All you have to do is hack up its RETURN function to make a PACK using a local variable.</p>
+<p>Simplified example:</p>
+<pre><code> /proxy-multi-func: adapt func/ [
+      body: compose $() inside body '[
+          /return: adapt return/ [
+             atom: pack [(unmeta atom) secondary]
+          ]
+          (as group! unbind body)  ; I wish this pattern were simpler
+      ]
+ ]
+
+ /multi-returner: proxy-multi-func [
+     return: [integer!]
+     &lt;local&gt; secondary  ; could be specially marked, if spec rewritten
+ ][
+     secondary: 20
+     return 10
+ ]
+</code></pre>
+<p>So when the multi-return-by-antiform-block change happened, this is what COMBINATOR did instead of transition to having every combinator do <strong><code>return pack [synthesized remainder]</code></strong></p>
+<p>Instead it worked the same as before: you'd set <strong>remainder</strong> however you wished, do <strong>return synthesized</strong>.  Except now the specialization of RETURN would PACK things up.</p>
+<h2><a name="p-7932-why-did-combinator-preserve-proxying-2" class="anchor" href="https://forum.rebol.info#p-7932-why-did-combinator-preserve-proxying-2"></a>Why Did COMBINATOR Preserve Proxying?</h2>
+<p>Well... for starters, to show that it could be done.  You <em>should</em> be able to do it.  So having a living test case to hammer through any issues was good.</p>
+<p>Also, because some combinators have two return values (synthesized and remainder), while others add a third (pending).  In truth the combinator always needs to return a pack of 3, it's just that some combinators automatically pipe the pending results from successful combinators to the output.  This means even if your combinator returned a pack of 2 in the piped case, that would have to be broken apart and turned into a pack of 3.  Having it in components helps.</p>
+<p>But generally, I think it makes the code clearer as well.  Saying <strong><code>(return pack [x y])</code></strong> doesn't have any labeling, while <strong><code>(remainder: y, return x)</code></strong> is somewhat clearer, and you don't need to label the "primary" result because that's understood as what the combinator is synthesizing.</p>
+<h2><a name="p-7932-synthesized-cant-be-proxied-unless-meta-3" class="anchor" href="https://forum.rebol.info#p-7932-synthesized-cant-be-proxied-unless-meta-3"></a>Synthesized Can't Be Proxied (unless ^META)</h2>
+<p>It's worth pointing out that there's a sort of design constraint here, when you're going to break out multi-return results and have them represented by local variables which are proxied by an adjusted RETURN...</p>
+<p>...and that constraint is that you can't put unstable antiforms in variables.  So if you have something you want to return like an antiform pack (as combinators can legitimately synthesize), it has to be the main return result.</p>
+<p>So since they use this proxying, combinators kind of break the rule of thumb of "don't make unstable antiforms your primary return in a multi-return situation".  This is because if you do:</p>
+<pre><code>return pack [pack [1 2] "a"]
+</code></pre>
+<p>Then you face some ambiguity in terms of what people might think <strong><code>([x y]: multi-return-func)</code></strong> should mean... or what <strong><code>(x: multi-return-func)</code></strong> should mean.</p>
+<p>But really, this is still being worked out.</p>
+<h2><a name="p-7932-anyway-just-wanted-to-sum-up-uparse-return-4" class="anchor" href="https://forum.rebol.info#p-7932-anyway-just-wanted-to-sum-up-uparse-return-4"></a>Anyway, Just Wanted To Sum Up UPARSE RETURN</h2>
+<p>I was questioning it, and wanted to kind of work through why it is the way it is.  But I think it's right.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/uparse-combinator-return-conventions-reviewed/2337">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/uparse-combinator-return-conventions-reviewed/2337</link>
+          <pubDate>Thu, 28 Nov 2024 00:35:37 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2337</guid>
+          <source url="https://forum.rebol.info/t/uparse-combinator-return-conventions-reviewed/2337.rss">UPARSE Combinator Return Conventions: Reviewed</source>
+        </item>
+        <item>
+          <title>Issues With Querying A Function&#39;s &quot;RETURN&quot;</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Functions</category>
+          <description><![CDATA[
+            <p>Each FUNCTION has a local variable named RETURN.  When it's running, the cell for that variable points at an "archetypal return function".  But that cell also holds a reference to that specific function instantiation's frame.  This way it knows how to return specifically from that invocation of that function.</p>
+<p>This "definitional return" concept has worked quite well.  But there are some fiddly issues that arise from trying to make RETURN an ordinary local variable.</p>
+<h2><a name="p-7931-it-was-hoped-return-would-not-be-special-1" class="anchor" href="https://forum.rebol.info#p-7931-it-was-hoped-return-would-not-be-special-1"></a>It Was Hoped RETURN Would Not Be Special</h2>
+<p>The idea is that LAMBDA would be lower-level than FUNCTION, and permit you to have parameters or local variables named RETURN that had nothing to do with returning.</p>
+<pre><code>/demo: lambda [return continue] [
+    return + continue
+]
+
+&gt;&gt; demo 1 2
+== 3
+</code></pre>
+<p>So an aspirational aspect of the design was that a user could create something that operated identically to the FUNCTION abstraction (just a bit slower, due to not being implemented natively).</p>
+<p>It would use something like THROW and CATCH, to implement RETURN (or construct(s) in that family) itself, as LAMBDAs synthesized upon instantiation.</p>
+<h2><a name="p-7931-return-as-local-hides-its-type-information-2" class="anchor" href="https://forum.rebol.info#p-7931-return-as-local-hides-its-type-information-2"></a>RETURN as Local Hides Its Type Information</h2>
+<p>While it's not an argument to the function, RETURN still has associated type information.</p>
+<p>Since RETURN is a local that will be filled with an action when the function runs, it isn't using its frame slot until that invocation happens.  That means it can store a PARAMETER! which says what return types are legal.  (It seems like a good use of an otherwise-unused slot otherwise you'd need a slot in the Phase to hold it.)</p>
+<p>Functions like HELP want to know those types.  Yet locals and specialized arguments are traditionally considered implementation details, hidden from callers.  They're only visible  when frames are captured during the "phase" of being inside the function call:</p>
+<pre><code>&gt;&gt; /foo: function [return: [integer!] x] [
+     print mold words of binding of $x
+]
+
+&gt;&gt; words of foo/
+== [x]
+
+&gt;&gt; foo
+== [return x]
+</code></pre>
+<p>Today's unsatisfying solution is that there's a flag on parameters that represent RETURN.  If you want the type information of that return, you can ask for it:</p>
+<pre><code>&gt;&gt; return of foo/
+== ~#[parameter! [integer!]]~  ; anti
+</code></pre>
+<p>But this flag is only applied by the FUNCTION native when its construction the parameter list.  So you wouldn't (for instance) get this behavior on a usermode re-implementation of FUNCTION based on LAMBDA.</p>
+<h2><a name="p-7931-how-to-change-return-in-composition-3" class="anchor" href="https://forum.rebol.info#p-7931-how-to-change-return-in-composition-3"></a>How To Change RETURN In Composition?</h2>
+<p>Let's say you're going to build a higher-level function with something like ENCLOSE:</p>
+<pre><code>&gt;&gt; /bar: enclose foo/ func [return: [tag!] f [frame!]] [
+       print "I'm an enclosure!"
+       eval f
+       return &lt;tag&gt;
+   ] 
+</code></pre>
+<p>The interface of an enclosed function is the same parameter list as the original, and the same returns as the original.  The enclosure is implemented as a function that takes a frame, and it can be given a new return type.  But today that isn't reported as the return type if you asked for HELP of FOO.  It would look at the original parameter list, which in this case says its RETURN is <strong><code>[integer!]</code></strong>.</p>
+<p><em>This suggests that the answer to the question <strong><code>return of</code></strong> has to be dispatcher-specific.</em></p>
+<p>FUNCTION would say "it's the contents of the RETURN local in the archetype (not overwritten with return function, so still a PARAMETER!)".</p>
+<p>ENCLOSE would say "it's the return type of the enclosure function that takes the frame" but then give back the original parameter list for everything else.  (This raises a question of how you would inherit the original function's return... it might be nice if you used a LAMBDA or something that reported no return constraint, that it would default to the constraints of the function you were enclosing.)</p>
+<p>In any case, if it was answered by the dispatcher... then if LAMBDA says "I don't have a RETURN", you'd not have HELP information on your RETURN if you were trying to build your own FUNCTION on top of LAMBDA.</p>
+<p><strong>The word RETURN may be a distraction, here.</strong>  Because if it's something like a GENERATOR, the products are coming from calls to YIELD.  Maybe <strong><code>(result of ...)</code></strong> or <strong><code>(synthesis of ...)</code></strong> would help stress that this question isn't tied up specifically with RETURN.</p>
+<h2><a name="p-7931-lambda-semantics-may-want-result-specification-4" class="anchor" href="https://forum.rebol.info#p-7931-lambda-semantics-may-want-result-specification-4"></a>LAMBDA Semantics May Want Result Specification</h2>
+<p>The idea of LAMBDA is that the evaluative product just drops out <a href="https://forum.rebol.info/t/implicit-execution-of-return-in-functions-bad/1656">(see various writings on why FUNCTION does not allow that)</a>.</p>
+<p>But just because you want that semantic, doesn't mean you don't want the HELP to not give a return type.</p>
+<p>However, LAMBDA doesn't have anywhere to store the type information the way FUNCTION does.  If it has a RETURN it may be using it for unrelated purposes.</p>
+<p>Given what I've proposed for the dispatcher-specific RETURN, you could accomplish it with an ENCLOSE:</p>
+<pre><code> enclose (lambda [...] [...]) func [return: [&lt;spec&gt;] f] [return eval f]
+</code></pre>
+<p>But it seems clearly better to have something specific to this purpose:</p>
+<pre><code> returns [&lt;spec&gt;] lambda [...] [...]
+</code></pre>
+<p>Then the Returns_Dispatcher() would simply type check what you gave it.</p>
+<p>Perhaps it could even accept a function as a first parameter, and then just say it returns whatever that function returns:</p>
+<pre><code>returns add/ lambda [x] [x + 1]
+</code></pre>
+<p>Though that might be more confusing than writing it out:</p>
+<pre><code>returns (return of add/) lambda [x] [x + 1]
+</code></pre>
+<p>Maybe a refinement should be used to bless that you're doing it on purpose:</p>
+<pre><code>returns:same-as add/ lambda [x] [x + 1]
+</code></pre>
+<p>I guess the big question would be how to get the return's textual description in there.  Maybe it could assume if the format is TEXT! BLOCK! that's what you mean:</p>
+<pre><code>/foo: returns [
+   "The input plus one"
+   [integer!]
+] lambda [x] [
+    x + 1
+]
+</code></pre>
+<h2><a name="p-7931-well-theres-some-ideas-5" class="anchor" href="https://forum.rebol.info#p-7931-well-theres-some-ideas-5"></a>Well, There's Some Ideas</h2>
+<p>I guess the idea here is that mechanics for answering "what do you return" come from the function's dispatcher, and maybe that becomes a chained question where if the dispatcher wraps something else, it has to ask the right parts of that thing.  There may be no user-exposed mechanic for building your own answer to the question beyond something like RETURNS, which is probably good enough.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/issues-with-querying-a-functions-return/2336">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/issues-with-querying-a-functions-return/2336</link>
+          <pubDate>Thu, 28 Nov 2024 00:00:21 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2336</guid>
+          <source url="https://forum.rebol.info/t/issues-with-querying-a-functions-return/2336.rss">Issues With Querying A Function&#39;s &quot;RETURN&quot;</source>
+        </item>
         <item>
           <title>Dropping `&lt;with&gt;`, `&lt;in&gt;`, `&lt;static&gt;`</title>
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
@@ -1897,383 +2400,6 @@ if (quote:quote:quasi:block? first [''~[a b c]~]) [...]
           <discourse:topicArchived>No</discourse:topicArchived>
           <guid isPermaLink="false">forum.rebol.info-topic-2298</guid>
           <source url="https://forum.rebol.info/t/typechecking-quoted-forms-quasiforms-antiforms/2298.rss">Typechecking Quoted forms / Quasiforms / Antiforms</source>
-        </item>
-        <item>
-          <title>Generalized Argument Removal - SPECIALIZE:RELAX</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Functions</category>
-          <description><![CDATA[
-            <p>Let's say you want a version of append that just appends random numbers to things:</p>
-<pre><code>&gt;&gt; append-random: adapt get $append [
-       value: random 10
-   ]
-</code></pre>
-<p>This works, but the function interface still thinks it takes two arguments:</p>
-<pre><code>&gt;&gt; append-random [a b c] [d e]
-== [a b c 10]
-</code></pre>
-<p>So fine, you can just specialize out the argument.  Both ADAPT of a SPECIALIZE and SPECIALIZE of an ADAPT would remove an argument.  But you want the specialize to run first, otherwise it would overwrite the adapted value.  So SPECIALIZE the ADAPT, to put the specialize earlier in the composition process.</p>
-<p><em><strong>But what value do you put in the specialized-out slot if you're just going to overwrite it?</strong></em></p>
-<p>Today we have quite the awesome answer: <strong><a href="https://forum.rebol.info/t/tripwire-in-the-wild/2278">use a TRIPWIRE!</a></strong>  Sounds great!</p>
-<pre><code>&gt;&gt; append-random: specialize (adapt get $append [
-       value: random 10
-   ]) [
-       value: ~&lt;specialized out&gt;~
-   ]
-** Script Error: append expects [~void~ element? splice?] for its value argument
-</code></pre>
-<h2>
-<a name="ooops-specialize-typechecked-that-1" class="anchor" href="https://forum.rebol.info#ooops-specialize-typechecked-that-1"></a>Ooops.  SPECIALIZE Typechecked That</h2>
-<p>There are two good reasons for specialization to type check:</p>
-<ul>
-<li>
-<p>You find out about bad types at the moment of specialization--instead of having to wait until the function is called to know there are problems.</p>
-</li>
-<li>
-<p>It can speed up the system by not type checking those parameters again <em>(though it occurs to me this may be broken right now, and fixing it sooner than later would probably be smart)</em></p>
-</li>
-</ul>
-<p>Historically what I've done just to get things going is to use some value that typechecks in the argument slot:</p>
-<pre><code>&gt;&gt; append-random: specialize (adapt get $append [
-       value: random 10
-   ]) [
-       value: [something that typechecks]
-   ]
-
-&gt;&gt; append-random [a b c]
-== [a b c 7]
-
-&gt;&gt; append-random [a b c]
-== [a b c 9]
-
-&gt;&gt; append-random [a b c]
-== [a b c 7]
-</code></pre>
-<p>For the sake of education, notice what happens if you did it backwards and ADAPT the SPECIALIZE:</p>
-<pre><code>&gt;&gt; append-random: adapt (specialize get $append [
-       value: [something that typechecks]
-   ]) [
-       value: random 10
-   ]
-
-&gt;&gt; append-random [a b c]
-== [a b c [something that typechecks]]
-</code></pre>
-<h2>
-<a name="seems-we-need-specializerelax-2" class="anchor" href="https://forum.rebol.info#seems-we-need-specializerelax-2"></a>Seems We Need SPECIALIZE:RELAX</h2>
-<p>Having to pick an arbitrary meaningless value that won't trip up the type checking is bad.</p>
-<p>While we want to type check 99% of the time, this kind of scenario calls for a version of specialize that does not do typechecking.</p>
-<p>Hence I propose <strong><code>SPECIALIZE:RELAX</code></strong>.</p>
-<p>Tripwires seem like the go-to datatype to use for these specialized-out values.  Rather than just say <strong><code>~&lt;specialized out&gt;~</code></strong> you can be as detailed as you like, to help inform on what should happen:</p>
-<pre><code>&gt;&gt; append-random: specialize:relax (adapt get $append [
-       value: random 10
-   ]) [
-       value: ~&lt;ADAPT phase of APPEND-RANDOM puts INTEGER! here&gt;~
-   ]
-</code></pre>
-<p>Tripwires are great!  <img src="https://forum.rebol.info/images/emoji/twitter/boom.png?v=12" title=":boom:" class="emoji" alt=":boom:" loading="lazy" width="20" height="20">  You don't have to stress too much about cost...the string inside the tag only exists as one instance in memory.</p>
-<p>But you could be lazy and/or cheap, and just unset it. <img src="https://forum.rebol.info/images/emoji/twitter/man_shrugging.png?v=12" title=":man_shrugging:" class="emoji" alt=":man_shrugging:" loading="lazy" width="20" height="20"></p>
-<pre><code>&gt;&gt; append-random: specialize:relax (adapt get $append [
-       value: random 10
-   ]) [
-       value: ~
-   ]
-</code></pre>
-<p>There might be other uses for not typechecking at the moment of specialization, but I can't think of what they would be.</p>
-            <p><small>3 posts - 2 participants</small></p>
-            <p><a href="https://forum.rebol.info/t/generalized-argument-removal-specialize-relax/2297">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/generalized-argument-removal-specialize-relax/2297</link>
-          <pubDate>Mon, 23 Sep 2024 17:37:49 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-2297</guid>
-          <source url="https://forum.rebol.info/t/generalized-argument-removal-specialize-relax/2297.rss">Generalized Argument Removal - SPECIALIZE:RELAX</source>
-        </item>
-        <item>
-          <title>META:LITE - When You Don&#39;t Want Quasiforms</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Semantics</category>
-          <description><![CDATA[
-            <p>There was a time before quasiforms existed, but where there was generic quoting.</p>
-<p>It was in this time that META was invented.  It did the only thing it could do:</p>
-<ul>
-<li>
-<p>When you META'd a plain (or quoted) thing, it got one quote level added</p>
-</li>
-<li>
-<p>When you META'd an "antiform" you would get a plain version of the thing</p>
-</li>
-</ul>
-<p>So it worked like this:</p>
-<pre><code>&gt;&gt; meta first [(d e f)]
-== '(d e f)
-
-&gt;&gt; meta first ['(d e f)]
-== ''(d e f)
-
-&gt;&gt; spread [a b c]
-== (a b c)  ; "antiform"
-
-&gt;&gt; meta spread [a b c]
-== (a b c)
-</code></pre>
-<p><em>(That's not how it works now--for good reasons.  Not only is it a bit too easy to get confused about whether a meta protocol is in effect, the absence of quasiforms leaves a representational hole for values that produce antiforms under evaluation.  But I won't rewrite a <a href="https://forum.rebol.info/t/a-justification-of-generalized-isotopes/1918">A Justification Of Generalized Iostopes</a> here, this post has another purpose.)</em></p>
-<h2>
-<a name="another-historical-twist-meta-of-null-was-null-1" class="anchor" href="https://forum.rebol.info#another-historical-twist-meta-of-null-was-null-1"></a>Another Historical Twist: META of NULL was NULL</h2>
-<p>NULL was an outlier--at various times having no quoted form (and at other times being considered a quote of nothingness, e.g. the lone apostrophe (<strong><code>'</code></strong>)).</p>
-<p>I don't exactly remember what state NULL was in at the time META was being invented.  But regardless, it was initially decided that META and UNMETA of NULL could just give null back.</p>
-<p>This actually turned out to frequently be useful...for instance <a href="https://forum.rebol.info/t/demonstrating-for-both-loop-composability-for-the-win/1833">when writing a loop wrapper like FOR-BOTH</a></p>
-<pre><code>for-both: func [var blk1 blk2 body] [  ; the historical formulation
-    return unmeta all [
-        meta for-each var blk1 body  ; META NULL =&gt; NULL allows chaining BREAK
-        meta for-each var blk2 body
-    ]
-]
-</code></pre>
-<p>Though while it was useful there, plenty of places needed to speak fully abstractly about all possible states.  So as the model shaped up, META of NULL fit into the regular pattern of all things having reified metaforms, giving <strong><code>~null~</code></strong>.</p>
-<h2>
-<a name="i-wanted-a-metalitehttpswwwyoutubecomwatchvimv0g-4cycw-2" class="anchor" href="https://forum.rebol.info#i-wanted-a-metalitehttpswwwyoutubecomwatchvimv0g-4cycw-2"></a><a href="https://www.youtube.com/watch?v=Imv0g-4cycw">I Wanted A META:LITE</a>
-</h2>
-<p>The idea of a META variation that passed through keywords as-is came along as <strong><code>meta:lite</code></strong>.</p>
-<pre><code>&gt;&gt; meta:lite [a b c]
-== '[a b c]
-
-&gt;&gt; spread [a b c]
-== ~(a b c)~  ; null
-
-&gt;&gt; meta:lite spread [a b c]
-== ~(a b c)~
-
-&gt;&gt; meta:lite null
-== ~null~  ; anti
-
-&gt;&gt; meta:lite first [~null~ ~void~]
-== '~null~
-</code></pre>
-<p>So today's META:LITE still produces quasiforms for antiforms--just not for the <code>~null~</code> and <code>~void~</code> antiforms (and I now imagine it should probably pass through <code>~okay~</code> and <code>~end~</code> and <code>~NaN~</code> as well):</p>
-<pre><code>/for-both: func [var blk1 blk2 body] [
-    return unmeta:lite all [
-        meta:lite for-each var blk1 body  ; meta:lite null =&gt; ~null~ antiform
-        meta:lite for-each var blk2 body  ; meta:lite void =&gt; ~void~ antiform
-    ]
-]
-</code></pre>
-<h2>
-<a name="but-what-if-metalite-didnt-make-any-quasiforms-at-all-3" class="anchor" href="https://forum.rebol.info#but-what-if-metalite-didnt-make-any-quasiforms-at-all-3"></a>But What If META:LITE Didn't Make <em>Any</em> Quasiforms At All?</h2>
-<p>By design, <a href="https://forum.rebol.info/t/quasiforms-arent-super-friendly-and-they-shouldnt-be/2273">quasiforms are not very friendly</a>.  So if you have an antiform in your hand... and you know you have an antiform in your hand... it's easy to take a step to a quasiform, but you need another step to get back to a plain form you can interact with.</p>
-<p>So why not have META:LITE take care of it?</p>
-<pre><code>&gt;&gt; meta:lite null
-== ~null~  ; anti
-
-&gt;&gt; meta:lite spread [a b c]
-== (a b c)
-</code></pre>
-<p>This doesn't make a difference to things like FOR-BOTH.  They'll still work--plain forms are just as truthy as quasiforms for the meta states.  They just have to remember to use UNMETA:LITE on the reverse end.  <em>(If you use plain UNMETA it will catch your error, as UNMETA does not accept plain forms.)</em></p>
-<p>It might seem random to pair up the feature of not making quasiforms with passing thru null and void.  But I actually think the kinds of places where you'd want one behavior do overlap significantly with the other.</p>
-<p>And we're really just running out of terms, here.  Throwing another nuance in to say <em>"I want partial META, but only partial in the sense that I'm passing through null and void, not partial in terms of the other antiforms--make those quasiforms"</em> is just starting to go beyond the ability to give names to.</p>
-<p>So in my head, having META:LITE be formulated as "do what META would do in a historical world where quasiforms and meta-nulls didn't exist" feels pretty good.</p>
-<h2>
-<a name="its-still-fundamentally-a-valid-meta-4" class="anchor" href="https://forum.rebol.info#its-still-fundamentally-a-valid-meta-4"></a>It's Still Fundamentally a "Valid META"</h2>
-<p>I couldn't really think of a good name for the operation besides just saying it was an alternate behavior of META. "Lite" is a bit strange but I felt it fit.</p>
-<p>Note that it doesn't make sense as a refinement to REIFY.  Because being willing to produce something that can't be put in a block fundamentally undermines what the word REIFY means.  (<strong><code>reify:...NOT!</code></strong>)</p>
-<p>The thing about META:LITE is that it really is giving you a full-spectrum meta representation of what you had in your hand.  Every input state maps to a unique output state.  The default META happens to also be a fully reifying operation as well...but here we are saying that's not intrinsic to "a meta operation".</p>
-<p><em>(Would there be any use for a META that passes through <em>all</em> antiforms--not just the antiform words--and just quotes everything else?  That's more a variation of QUOTE than it is a variation of META.  I can't offhand think of a case where that would ever be useful.)</em></p>
-            <p><small>1 post - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/meta-lite-when-you-dont-want-quasiforms/2296">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/meta-lite-when-you-dont-want-quasiforms/2296</link>
-          <pubDate>Mon, 23 Sep 2024 13:42:44 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-2296</guid>
-          <source url="https://forum.rebol.info/t/meta-lite-when-you-dont-want-quasiforms/2296.rss">META:LITE - When You Don&#39;t Want Quasiforms</source>
-        </item>
-        <item>
-          <title>ENVELOP (and COMPOSE!) By Example</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Dialects/DSLs</category>
-          <description><![CDATA[
-            <p>Prior to splices, we were considering rethinking <strong>append/only [a b c] [d e]</strong> as <strong>append [a b c] only [d e]</strong>, where ONLY would just envelop its argument in a block.</p>
-<p><a class="mention" href="https://forum.rebol.info/u/rgchris">@rgchris</a> didn't care for the name:</p>
-<aside class="quote no-group" data-username="rgchris" data-post="1" data-topic="1873">
-<div class="title">
-<div class="quote-controls"></div>
-<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/rgchris/48/14_2.png" class="avatar"><a href="https://forum.rebol.info/t/1873/1">On another topic</a></div>
-<blockquote>
-<p>Correct me if I'm wrong, but this proposed ONLY function would simply create a single value cell with the block reference, which would seem pretty efficient.</p>
-<p>It'd be very easy to shim:</p>
-<pre data-code-wrap="plaintext"><code class="lang-plaintext">only: func [value][
-    reduce [value]
-]
-</code></pre>
-<p>I'm still fond of ENVELOP over BLOCKIFY as a name. I don't think ONLY would make the cut. Naming is tricky as it is sort of a hack—it's purpose is to make a block a singular value but in actuality it is creating a new value of which the old one just happens to be the only content.</p>
-</blockquote>
-</aside>
-<p>As it happens, ONLY defined in this way stuck around for a while.  (I actually thought it had been deleted, but it turns out it was hiding as **<code>only*</code>, so just finally deleted it now!)</p>
-<p>I agree that ENVELOP is a better and more useful name for the category of operations.  Today we have ENBLOCK and ENGROUP:</p>
-<pre><code>&gt;&gt; enblock [a b c]
-== [[a b c]]
-
-&gt;&gt; enblock &lt;tag&gt;
-== [&lt;tag&gt;]
-
-&gt;&gt; engroup [a b c]
-== ([a b c])
-
-&gt;&gt; engroup &lt;tag&gt;
-== (&lt;tag&gt;)
-</code></pre>
-<p>But there's no generalized ENVELOP.</p>
-<h2><a name="p-7757-envelop-by-example-seems-like-an-important-construct-1" class="anchor" href="https://forum.rebol.info#p-7757-envelop-by-example-seems-like-an-important-construct-1"></a>"Envelop by Example" Seems Like an Important Construct</h2>
-<pre><code>&gt;&gt; something: 1020
-
-&gt;&gt; word: 'something  ; demo behavior when unbound (binding from context)
-
-&gt;&gt; envelop '[] word
-== [something]
-
-&gt;&gt; envelop '() word
-== (something)
-
-&gt;&gt; envelop '@[] word  ; would work with sigil-decorated types
-== @[something]
-
-&gt;&gt; envelop '(()) word  ; could work with nested envelopes
-== ((something))
-</code></pre>
-<p>There's a big advantage in passing in a block or group "by example".  It means you can implicitly pass along a binding, which can be integrated in the same step...if that's what you want.  (The modern art of writing Ren-C code requires a lot of consciousness about the decision to use bound or unbound material.)</p>
-<pre><code>&gt;&gt; eval envelop '(()) word  ; quoting means no binding
-** Error: something not defined
-
-&gt;&gt; eval envelop $(()) word  ; if binding passed in, it's used
-== 1020
-</code></pre>
-<p>ENVELOP might even support <a href="https://forum.rebol.info/t/synthetic-asymmetric-delimiters/1893">Synthetic Asymmetric Delimiters</a></p>
-<pre><code>&gt;&gt; envelop '(| |) word
-== (| something |)
-
-&gt;&gt; envelop '(|) word  ; shorthand--assume paired?
-== (| something |)
-
-&gt;&gt; envelop '(&lt;*&gt;) word  ; maybe not assume, for COMPOSE marker compatibility
-== (&lt;*&gt; something)
-</code></pre>
-<h2><a name="p-7757-engroup-and-enblock-still-useful-2" class="anchor" href="https://forum.rebol.info#p-7757-engroup-and-enblock-still-useful-2"></a>ENGROUP and ENBLOCK Still Useful</h2>
-<p>I do think that ENGROUP and ENBLOCK as specializations of ENVELOP turn out to be what you'll use at least 90% of the time...so they're worth having around.</p>
-<p>But as arity-1 functions, the returned block or group would be unbound at its tip.  So you'd have to use the ENVELOP-by-example to pass in a binding.</p>
-<h2><a name="p-7757-this-overlaps-the-morph-proposalhttpsforumrebolinfotsetify-plainify-getify-symify-or-morph1334-somewhat-3" class="anchor" href="https://forum.rebol.info#p-7757-this-overlaps-the-morph-proposalhttpsforumrebolinfotsetify-plainify-getify-symify-or-morph1334-somewhat-3"></a>This Overlaps <a href="https://forum.rebol.info/t/setify-plainify-getify-symify-or-morph/1334">the MORPH Proposal</a> Somewhat</h2>
-<p>MORPH has the ability to change the decorations on the value you're passing in, whereas ENVELOP would assume you wanted the item as-is, just enclosed in some other stuff.</p>
-<p>My instinct is to say that this takes the pressure off MORPH to be all things to all people... vs. the idea that we don't need ENVELOP and it should just become a subfeature of morph.  But I dunno.</p>
-            <p><small>6 posts - 2 participants</small></p>
-            <p><a href="https://forum.rebol.info/t/envelop-and-compose-by-example/2294">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/envelop-and-compose-by-example/2294</link>
-          <pubDate>Mon, 23 Sep 2024 12:43:20 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-2294</guid>
-          <source url="https://forum.rebol.info/t/envelop-and-compose-by-example/2294.rss">ENVELOP (and COMPOSE!) By Example</source>
-        </item>
-        <item>
-          <title>What is ~/~ : A PATH! or a QUASI-WORD?</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Datatypes</category>
-          <description><![CDATA[
-            <p>I've mentioned that there are not going to be quasiform or antiform sequence types.</p>
-<ul>
-<li>
-<p>We want tildes in paths <strong><code>~/home/whatever.txt</code></strong></p>
-<ul>
-<li>
-<p>Paths in particular...but they could be useful in tuples (<strong><code>~.foo</code></strong>) or chains (<strong><code>[a]:~</code></strong>)</p>
-</li>
-<li>
-<p>Quasiforms might be nice  for some purposes too (<strong><code>~null~/a/b/c), (foo:~[a]~</code></strong>)</p>
-</li>
-</ul>
-</li>
-<li>
-<p>The known very important usage of tilde in paths, plus all the as-yet-unknown and untapped other uses, far outweigh any advantage I can think of for antiform/quasiform sequences.</p>
-</li>
-</ul>
-<p>So that's settled.  But there's a bit of an edge case with the WORD!s like <strong><code>/</code></strong> or <strong>.</strong> or <strong>:</strong></p>
-<p>And there, I'm going to have to say that <strong><code>~/~</code></strong> is a quasiword.</p>
-<ul>
-<li>
-<p>I want all words to have quasiforms (though not antiforms... only system-blessed "keywords" will be allowed to become antiforms).  And so I don't want to exempt any words from that.</p>
-</li>
-<li>
-<p>I don't think excluding <strong><code>~/~</code></strong> as a path form has any tremendous consequences</p>
-</li>
-<li>
-<p>Allowing it to be a quasiword fits in with <strong><code>~///~</code></strong> and other such words being quasiwords, and those aren't valid paths.</p>
-</li>
-</ul>
-<p>So we open up a wider field of parts, keep all words having quasiforms, and lose one weird path representation.</p>
-<p>Though it's not "lost"--if you're writing dialect code that has some logic for what a PATH! of two tilde-trash would mean, you can specially recognize the quasiword.  You'll only run into representational trouble if in the same dialect you need a meaning for every possible quasiword that deviates from what the path interpretation would be.</p>
-<p>(I'd say I'd bet money that's never going to happen, except I've seen exactly weird things like that happen often enough to know better.  So instead I'll say "it might happen someday, but I don't care.")</p>
-<p>Anyway, trying to shore this up a bit, some sample errors:</p>
-<pre><code>&gt;&gt; to path! [~ a]
-== ~/a
-
-&gt;&gt; to path! [~ ~]
-** Script Error: Sequence would conflate with WORD! form: ~/~
-
-&gt;&gt; to path! [a _]
-== a/
-
-&gt;&gt; to path! [_ _]
-** Script Error: Sequence would conflate with WORD! form: /
-
-&gt;&gt; to path! [_ a _]
-== /a/
-
-&gt;&gt; to path! [a _ b]
-** Script Error: BLANK! only legal at head and tail of sequence
-</code></pre>
-            <p><small>2 posts - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/what-is-a-path-or-a-quasi-word/2292">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/what-is-a-path-or-a-quasi-word/2292</link>
-          <pubDate>Sun, 22 Sep 2024 13:15:01 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-2292</guid>
-          <source url="https://forum.rebol.info/t/what-is-a-path-or-a-quasi-word/2292.rss">What is ~/~ : A PATH! or a QUASI-WORD?</source>
-        </item>
-        <item>
-          <title>DO/NEXT vs. EVAL/NEXT vs. EVAL:STEP</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Naming</category>
-          <description><![CDATA[
-            <p>DO/NEXT was how you'd do a single step in historical Redbol</p>
-<p>This is currently EVAL/NEXT (since DO is higher level and doesn't evaluate lists).  But it hadn't occurred to me to question /NEXT...</p>
-<p>But I realized that within the code, I call it <strong><code>Eval_Step_XXX()</code></strong>.  And the level executor that runs a single evaluation step is called the <strong><code>Stepper_Executor()</code></strong></p>
-<p>So <strong><code>EVAL:STEP</code></strong> (new refinement notation) seems better to me.</p>
-<pre><code>&gt;&gt; [pos value]: eval:step [1 + 2 10 + 20]
-== [10 + 20]
-
-&gt;&gt; pos
-== [10 + 20]
-
-&gt;&gt; value
-== 3
-</code></pre>
-            <p><small>1 post - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/do-next-vs-eval-next-vs-eval-step/2291">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/do-next-vs-eval-next-vs-eval-step/2291</link>
-          <pubDate>Sat, 21 Sep 2024 17:13:59 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-2291</guid>
-          <source url="https://forum.rebol.info/t/do-next-vs-eval-next-vs-eval-step/2291.rss">DO/NEXT vs. EVAL/NEXT vs. EVAL:STEP</source>
         </item>
   </channel>
 </rss>

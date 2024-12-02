@@ -5,8 +5,189 @@
     <link>https://forum.rebol.info/c/development/functions/59</link>
     <description>Topics in the &#39;Functions&#39; category Discussions of Functions and Generators, e.g. how things like RETURN work... or the mechanics of generators and composers like ADAPT, SPECIALIZE, ENCLOSE, HIJACK, etc.</description>
     
-      <lastBuildDate>Thu, 21 Nov 2024 22:06:22 +0000</lastBuildDate>
+      <lastBuildDate>Sat, 30 Nov 2024 21:20:38 +0000</lastBuildDate>
       <atom:link href="https://forum.rebol.info/c/development/functions/59.rss" rel="self" type="application/rss+xml" />
+        <item>
+          <title>Simplifying Refinement Promotion</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Functions</category>
+          <description><![CDATA[
+            <p>There are two modes of partial specialization which Ren-C has supported.</p>
+<p>One form would be like if APPEND takes something like :DUP and fixes it to a value:</p>
+<pre><code>&gt;&gt; append2: specialize append/ [dup: 2]
+
+&gt;&gt; append2 [a b c] &lt;d&gt;
+== [a b c &lt;d&gt; &lt;d&gt;]
+</code></pre>
+<p>Then there's a trickier kind of specialization, which is to ask for the parameter but not specify it... thus just increasing the arity:</p>
+<pre><code>&gt;&gt; appenddup: append:dup/
+
+&gt;&gt; appenddup [a b c] &lt;d&gt; 4
+== [a b c &lt;d&gt; &lt;d&gt; &lt;d&gt; &lt;d&gt;]
+</code></pre>
+<p>The second form is pretty unusual in the language world.  There doesn't seem to be much prior art in "the conversion of optional parameters to required parameters" (at least I don't know any, and the AIs I asked don't know any).</p>
+<p>Since it's pretty different from what what people think of as partial specialization, let's call it <strong>"refinement promotion"</strong>.</p>
+<h2><a name="p-7935-refinement-promotion-is-tricky-1" class="anchor" href="https://forum.rebol.info#p-7935-refinement-promotion-is-tricky-1"></a>Refinement Promotion Is <em>Tricky</em></h2>
+<p>Something that has been non-negotiable in the design is the straightforward array of parameters and locals that specify a function interface.</p>
+<p>Refinements are defined in some order in that array.  But you are not required to use them in that order.</p>
+<p>So consider a definition like:</p>
+<pre><code> /foo: func [a [integer!] :b [integer!] :c [integer!]] [...]
+</code></pre>
+<p>Someone might do refinement promotion of this as <strong><code>foo:c:b/</code></strong> - this makes it seem to the caller a function originally written with spec:</p>
+<pre><code> [a [integer!] c [integer!] b [integer!]]
+</code></pre>
+<p>The techniques so far have tried to mimic the way that refinements work.  So <strong><code>get $foo:c:b</code></strong> would produce a function that was accompanied by a <strong><code>[c b]</code></strong> array, that would get pushed when running the promoted function.  The elements in the array would not just have the words, but those words would have binding information to say what index those words were found at in the parameter array.</p>
+<p>But since the underlying array is left the same, this means every time you want to know something like "what's the first unspecialized normal argument" you have to mimic the refinement gathering process.  It convoluted the process quite a lot, and really went against the idea of the implementation being "simple".</p>
+<h2><a name="p-7935-q-is-this-really-required-to-support-a-yes-2" class="anchor" href="https://forum.rebol.info#p-7935-q-is-this-really-required-to-support-a-yes-2"></a>Q: Is This Really Required To Support?  (A: Yes)</h2>
+<p>This may not seem like a super-common need.  But if you're implementing a dialect that wants to support calling functions with refinements, it's pretty important.</p>
+<p>Let's say you're implementing something like <a href="https://forum.rebol.info/t/if-action-combinators-dont-impress-what-will/1608">the feature in UPARSE that lets you call functions</a>:</p>
+<pre><code>&gt;&gt; data: copy ""
+
+&gt;&gt; parse ["a" "b"] [some [/append:dup (data) text! (2)]]
+
+&gt;&gt; data
+== "aabb"
+</code></pre>
+<p>Basically, if <strong><code>(get $/append:dup)</code></strong> can come back with a function that you can query for its parameters and get answers just like it was any other function, then support for refinements comes basically for free.</p>
+<h2><a name="p-7935-should-the-varlist-just-be-rewritten-3" class="anchor" href="https://forum.rebol.info#p-7935-should-the-varlist-just-be-rewritten-3"></a>Should The VarList Just Be Rewritten?</h2>
+<p>If you look at what a modern SPECIALIZE followed by AUGMENT can do, they can hide parameters...and then add back parameters with the same name.  Which parameters are visible depend on the "phase" of the frame.</p>
+<p>So why couldn't refinement promotion be done just by making a new function interface that removes the argument as a refinement, and adds it back as a regular argument... then has a dispatch phase that moves the argument data to its old position for the subsequent phases?</p>
+<p>It's not particularly "cheap" to do that, space-wise.  You'd need a new VarList* and a new Phase*, and the Phase would have to remember the new and old positions to do the rewrite.  But it would make parameter enumeration blunt and simple, because you'd really just be enumerating the parameters in order.</p>
+<p>There'd be some cases where the position of the refinement would allow it to just be naturally rewritten to be a regular argument, and that could be optimized for.</p>
+<h2><a name="p-7935-what-about-when-you-have-lots-of-local-4" class="anchor" href="https://forum.rebol.info#p-7935-what-about-when-you-have-lots-of-local-4"></a>What About When You Have Lots of <code>&lt;local&gt;</code>?</h2>
+<p>This is kind of the dark side of the simple FRAME! model, which is that if you use it to create a lot of local variables, then operations like SPECIALIZE and AUGMENT which do VarList manipulation have to make copies of everything for the new VarList...including a bunch of locals that aren't changing at all in each new form.</p>
+<pre><code>/foo: func [x [text!] y [tag!] &lt;local&gt; a b c d e f g h i j k l m n o p] [
+    ... 19 frame cells (includes RETURN) ...
+]
+
+/bar: augment foo/ [z [integer!]]  ; z is last item in new 20 item frame
+</code></pre>
+<p>Refinement promotion would become another one of these situations that would do seemingly unnecessary duplication.</p>
+<p>It would be possible in cases like this to create smaller frames and then proxy the results into larger ones, essentially simulating what a user might do to manually call FOO from a new function BAR which had a frame with 3 elements.</p>
+<pre><code>/bar: lambda [x [text!] y [tag!] z [integer!]] [
+    foo x y  ; imagine doing this, but with faster internal mechanics
+]
+</code></pre>
+<p>Some calculation could be done where the size of the frame justified it.  I have a feeling that the frame would have to be reasonably large before a technique like this would be beneficial.</p>
+<h2><a name="p-7935-what-about-refinements-at-headhttpsforumrebolinfotrefinement-arguments-at-head-of-args-list-not-tail2331-5" class="anchor" href="https://forum.rebol.info#p-7935-what-about-refinements-at-headhttpsforumrebolinfotrefinement-arguments-at-head-of-args-list-not-tail2331-5"></a>What About <a href="https://forum.rebol.info/t/refinement-arguments-at-head-of-args-list-not-tail/2331">Refinements At Head</a>?</h2>
+<p>Well, in that case, you would <em>have</em> to build a new VarList* that extracted the arguments, and then proxy them into position for the new interface.</p>
+<p>At least one wouldn't be worried about the "bloated copies of locals" situation.</p>
+<h2><a name="p-7935-souse-the-auxiliary-array-simulating-refinements-6" class="anchor" href="https://forum.rebol.info#p-7935-souse-the-auxiliary-array-simulating-refinements-6"></a>So...Use The Auxiliary Array Simulating Refinements?</h2>
+<p>The code for simulating refinements when asking simple questions like <em>"what's the first unspecialized normal arg"</em> is unappealingly complex. <img src="https://forum.rebol.info/images/emoji/twitter/nauseated_face.png?v=12" title=":nauseated_face:" class="emoji" alt=":nauseated_face:" loading="lazy" width="20" height="20"></p>
+<p>Making it further unappealing is that when you have this array of refinements "off to the side" but still allow people to fill in slots in frames to specialize out arguments, you end up needing to have "reconciliation"...because those frame slots that are referenced by this out-of-band array are no longer part of the refinement promotion.</p>
+<pre><code>&gt;&gt; f: make frame! append:dup:part/  ; has auxiliary [dup part]
+
+&gt;&gt; f.dup: 3  ; what cleans up [dup part] to just [part] ?
+</code></pre>
+<p>I've talked about not knowing about what "moment" to do these kinds of fixes, and I'm increasingly looking for ways to avoid there being any such moment.  If the physical experience of the frame was that DUP and PART were ordinary parameters and not refinements, then it "just works".</p>
+<h2><a name="p-7935-the-dumb-mechanical-answer-is-likely-best-7" class="anchor" href="https://forum.rebol.info#p-7935-the-dumb-mechanical-answer-is-likely-best-7"></a>The "Dumb" Mechanical Answer Is Likely Best</h2>
+<p>I sometimes forget just how much I take for granted in Ren-C, regarding the ability to compose functions together.</p>
+<p>The "inefficient" idea of making a new parameter list and then proxying the arguments into position would be more efficient than having to create and evaluate an interpreted function that had to manually copy the parameters.</p>
+<p>There's a huge tax created by having to compose an off-to-the-side parameter reordering list in with the frame variables, and that tax is paid by <em>any code</em> that wants to interpret the list.  It's just too big a tax to pay.</p>
+<p>It pains me a bit to delete it, because it was hard to write and seemed clever at the time.  But techniques have advanced...and while the auxiliary list may have seemed somewhat optimal for storage, it's no longer the right choice.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/simplifying-refinement-promotion/2338">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/simplifying-refinement-promotion/2338</link>
+          <pubDate>Sat, 30 Nov 2024 21:20:38 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2338</guid>
+          <source url="https://forum.rebol.info/t/simplifying-refinement-promotion/2338.rss">Simplifying Refinement Promotion</source>
+        </item>
+        <item>
+          <title>Issues With Querying A Function&#39;s &quot;RETURN&quot;</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Functions</category>
+          <description><![CDATA[
+            <p>Each FUNCTION has a local variable named RETURN.  When it's running, the cell for that variable points at an "archetypal return function".  But that cell also holds a reference to that specific function instantiation's frame.  This way it knows how to return specifically from that invocation of that function.</p>
+<p>This "definitional return" concept has worked quite well.  But there are some fiddly issues that arise from trying to make RETURN an ordinary local variable.</p>
+<h2><a name="p-7931-it-was-hoped-return-would-not-be-special-1" class="anchor" href="https://forum.rebol.info#p-7931-it-was-hoped-return-would-not-be-special-1"></a>It Was Hoped RETURN Would Not Be Special</h2>
+<p>The idea is that LAMBDA would be lower-level than FUNCTION, and permit you to have parameters or local variables named RETURN that had nothing to do with returning.</p>
+<pre><code>/demo: lambda [return continue] [
+    return + continue
+]
+
+&gt;&gt; demo 1 2
+== 3
+</code></pre>
+<p>So an aspirational aspect of the design was that a user could create something that operated identically to the FUNCTION abstraction (just a bit slower, due to not being implemented natively).</p>
+<p>It would use something like THROW and CATCH, to implement RETURN (or construct(s) in that family) itself, as LAMBDAs synthesized upon instantiation.</p>
+<h2><a name="p-7931-return-as-local-hides-its-type-information-2" class="anchor" href="https://forum.rebol.info#p-7931-return-as-local-hides-its-type-information-2"></a>RETURN as Local Hides Its Type Information</h2>
+<p>While it's not an argument to the function, RETURN still has associated type information.</p>
+<p>Since RETURN is a local that will be filled with an action when the function runs, it isn't using its frame slot until that invocation happens.  That means it can store a PARAMETER! which says what return types are legal.  (It seems like a good use of an otherwise-unused slot otherwise you'd need a slot in the Phase to hold it.)</p>
+<p>Functions like HELP want to know those types.  Yet locals and specialized arguments are traditionally considered implementation details, hidden from callers.  They're only visible  when frames are captured during the "phase" of being inside the function call:</p>
+<pre><code>&gt;&gt; /foo: function [return: [integer!] x] [
+     print mold words of binding of $x
+]
+
+&gt;&gt; words of foo/
+== [x]
+
+&gt;&gt; foo
+== [return x]
+</code></pre>
+<p>Today's unsatisfying solution is that there's a flag on parameters that represent RETURN.  If you want the type information of that return, you can ask for it:</p>
+<pre><code>&gt;&gt; return of foo/
+== ~#[parameter! [integer!]]~  ; anti
+</code></pre>
+<p>But this flag is only applied by the FUNCTION native when its construction the parameter list.  So you wouldn't (for instance) get this behavior on a usermode re-implementation of FUNCTION based on LAMBDA.</p>
+<h2><a name="p-7931-how-to-change-return-in-composition-3" class="anchor" href="https://forum.rebol.info#p-7931-how-to-change-return-in-composition-3"></a>How To Change RETURN In Composition?</h2>
+<p>Let's say you're going to build a higher-level function with something like ENCLOSE:</p>
+<pre><code>&gt;&gt; /bar: enclose foo/ func [return: [tag!] f [frame!]] [
+       print "I'm an enclosure!"
+       eval f
+       return &lt;tag&gt;
+   ] 
+</code></pre>
+<p>The interface of an enclosed function is the same parameter list as the original, and the same returns as the original.  The enclosure is implemented as a function that takes a frame, and it can be given a new return type.  But today that isn't reported as the return type if you asked for HELP of FOO.  It would look at the original parameter list, which in this case says its RETURN is <strong><code>[integer!]</code></strong>.</p>
+<p><em>This suggests that the answer to the question <strong><code>return of</code></strong> has to be dispatcher-specific.</em></p>
+<p>FUNCTION would say "it's the contents of the RETURN local in the archetype (not overwritten with return function, so still a PARAMETER!)".</p>
+<p>ENCLOSE would say "it's the return type of the enclosure function that takes the frame" but then give back the original parameter list for everything else.  (This raises a question of how you would inherit the original function's return... it might be nice if you used a LAMBDA or something that reported no return constraint, that it would default to the constraints of the function you were enclosing.)</p>
+<p>In any case, if it was answered by the dispatcher... then if LAMBDA says "I don't have a RETURN", you'd not have HELP information on your RETURN if you were trying to build your own FUNCTION on top of LAMBDA.</p>
+<p><strong>The word RETURN may be a distraction, here.</strong>  Because if it's something like a GENERATOR, the products are coming from calls to YIELD.  Maybe <strong><code>(result of ...)</code></strong> or <strong><code>(synthesis of ...)</code></strong> would help stress that this question isn't tied up specifically with RETURN.</p>
+<h2><a name="p-7931-lambda-semantics-may-want-result-specification-4" class="anchor" href="https://forum.rebol.info#p-7931-lambda-semantics-may-want-result-specification-4"></a>LAMBDA Semantics May Want Result Specification</h2>
+<p>The idea of LAMBDA is that the evaluative product just drops out <a href="https://forum.rebol.info/t/implicit-execution-of-return-in-functions-bad/1656">(see various writings on why FUNCTION does not allow that)</a>.</p>
+<p>But just because you want that semantic, doesn't mean you don't want the HELP to not give a return type.</p>
+<p>However, LAMBDA doesn't have anywhere to store the type information the way FUNCTION does.  If it has a RETURN it may be using it for unrelated purposes.</p>
+<p>Given what I've proposed for the dispatcher-specific RETURN, you could accomplish it with an ENCLOSE:</p>
+<pre><code> enclose (lambda [...] [...]) func [return: [&lt;spec&gt;] f] [return eval f]
+</code></pre>
+<p>But it seems clearly better to have something specific to this purpose:</p>
+<pre><code> returns [&lt;spec&gt;] lambda [...] [...]
+</code></pre>
+<p>Then the Returns_Dispatcher() would simply type check what you gave it.</p>
+<p>Perhaps it could even accept a function as a first parameter, and then just say it returns whatever that function returns:</p>
+<pre><code>returns add/ lambda [x] [x + 1]
+</code></pre>
+<p>Though that might be more confusing than writing it out:</p>
+<pre><code>returns (return of add/) lambda [x] [x + 1]
+</code></pre>
+<p>Maybe a refinement should be used to bless that you're doing it on purpose:</p>
+<pre><code>returns:same-as add/ lambda [x] [x + 1]
+</code></pre>
+<p>I guess the big question would be how to get the return's textual description in there.  Maybe it could assume if the format is TEXT! BLOCK! that's what you mean:</p>
+<pre><code>/foo: returns [
+   "The input plus one"
+   [integer!]
+] lambda [x] [
+    x + 1
+]
+</code></pre>
+<h2><a name="p-7931-well-theres-some-ideas-5" class="anchor" href="https://forum.rebol.info#p-7931-well-theres-some-ideas-5"></a>Well, There's Some Ideas</h2>
+<p>I guess the idea here is that mechanics for answering "what do you return" come from the function's dispatcher, and maybe that becomes a chained question where if the dispatcher wraps something else, it has to ask the right parts of that thing.  There may be no user-exposed mechanic for building your own answer to the question beyond something like RETURNS, which is probably good enough.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/issues-with-querying-a-functions-return/2336">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/issues-with-querying-a-functions-return/2336</link>
+          <pubDate>Thu, 28 Nov 2024 00:00:21 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2336</guid>
+          <source url="https://forum.rebol.info/t/issues-with-querying-a-functions-return/2336.rss">Issues With Querying A Function&#39;s &quot;RETURN&quot;</source>
+        </item>
         <item>
           <title>Dropping `&lt;with&gt;`, `&lt;in&gt;`, `&lt;static&gt;`</title>
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
@@ -2259,211 +2440,6 @@ after  ; did not reflect the change
           <discourse:topicArchived>No</discourse:topicArchived>
           <guid isPermaLink="false">forum.rebol.info-topic-1257</guid>
           <source url="https://forum.rebol.info/t/multiple-return-values-via-infix/1257.rss">Multiple Return Values Via Infix</source>
-        </item>
-        <item>
-          <title>Looking into a *usermode* POINTFREE</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Functions</category>
-          <description><![CDATA[
-            <p>The concept of <a href="https://en.wikipedia.org/wiki/Tacit_programming">"Point Free" or "Tacit Programming"</a> is that it's a way of relating functions to each other without mentioning their arguments.</p>
-<p>So instead of writing something like:</p>
-<pre><code> append-to-data: function [value] [append data value]
-</code></pre>
-<p>You'd have some way of avoiding the redundancy of having to say "value" twice.  So imagine declaring an identical function with a syntax like:</p>
-<pre><code> append-to-data: pointfree [append data]
-</code></pre>
-<p>That would notice you didn't provide all the parameters to append, so an implicit parameter to the new function would be added.  But what if you wanted instead something like:</p>
-<pre><code>append-10: function [series] [append series 10]
-</code></pre>
-<p>So maybe you would have some syntax in POINTFREE for that where you put a placeholder in spots that you wanted implicitly picked up.  Maybe BLANK! as a default:</p>
-<pre><code>append-10: pointfree [append _ 10]
-</code></pre>
-<p><em>(Note: <strong>pointfree</strong> may not be the best name, but it won't be taken for other reasons...and reinforces the term for Rebol programmers unused to FP concepts.  There may be a nicer name.)</em></p>
-<h2>
-<a name="writing-this-in-usermode-in-historical-rebol-is-non-trivial-1" class="anchor" href="https://forum.rebol.info#writing-this-in-usermode-in-historical-rebol-is-non-trivial-1"></a>Writing This In Usermode In Historical Rebol Is Non-Trivial</h2>
-<p>If you think writing a reliable POINTFREE yourself would be easy in Rebol2/Red, <strong>I invite you to try</strong>.  There's a lot to get right with parameter analysis and ordering refinements; beyond the average user.  It doesn't get much easier if you are coding inside the system, either.</p>
-<p>It would also be noticeably slower, using any method in near-reach.  The only mechanisms would involve creating a whole new function spec, where the evaluator would have to pass parameters to that function...then start evaluating again to make a nested call...type checking all over again.</p>
-<p>Ren-C has several tricks up its sleeve, including the duality between FRAME! and ACTION as "antiform FRAME!".  This provides a convenient round-trip:</p>
-<pre><code>&gt;&gt; data: [a b c]
-
-&gt;&gt; f: make frame! :append
-&gt;&gt; f.series: data
-
-&gt;&gt; apd: runs f
-&gt;&gt; apd [d e f]
-
-&gt;&gt; data
-== [a b c d e f]
-</code></pre>
-<p>There's also a great convenience afforded by Ren-C's smart specialization handling.  Consider:</p>
-<pre><code>&gt;&gt; parameters of :append
-== [series value /part /only /dup /line]
-
-&gt;&gt; apdup: :append/dup
-
-&gt;&gt; parameters of :apdup
-== [series value dup /part /only /line]
-</code></pre>
-<p>So if you have someone writing <strong>pointfree [append/dup ...]</strong> you don't worry...just GET the PATH!, and the function you are handed back doesn't even report DUP as a refinement.  It's a normal parameter now.</p>
-<p>There's also more unlocked by the idea of <a href="https://forum.rebol.info/t/pure-and-refined-simplifying-refinements-to-one-or-zero-args/1120">refinements naming their 0-or-1 arguments</a>.  We've seen it open doors with <a href="https://forum.rebol.info/t/augment-add-parameters-and-refinements-after-the-fact/1216">AUGMENT</a>, but it helps here and elsewhere.</p>
-<hr>
-<h2>
-<a name="a-start-on-the-vision-of-pointfree-2" class="anchor" href="https://forum.rebol.info#a-start-on-the-vision-of-pointfree-2"></a>A Start on the Vision of POINTFREE</h2>
-<p>Below is a draft usermode implementation.  It is incomplete and raises some issues.  The biggest issue is that it only lets you specialize by example at one level of depth.  So you can't write:</p>
-<pre><code>&gt;&gt; apde-spread: pointfree [append _ spread]
-
-&gt;&gt; apde-spread [a b c] [d e]
-== [a b c d e]
-</code></pre>
-<p>That would require some kind of recursive process--the call to SPREAD in the parameter slot for APPEND would have to be done using POINTFREE as well.</p>
-<p>Moreover, there's a semantic question of when to capture variables.  If you write:</p>
-<pre><code>&gt;&gt; x: 10
-
-&gt;&gt; add-x: pointfree [add x]
-
-&gt;&gt; x: 20
-
-&gt;&gt; add-x 1000
-== ???
-</code></pre>
-<p>...do you want to add the value of X as it was at the moment of specialization, and get 1010?  Or to add its current value and get 1020?  If you wrote out a function you'd get 1020, and I'd think the more common desire (and you should have to say <strong>pointfree compose [add (x)]</strong> to get the former intent).  But as written now you get 1010, so a different mechanism is needed.</p>
-<p>All that said, this implementation shows relatively little code, that's taking care of some rather complex acrobatics!  I'd hope it wouldn't be too far beyond the reach of a novice to write.</p>
-<h3>
-<a name="pointfree-is-lower-level-takes-applicand-separate-from-args-3" class="anchor" href="https://forum.rebol.info#pointfree-is-lower-level-takes-applicand-separate-from-args-3"></a>POINTFREE* Is Lower-Level, Takes Applicand Separate From Args</h3>
-<p>This layer takes FRAME! and BLOCK! as two separate arguments.  If the user does:</p>
-<pre><code>&gt;&gt; apde: pointfree* :append [_ [d e]]
-</code></pre>
-<p>Then the blank signals an unspecialized slot.  So that would be like writing:</p>
-<pre><code>&gt;&gt; apde: specialize :append [value: [d e]]  ; leave series unspecialized
-
-&gt;&gt; apde [a b c]
-== [a b c [d e]]
-</code></pre>
-<p>Note that Variadics are not supported at this time.  And there's an ongoing effort to improve <a href="https://forum.rebol.info/t/representing-everything-about-a-parameter-except-its-name/1459/6">parameter reflection</a>, but this is what we have at the moment.</p>
-<pre><code>pointfree*: func* [
-    "Specialize by example: https://en.wikipedia.org/wiki/Tacit_programming"
-
-    return: [action?]
-    frame [&lt;unrun&gt; frame!]
-    block "Invocation by example (BLANK!s are unspecialized)"
-        [block!]
-    &lt;local&gt; params var
-][
-    frame: copy frame  ; if given e.g. APPEND's frame, don't mutate it!
-
-    for-each param (parameters of frame) [
-        if tail? block [break]  ; no more args, leave rest unspecialized
-
-        match [word! lit-word? get-word!] param else [
-            continue  ; skip unused refinements
-        ]
-
-        case [
-            blank? block.1 [  ; means leave unspecialized
-                block: next block
-            ]
-
-            match word! param [  ; ordinary parameter
-                [block frame.(param)]: evaluate/next block
-            ]
-
-            all [
-                match [get-word!] param  ; soft literal parameter
-                match [group! get-word! get-tuple!] block.1
-            ][
-                frame.(param): reeval block.1
-                block: next block
-            ]
-
-            &lt;default&gt; [  ; hard literal or non-escaped soft literal
-                frame.(param): block.1
-                block: next block
-            ]
-        ]
-    ]
-
-    if not tail? block [
-        fail/blame [
-            "Unused argument data at end of POINTFREE block"
-        ] $block
-    ]
-
-    return runs frame
-]
-</code></pre>
-<h3>
-<a name="higher-level-pointfree-includes-the-applicand-in-the-block-4" class="anchor" href="https://forum.rebol.info#higher-level-pointfree-includes-the-applicand-in-the-block-4"></a>Higher-Level POINTFREE Includes the Applicand In The BLOCK!</h3>
-<p>This higher-level version wants the name of an action at the head of the block, e.g.</p>
-<pre><code>pointfree [append _ [d e]]
-=&gt;
-pointfree* :append [_ [d e]]
-</code></pre>
-<p>It does this by specializing out the frame on the interface of POINTFREE* and just taking a block.  Then when it's called, it overwrites the dummy specialization with a frame from the first block element, and updates the block to be one step forward.</p>
-<pre><code>pointfree: specialize (adapt get $pointfree* [
-    frame: (match frame! any [  ; no SET-WORD! namecache
-        if match [word! path!] block.1 [
-            unrun get/any inside block block.1
-        ]
-    ]) else [
-        fail "POINTFREE requires FRAME! argument at head of block"
-    ]
-
-    block: next block
-])[
-    frame: unrun get $panic/value  ; overwritten, best to be something mean
-]
-</code></pre>
-            <p><small>6 posts - 4 participants</small></p>
-            <p><a href="https://forum.rebol.info/t/looking-into-a-usermode-pointfree/1236">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/looking-into-a-usermode-pointfree/1236</link>
-          <pubDate>Wed, 30 Oct 2019 13:38:19 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-1236</guid>
-          <source url="https://forum.rebol.info/t/looking-into-a-usermode-pointfree/1236.rss">Looking into a *usermode* POINTFREE</source>
-        </item>
-        <item>
-          <title>What Are Definitional Returns?</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Functions</category>
-          <description><![CDATA[
-            <p>Novices using Rebol2 or Red aren't really clear on how their RETURN works.  (Or <em>doesn't</em> work, as the case my be.)  RETURN climbs the stack until it finds a function that is willing to accept returns.</p>
-<ul>
-<li>Functions in Rebol2/Red that <em>won't</em> accept returns: <strong>IF, WHILE, or pretty much any native</strong>
-</li>
-<li>Functions in Rebol2/Red that <em>will</em> accept returns: <strong>any user FUNC you write</strong>
-</li>
-</ul>
-<p>To give a brutally simple example, you cannot implement UNLESS in terms of IF:</p>
-<pre><code> rebol2&gt;&gt; foo: func [x] [if not x = 10 [return "not 10"] return "it's 10!"]
- rebol2&gt;&gt; foo 20
- == "not 10"
-
- rebol2&gt;&gt; unless: func [cond block] [if not cond block]
- rebol2&gt;&gt; bar: func [x] [unless x = 10 [return "not 10"] return "it's 10!"]
- rebol2&gt;&gt; bar 20
- == "it's 10"  ; D'oh
-</code></pre>
-<p>That UNLESS, because it's a FUNC and not a native, is a candidate for receiving RETURN.  So the UNLESS itself returned "not 10" instead of returning from bar.  Execution continued and the `return "it's 10!" ran.  <strong>I maintain that correct behavior constitutes another must-have, <a href="https://github.com/metaeducation/rebol-issues/issues/539#issuecomment-170878011">and I was by no means alone in this, nor the first to say so</a></strong>.</p>
-<pre><code>&gt;&gt; unless: function [cond block] [if not cond (block)]  ; see note re: group!
-&gt;&gt; bar: function [x] [unless x = 10 [return "not 10"] return "it's 10!"]
-&gt;&gt; bar 20
-== "not 10"
-</code></pre>
-<p><strong>I do not consider annotating UNLESS to say "I'm the kind of thing that doesn't catch returns" to be remotely acceptable.</strong>  I'd sooner throw out the project than go that route.  Addressing definitional returns wasn't at all trivial...even though conceptually it was understood what needed to be done.  It was one of the first things I tried to do in open-sourced R3-Alpha.  The rearranging I had to do in order to understand the code well enough to accomplish it laid the groundwork for many features to come.</p>
-<p><em>(Note: The reason you have to put a group! around <code>block</code> (or say <code>:block</code>) is due to soft-quoted branching, and I <a href="https://forum.rebol.info/t/stylistic-questions-and-soft-quoted-branching/1220">argue for the tradeoff here</a>.  I would not consider that one of my non-negotiable points for this list, though I've offered what I believe to be some compelling arguments.  I do--however--consider FUNCTION instead of FUNC to be a non-negotiable way of writing this, with current leaning that <a href="https://forum.rebol.info/t/abbreviations-as-synonyms/1211">FUNC is a full synonym for FUNCTION</a>)</em></p>
-            <p><small>1 post - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/what-are-definitional-returns/2191">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/what-are-definitional-returns/2191</link>
-          <pubDate>Sun, 20 Oct 2019 04:00:00 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-2191</guid>
-          <source url="https://forum.rebol.info/t/what-are-definitional-returns/2191.rss">What Are Definitional Returns?</source>
         </item>
   </channel>
 </rss>

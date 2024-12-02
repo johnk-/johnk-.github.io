@@ -5,8 +5,256 @@
     <link>https://forum.rebol.info/c/development/8</link>
     <description>Topics in the &#39;Development&#39; category Discussion of the development of Rebol itself: language design, implementation and standard library.</description>
     
-      <lastBuildDate>Thu, 21 Nov 2024 22:06:22 +0000</lastBuildDate>
+      <lastBuildDate>Sun, 01 Dec 2024 00:50:53 +0000</lastBuildDate>
       <atom:link href="https://forum.rebol.info/c/development/8.rss" rel="self" type="application/rss+xml" />
+        <item>
+          <title>The Probably-False Economy of EVAL Consuming FRAME!</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Optimization</category>
+          <description><![CDATA[
+            <p>The earliest design usages for FRAME! were for things like ENCLOSE.</p>
+<p>ENCLOSE builds the frame for the function you're enclosing, then passes the frame to a function that can manipulate the frame, and invoke it with EVAL (or not invoke it at all, if it wishes).</p>
+<p>Here's a sort of simple historical example:</p>
+<pre><code>/foo: func [a b] [
+   let result: a + b
+   a: b: ~&lt;whatever&gt;~  ; functions can modify args/locals for any reason
+   return result
+]
+
+/bar: enclose foo/ (lambda [f [frame!]] [
+    let b: f.b
+    f.a: f.a * 10
+    (eval f) + b
+])
+
+&gt;&gt; bar 100 10
+== 1020  ; ((a * 10) + b) + b
+</code></pre>
+<p>You'll notice above that I didn't write:</p>
+<pre><code>/bar: enclose foo/ (lambda [f [frame!]] [
+    f.a: f.a * 10
+    (eval f) + f.b
+])
+</code></pre>
+<p>This is because EVAL of a FRAME! would "consume" the frame, and trying to use <strong><code>f.b</code></strong> after the EVAL would raise an error.  In other words, memory was not allocated as it usually would be for a new frame to do the call...but the fields of the frame were the actual values being used.</p>
+<p>I overwrote <strong><code>a</code></strong> and <strong><code>b</code></strong> to make the point that once that EVAL is called, you can't rely on any particular state of a frame's variables.  In the general case, they can be changed to anything.</p>
+<h2><a name="p-7936-eval-copy-f-is-easy-and-so-is-saving-variables-right-1" class="anchor" href="https://forum.rebol.info#p-7936-eval-copy-f-is-easy-and-so-is-saving-variables-right-1"></a><code>(eval copy f)</code> is Easy, and So Is Saving Variables, Right?</h2>
+<p>The premise I was going on was that it seemed like it would be wasteful...especially in scenarios like an ENCLOSE, to make another copy of the frame's data.</p>
+<p>And I figured usually you wouldn't need to refer to anything from the frame's input state after you called it.</p>
+<p>So you had two choices: either evaluate a copy of the frame, or save any variables you were interested in as locals.</p>
+<h2><a name="p-7936-it-turns-out-to-be-incredibly-common-to-save-variables-2" class="anchor" href="https://forum.rebol.info#p-7936-it-turns-out-to-be-incredibly-common-to-save-variables-2"></a>It Turns Out To Be Incredibly Common To Save Variables</h2>
+<p>I didn't know when originally trying to optimize the feature how often an ENCLOSE would need to talk about the input fields after an EVAL call.</p>
+<p>But empirically I'd say you need the fields at least half the time.  You actually want it more often than that when you consider debugging--you often want to print some information about the input parameters after you've done the EVAL.</p>
+<h2><a name="p-7936-let-b-fb-costs-much-more-than-mallocmemcpy-3" class="anchor" href="https://forum.rebol.info#p-7936-let-b-fb-costs-much-more-than-mallocmemcpy-3"></a><code>(let b: f.b)</code> Costs Much More Than <code>malloc()+memcpy()</code></h2>
+<p>When you come down to it, relatively speaking: <em>Evaluator cycles are expensive</em>.  <em>Tuple lookup is expensive</em>.  <em>Assignment is expensive</em>.  <em>LET statements are expensive</em>.</p>
+<p>That's because this is an interpreted language, and running code in the interpreter involves pushing and popping entities that represent interpreter stack levels.  There's all kinds of C data structures and layers of C function calls as the gears of the machinery turn...whether your operation be simple or complex.  That's just the name of the game... <strong>a + b</strong> in a generalized evaluator is going to be at least 100x more costly than adding two integers in C, which is basically just a single CPU instruction.</p>
+<p>So if you have to do <em>any</em> mitigation of losing the frame data by adding interpreted code, not only are you having to junk up what you're writing...but you're also paying much more than you would have if the system had just gone ahead and made a copy.</p>
+<h2><a name="p-7936-explaining-why-you-cant-is-lamer-than-it-just-works-4" class="anchor" href="https://forum.rebol.info#p-7936-explaining-why-you-cant-is-lamer-than-it-just-works-4"></a>Explaining Why You Can't Is Lamer Than <em>"It Just Works"</em></h2>
+<p>People understand that if they have a FRAME! for APPEND and they EVAL it, that the series is going to be mutated.</p>
+<p>But they're going to understand less that the series field of the frame is not available at all to them after the call.</p>
+<p>It's kind of a no-brainer to say that if the two approaches were at all comparable in speed or overall performance, that the more useful behavior should be the default.</p>
+<p><em>And I actually believe the more useful behavior is faster in the general case...by avoiding additional intepreter cycles to save frame fields in variables.</em></p>
+<h2><a name="p-7936-free-f-could-use-free-as-an-intrinsic-if-you-want-5" class="anchor" href="https://forum.rebol.info#p-7936-free-f-could-use-free-as-an-intrinsic-if-you-want-5"></a><code>(free f)</code> Could Use FREE As An Intrinsic If You Want</h2>
+<p><strong><a href="https://forum.rebol.info/t/intrinsics-functions-without-frames/2050">FREE could be trivially made Intrinsic</a>.</strong></p>
+<p>If profiling suggested that something like an ENCLOSE on a function with a large frame was affecting your bottom line by not freeing the frame, you could just free it after the EVAL.  That would leave behind nothing but a tiny useless stub (to avoid latent references in other cells from crashing the GC), so you'd get the same end result as the historical EVAL.</p>
+<p>I'm betting that having EVAL be able to be intrinsic when it takes one argument, and making FREE intrinsic would be faster than trying to do some weird refinement like <strong><code>eval:free</code></strong> to fold both into one operation...because refinement processing has its own cost, which I <em>think</em> would be greater.</p>
+<p>But an optimized <strong><code>eval-free</code></strong> might be worth making, I don't know.  However its mechanic would simply be to natively fold the free in after the EVAL, instead of trying to make EVAL take over the frame and use its memory.</p>
+<p>My guess is that using EVAL-FREE won't be a benefit most of the time if you add any evaluator cycles to save a variable because of it.</p>
+<h1><a name="p-7936-hence-eval-will-no-longer-consume-frame-6" class="anchor" href="https://forum.rebol.info#p-7936-hence-eval-will-no-longer-consume-frame-6"></a>Hence, EVAL Will No Longer Consume FRAME!</h1>
+<p>This makes the "action-is-frame" duality even more solid, because as frames are passed around in the system there won't be "consume frame vs. don't" flags involved.</p>
+<p>You'll just either free the frame after you've applied it, or you won't.  <img src="https://forum.rebol.info/images/emoji/twitter/man_shrugging.png?v=12" title=":man_shrugging:" class="emoji" alt=":man_shrugging:" loading="lazy" width="20" height="20"></p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/the-probably-false-economy-of-eval-consuming-frame/2339">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/the-probably-false-economy-of-eval-consuming-frame/2339</link>
+          <pubDate>Sun, 01 Dec 2024 00:50:53 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2339</guid>
+          <source url="https://forum.rebol.info/t/the-probably-false-economy-of-eval-consuming-frame/2339.rss">The Probably-False Economy of EVAL Consuming FRAME!</source>
+        </item>
+        <item>
+          <title>Simplifying Refinement Promotion</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Functions</category>
+          <description><![CDATA[
+            <p>There are two modes of partial specialization which Ren-C has supported.</p>
+<p>One form would be like if APPEND takes something like :DUP and fixes it to a value:</p>
+<pre><code>&gt;&gt; append2: specialize append/ [dup: 2]
+
+&gt;&gt; append2 [a b c] &lt;d&gt;
+== [a b c &lt;d&gt; &lt;d&gt;]
+</code></pre>
+<p>Then there's a trickier kind of specialization, which is to ask for the parameter but not specify it... thus just increasing the arity:</p>
+<pre><code>&gt;&gt; appenddup: append:dup/
+
+&gt;&gt; appenddup [a b c] &lt;d&gt; 4
+== [a b c &lt;d&gt; &lt;d&gt; &lt;d&gt; &lt;d&gt;]
+</code></pre>
+<p>The second form is pretty unusual in the language world.  There doesn't seem to be much prior art in "the conversion of optional parameters to required parameters" (at least I don't know any, and the AIs I asked don't know any).</p>
+<p>Since it's pretty different from what what people think of as partial specialization, let's call it <strong>"refinement promotion"</strong>.</p>
+<h2><a name="p-7935-refinement-promotion-is-tricky-1" class="anchor" href="https://forum.rebol.info#p-7935-refinement-promotion-is-tricky-1"></a>Refinement Promotion Is <em>Tricky</em></h2>
+<p>Something that has been non-negotiable in the design is the straightforward array of parameters and locals that specify a function interface.</p>
+<p>Refinements are defined in some order in that array.  But you are not required to use them in that order.</p>
+<p>So consider a definition like:</p>
+<pre><code> /foo: func [a [integer!] :b [integer!] :c [integer!]] [...]
+</code></pre>
+<p>Someone might do refinement promotion of this as <strong><code>foo:c:b/</code></strong> - this makes it seem to the caller a function originally written with spec:</p>
+<pre><code> [a [integer!] c [integer!] b [integer!]]
+</code></pre>
+<p>The techniques so far have tried to mimic the way that refinements work.  So <strong><code>get $foo:c:b</code></strong> would produce a function that was accompanied by a <strong><code>[c b]</code></strong> array, that would get pushed when running the promoted function.  The elements in the array would not just have the words, but those words would have binding information to say what index those words were found at in the parameter array.</p>
+<p>But since the underlying array is left the same, this means every time you want to know something like "what's the first unspecialized normal argument" you have to mimic the refinement gathering process.  It convoluted the process quite a lot, and really went against the idea of the implementation being "simple".</p>
+<h2><a name="p-7935-q-is-this-really-required-to-support-a-yes-2" class="anchor" href="https://forum.rebol.info#p-7935-q-is-this-really-required-to-support-a-yes-2"></a>Q: Is This Really Required To Support?  (A: Yes)</h2>
+<p>This may not seem like a super-common need.  But if you're implementing a dialect that wants to support calling functions with refinements, it's pretty important.</p>
+<p>Let's say you're implementing something like <a href="https://forum.rebol.info/t/if-action-combinators-dont-impress-what-will/1608">the feature in UPARSE that lets you call functions</a>:</p>
+<pre><code>&gt;&gt; data: copy ""
+
+&gt;&gt; parse ["a" "b"] [some [/append:dup (data) text! (2)]]
+
+&gt;&gt; data
+== "aabb"
+</code></pre>
+<p>Basically, if <strong><code>(get $/append:dup)</code></strong> can come back with a function that you can query for its parameters and get answers just like it was any other function, then support for refinements comes basically for free.</p>
+<h2><a name="p-7935-should-the-varlist-just-be-rewritten-3" class="anchor" href="https://forum.rebol.info#p-7935-should-the-varlist-just-be-rewritten-3"></a>Should The VarList Just Be Rewritten?</h2>
+<p>If you look at what a modern SPECIALIZE followed by AUGMENT can do, they can hide parameters...and then add back parameters with the same name.  Which parameters are visible depend on the "phase" of the frame.</p>
+<p>So why couldn't refinement promotion be done just by making a new function interface that removes the argument as a refinement, and adds it back as a regular argument... then has a dispatch phase that moves the argument data to its old position for the subsequent phases?</p>
+<p>It's not particularly "cheap" to do that, space-wise.  You'd need a new VarList* and a new Phase*, and the Phase would have to remember the new and old positions to do the rewrite.  But it would make parameter enumeration blunt and simple, because you'd really just be enumerating the parameters in order.</p>
+<p>There'd be some cases where the position of the refinement would allow it to just be naturally rewritten to be a regular argument, and that could be optimized for.</p>
+<h2><a name="p-7935-what-about-when-you-have-lots-of-local-4" class="anchor" href="https://forum.rebol.info#p-7935-what-about-when-you-have-lots-of-local-4"></a>What About When You Have Lots of <code>&lt;local&gt;</code>?</h2>
+<p>This is kind of the dark side of the simple FRAME! model, which is that if you use it to create a lot of local variables, then operations like SPECIALIZE and AUGMENT which do VarList manipulation have to make copies of everything for the new VarList...including a bunch of locals that aren't changing at all in each new form.</p>
+<pre><code>/foo: func [x [text!] y [tag!] &lt;local&gt; a b c d e f g h i j k l m n o p] [
+    ... 19 frame cells (includes RETURN) ...
+]
+
+/bar: augment foo/ [z [integer!]]  ; z is last item in new 20 item frame
+</code></pre>
+<p>Refinement promotion would become another one of these situations that would do seemingly unnecessary duplication.</p>
+<p>It would be possible in cases like this to create smaller frames and then proxy the results into larger ones, essentially simulating what a user might do to manually call FOO from a new function BAR which had a frame with 3 elements.</p>
+<pre><code>/bar: lambda [x [text!] y [tag!] z [integer!]] [
+    foo x y  ; imagine doing this, but with faster internal mechanics
+]
+</code></pre>
+<p>Some calculation could be done where the size of the frame justified it.  I have a feeling that the frame would have to be reasonably large before a technique like this would be beneficial.</p>
+<h2><a name="p-7935-what-about-refinements-at-headhttpsforumrebolinfotrefinement-arguments-at-head-of-args-list-not-tail2331-5" class="anchor" href="https://forum.rebol.info#p-7935-what-about-refinements-at-headhttpsforumrebolinfotrefinement-arguments-at-head-of-args-list-not-tail2331-5"></a>What About <a href="https://forum.rebol.info/t/refinement-arguments-at-head-of-args-list-not-tail/2331">Refinements At Head</a>?</h2>
+<p>Well, in that case, you would <em>have</em> to build a new VarList* that extracted the arguments, and then proxy them into position for the new interface.</p>
+<p>At least one wouldn't be worried about the "bloated copies of locals" situation.</p>
+<h2><a name="p-7935-souse-the-auxiliary-array-simulating-refinements-6" class="anchor" href="https://forum.rebol.info#p-7935-souse-the-auxiliary-array-simulating-refinements-6"></a>So...Use The Auxiliary Array Simulating Refinements?</h2>
+<p>The code for simulating refinements when asking simple questions like <em>"what's the first unspecialized normal arg"</em> is unappealingly complex. <img src="https://forum.rebol.info/images/emoji/twitter/nauseated_face.png?v=12" title=":nauseated_face:" class="emoji" alt=":nauseated_face:" loading="lazy" width="20" height="20"></p>
+<p>Making it further unappealing is that when you have this array of refinements "off to the side" but still allow people to fill in slots in frames to specialize out arguments, you end up needing to have "reconciliation"...because those frame slots that are referenced by this out-of-band array are no longer part of the refinement promotion.</p>
+<pre><code>&gt;&gt; f: make frame! append:dup:part/  ; has auxiliary [dup part]
+
+&gt;&gt; f.dup: 3  ; what cleans up [dup part] to just [part] ?
+</code></pre>
+<p>I've talked about not knowing about what "moment" to do these kinds of fixes, and I'm increasingly looking for ways to avoid there being any such moment.  If the physical experience of the frame was that DUP and PART were ordinary parameters and not refinements, then it "just works".</p>
+<h2><a name="p-7935-the-dumb-mechanical-answer-is-likely-best-7" class="anchor" href="https://forum.rebol.info#p-7935-the-dumb-mechanical-answer-is-likely-best-7"></a>The "Dumb" Mechanical Answer Is Likely Best</h2>
+<p>I sometimes forget just how much I take for granted in Ren-C, regarding the ability to compose functions together.</p>
+<p>The "inefficient" idea of making a new parameter list and then proxying the arguments into position would be more efficient than having to create and evaluate an interpreted function that had to manually copy the parameters.</p>
+<p>There's a huge tax created by having to compose an off-to-the-side parameter reordering list in with the frame variables, and that tax is paid by <em>any code</em> that wants to interpret the list.  It's just too big a tax to pay.</p>
+<p>It pains me a bit to delete it, because it was hard to write and seemed clever at the time.  But techniques have advanced...and while the auxiliary list may have seemed somewhat optimal for storage, it's no longer the right choice.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/simplifying-refinement-promotion/2338">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/simplifying-refinement-promotion/2338</link>
+          <pubDate>Sat, 30 Nov 2024 21:20:38 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2338</guid>
+          <source url="https://forum.rebol.info/t/simplifying-refinement-promotion/2338.rss">Simplifying Refinement Promotion</source>
+        </item>
+        <item>
+          <title>Issues With Querying A Function&#39;s &quot;RETURN&quot;</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Functions</category>
+          <description><![CDATA[
+            <p>Each FUNCTION has a local variable named RETURN.  When it's running, the cell for that variable points at an "archetypal return function".  But that cell also holds a reference to that specific function instantiation's frame.  This way it knows how to return specifically from that invocation of that function.</p>
+<p>This "definitional return" concept has worked quite well.  But there are some fiddly issues that arise from trying to make RETURN an ordinary local variable.</p>
+<h2><a name="p-7931-it-was-hoped-return-would-not-be-special-1" class="anchor" href="https://forum.rebol.info#p-7931-it-was-hoped-return-would-not-be-special-1"></a>It Was Hoped RETURN Would Not Be Special</h2>
+<p>The idea is that LAMBDA would be lower-level than FUNCTION, and permit you to have parameters or local variables named RETURN that had nothing to do with returning.</p>
+<pre><code>/demo: lambda [return continue] [
+    return + continue
+]
+
+&gt;&gt; demo 1 2
+== 3
+</code></pre>
+<p>So an aspirational aspect of the design was that a user could create something that operated identically to the FUNCTION abstraction (just a bit slower, due to not being implemented natively).</p>
+<p>It would use something like THROW and CATCH, to implement RETURN (or construct(s) in that family) itself, as LAMBDAs synthesized upon instantiation.</p>
+<h2><a name="p-7931-return-as-local-hides-its-type-information-2" class="anchor" href="https://forum.rebol.info#p-7931-return-as-local-hides-its-type-information-2"></a>RETURN as Local Hides Its Type Information</h2>
+<p>While it's not an argument to the function, RETURN still has associated type information.</p>
+<p>Since RETURN is a local that will be filled with an action when the function runs, it isn't using its frame slot until that invocation happens.  That means it can store a PARAMETER! which says what return types are legal.  (It seems like a good use of an otherwise-unused slot otherwise you'd need a slot in the Phase to hold it.)</p>
+<p>Functions like HELP want to know those types.  Yet locals and specialized arguments are traditionally considered implementation details, hidden from callers.  They're only visible  when frames are captured during the "phase" of being inside the function call:</p>
+<pre><code>&gt;&gt; /foo: function [return: [integer!] x] [
+     print mold words of binding of $x
+]
+
+&gt;&gt; words of foo/
+== [x]
+
+&gt;&gt; foo
+== [return x]
+</code></pre>
+<p>Today's unsatisfying solution is that there's a flag on parameters that represent RETURN.  If you want the type information of that return, you can ask for it:</p>
+<pre><code>&gt;&gt; return of foo/
+== ~#[parameter! [integer!]]~  ; anti
+</code></pre>
+<p>But this flag is only applied by the FUNCTION native when its construction the parameter list.  So you wouldn't (for instance) get this behavior on a usermode re-implementation of FUNCTION based on LAMBDA.</p>
+<h2><a name="p-7931-how-to-change-return-in-composition-3" class="anchor" href="https://forum.rebol.info#p-7931-how-to-change-return-in-composition-3"></a>How To Change RETURN In Composition?</h2>
+<p>Let's say you're going to build a higher-level function with something like ENCLOSE:</p>
+<pre><code>&gt;&gt; /bar: enclose foo/ func [return: [tag!] f [frame!]] [
+       print "I'm an enclosure!"
+       eval f
+       return &lt;tag&gt;
+   ] 
+</code></pre>
+<p>The interface of an enclosed function is the same parameter list as the original, and the same returns as the original.  The enclosure is implemented as a function that takes a frame, and it can be given a new return type.  But today that isn't reported as the return type if you asked for HELP of FOO.  It would look at the original parameter list, which in this case says its RETURN is <strong><code>[integer!]</code></strong>.</p>
+<p><em>This suggests that the answer to the question <strong><code>return of</code></strong> has to be dispatcher-specific.</em></p>
+<p>FUNCTION would say "it's the contents of the RETURN local in the archetype (not overwritten with return function, so still a PARAMETER!)".</p>
+<p>ENCLOSE would say "it's the return type of the enclosure function that takes the frame" but then give back the original parameter list for everything else.  (This raises a question of how you would inherit the original function's return... it might be nice if you used a LAMBDA or something that reported no return constraint, that it would default to the constraints of the function you were enclosing.)</p>
+<p>In any case, if it was answered by the dispatcher... then if LAMBDA says "I don't have a RETURN", you'd not have HELP information on your RETURN if you were trying to build your own FUNCTION on top of LAMBDA.</p>
+<p><strong>The word RETURN may be a distraction, here.</strong>  Because if it's something like a GENERATOR, the products are coming from calls to YIELD.  Maybe <strong><code>(result of ...)</code></strong> or <strong><code>(synthesis of ...)</code></strong> would help stress that this question isn't tied up specifically with RETURN.</p>
+<h2><a name="p-7931-lambda-semantics-may-want-result-specification-4" class="anchor" href="https://forum.rebol.info#p-7931-lambda-semantics-may-want-result-specification-4"></a>LAMBDA Semantics May Want Result Specification</h2>
+<p>The idea of LAMBDA is that the evaluative product just drops out <a href="https://forum.rebol.info/t/implicit-execution-of-return-in-functions-bad/1656">(see various writings on why FUNCTION does not allow that)</a>.</p>
+<p>But just because you want that semantic, doesn't mean you don't want the HELP to not give a return type.</p>
+<p>However, LAMBDA doesn't have anywhere to store the type information the way FUNCTION does.  If it has a RETURN it may be using it for unrelated purposes.</p>
+<p>Given what I've proposed for the dispatcher-specific RETURN, you could accomplish it with an ENCLOSE:</p>
+<pre><code> enclose (lambda [...] [...]) func [return: [&lt;spec&gt;] f] [return eval f]
+</code></pre>
+<p>But it seems clearly better to have something specific to this purpose:</p>
+<pre><code> returns [&lt;spec&gt;] lambda [...] [...]
+</code></pre>
+<p>Then the Returns_Dispatcher() would simply type check what you gave it.</p>
+<p>Perhaps it could even accept a function as a first parameter, and then just say it returns whatever that function returns:</p>
+<pre><code>returns add/ lambda [x] [x + 1]
+</code></pre>
+<p>Though that might be more confusing than writing it out:</p>
+<pre><code>returns (return of add/) lambda [x] [x + 1]
+</code></pre>
+<p>Maybe a refinement should be used to bless that you're doing it on purpose:</p>
+<pre><code>returns:same-as add/ lambda [x] [x + 1]
+</code></pre>
+<p>I guess the big question would be how to get the return's textual description in there.  Maybe it could assume if the format is TEXT! BLOCK! that's what you mean:</p>
+<pre><code>/foo: returns [
+   "The input plus one"
+   [integer!]
+] lambda [x] [
+    x + 1
+]
+</code></pre>
+<h2><a name="p-7931-well-theres-some-ideas-5" class="anchor" href="https://forum.rebol.info#p-7931-well-theres-some-ideas-5"></a>Well, There's Some Ideas</h2>
+<p>I guess the idea here is that mechanics for answering "what do you return" come from the function's dispatcher, and maybe that becomes a chained question where if the dispatcher wraps something else, it has to ask the right parts of that thing.  There may be no user-exposed mechanic for building your own answer to the question beyond something like RETURNS, which is probably good enough.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/issues-with-querying-a-functions-return/2336">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/issues-with-querying-a-functions-return/2336</link>
+          <pubDate>Thu, 28 Nov 2024 00:00:21 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2336</guid>
+          <source url="https://forum.rebol.info/t/issues-with-querying-a-functions-return/2336.rss">Issues With Querying A Function&#39;s &quot;RETURN&quot;</source>
+        </item>
         <item>
           <title>Dropping `&lt;with&gt;`, `&lt;in&gt;`, `&lt;static&gt;`</title>
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
@@ -1816,239 +2064,6 @@ if (quote:quote:quasi:block? first [''~[a b c]~]) [...]
           <discourse:topicArchived>No</discourse:topicArchived>
           <guid isPermaLink="false">forum.rebol.info-topic-2291</guid>
           <source url="https://forum.rebol.info/t/do-next-vs-eval-next-vs-eval-step/2291.rss">DO/NEXT vs. EVAL/NEXT vs. EVAL:STEP</source>
-        </item>
-        <item>
-          <title>Implicit Escaping To Tiebreak Literal Arguments</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Functions</category>
-          <description><![CDATA[
-            <p>Imagine a situation where one function takes its right-hand side literally, and another takes its left-hand side literally:</p>
-<pre><code>right-literal: func ['arg] [...]
-left-literal: enfix func ['left right] [...]
-</code></pre>
-<p>What happens when I write:</p>
-<pre><code> right-literal X left-literal Y
-</code></pre>
-<p>Seems like an unbreakable tie.  <img src="https://forum.rebol.info/images/emoji/twitter/necktie.png?v=12" title=":necktie:" class="emoji" alt=":necktie:" loading="lazy" width="20" height="20"></p>
-<p>You're going to be lying to someone if you don't trigger an error.  It could be a pretty big lie...e.g. if you let one evaluate and pass their result to the other, then you might be giving an antiform to a function that specifically only expected source-representable things.</p>
-<h2>
-<a name="but-what-if-the-situation-was-a-bit-moremalleable-1" class="anchor" href="https://forum.rebol.info#but-what-if-the-situation-was-a-bit-moremalleable-1"></a>But what if the situation was a bit more...malleable...</h2>
-<p>Let's say that one of these lets you escape the argument inside a GROUP! (currently thinking the most semiotic way to represent such a property of a parameter is by...putting it in a group).</p>
-<pre><code>right-escapable: func ['(arg)] [...]  ; `right-esc ('X)` acts like `right-esc X` 
-left-literal: enfix func ['left right] [...]
-</code></pre>
-<p>So this means that RIGHT-ESCAPABLE is geared up to accept evaluative products.  If that's the case, then we might think of ourselves as having a bit more liberty to tiebreak:</p>
-<pre><code>right-escapable X left-literal Y
-=&gt;
-right-escapable (X left-literal Y)
-</code></pre>
-<p>Whether that seems presumptuous or not to you, it definitely is useful, e.g. with lambdas...where requiring a group would be ugly:</p>
-<pre><code>case [...] then x -&gt; [...]
-</code></pre>
-<p>The interface on the function says it was "willing to accept a group at the callsite".  But it never actually received a group, just the evaluative product, which would then be typechecked.  Given that it's willing to take that evaluative product, why not throw in the group implicitly vs. giving an error?</p>
-<p>You should be convinced.  It's a good thing.</p>
-<h2>
-<a name="another-case-study-infix-of-2" class="anchor" href="https://forum.rebol.info#another-case-study-infix-of-2"></a>Another Case Study: Infix "OF"</h2>
-<p>First there was <strong><code>(type? x)</code></strong> in Rebol2</p>
-<p>Then <strong><code>(type-of x)</code></strong> emerged, in the attempts to purge the blight of <em>"functions that return a result end in question mark"</em>, reserving it for LOGIC-bearing functions.</p>
-<p>It then became <strong><code>(type of x)</code></strong> to be even more pleasing to the words-separated-by-spaces aesthetic.</p>
-<p>But the infix properties of such a left-literal function can't be the same as ordinary evaluative infix, e.g. math:</p>
-<pre><code>&gt;&gt; 1 + 2 * 3
-== 9  ; e.g. (1 + 2) * 3
-</code></pre>
-<p>Because we used to be able to write:</p>
-<pre><code>&gt;&gt; integer! = type-of 1
-== ~okay~  ; anti
-</code></pre>
-<p>So we'd still like to be able to write:</p>
-<pre><code>&gt;&gt; integer! = type of 1
-== ~okay~  ; anti
-</code></pre>
-<p>Hence that can't be interpreted as <strong><code>(integer! = type) of 1</code></strong></p>
-<p><em>"Easy enough"</em> you say... <em>"make it so literal left enfix wins over evaluative right enfix."</em></p>
-<p>If you think it's easy, try writing this stuff yourself.  But yes--that is what I did.</p>
-<p>However, OF is one of these "escapable" routines.  We want to be able to do this:</p>
-<pre><code>&gt;&gt; integer! = (first [type length]) of 1
-== ~okay~  ; anti
-</code></pre>
-<p>So how does this work out with our tie-breaking?</p>
-<p><em>It doesn't count.</em>  There's no tie to break.  <strong><code>=</code></strong> isn't inescapably quoting its right.  If it <em>was</em> inescapably quoting its right, then the escapable left would mean the OF would yield to the hard rightward literal.</p>
-<h2>
-<a name="its-simpler-than-i-had-it-3" class="anchor" href="https://forum.rebol.info#its-simpler-than-i-had-it-3"></a>It's Simpler Than I Had It</h2>
-<p>Due to some accidents of history and not really having clear thinking on this, there were more parameter conventions than were required... with one hacked in to specifically make the <strong>OF</strong> case work.</p>
-<p>It turns out that using the rationale above, the extra parameter convention can be dropped.  It can all be done with just escapability-or-not meeting escapability-or-not.</p>
-            <p><small>1 post - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/implicit-escaping-to-tiebreak-literal-arguments/2290">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/implicit-escaping-to-tiebreak-literal-arguments/2290</link>
-          <pubDate>Fri, 20 Sep 2024 17:17:17 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-2290</guid>
-          <source url="https://forum.rebol.info/t/implicit-escaping-to-tiebreak-literal-arguments/2290.rss">Implicit Escaping To Tiebreak Literal Arguments</source>
-        </item>
-        <item>
-          <title>The Meaning of the FORM String Operation</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Semantics</category>
-          <description><![CDATA[
-            <p>So FORM's vague job is to give a "human readable representation" of the data it's given.</p>
-<p>So for TEXT!, it gives you a representation of the string without delimiters--in contrast to MOLD, which gives you the delimiters:</p>
-<pre><code>&gt;&gt; form "hello world"
-== "hello world"
-
-&gt;&gt; mold "hello world"
-== {"hello world"}
-</code></pre>
-<p>And you're probably thinking <em>"Uh...FORM of a text string is a no-op.  Why would you do that?"</em></p>
-<p>The idea is that there are things other than text which do what the delimiters.  Such as TAG!</p>
-<pre><code>&gt;&gt; form &lt;hello world&gt;
-== "&lt;hello world&gt;"
-
-&gt;&gt; mold &lt;hello world&gt;
-== "&lt;hello world&gt;"
-</code></pre>
-<p>What if you don't want delimiters on your TAG!s and such?  Well... for any string-ish type, thanks to UTF-8 we have a <em>super efficient</em> operation called AS TEXT! which aliases any type as a string.  It reuses the memory:</p>
-<pre><code>&gt;&gt; tag: &lt;hello world&gt;
-
-&gt;&gt; text: as text! &lt;hello world&gt;
-== "hello world"
-
-&gt;&gt; append tag "ly Ren-C user"
-== &lt;hello worldly Ren-C user&gt;
-
-&gt;&gt; text
-== "hello worldly Ren-C user"
-</code></pre>
-<p>You can use it on ANY-WORD! as well, and it will give you a read-only string... and not have the sigils:</p>
-<pre><code>&gt;&gt; as text! '$var
-== "var"
-</code></pre>
-<p>I have an inkling that over the subset of operations to which you can use both TO and AS, that you should get the same result... just a copy:</p>
-<pre><code>&gt;&gt; tag: &lt;hello world&gt;
-
-&gt;&gt; text: to text! &lt;hello world&gt;  ; TO TEXT!, not AS TEXT!
-== "hello world"
-
-&gt;&gt; append tag "ly Ren-C user"
-== &lt;hello worldly Ren-C user&gt;
-
-&gt;&gt; text
-== "hello world"
-</code></pre>
-<h2>
-<a name="so-form-adds-delimiters-and-toas-text-does-not-1" class="anchor" href="https://forum.rebol.info#so-form-adds-delimiters-and-toas-text-does-not-1"></a>So FORM adds delimiters, and TO+AS TEXT! Does Not...</h2>
-<p>...BUT...let's go back:</p>
-<pre><code>&gt;&gt; form "hello world"
-== "hello world"
-
-&gt;&gt; form &lt;hello world&gt;
-== "&lt;hello world&gt;"
-</code></pre>
-<p>Why again is FORM a no-op on text, but adds delimiters to tags?</p>
-<h2>
-<a name="and-how-about-blocks-2" class="anchor" href="https://forum.rebol.info#and-how-about-blocks-2"></a>And How About Blocks?</h2>
-<p>The block behavior of FORM historically strikes me as not terribly useful:</p>
-<pre><code>rebol2/red&gt;&gt; form [I am [:a "block" that:] &lt;is&gt; (being formed)]
-== "I am a block that &lt;is&gt; being formed"
-
-r3-alpha&gt;&gt; form [I am [:a "block" that:] &lt;is&gt; (being formed)]
-== "I am :a block that: &lt;is&gt; being formed"
-</code></pre>
-<p>How often do you want to take a bunch of material and throw away decorations from some of it, and flatten out all the lists with no processing but spaces?</p>
-<p>I don't think I've ever used that.  I see more use in MOLD SPREAD, which it seems like R3-Alpha was edging toward and didn't quite get there.</p>
-<pre><code>&gt;&gt; mold spread [I am [:a "block" that:] &lt;is&gt; (being "formed")]
-== {(I am :a "block" that: &lt;is&gt; (being "formed"))}
-</code></pre>
-<h2>
-<a name="who-is-calling-form-and-why-are-they-calling-it-3" class="anchor" href="https://forum.rebol.info#who-is-calling-form-and-why-are-they-calling-it-3"></a>Who is Calling FORM (and why are they calling it?)</h2>
-<p>The variance in behaviors across R3-Alpha and Red show what is usually true when you see variation--<em>people don't know why the thing exists, find out it has random behavior, then avoid using it in favor of other things</em>.</p>
-<p>Most uses seem to be turning WORD! to string, and turning TAG! to string with some assurance it will have the delimiters on it.  Nobody really uses it on blocks.</p>
-<p>I don't yet have a complete answer for either getting rid of it, or defining it rigorously.  But I'm going to start paying more attention to it.</p>
-            <p><small>2 posts - 2 participants</small></p>
-            <p><a href="https://forum.rebol.info/t/the-meaning-of-the-form-string-operation/2288">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/the-meaning-of-the-form-string-operation/2288</link>
-          <pubDate>Fri, 20 Sep 2024 09:16:05 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-2288</guid>
-          <source url="https://forum.rebol.info/t/the-meaning-of-the-form-string-operation/2288.rss">The Meaning of the FORM String Operation</source>
-        </item>
-        <item>
-          <title>Making FAIL Stand Out With Antiform TAG!</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Errors</category>
-          <description><![CDATA[
-            <aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="2278">
-<div class="title">
-<div class="quote-controls"></div>
-<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"><a href="https://forum.rebol.info/t/tripwire-in-the-wild/2278/1">TRIPWIRE in The Wild</a></div>
-<blockquote>
-<p>But with <strong><a href="https://forum.rebol.info/t/antiform-tag-as-triggers-an-error-on-access-type/2170">antiform tags</a></strong>, you can embed a message into the unset variable:</p>
-<pre data-code-wrap="plaintext"><code class="lang-plaintext">&gt;&gt; state: ~&lt;INITIALIZE-STATE hasn't been called yet&gt;~
-
-&gt;&gt; state
-** Script Error: state is ~&lt;INITIALIZE-STATE hasn't been called yet&gt;~ antiform
-** See ^(...) and GET/ANY
-</code></pre>
-</blockquote>
-</aside>
-<p>I have another use of TRIPWIRE that I don't know if it's good or bad, but...</p>
-<hr>
-<p>I've always wanted FAIL to stand out more.  When it first was invented (and Ren-C was case-insensitive), I would type FAIL in uppercase to get it:</p>
-<pre><code>foo: func [x [integer! text!]] [
-    switch/type x [
-        integer! [print "It's an integer"]
-        text! [print "It's a text"]
-        FAIL "unreachable"
-    ]
-]
-</code></pre>
-<p>Then I came up with the idea to use QUASI-WORD!s (that would evaluate to antiform words):</p>
-<pre><code>foo: func [x [integer! text!]] [
-    switch/type x [
-        integer! [print "It's an integer"]
-        text! [print "It's a text"]
-        fail ~unreachable~
-    ]
-]
-</code></pre>
-<p>I thought it looked cool and drew attention more than <strong><code>fail "unreachable"</code></strong>, while being the same number of characters.  It acted the same, but cost a bit less due to the interning of the word.</p>
-<p>But now, <a href="https://forum.rebol.info/t/renaming-antiword-time-to-call-it-keyword/2277">"keywords" are restricted to a finite system set</a>.   So by necessity, this has changed to use quasiform/antiform TAG!s:</p>
-<pre><code>foo: func [x [integer! text!]] [
-    switch/type x [
-        integer! [print "It's an integer"]
-        text! [print "It's a text"]
-        fail ~&lt;unreachable&gt;~
-    ]
-]
-</code></pre>
-<p>Now it's two more characters, doesn't cost any less than a string, and at the moment still acts the same as a string.  Is it still a useful thing?  Compared with:</p>
-<pre><code>foo: func [x [integer! text!]] [
-    switch/type x [
-        integer! [print "It's an integer"]
-        text! [print "It's a text"]
-        fail "unreachable"
-    ]
-]
-</code></pre>
-<p>I truly like that you can "see" the error better when it's <strong><code>~&lt;unreachable&gt;~</code></strong>...and go "oh, there's an error there".  I imagine this being particularly cool with syntax highlighting.</p>
-<p>To make that visibility advantage systemic, would it be reasonable to say that all FAILs take antiform tags and not strings?  Then if you have a message in a text string you would have to say <strong><code>fail [msg]</code></strong> instead of just <strong><code>fail msg</code></strong>.  I don't think that's terribly oppressive.</p>
-<p>I don't completely like the idea of it being a choice/synonym, because then people will just stylize their code differently and inconsistently...the same person even making different choices in the same file.  But it could just be a synonym and let you pick what you like for the situation, and maybe that's good.</p>
-<p>Or maybe it's a dumb feature.  I don't know.</p>
-            <p><small>1 post - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/making-fail-stand-out-with-antiform-tag/2282">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/making-fail-stand-out-with-antiform-tag/2282</link>
-          <pubDate>Mon, 16 Sep 2024 13:31:27 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-2282</guid>
-          <source url="https://forum.rebol.info/t/making-fail-stand-out-with-antiform-tag/2282.rss">Making FAIL Stand Out With Antiform TAG!</source>
         </item>
   </channel>
 </rss>

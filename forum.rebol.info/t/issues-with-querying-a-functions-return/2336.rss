@@ -1,0 +1,206 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Issues With Querying A Function&#39;s &quot;RETURN&quot;</title>
+    <link>https://forum.rebol.info/t/issues-with-querying-a-functions-return/2336</link>
+    <description>Each FUNCTION has a local variable named RETURN.  When it&#39;s running, the cell for that variable points at an &quot;archetypal return function&quot;.  But that cell also holds a reference to that specific function instantiation&#39;s frame.  This way it knows how to return specifically from that invocation of that function.
+
+This &quot;definitional return&quot; concept has worked quite well.  But there are some fiddly issues that arise from trying to make RETURN an ordinary local variable.
+
+## It Was Hoped RETURN Would Not Be Special
+
+The idea is that LAMBDA would be lower-level than FUNCTION, and permit you to have parameters or local variables named RETURN that had nothing to do with returning.
+
+    /demo: lambda [return continue] [
+        return + continue
+    ]
+
+    &gt;&gt; demo 1 2
+    == 3
+
+So an aspirational aspect of the design was that a user could create something that operated identically to the FUNCTION abstraction (just a bit slower, due to not being implemented natively).
+
+It would use something like THROW and CATCH, to implement RETURN (or construct(s) in that family) itself, as LAMBDAs synthesized upon instantiation.
+
+## RETURN as Local Hides Its Type Information
+
+While it&#39;s not an argument to the function, RETURN still has associated type information.
+
+Since RETURN is a local that will be filled with an action when the function runs, it isn&#39;t using its frame slot until that invocation happens.  That means it can store a PARAMETER! which says what return types are legal.  (It seems like a good use of an otherwise-unused slot otherwise you&#39;d need a slot in the Phase to hold it.)
+
+Functions like HELP want to know those types.  Yet locals and specialized arguments are traditionally considered implementation details, hidden from callers.  They&#39;re only visible  when frames are captured during the &quot;phase&quot; of being inside the function call:
+
+    &gt;&gt; /foo: function [return: [integer!] x] [
+         print mold words of binding of $x
+    ]
+
+    &gt;&gt; words of foo/
+    == [x]
+
+    &gt;&gt; foo
+    == [return x]
+
+Today&#39;s unsatisfying solution is that there&#39;s a flag on parameters that represent RETURN.  If you want the type information of that return, you can ask for it:
+
+    &gt;&gt; return of foo/
+    == ~#[parameter! [integer!]]~  ; anti
+
+But this flag is only applied by the FUNCTION native when its construction the parameter list.  So you wouldn&#39;t (for instance) get this behavior on a usermode re-implementation of FUNCTION based on LAMBDA.
+
+## How To Change RETURN In Composition?
+
+Let&#39;s say you&#39;re going to build a higher-level function with something like ENCLOSE:
+
+    &gt;&gt; /bar: enclose foo/ func [return: [tag!] f [frame!]] [
+           print &quot;I&#39;m an enclosure!&quot;
+           eval f
+           return &lt;tag&gt;
+       ] 
+
+The interface of an enclosed function is the same parameter list as the original, and the same returns as the original.  The enclosure is implemented as a function that takes a frame, and it can be given a new return type.  But today that isn&#39;t reported as the return type if you asked for HELP of FOO.  It would look at the original parameter list, which in this case says its RETURN is **`[integer!]`**.
+
+*This suggests that the answer to the question **`return of`** has to be dispatcher-specific.*
+
+FUNCTION would say &quot;it&#39;s the contents of the RETURN local in the archetype (not overwritten with return function, so still a PARAMETER!)&quot;.
+
+ENCLOSE would say &quot;it&#39;s the return type of the enclosure function that takes the frame&quot; but then give back the original parameter list for everything else.  (This raises a question of how you would inherit the original function&#39;s return... it might be nice if you used a LAMBDA or something that reported no return constraint, that it would default to the constraints of the function you were enclosing.)
+  
+In any case, if it was answered by the dispatcher... then if LAMBDA says &quot;I don&#39;t have a RETURN&quot;, you&#39;d not have HELP information on your RETURN if you were trying to build your own FUNCTION on top of LAMBDA.
+
+**The word RETURN may be a distraction, here.**  Because if it&#39;s something like a GENERATOR, the products are coming from calls to YIELD.  Maybe **`(result of ...)`** or **`(synthesis of ...)`** would help stress that this question isn&#39;t tied up specifically with RETURN.
+
+## LAMBDA Semantics May Want Result Specification
+
+The idea of LAMBDA is that the evaluative product just drops out [(see various writings on why FUNCTION does not allow that)](https://forum.rebol.info/t/implicit-execution-of-return-in-functions-bad/1656).
+
+But just because you want that semantic, doesn&#39;t mean you don&#39;t want the HELP to not give a return type.
+
+However, LAMBDA doesn&#39;t have anywhere to store the type information the way FUNCTION does.  If it has a RETURN it may be using it for unrelated purposes.
+
+Given what I&#39;ve proposed for the dispatcher-specific RETURN, you could accomplish it with an ENCLOSE:
+
+     enclose (lambda [...] [...]) func [return: [&lt;spec&gt;] f] [return eval f]
+
+But it seems clearly better to have something specific to this purpose:
+
+     returns [&lt;spec&gt;] lambda [...] [...]
+
+Then the Returns_Dispatcher() would simply type check what you gave it.
+
+Perhaps it could even accept a function as a first parameter, and then just say it returns whatever that function returns:
+
+    returns add/ lambda [x] [x + 1]
+
+Though that might be more confusing than writing it out:
+
+    returns (return of add/) lambda [x] [x + 1]
+
+Maybe a refinement should be used to bless that you&#39;re doing it on purpose:
+
+    returns:same-as add/ lambda [x] [x + 1]
+
+I guess the big question would be how to get the return&#39;s textual description in there.  Maybe it could assume if the format is TEXT! BLOCK! that&#39;s what you mean:
+
+    /foo: returns [
+       &quot;The input plus one&quot;
+       [integer!]
+    ] lambda [x] [
+        x + 1
+    ]
+
+## Well, There&#39;s Some Ideas
+
+I guess the idea here is that mechanics for answering &quot;what do you return&quot; come from the function&#39;s dispatcher, and maybe that becomes a chained question where if the dispatcher wraps something else, it has to ask the right parts of that thing.  There may be no user-exposed mechanic for building your own answer to the question beyond something like RETURNS, which is probably good enough.</description>
+    
+    <lastBuildDate>Thu, 28 Nov 2024 00:00:22 +0000</lastBuildDate>
+    <category>Functions</category>
+    <atom:link href="https://forum.rebol.info/t/issues-with-querying-a-functions-return/2336.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Issues With Querying A Function&#39;s &quot;RETURN&quot;</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>Each FUNCTION has a local variable named RETURN.  When it's running, the cell for that variable points at an "archetypal return function".  But that cell also holds a reference to that specific function instantiation's frame.  This way it knows how to return specifically from that invocation of that function.</p>
+<p>This "definitional return" concept has worked quite well.  But there are some fiddly issues that arise from trying to make RETURN an ordinary local variable.</p>
+<h2><a name="p-7931-it-was-hoped-return-would-not-be-special-1" class="anchor" href="https://forum.rebol.info#p-7931-it-was-hoped-return-would-not-be-special-1"></a>It Was Hoped RETURN Would Not Be Special</h2>
+<p>The idea is that LAMBDA would be lower-level than FUNCTION, and permit you to have parameters or local variables named RETURN that had nothing to do with returning.</p>
+<pre><code>/demo: lambda [return continue] [
+    return + continue
+]
+
+&gt;&gt; demo 1 2
+== 3
+</code></pre>
+<p>So an aspirational aspect of the design was that a user could create something that operated identically to the FUNCTION abstraction (just a bit slower, due to not being implemented natively).</p>
+<p>It would use something like THROW and CATCH, to implement RETURN (or construct(s) in that family) itself, as LAMBDAs synthesized upon instantiation.</p>
+<h2><a name="p-7931-return-as-local-hides-its-type-information-2" class="anchor" href="https://forum.rebol.info#p-7931-return-as-local-hides-its-type-information-2"></a>RETURN as Local Hides Its Type Information</h2>
+<p>While it's not an argument to the function, RETURN still has associated type information.</p>
+<p>Since RETURN is a local that will be filled with an action when the function runs, it isn't using its frame slot until that invocation happens.  That means it can store a PARAMETER! which says what return types are legal.  (It seems like a good use of an otherwise-unused slot otherwise you'd need a slot in the Phase to hold it.)</p>
+<p>Functions like HELP want to know those types.  Yet locals and specialized arguments are traditionally considered implementation details, hidden from callers.  They're only visible  when frames are captured during the "phase" of being inside the function call:</p>
+<pre><code>&gt;&gt; /foo: function [return: [integer!] x] [
+     print mold words of binding of $x
+]
+
+&gt;&gt; words of foo/
+== [x]
+
+&gt;&gt; foo
+== [return x]
+</code></pre>
+<p>Today's unsatisfying solution is that there's a flag on parameters that represent RETURN.  If you want the type information of that return, you can ask for it:</p>
+<pre><code>&gt;&gt; return of foo/
+== ~#[parameter! [integer!]]~  ; anti
+</code></pre>
+<p>But this flag is only applied by the FUNCTION native when its construction the parameter list.  So you wouldn't (for instance) get this behavior on a usermode re-implementation of FUNCTION based on LAMBDA.</p>
+<h2><a name="p-7931-how-to-change-return-in-composition-3" class="anchor" href="https://forum.rebol.info#p-7931-how-to-change-return-in-composition-3"></a>How To Change RETURN In Composition?</h2>
+<p>Let's say you're going to build a higher-level function with something like ENCLOSE:</p>
+<pre><code>&gt;&gt; /bar: enclose foo/ func [return: [tag!] f [frame!]] [
+       print "I'm an enclosure!"
+       eval f
+       return &lt;tag&gt;
+   ] 
+</code></pre>
+<p>The interface of an enclosed function is the same parameter list as the original, and the same returns as the original.  The enclosure is implemented as a function that takes a frame, and it can be given a new return type.  But today that isn't reported as the return type if you asked for HELP of FOO.  It would look at the original parameter list, which in this case says its RETURN is <strong><code>[integer!]</code></strong>.</p>
+<p><em>This suggests that the answer to the question <strong><code>return of</code></strong> has to be dispatcher-specific.</em></p>
+<p>FUNCTION would say "it's the contents of the RETURN local in the archetype (not overwritten with return function, so still a PARAMETER!)".</p>
+<p>ENCLOSE would say "it's the return type of the enclosure function that takes the frame" but then give back the original parameter list for everything else.  (This raises a question of how you would inherit the original function's return... it might be nice if you used a LAMBDA or something that reported no return constraint, that it would default to the constraints of the function you were enclosing.)</p>
+<p>In any case, if it was answered by the dispatcher... then if LAMBDA says "I don't have a RETURN", you'd not have HELP information on your RETURN if you were trying to build your own FUNCTION on top of LAMBDA.</p>
+<p><strong>The word RETURN may be a distraction, here.</strong>  Because if it's something like a GENERATOR, the products are coming from calls to YIELD.  Maybe <strong><code>(result of ...)</code></strong> or <strong><code>(synthesis of ...)</code></strong> would help stress that this question isn't tied up specifically with RETURN.</p>
+<h2><a name="p-7931-lambda-semantics-may-want-result-specification-4" class="anchor" href="https://forum.rebol.info#p-7931-lambda-semantics-may-want-result-specification-4"></a>LAMBDA Semantics May Want Result Specification</h2>
+<p>The idea of LAMBDA is that the evaluative product just drops out <a href="https://forum.rebol.info/t/implicit-execution-of-return-in-functions-bad/1656">(see various writings on why FUNCTION does not allow that)</a>.</p>
+<p>But just because you want that semantic, doesn't mean you don't want the HELP to not give a return type.</p>
+<p>However, LAMBDA doesn't have anywhere to store the type information the way FUNCTION does.  If it has a RETURN it may be using it for unrelated purposes.</p>
+<p>Given what I've proposed for the dispatcher-specific RETURN, you could accomplish it with an ENCLOSE:</p>
+<pre><code> enclose (lambda [...] [...]) func [return: [&lt;spec&gt;] f] [return eval f]
+</code></pre>
+<p>But it seems clearly better to have something specific to this purpose:</p>
+<pre><code> returns [&lt;spec&gt;] lambda [...] [...]
+</code></pre>
+<p>Then the Returns_Dispatcher() would simply type check what you gave it.</p>
+<p>Perhaps it could even accept a function as a first parameter, and then just say it returns whatever that function returns:</p>
+<pre><code>returns add/ lambda [x] [x + 1]
+</code></pre>
+<p>Though that might be more confusing than writing it out:</p>
+<pre><code>returns (return of add/) lambda [x] [x + 1]
+</code></pre>
+<p>Maybe a refinement should be used to bless that you're doing it on purpose:</p>
+<pre><code>returns:same-as add/ lambda [x] [x + 1]
+</code></pre>
+<p>I guess the big question would be how to get the return's textual description in there.  Maybe it could assume if the format is TEXT! BLOCK! that's what you mean:</p>
+<pre><code>/foo: returns [
+   "The input plus one"
+   [integer!]
+] lambda [x] [
+    x + 1
+]
+</code></pre>
+<h2><a name="p-7931-well-theres-some-ideas-5" class="anchor" href="https://forum.rebol.info#p-7931-well-theres-some-ideas-5"></a>Well, There's Some Ideas</h2>
+<p>I guess the idea here is that mechanics for answering "what do you return" come from the function's dispatcher, and maybe that becomes a chained question where if the dispatcher wraps something else, it has to ask the right parts of that thing.  There may be no user-exposed mechanic for building your own answer to the question beyond something like RETURNS, which is probably good enough.</p>
+          <p><a href="https://forum.rebol.info/t/issues-with-querying-a-functions-return/2336/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/issues-with-querying-a-functions-return/2336/1</link>
+        <pubDate>Thu, 28 Nov 2024 00:00:22 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-2336-1</guid>
+        <source url="https://forum.rebol.info/t/issues-with-querying-a-functions-return/2336.rss">Issues With Querying A Function&#39;s &quot;RETURN&quot;</source>
+      </item>
+  </channel>
+</rss>
