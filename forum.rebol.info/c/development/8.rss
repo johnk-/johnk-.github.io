@@ -5,8 +5,241 @@
     <link>https://forum.rebol.info/c/development/8</link>
     <description>Topics in the &#39;Development&#39; category Discussion of the development of Rebol itself: language design, implementation and standard library.</description>
     
-      <lastBuildDate>Sun, 01 Dec 2024 00:50:53 +0000</lastBuildDate>
+      <lastBuildDate>Sat, 07 Dec 2024 20:48:23 +0000</lastBuildDate>
       <atom:link href="https://forum.rebol.info/c/development/8.rss" rel="self" type="application/rss+xml" />
+        <item>
+          <title>Default Values and MAKE FRAME! - 2024 Edition</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Functions</category>
+          <description><![CDATA[
+            <blockquote>
+<p><em><strong>NOTE:</strong> The below summarizes history with some adjustments made for simplification purposes.  See posts in <a href="https://forum.rebol.info/c/archive/61">Archive</a> regarding frames for all the exact detours.</em></p>
+</blockquote>
+<hr>
+<p>Something like this has worked ever since the first FRAME!:</p>
+<pre><code>f: make frame! append/
+f.series: [a b c]
+f.value: 10
+
+&gt;&gt; eval f
+== [a b c 10]
+</code></pre>
+<p>Notice that although APPEND has refinements, you don't have to explicitly go through and set them to NULL.  That was done for you.</p>
+<p>That might make you think the result of <strong>(make frame! append/)</strong> looked like this:</p>
+<pre><code>&gt;&gt; make frame! append/
+== #[frame! [  ; you might think...
+    series: ~null~
+    value: ~null~
+    part: ~null~
+    dup: ~null~
+    line: ~null~
+]]
+</code></pre>
+<p>e.g. all fields defaulting to null, whether they are refinements or not.</p>
+<h2><a name="p-7965-thats-not-what-it-did-here-is-why-1" class="anchor" href="https://forum.rebol.info#p-7965-thats-not-what-it-did-here-is-why-1"></a>That's Not What It Did... Here Is Why</h2>
+<p>Even before the full-on unification of ACTION! and FRAME! into one datatype, there was a concept that you could make an action out of a frame.  This meant some state of the frame variables had to represent the idea that an argument was still to be gathered.</p>
+<p>The goal was something like this:</p>
+<pre><code>f: make frame! append/
+f.value: 10
+; don't assign f.series, leave it however it was
+
+&gt;&gt; run f [a b c]
+== [a b c 10]
+</code></pre>
+<p>If all the argument slots were eagerly set to <strong><code>~null~</code></strong> then you'd get something like:</p>
+<pre><code>&gt;&gt; run f [a b c]
+** Error: APPEND doesn't allow ~null~ for its VALUE argument
+</code></pre>
+<p>So instead, MAKE FRAME! would leave the slots all unset, to indicate they were unspecialized:</p>
+<pre><code>&gt;&gt; make frame! append/
+== #[frame! [
+    series: ~
+    value: ~
+    part: ~
+    dup: ~
+    line: ~
+]]
+</code></pre>
+<p>If it got to the point of execution, optional parameters (e.g. refinements) would be turned from NOTHING into NULL implicitly.  But if you didn't set a slot for a required parameter, it would give a helpful error:</p>
+<pre><code>f: make frame! append/
+f.value: 10
+
+&gt;&gt; eval f
+** Error: APPEND's SERIES argument is unspecified
+</code></pre>
+<h2><a name="p-7965-but-what-if-you-want-to-specialize-to-nothing-2" class="anchor" href="https://forum.rebol.info#p-7965-but-what-if-you-want-to-specialize-to-nothing-2"></a>But What If You Want To Specialize To Nothing?</h2>
+<p>It might seem that "nothing" is a rare thing to want to specialize to.  But it's a legitimate value, and represents a valid frame state.</p>
+<p>e.g. let's say you wanted to write UNSET as a specialization:</p>
+<pre><code>/unset: specialize set/ [value: ~]
+</code></pre>
+<p>This would wind up making UNSET a synonym for SET.  Because it would think you were saying <em>"specialize SET's value to be unspecialized"</em>...which is what it was by default.</p>
+<p>In this sense, using NOTHING as the unspecialized value just pushed the problem around a little bit.  No matter what you pick to represent the unspecialized state, you're going to have a problem.  It just happens that functions which take ~null~ antiforms are relatively common compared to those that take ~ antiforms.</p>
+<h2><a name="p-7965-leveraging-meta-on-a-stable-antiform-3" class="anchor" href="https://forum.rebol.info#p-7965-leveraging-meta-on-a-stable-antiform-3"></a>Leveraging ^META On a Stable Antiform</h2>
+<p>If you start thinking about being sneaky, you might imagine adding extra hidden bits somewhere to say <em>"no, this is a magic kind of specialized NOTHING"</em>.  But sneaky hidden bits are a tangled web, adding cost in the routines to manipulate them.</p>
+<p>So the idea was to use a not-so-hidden bit: any function that could legitimately take "nothing" as an argument had to take it as a ^META parameter.</p>
+<pre><code>x: 1020
+
+f: make frame! set/
+f.var: $x
+f.value: first [~]  ; ~ is meta-NOTHING, aka "quasi-BLANK!", aka "TRASH"
+
+&gt;&gt; eval f
+== ~  ; anti
+
+&gt;&gt; x
+** Error: X is unset (antiform BLANK!)
+</code></pre>
+<p>This works, but creates an additional burden: functions that truly want to receive a value that can represent any stable form must take their arguments as ^META... which usually you'd think you only need for unstable forms.</p>
+<h2><a name="p-7965-theres-still-an-ambiguity-gather-or-error-4" class="anchor" href="https://forum.rebol.info#p-7965-theres-still-an-ambiguity-gather-or-error-4"></a>There's Still an Ambiguity: Gather, Or Error?</h2>
+<p>The above was the status quo for a couple of years: MAKE FRAME! gave you back a frame whose slots were all unset.  Those unset slots represented arguments that were unspecialized.</p>
+<p>But still you have a question: should an unspecialized argument be gathered from a callsite, or should it trigger an error?</p>
+<p>That decision came from the operation.  If you used EVAL on a FRAME!, it would assume all the frame slots were finalized...and any nothing cells would raise errors.  If you used RUN (or converted the FRAME! into an action) then it assumed the unspecialized slots meant you wanted to gather arguments.</p>
+<h2><a name="p-7965-evolution-antiform-parameter-for-unspecialized-slots-5" class="anchor" href="https://forum.rebol.info#p-7965-evolution-antiform-parameter-for-unspecialized-slots-5"></a>Evolution: Antiform PARAMETER! For Unspecialized Slots</h2>
+<p>A big change came through with a user exposure of the PARAMETER! type.  With antiform parameters representing unspecialized slots, you had the signal of "this is unspecialized", but also the information required to gather the parameter: what types it checked, whether it was a refinement or not, whether it should be taken literally from a callsite, etc.</p>
+<p>This heralded even more exposure of the mechanics of function composition to user mode.  Instead of just specializing a function argument to a value, you could do things like "tweak" the argument's accepted types.</p>
+<p>For instance: what if you wanted a version of APPEND that only appended integers?</p>
+<pre><code>&gt;&gt; ap-int: make frame! append/
+
+&gt;&gt; ap-int.value: anti make parameter! [integer!]  ; or whatever syntax
+== ~#[parameter! [integer!]]~  ; anti
+
+&gt;&gt; /ap-int: anti ap-int
+== ~#[frame! ...]~  ; anti
+
+&gt;&gt; ap-int [a b c] 1020
+== [a b c 1020]
+
+&gt;&gt; ap-int [a b c] "illegal"
+** Error: AP-INT requires [integer!] for its value argument
+</code></pre>
+<p>This meant that MAKE FRAME! gave back something that looked rather weird:</p>
+<pre><code>&gt;&gt; make frame! append/
+== #[frame! [
+    series: ~#[parameter! [
+        ~void~ any-series? port! map! object! module! bitset!]
+    ]~
+    value: ~#[parameter! [~void~ element? splice?]]~
+    part: ~#[parameter! :[any-number? any-series? pair!]]~
+    dup: ~#[parameter! :[any-number? pair!]]~
+    line: ~#[parameter! :[]]~
+]]
+</code></pre>
+<p><img src="https://forum.rebol.info/images/emoji/twitter/face_with_diagonal_mouth.png?v=12" title=":face_with_diagonal_mouth:" class="emoji only-emoji" alt=":face_with_diagonal_mouth:" loading="lazy" width="20" height="20"></p>
+<p>Although this gives you a useful and actionable information about the parameters, that's fairly noisy for most purposes.  You haven't done any assignments to the frame, and yet it looks like it's "full".</p>
+<p>Let's put a pin in that.</p>
+<h2><a name="p-7965-are-meta-exceptions-still-needed-6" class="anchor" href="https://forum.rebol.info#p-7965-are-meta-exceptions-still-needed-6"></a>Are ^META Exceptions Still Needed?</h2>
+<p>In this model, there is no way of expressing a specialization of a function to an antiform parameter unless that function defined the parameter as ^META.</p>
+<p>That doesn't <em>necessarily</em> mean we'd have to be prescriptive.  I mentioned that EVAL expects all the arguments to be specified to their final values, while RUN accepts some will be unspecialized.  So EVAL <em>could</em> treat antiform parameters as the actual values to pass, while RUN would gather them from the callsite.</p>
+<p>This would produce a strange conflation.  You couldn't tell by looking at a frame whether or not an antiform parameter was a legitimate argument, or an unspecialized parameter definition.</p>
+<p>As an example, consider the HOLE? function, that tells you whether or not a value is an antiform parameter.  Let's assume it's operating in a world that it doesn't need to take the argument as ^META:</p>
+<pre><code>&gt;&gt; f: make frame! hole/
+== #[frame! [value: ~#[parameter! [any-value?]]~]
+</code></pre>
+<p>The interface says it takes ANY-VALUE? as the first parameter to HOLE?  Yet we don't have any mechanical way of telling that <strong><code>f2</code></strong> isn't a completed frame for calling HOLE?.  So if EVAL accepts this:</p>
+<pre><code>&gt;&gt; eval f
+== ~okay~  ; anti
+</code></pre>
+<p><img src="https://forum.rebol.info/images/emoji/twitter/thinking.png?v=12" title=":thinking:" class="emoji only-emoji" alt=":thinking:" loading="lazy" width="20" height="20"></p>
+<p>It really seems the best plan is to keep erroring when you try to EVAL frames with antiform PARAMETER! in them, when those parameters are required:</p>
+<pre><code>&gt;&gt; eval f2
+** Error: HOLE?'s VALUE parameter is unspecified (antiform PARAMETER!)
+</code></pre>
+<p>It does require the ^META exception: functions which need to accept antiform arguments must take that parameter in a meta form.  A function like HOLE? would fit into this category, and so would SET (which has to take unstable antiforms anyway, e.g. to do SET of a BLOCK! to a PACK)</p>
+<p>Under this design, any function that can accept antiform parameters at all, will also able to be specialized with antiform parameters.</p>
+<h2><a name="p-7965-denoising-make-frame-different-frame-makers-7" class="anchor" href="https://forum.rebol.info#p-7965-denoising-make-frame-different-frame-makers-7"></a>Denoising MAKE FRAME!: Different Frame Makers?</h2>
+<p>I pointed out that having antiform parameters in frame slots is a bit noisy.</p>
+<p>So what if there were two ways of making frames: one that gives you the parameter antiforms (suitable for tweaking and writing your own specialization operations), and another that clears the fields out?</p>
+<p>For instance, keeping the old behavior for MAKE FRAME!:</p>
+<pre><code>&gt;&gt; make frame! append/
+== #[frame! [
+    series: ~
+    value: ~
+    part: ~
+    dup: ~
+    line: ~
+]]
+</code></pre>
+<p>But if you wanted antiform parameters, you could just copy the non-antiform version of the FRAME!:</p>
+<pre><code>&gt;&gt; copy unrun append/
+== #[frame! [
+    series: ~#[parameter! [
+        ~void~ any-series? port! map! object! module! bitset!]
+    ]~
+    value: ~#[parameter! [~void~ element? splice?]]~
+    part: ~#[parameter! :[any-number? any-series? pair!]]~
+    dup: ~#[parameter! :[any-number? pair!]]~
+    line: ~#[parameter! :[]]~
+]]
+</code></pre>
+<p>In this design, you'd have <em>two</em> stable forms which you'd have to use ^META conventions to take as an argument.</p>
+<p>Antiform ~ would still have to turn into ~null~ if EVAL found it in a refinement slot.  But I'm not sure PARAMETER! antiforms would need to do that too.  One could argue that you should never be EVAL'ing a frame with antiform parameters in it, so it could be a sort of safety mechanism (?).  I'm not sure if it's necessary to enable, so I'd probably just raise an error until I saw a compelling case.</p>
+<h2><a name="p-7965-is-the-added-nuance-worth-it-8" class="anchor" href="https://forum.rebol.info#p-7965-is-the-added-nuance-worth-it-8"></a>Is The Added Nuance Worth It?</h2>
+<p>Continuing to handle unset variables as placeholders is not strictly necessary, given that antiform parameters are the more fundamental "unspecialized" slot representation.</p>
+<p>But it's definitely a lot better than something I tried that <em>sucked</em>: which was trying to make variables holding antiform PARAMETER! act like they were unset.  This made manipulating function interfaces programmatically <em>very</em> painful.</p>
+<p>It would mean sacrificing another value to have to be passed ^META.  Though bear in mind, most of the damage is done from having one form: e.g. a function like SET is having to take its value ^META already in order to be able to set things to antiform PARAMETER!.  So it isn't like you'd be able to specialize SET with antiform <code>~</code> to get UNSET if this wasn't done... it would affect the NOTHING? function (and probably not a lot else).</p>
+<p><strong>Having used MAKE FRAME! a fair bit, I am inclined to believe it's worth it.</strong>  It's a clear indicator of whether you've assigned fields or not, with some teeth by actually making the variables unset (erroring on use before assignment, and reacting to things like DEFAULT).</p>
+            <p><small>2 posts - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/default-values-and-make-frame-2024-edition/2347">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/default-values-and-make-frame-2024-edition/2347</link>
+          <pubDate>Sat, 07 Dec 2024 20:48:23 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2347</guid>
+          <source url="https://forum.rebol.info/t/default-values-and-make-frame-2024-edition/2347.rss">Default Values and MAKE FRAME! - 2024 Edition</source>
+        </item>
+        <item>
+          <title>Design for Something Like FLIP To Reverse Arguments</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Functions</category>
+          <description><![CDATA[
+            <aside class="quote no-group" data-username="bradrn" data-post="6" data-topic="1238">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/bradrn/48/365_2.png" class="avatar"><a href="https://forum.rebol.info/t/parameter-order-in-rebol/1238/6">Parameter Order in Rebol</a></div>
+<blockquote>
+<p>If someone wants to specify the second parameter first they can always write <code>flip cons</code> or <code>flip snoc</code>.</p>
+</blockquote>
+</aside>
+<p>The design of a FLIP-like operation raises some questions.</p>
+<p>If it were an operator that acted on functions, it wouldn't retrigger them.  You'd have to say:</p>
+<pre><code>&gt;&gt; append 'd [a b c]
+== [a b c d]
+
+&gt;&gt; run flip append/ [a b c] 'd
+== [a b c d]
+</code></pre>
+<p>Alternately, I guess you could use slash to run a GROUP!, but then you'd have a disabling slash and a running slash:</p>
+<pre><code>&gt;&gt; /(flip append/) [a b c] 'd
+== [a b c d]
+</code></pre>
+<p>If it were instead something along the lines of RUN, where applying the flipped function was implicit, you could write:</p>
+<pre><code>&gt;&gt; flip append/ [a b c] 'd
+== [a b c d]
+</code></pre>
+<p>I don't think <strong><code>flip/append</code></strong> being a synonym for <strong><code>/(flip append/)</code></strong> is a generically useful idea, compared to the likes of <strong><code>not/even?/</code></strong> for cascading.</p>
+<p>But if the <a href="https://forum.rebol.info/t/dialecting-function-calls-new-weird-powerful/2310">weird idea of dialected CHAIN!</a> ever came to pass, FLIP could go into a distinct mode based on receiving a function in the place other functions have refinements...</p>
+<pre><code>&gt;&gt; append/
+== ~#[frame! [value series]]~
+
+&gt;&gt; flip append/
+== ~#[frame! [series value]]~
+
+&gt;&gt; flip:append [a b c] 'd
+== [a b c d]
+</code></pre>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/design-for-something-like-flip-to-reverse-arguments/2345">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/design-for-something-like-flip-to-reverse-arguments/2345</link>
+          <pubDate>Mon, 02 Dec 2024 14:41:21 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2345</guid>
+          <source url="https://forum.rebol.info/t/design-for-something-like-flip-to-reverse-arguments/2345.rss">Design for Something Like FLIP To Reverse Arguments</source>
+        </item>
         <item>
           <title>The Probably-False Economy of EVAL Consuming FRAME!</title>
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
@@ -1967,103 +2200,6 @@ if (quote:quote:quasi:block? first [''~[a b c]~]) [...]
           <discourse:topicArchived>No</discourse:topicArchived>
           <guid isPermaLink="false">forum.rebol.info-topic-2296</guid>
           <source url="https://forum.rebol.info/t/meta-lite-when-you-dont-want-quasiforms/2296.rss">META:LITE - When You Don&#39;t Want Quasiforms</source>
-        </item>
-        <item>
-          <title>What is ~/~ : A PATH! or a QUASI-WORD?</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Datatypes</category>
-          <description><![CDATA[
-            <p>I've mentioned that there are not going to be quasiform or antiform sequence types.</p>
-<ul>
-<li>
-<p>We want tildes in paths <strong><code>~/home/whatever.txt</code></strong></p>
-<ul>
-<li>
-<p>Paths in particular...but they could be useful in tuples (<strong><code>~.foo</code></strong>) or chains (<strong><code>[a]:~</code></strong>)</p>
-</li>
-<li>
-<p>Quasiforms might be nice  for some purposes too (<strong><code>~null~/a/b/c), (foo:~[a]~</code></strong>)</p>
-</li>
-</ul>
-</li>
-<li>
-<p>The known very important usage of tilde in paths, plus all the as-yet-unknown and untapped other uses, far outweigh any advantage I can think of for antiform/quasiform sequences.</p>
-</li>
-</ul>
-<p>So that's settled.  But there's a bit of an edge case with the WORD!s like <strong><code>/</code></strong> or <strong>.</strong> or <strong>:</strong></p>
-<p>And there, I'm going to have to say that <strong><code>~/~</code></strong> is a quasiword.</p>
-<ul>
-<li>
-<p>I want all words to have quasiforms (though not antiforms... only system-blessed "keywords" will be allowed to become antiforms).  And so I don't want to exempt any words from that.</p>
-</li>
-<li>
-<p>I don't think excluding <strong><code>~/~</code></strong> as a path form has any tremendous consequences</p>
-</li>
-<li>
-<p>Allowing it to be a quasiword fits in with <strong><code>~///~</code></strong> and other such words being quasiwords, and those aren't valid paths.</p>
-</li>
-</ul>
-<p>So we open up a wider field of parts, keep all words having quasiforms, and lose one weird path representation.</p>
-<p>Though it's not "lost"--if you're writing dialect code that has some logic for what a PATH! of two tilde-trash would mean, you can specially recognize the quasiword.  You'll only run into representational trouble if in the same dialect you need a meaning for every possible quasiword that deviates from what the path interpretation would be.</p>
-<p>(I'd say I'd bet money that's never going to happen, except I've seen exactly weird things like that happen often enough to know better.  So instead I'll say "it might happen someday, but I don't care.")</p>
-<p>Anyway, trying to shore this up a bit, some sample errors:</p>
-<pre><code>&gt;&gt; to path! [~ a]
-== ~/a
-
-&gt;&gt; to path! [~ ~]
-** Script Error: Sequence would conflate with WORD! form: ~/~
-
-&gt;&gt; to path! [a _]
-== a/
-
-&gt;&gt; to path! [_ _]
-** Script Error: Sequence would conflate with WORD! form: /
-
-&gt;&gt; to path! [_ a _]
-== /a/
-
-&gt;&gt; to path! [a _ b]
-** Script Error: BLANK! only legal at head and tail of sequence
-</code></pre>
-            <p><small>2 posts - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/what-is-a-path-or-a-quasi-word/2292">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/what-is-a-path-or-a-quasi-word/2292</link>
-          <pubDate>Sun, 22 Sep 2024 13:15:01 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-2292</guid>
-          <source url="https://forum.rebol.info/t/what-is-a-path-or-a-quasi-word/2292.rss">What is ~/~ : A PATH! or a QUASI-WORD?</source>
-        </item>
-        <item>
-          <title>DO/NEXT vs. EVAL/NEXT vs. EVAL:STEP</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Naming</category>
-          <description><![CDATA[
-            <p>DO/NEXT was how you'd do a single step in historical Redbol</p>
-<p>This is currently EVAL/NEXT (since DO is higher level and doesn't evaluate lists).  But it hadn't occurred to me to question /NEXT...</p>
-<p>But I realized that within the code, I call it <strong><code>Eval_Step_XXX()</code></strong>.  And the level executor that runs a single evaluation step is called the <strong><code>Stepper_Executor()</code></strong></p>
-<p>So <strong><code>EVAL:STEP</code></strong> (new refinement notation) seems better to me.</p>
-<pre><code>&gt;&gt; [pos value]: eval:step [1 + 2 10 + 20]
-== [10 + 20]
-
-&gt;&gt; pos
-== [10 + 20]
-
-&gt;&gt; value
-== 3
-</code></pre>
-            <p><small>1 post - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/do-next-vs-eval-next-vs-eval-step/2291">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/do-next-vs-eval-next-vs-eval-step/2291</link>
-          <pubDate>Sat, 21 Sep 2024 17:13:59 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-2291</guid>
-          <source url="https://forum.rebol.info/t/do-next-vs-eval-next-vs-eval-step/2291.rss">DO/NEXT vs. EVAL/NEXT vs. EVAL:STEP</source>
         </item>
   </channel>
 </rss>

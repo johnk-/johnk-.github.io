@@ -5,6 +5,519 @@
     <link>https://forum.rebol.info</link>
     <description>Latest posts</description>
       <item>
+        <title>Default Values and MAKE FRAME! - 2024 Edition</title>
+        <dc:creator><![CDATA[@hostilefork Brian Dickens]]></dc:creator>
+        <description><![CDATA[ <p><em>Still paying off technical debt, here...this frame stuff has been agonizing.</em></p>
+<aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="2347">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>It would mean sacrificing another value to have to be passed ^META. Though bear in mind, most of the damage is done from having one form: e.g. a function like SET is having to take its value ^META already in order to be able to set things to antiform PARAMETER!.</p>
+</blockquote>
+</aside>
+<p>As part of trying out this "two unspecialized forms" concept, I started tightening the screws so I can better reason about the invariants.  It quickly exposed something fundamental, that I might classify as <em>"genuinely interesting"</em>.</p>
+<p>Consider the native for testing if something is an INTEGER?.  Let's say it's able to accept ANY-VALUE?, and it should not return true for PARAMETER! antiforms:</p>
+<pre><code>/integer?: native [return: [logic?] value [any-value?]]
+</code></pre>
+<p>We don't want to be in a situation where a function like this needs to take its argument as ^META, because that's a trap we don't want to fall in... where <em>every</em> parameter has to be meta.  You don't want the edge case to spread like that.</p>
+<p>But now we have to ask: what if you have an antiform PARAMETER!, and you ask INTEGER? of it.  <img src="https://forum.rebol.info/images/emoji/twitter/face_with_diagonal_mouth.png?v=12" title=":face_with_diagonal_mouth:" class="emoji" alt=":face_with_diagonal_mouth:" loading="lazy" width="20" height="20"></p>
+<p>The options are limited to basically 2 choices:</p>
+<ol>
+<li>
+<p>Antiform PARAMETER! is removed from the ANY-VALUE? class.  That means testing INTEGER? on an antiform parameter would trigger an abrupt failure.</p>
+</li>
+<li>
+<p>Antiform PARAMETER! is made legal in EVAL frame contexts to mean "itself" (while its meaning in RUN frame contexts is "unspecialized").</p>
+</li>
+</ol>
+<p>When you put it that way, I get bad vibes from (1).</p>
+<p>Though (2) has consequences that I've explained.  Any function that takes antiform PARAMETER! which doesn't take it ^META will not be able to create <em>partial specializations</em> that fix arguments as antiform parameters, while still gathering other parameters.  You will only be able to use antiform parameters in <em>full specializations</em>.</p>
+<p>But I realized you -could- create partial specializations on functions taking antiform parameters non-META.  You'd just have to get creative: make a variant with the parameter adjusted to be ^META and then, use an ENCLOSE...after all the arguments are fulfilled, unmeta it before passing through to the original function.</p>
+<p><em>Having <strong>a</strong> way to do it is good enough for me.</em>  I do not think that partial specializations to antiform parameters is going to be something anyone does frequently (or ever, probably, outside of the test files I'm going to write that prove it can be done.)</p>
+<h2><a name="p-7966-down-to-just-one-meta-exception-nothing-1" class="anchor" href="https://forum.rebol.info#p-7966-down-to-just-one-meta-exception-nothing-1"></a>Down To Just One ^META Exception: <em>NOTHING</em> (<code>~</code>)</h2>
+<p>A "genuinely interesting" aspect of this is that it brings a renewed motivation to the existence of the unset state.  It has been challenged before:</p>
+<p><strong><a href="https://forum.rebol.info/t/why-or-why-not-have-unset-in-rebol-like-languages/113">Why Have an "Unset State" in Rebol-like Languages?</a></strong></p>
+<p>I actually was reflecting on the question of the necessity of "nothing" once I realized that protecting-you-from-typos is no longer one of the reasons, due to binding becoming "strict".  So I had a panicky moment where I wondered if <code>~null~</code> and <code>~</code> antiforms should be merged, after all.  <img src="https://forum.rebol.info/images/emoji/twitter/worried.png?v=12" title=":worried:" class="emoji" alt=":worried:" loading="lazy" width="20" height="20"></p>
+<p>Almost certainly not... <em>but</em> with PARAMETER! antiforms now in frames as "themselves", something has to give.  There's a strong incentive to pare that back to as few states as possible... and hence, just one thing: NOTHING.</p>
+<p>Note it's thus subject to the limitations of (1) above, and hence <em>you can't call INTEGER? on NOTHING</em>.</p>
+<p><strong>So NOTHING becomes (as it was) the one stable antiform state that a variable can hold, which cannot be accepted by functions that don't take ^META parameters.</strong></p>
+<p>If we didn't do something special, the error you'd get would look like:</p>
+<pre><code>&gt;&gt; integer? ~
+** Error: INTEGER?'s VALUE argument is unspecified (~ antiform)
+</code></pre>
+<p>Maybe that's good enough, though the argument-gathering machinery could pre-empt the FRAME! typechecking layer with a clearer message:</p>
+<pre><code>&gt;&gt; integer? ~
+** Error: INTEGER?'s VALUE argument can't be NOTHING (~ antiform)
+</code></pre>
+<p>That may be seem like splitting hairs, but I don't think it is.</p>
+<h2><a name="p-7966-casualty-unblocks-eval-of-unspecialized-frames-2" class="anchor" href="https://forum.rebol.info#p-7966-casualty-unblocks-eval-of-unspecialized-frames-2"></a>Casualty: Unblocks EVAL of Unspecialized FRAME!s</h2>
+<aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="2347">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>Antiform ~ would still have to turn into ~null~ if EVAL found it in a refinement slot. But I'm not sure PARAMETER! antiforms would need to do that too. One could argue that you should never be EVAL'ing a frame with antiform parameters in it, so it could be a sort of safety mechanism (?).</p>
+</blockquote>
+</aside>
+<p>So with antiform parameters being treated as-is under EVAL, then when you don't use MAKE FRAME! and get the slots filled with nothing, you get the slots filled with antiform parameters.  And that means this would happen:</p>
+<pre><code>&gt;&gt; f: copy unrun parameter?/
+== #[frame! [value: ~#[parameter! [any-value?]]~]
+
+&gt;&gt; eval f
+== ~okay~  ; anti
+</code></pre>
+<p>I can live with this.  COPY on an action's FRAME! is something you should do only if you're building something you mean to run as an action, and if you EVAL it instead, that's kind of your fault.</p>
+<p>Maybe there could be some kind of prevention of this, but I'd be loathe to see the FRAME! type bifurcate into "EVAL-able frames" and "RUN-able frames".</p>
+<p>Anyway, this is <em>far</em> less a concern with MAKE FRAME! unsetting the slots, than it was when those were antiform parameters.</p> ]]></description>
+        <link>https://forum.rebol.info/t/default-values-and-make-frame-2024-edition/2347#post_2</link>
+        <pubDate>Sun, 08 Dec 2024 11:56:28 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-7966</guid>
+      </item>
+      <item>
+        <title>Default Values and MAKE FRAME! - 2024 Edition</title>
+        <dc:creator><![CDATA[@hostilefork Brian Dickens]]></dc:creator>
+        <description><![CDATA[ <blockquote>
+<p><em><strong>NOTE:</strong> The below summarizes history with some adjustments made for simplification purposes.  See posts in <a href="https://forum.rebol.info/c/archive/61">Archive</a> regarding frames for all the exact detours.</em></p>
+</blockquote>
+<hr>
+<p>Something like this has worked ever since the first FRAME!:</p>
+<pre><code>f: make frame! append/
+f.series: [a b c]
+f.value: 10
+
+&gt;&gt; eval f
+== [a b c 10]
+</code></pre>
+<p>Notice that although APPEND has refinements, you don't have to explicitly go through and set them to NULL.  That was done for you.</p>
+<p>That might make you think the result of <strong>(make frame! append/)</strong> looked like this:</p>
+<pre><code>&gt;&gt; make frame! append/
+== #[frame! [  ; you might think...
+    series: ~null~
+    value: ~null~
+    part: ~null~
+    dup: ~null~
+    line: ~null~
+]]
+</code></pre>
+<p>e.g. all fields defaulting to null, whether they are refinements or not.</p>
+<h2><a name="p-7965-thats-not-what-it-did-here-is-why-1" class="anchor" href="https://forum.rebol.info#p-7965-thats-not-what-it-did-here-is-why-1"></a>That's Not What It Did... Here Is Why</h2>
+<p>Even before the full-on unification of ACTION! and FRAME! into one datatype, there was a concept that you could make an action out of a frame.  This meant some state of the frame variables had to represent the idea that an argument was still to be gathered.</p>
+<p>The goal was something like this:</p>
+<pre><code>f: make frame! append/
+f.value: 10
+; don't assign f.series, leave it however it was
+
+&gt;&gt; run f [a b c]
+== [a b c 10]
+</code></pre>
+<p>If all the argument slots were eagerly set to <strong><code>~null~</code></strong> then you'd get something like:</p>
+<pre><code>&gt;&gt; run f [a b c]
+** Error: APPEND doesn't allow ~null~ for its VALUE argument
+</code></pre>
+<p>So instead, MAKE FRAME! would leave the slots all unset, to indicate they were unspecialized:</p>
+<pre><code>&gt;&gt; make frame! append/
+== #[frame! [
+    series: ~
+    value: ~
+    part: ~
+    dup: ~
+    line: ~
+]]
+</code></pre>
+<p>If it got to the point of execution, optional parameters (e.g. refinements) would be turned from NOTHING into NULL implicitly.  But if you didn't set a slot for a required parameter, it would give a helpful error:</p>
+<pre><code>f: make frame! append/
+f.value: 10
+
+&gt;&gt; eval f
+** Error: APPEND's SERIES argument is unspecified
+</code></pre>
+<h2><a name="p-7965-but-what-if-you-want-to-specialize-to-nothing-2" class="anchor" href="https://forum.rebol.info#p-7965-but-what-if-you-want-to-specialize-to-nothing-2"></a>But What If You Want To Specialize To Nothing?</h2>
+<p>It might seem that "nothing" is a rare thing to want to specialize to.  But it's a legitimate value, and represents a valid frame state.</p>
+<p>e.g. let's say you wanted to write UNSET as a specialization:</p>
+<pre><code>/unset: specialize set/ [value: ~]
+</code></pre>
+<p>This would wind up making UNSET a synonym for SET.  Because it would think you were saying <em>"specialize SET's value to be unspecialized"</em>...which is what it was by default.</p>
+<p>In this sense, using NOTHING as the unspecialized value just pushed the problem around a little bit.  No matter what you pick to represent the unspecialized state, you're going to have a problem.  It just happens that functions which take ~null~ antiforms are relatively common compared to those that take ~ antiforms.</p>
+<h2><a name="p-7965-leveraging-meta-on-a-stable-antiform-3" class="anchor" href="https://forum.rebol.info#p-7965-leveraging-meta-on-a-stable-antiform-3"></a>Leveraging ^META On a Stable Antiform</h2>
+<p>If you start thinking about being sneaky, you might imagine adding extra hidden bits somewhere to say <em>"no, this is a magic kind of specialized NOTHING"</em>.  But sneaky hidden bits are a tangled web, adding cost in the routines to manipulate them.</p>
+<p>So the idea was to use a not-so-hidden bit: any function that could legitimately take "nothing" as an argument had to take it as a ^META parameter.</p>
+<pre><code>x: 1020
+
+f: make frame! set/
+f.var: $x
+f.value: first [~]  ; ~ is meta-NOTHING, aka "quasi-BLANK!", aka "TRASH"
+
+&gt;&gt; eval f
+== ~  ; anti
+
+&gt;&gt; x
+** Error: X is unset (antiform BLANK!)
+</code></pre>
+<p>This works, but creates an additional burden: functions that truly want to receive a value that can represent any stable form must take their arguments as ^META... which usually you'd think you only need for unstable forms.</p>
+<h2><a name="p-7965-theres-still-an-ambiguity-gather-or-error-4" class="anchor" href="https://forum.rebol.info#p-7965-theres-still-an-ambiguity-gather-or-error-4"></a>There's Still an Ambiguity: Gather, Or Error?</h2>
+<p>The above was the status quo for a couple of years: MAKE FRAME! gave you back a frame whose slots were all unset.  Those unset slots represented arguments that were unspecialized.</p>
+<p>But still you have a question: should an unspecialized argument be gathered from a callsite, or should it trigger an error?</p>
+<p>That decision came from the operation.  If you used EVAL on a FRAME!, it would assume all the frame slots were finalized...and any nothing cells would raise errors.  If you used RUN (or converted the FRAME! into an action) then it assumed the unspecialized slots meant you wanted to gather arguments.</p>
+<h2><a name="p-7965-evolution-antiform-parameter-for-unspecialized-slots-5" class="anchor" href="https://forum.rebol.info#p-7965-evolution-antiform-parameter-for-unspecialized-slots-5"></a>Evolution: Antiform PARAMETER! For Unspecialized Slots</h2>
+<p>A big change came through with a user exposure of the PARAMETER! type.  With antiform parameters representing unspecialized slots, you had the signal of "this is unspecialized", but also the information required to gather the parameter: what types it checked, whether it was a refinement or not, whether it should be taken literally from a callsite, etc.</p>
+<p>This heralded even more exposure of the mechanics of function composition to user mode.  Instead of just specializing a function argument to a value, you could do things like "tweak" the argument's accepted types.</p>
+<p>For instance: what if you wanted a version of APPEND that only appended integers?</p>
+<pre><code>&gt;&gt; ap-int: make frame! append/
+
+&gt;&gt; ap-int.value: anti make parameter! [integer!]  ; or whatever syntax
+== ~#[parameter! [integer!]]~  ; anti
+
+&gt;&gt; /ap-int: anti ap-int
+== ~#[frame! ...]~  ; anti
+
+&gt;&gt; ap-int [a b c] 1020
+== [a b c 1020]
+
+&gt;&gt; ap-int [a b c] "illegal"
+** Error: AP-INT requires [integer!] for its value argument
+</code></pre>
+<p>This meant that MAKE FRAME! gave back something that looked rather weird:</p>
+<pre><code>&gt;&gt; make frame! append/
+== #[frame! [
+    series: ~#[parameter! [
+        ~void~ any-series? port! map! object! module! bitset!]
+    ]~
+    value: ~#[parameter! [~void~ element? splice?]]~
+    part: ~#[parameter! :[any-number? any-series? pair!]]~
+    dup: ~#[parameter! :[any-number? pair!]]~
+    line: ~#[parameter! :[]]~
+]]
+</code></pre>
+<p><img src="https://forum.rebol.info/images/emoji/twitter/face_with_diagonal_mouth.png?v=12" title=":face_with_diagonal_mouth:" class="emoji only-emoji" alt=":face_with_diagonal_mouth:" loading="lazy" width="20" height="20"></p>
+<p>Although this gives you a useful and actionable information about the parameters, that's fairly noisy for most purposes.  You haven't done any assignments to the frame, and yet it looks like it's "full".</p>
+<p>Let's put a pin in that.</p>
+<h2><a name="p-7965-are-meta-exceptions-still-needed-6" class="anchor" href="https://forum.rebol.info#p-7965-are-meta-exceptions-still-needed-6"></a>Are ^META Exceptions Still Needed?</h2>
+<p>In this model, there is no way of expressing a specialization of a function to an antiform parameter unless that function defined the parameter as ^META.</p>
+<p>That doesn't <em>necessarily</em> mean we'd have to be prescriptive.  I mentioned that EVAL expects all the arguments to be specified to their final values, while RUN accepts some will be unspecialized.  So EVAL <em>could</em> treat antiform parameters as the actual values to pass, while RUN would gather them from the callsite.</p>
+<p>This would produce a strange conflation.  You couldn't tell by looking at a frame whether or not an antiform parameter was a legitimate argument, or an unspecialized parameter definition.</p>
+<p>As an example, consider the HOLE? function, that tells you whether or not a value is an antiform parameter.  Let's assume it's operating in a world that it doesn't need to take the argument as ^META:</p>
+<pre><code>&gt;&gt; f: make frame! hole/
+== #[frame! [value: ~#[parameter! [any-value?]]~]
+</code></pre>
+<p>The interface says it takes ANY-VALUE? as the first parameter to HOLE?  Yet we don't have any mechanical way of telling that <strong><code>f2</code></strong> isn't a completed frame for calling HOLE?.  So if EVAL accepts this:</p>
+<pre><code>&gt;&gt; eval f
+== ~okay~  ; anti
+</code></pre>
+<p><img src="https://forum.rebol.info/images/emoji/twitter/thinking.png?v=12" title=":thinking:" class="emoji only-emoji" alt=":thinking:" loading="lazy" width="20" height="20"></p>
+<p>It really seems the best plan is to keep erroring when you try to EVAL frames with antiform PARAMETER! in them, when those parameters are required:</p>
+<pre><code>&gt;&gt; eval f2
+** Error: HOLE?'s VALUE parameter is unspecified (antiform PARAMETER!)
+</code></pre>
+<p>It does require the ^META exception: functions which need to accept antiform arguments must take that parameter in a meta form.  A function like HOLE? would fit into this category, and so would SET (which has to take unstable antiforms anyway, e.g. to do SET of a BLOCK! to a PACK)</p>
+<p>Under this design, any function that can accept antiform parameters at all, will also able to be specialized with antiform parameters.</p>
+<h2><a name="p-7965-denoising-make-frame-different-frame-makers-7" class="anchor" href="https://forum.rebol.info#p-7965-denoising-make-frame-different-frame-makers-7"></a>Denoising MAKE FRAME!: Different Frame Makers?</h2>
+<p>I pointed out that having antiform parameters in frame slots is a bit noisy.</p>
+<p>So what if there were two ways of making frames: one that gives you the parameter antiforms (suitable for tweaking and writing your own specialization operations), and another that clears the fields out?</p>
+<p>For instance, keeping the old behavior for MAKE FRAME!:</p>
+<pre><code>&gt;&gt; make frame! append/
+== #[frame! [
+    series: ~
+    value: ~
+    part: ~
+    dup: ~
+    line: ~
+]]
+</code></pre>
+<p>But if you wanted antiform parameters, you could just copy the non-antiform version of the FRAME!:</p>
+<pre><code>&gt;&gt; copy unrun append/
+== #[frame! [
+    series: ~#[parameter! [
+        ~void~ any-series? port! map! object! module! bitset!]
+    ]~
+    value: ~#[parameter! [~void~ element? splice?]]~
+    part: ~#[parameter! :[any-number? any-series? pair!]]~
+    dup: ~#[parameter! :[any-number? pair!]]~
+    line: ~#[parameter! :[]]~
+]]
+</code></pre>
+<p>In this design, you'd have <em>two</em> stable forms which you'd have to use ^META conventions to take as an argument.</p>
+<p>Antiform ~ would still have to turn into ~null~ if EVAL found it in a refinement slot.  But I'm not sure PARAMETER! antiforms would need to do that too.  One could argue that you should never be EVAL'ing a frame with antiform parameters in it, so it could be a sort of safety mechanism (?).  I'm not sure if it's necessary to enable, so I'd probably just raise an error until I saw a compelling case.</p>
+<h2><a name="p-7965-is-the-added-nuance-worth-it-8" class="anchor" href="https://forum.rebol.info#p-7965-is-the-added-nuance-worth-it-8"></a>Is The Added Nuance Worth It?</h2>
+<p>Continuing to handle unset variables as placeholders is not strictly necessary, given that antiform parameters are the more fundamental "unspecialized" slot representation.</p>
+<p>But it's definitely a lot better than something I tried that <em>sucked</em>: which was trying to make variables holding antiform PARAMETER! act like they were unset.  This made manipulating function interfaces programmatically <em>very</em> painful.</p>
+<p>It would mean sacrificing another value to have to be passed ^META.  Though bear in mind, most of the damage is done from having one form: e.g. a function like SET is having to take its value ^META already in order to be able to set things to antiform PARAMETER!.  So it isn't like you'd be able to specialize SET with antiform <code>~</code> to get UNSET if this wasn't done... it would affect the NOTHING? function (and probably not a lot else).</p>
+<p><strong>Having used MAKE FRAME! a fair bit, I am inclined to believe it's worth it.</strong>  It's a clear indicator of whether you've assigned fields or not, with some teeth by actually making the variables unset (erroring on use before assignment, and reacting to things like DEFAULT).</p> ]]></description>
+        <link>https://forum.rebol.info/t/default-values-and-make-frame-2024-edition/2347#post_1</link>
+        <pubDate>Sat, 07 Dec 2024 20:48:23 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-7965</guid>
+      </item>
+      <item>
+        <title>BINARY! Dialected Encoding/Decoding instead of TO conversions?</title>
+        <dc:creator><![CDATA[@hostilefork Brian Dickens]]></dc:creator>
+        <description><![CDATA[ <aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="1270">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">&gt;&gt; encode [LE + 2] 32
+== #{2000}  ; little-endian, 2 byte, unsigned
+
+&gt;&gt; encode [LE +/- 3] -2
+== #{FEFFFF}  ; little-endian, 3 byte, signed
+</code></pre>
+</blockquote>
+</aside>
+<p>I got to wondering "why isn't there a numeric encoding for just negative numbers"?</p>
+<p>Then I thought "uh, duh...no such representation is needed, as you just would negate the all-positive representation".</p>
+<pre><code>&gt;&gt; negate decode [BE +] #{FF}
+== -255
+</code></pre>
+<p>But with these encoders/decoders... why not build it in as an option?</p>
+<pre><code>&gt;&gt; decode [BE -] #{FF}
+== -255
+</code></pre>
+<p>And on encoding, you can ensure the input value is negative:</p>
+<pre><code>&gt;&gt; encode [BE -] -255
+== #{FF}
+
+&gt;&gt; decode [BE -] 255
+** Error: DECODE [BE -] requires input value to be negative
+</code></pre>
+<p>Not sure how often it would be used... I just like the completeness of it.</p>
+<p>There's another axis of potential feature here, which is offset encoding.  So if you're trying to encode a range of numbers between 128 and 383, you can do that in a byte... just consider it to be offset by 128.  I can see it being kind of convenient if that offset were part of the dialected block, and could be reused on the encode and decode side.</p>
+<p>Far from being any kind of priority, but, have to stay entertained somehow.</p> ]]></description>
+        <link>https://forum.rebol.info/t/binary-dialected-encoding-decoding-instead-of-to-conversions/1270#post_3</link>
+        <pubDate>Fri, 06 Dec 2024 16:52:21 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-7964</guid>
+      </item>
+      <item>
+        <title>Should (1 + #A) Equal (#A + 1) ?</title>
+        <dc:creator><![CDATA[@hostilefork Brian Dickens]]></dc:creator>
+        <description><![CDATA[ <p>I ran across this peculiarity:</p>
+<pre><code>rebol2&gt;&gt; 1 + #"A"
+== 66
+
+rebol2&gt;&gt; #"A" + 1
+== #"B"
+</code></pre>
+<p>Red and R3-Alpha do this too.</p>
+<p>Loosely speaking, there's an internal policy which is something along the lines of <em>"if the types don't match, convert the second operand into the type of the first, and then do the add"</em>.</p>
+<p>Because of this, it's necessary to support the addition of characters to each other to get <strong>(<span class="hashtag-raw">#A</span> + 1)</strong> to work:</p>
+<pre><code>red&gt;&gt; #"A" + #"B"
+== #"^(83)"  ; only useful in implementation of old coercion rule
+</code></pre>
+<p>...which seems nonsensical to me.</p>
+<h2><a name="p-7963-what-do-other-languages-do-1" class="anchor" href="https://forum.rebol.info#p-7963-what-do-other-languages-do-1"></a>What Do Other Languages Do?</h2>
+<p>If "implicit type promotion" is supported, many languages, including C, C++, and Java, use a system where the "smaller" type is converted to the "larger" type (<a href="https://pages.mtu.edu/~shene/COURSES/cs201/NOTES/chap02/exp-2.html">e.g., int to float</a>).  Having an idea of what's bigger and what's smaller helps avoid the commutativity problem.</p>
+<p>And in the specific case of adding characters to integers, Rebol is weird to give a different answer depending on order.</p>
+<ul>
+<li>
+<p><strong>Python:</strong> In Python, adding an integer to a character (or vice versa) would raise a TypeError. Python doesn't implicitly convert between these types.</p>
+</li>
+<li>
+<p><strong>JavaScript:</strong> JavaScript would convert the character to its ASCII value and perform integer addition in both cases, resulting in a number.</p>
+</li>
+<li>
+<p><strong>Ruby:</strong> Similar to Python, Ruby would raise a TypeError when trying to add an integer to a character.</p>
+</li>
+<li>
+<p><strong>Java:</strong> Java doesn't allow direct addition between char and int types without explicit casting.</p>
+</li>
+</ul>
+<p>I think adding integers to characters and wanting a character back is the more common operation, so if it's legal, I'd advocate for:</p>
+<pre><code>&gt;&gt; 1 + #A
+== #B
+
+&gt;&gt; #A + 1
+== #B
+</code></pre>
+<p>But if we want to rule out addition of characters to characters (which I do) this commutative behavior doesn't fall out from a system of implicit conversion with an ordering on "bigger" types... since characters are smaller.</p>
+<p>I don't see an obvious "rule" besides hardcoding it.</p>
+<h2><a name="p-7963-what-about-commutativity-in-general-2" class="anchor" href="https://forum.rebol.info#p-7963-what-about-commutativity-in-general-2"></a>What About Commutativity In General?</h2>
+<p>We can imagine decisions on what you would make <strong><code>+</code></strong> mean that would not be commutative.  For instance, if you were allowed to make it mean "join strings":</p>
+<pre><code>&gt;&gt; "abc" + "def"
+== "abcdef"
+
+&gt;&gt; "def" + "abc"
+== "defabc"
+</code></pre>
+<p>So you might try and argue that the rules for <strong>add</strong> are different than the rules for <strong>+</strong>, and it's only when + is acting as ADD that it enforces commutativity.  However... even in the domain of math, you have exceptions... e.g. matrix multiplication is not commutative.</p>
+<p>The more general question of commutativity seems to be that there aren't any popular languages that do it automatically.  e.g. in C++ you have to overload <strong><code>operator+(T1,T2)</code></strong> and <strong><code>operator+(T2,T1)</code></strong> separately...one of them can call the other, but that never happens automatically.</p> ]]></description>
+        <link>https://forum.rebol.info/t/should-1-a-equal-a-1/2346#post_1</link>
+        <pubDate>Fri, 06 Dec 2024 12:30:01 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-7963</guid>
+      </item>
+      <item>
+        <title>Parameter Order in Rebol</title>
+        <dc:creator><![CDATA[@bradrn]]></dc:creator>
+        <description><![CDATA[ <aside class="quote no-group" data-username="hostilefork" data-post="9" data-topic="1238">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>Wanting to move refinements is actually a pretty big thinking point at the moment, if you saw this:</p>
+</blockquote>
+</aside>
+<p>Sure, but that isn’t relevant to the order of the mandatory parameters, which is what you’re talking about here… right?</p> ]]></description>
+        <link>https://forum.rebol.info/t/parameter-order-in-rebol/1238#post_10</link>
+        <pubDate>Tue, 03 Dec 2024 02:55:25 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-7962</guid>
+      </item>
+      <item>
+        <title>Parameter Order in Rebol</title>
+        <dc:creator><![CDATA[@hostilefork Brian Dickens]]></dc:creator>
+        <description><![CDATA[ <aside class="quote no-group" data-username="bradrn" data-post="8" data-topic="1238">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/bradrn/48/365_2.png" class="avatar"> bradrn:</div>
+<blockquote>
+<p>But maybe there’s some other part of the language which is affected by parameter order. (Refinements? Not sure…)</p>
+</blockquote>
+</aside>
+<p>Wanting to move refinements is actually a pretty big thinking point at the moment, if you saw this:</p>
+<aside class="quote quote-modified" data-post="1" data-topic="2331">
+  <div class="title">
+    <div class="quote-controls"></div>
+    <img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar">
+    <a href="https://forum.rebol.info/t/refinement-arguments-at-head-of-args-list-not-tail/2331">Refinement Arguments at Head of Args List, Not Tail</a> <a class="badge-category__wrapper " href="https://forum.rebol.info/c/development/functions/59"><span data-category-id="59" style="--category-badge-color: #25AAE2; --category-badge-text-color: #FFFFFF; --parent-category-badge-color: #25AAE2;" data-parent-category-id="8" data-drop-close="true" class="badge-category --has-parent" title="Discussions of Functions and Generators, e.g. how things like RETURN work... or the mechanics of generators and composers like ADAPT, SPECIALIZE, ENCLOSE, HIJACK, etc."><span class="badge-category__name">Functions</span></span></a>
+  </div>
+  <blockquote>
+    In the corpus of code we have so far, it seems to me that when a refinement adds an argument to a function that it would be preferable if that argument would become the first parameter... not tacked onto the end. 
+Some cases might not be completely obvious one way or another: 
+&gt;&gt; append [a b c] [d e]
+== [a b c [d e]]
+
+&gt;&gt; append:dup [a b c] [d e] 2  ; old way
+== [a b c [d e] [d e]] 
+
+&gt;&gt; append:dup 2 [a b c] [d e]  ; new idea
+== [a b c [d e] [d e]]
+
+I think it's better if it's first, but it's not …
+  </blockquote>
+</aside>
+ ]]></description>
+        <link>https://forum.rebol.info/t/parameter-order-in-rebol/1238#post_9</link>
+        <pubDate>Tue, 03 Dec 2024 02:41:42 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-7961</guid>
+      </item>
+      <item>
+        <title>Parameter Order in Rebol</title>
+        <dc:creator><![CDATA[@bradrn]]></dc:creator>
+        <description><![CDATA[ <aside class="quote no-group" data-username="hostilefork" data-post="7" data-topic="1238">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>It's really hard, though, to see this systemically with fresh eyes.</p>
+</blockquote>
+</aside>
+<p>I think that considerations of parameter order in Haskell go more or less like this:</p>
+<ol>
+<li>If there’s an obviously intuitive ordering, use that.</li>
+<li>Otherwise, if there’s an ordering which simplifies the definition, use that.</li>
+<li>Otherwise, if there’s no other deciding factor, order them according to what is most useful for partial application.</li>
+</ol>
+<p>I think to some extent these criteria are less helpful for Ren-C, because it doesn’t make as much use of eta-reduction, currying or partial application. But maybe there’s some other part of the language which is affected by parameter order. (Refinements? Not sure…)</p> ]]></description>
+        <link>https://forum.rebol.info/t/parameter-order-in-rebol/1238#post_8</link>
+        <pubDate>Tue, 03 Dec 2024 02:39:04 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-7960</guid>
+      </item>
+      <item>
+        <title>Parameter Order in Rebol</title>
+        <dc:creator><![CDATA[@hostilefork Brian Dickens]]></dc:creator>
+        <description><![CDATA[ <aside class="quote no-group" data-username="bradrn" data-post="6" data-topic="1238">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/bradrn/48/365_2.png" class="avatar"> bradrn:</div>
+<blockquote>
+<p>If someone wants to specify the second parameter first they can always write <code>flip cons</code> or <code>flip snoc</code>.</p>
+</blockquote>
+</aside>
+<p><a href="https://forum.rebol.info/t/design-for-something-like-flip-to-reverse-arguments/2345/1">Some thoughts here</a></p>
+<aside class="quote no-group" data-username="bradrn" data-post="6" data-topic="1238">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/bradrn/48/365_2.png" class="avatar"> bradrn:</div>
+<blockquote>
+<p>So really this parameter order is so intuitive that it overrides considerations of ‘less/more important’.</p>
+</blockquote>
+</aside>
+<p>It's really hard, though, to see this systemically with fresh eyes.</p>
+<p>Today for instance REPLACE takes the thing to do the replacement in first:</p>
+<pre><code>&gt;&gt; replace [a b b a] 'b 'c
+== [a c c a]
+</code></pre>
+<p>But if this philosophy were extended that would become either of:</p>
+<pre><code>&gt;&gt; replace 'c 'b [a b b a]
+== [a c c a]
+
+&gt;&gt; replace 'b 'c [a b b a]
+== [a c c a]
+</code></pre>
+<p>It's hard to say which makes more sense.  If the "how you would write it out in English" argument comes up,  it seems briefest as:</p>
+<pre><code>replace 'b &lt;with&gt; 'c &lt;in&gt; [a b b a]
+</code></pre>
+<p>I'm not sure how that would hammer out in the other case:</p>
+<pre><code>replace 'c &lt;wherever you find&gt; 'b &lt;in&gt; [a b b a]
+</code></pre>
+<p>But once you move away from the "obvious-seeming" cases, the whole thing stops seeming obvious.  There's a lot of inertia behind the historical choices...this is tough to reason about.</p> ]]></description>
+        <link>https://forum.rebol.info/t/parameter-order-in-rebol/1238#post_7</link>
+        <pubDate>Mon, 02 Dec 2024 14:45:21 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-7959</guid>
+      </item>
+      <item>
+        <title>Design for Something Like FLIP To Reverse Arguments</title>
+        <dc:creator><![CDATA[@hostilefork Brian Dickens]]></dc:creator>
+        <description><![CDATA[ <aside class="quote no-group" data-username="bradrn" data-post="6" data-topic="1238">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/bradrn/48/365_2.png" class="avatar"><a href="https://forum.rebol.info/t/parameter-order-in-rebol/1238/6">Parameter Order in Rebol</a></div>
+<blockquote>
+<p>If someone wants to specify the second parameter first they can always write <code>flip cons</code> or <code>flip snoc</code>.</p>
+</blockquote>
+</aside>
+<p>The design of a FLIP-like operation raises some questions.</p>
+<p>If it were an operator that acted on functions, it wouldn't retrigger them.  You'd have to say:</p>
+<pre><code>&gt;&gt; append 'd [a b c]
+== [a b c d]
+
+&gt;&gt; run flip append/ [a b c] 'd
+== [a b c d]
+</code></pre>
+<p>Alternately, I guess you could use slash to run a GROUP!, but then you'd have a disabling slash and a running slash:</p>
+<pre><code>&gt;&gt; /(flip append/) [a b c] 'd
+== [a b c d]
+</code></pre>
+<p>If it were instead something along the lines of RUN, where applying the flipped function was implicit, you could write:</p>
+<pre><code>&gt;&gt; flip append/ [a b c] 'd
+== [a b c d]
+</code></pre>
+<p>I don't think <strong><code>flip/append</code></strong> being a synonym for <strong><code>/(flip append/)</code></strong> is a generically useful idea, compared to the likes of <strong><code>not/even?/</code></strong> for cascading.</p>
+<p>But if the <a href="https://forum.rebol.info/t/dialecting-function-calls-new-weird-powerful/2310">weird idea of dialected CHAIN!</a> ever came to pass, FLIP could go into a distinct mode based on receiving a function in the place other functions have refinements...</p>
+<pre><code>&gt;&gt; append/
+== ~#[frame! [value series]]~
+
+&gt;&gt; flip append/
+== ~#[frame! [series value]]~
+
+&gt;&gt; flip:append [a b c] 'd
+== [a b c d]
+</code></pre> ]]></description>
+        <link>https://forum.rebol.info/t/design-for-something-like-flip-to-reverse-arguments/2345#post_1</link>
+        <pubDate>Mon, 02 Dec 2024 14:41:22 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-7958</guid>
+      </item>
+      <item>
+        <title>Parameter Order in Rebol</title>
+        <dc:creator><![CDATA[@bradrn]]></dc:creator>
+        <description><![CDATA[ <p>In Haskell, a lot of collection libraries define two operations, such as these ones from <code>text</code>:</p>
+<pre data-code-wrap="hs"><code class="lang-hs">cons :: Char -&gt; Text -&gt; Text
+snoc :: Text -&gt; Char -&gt; Text
+</code></pre>
+<p>(The name <code>snoc</code> comes from being the reverse of <code>cons</code>… geddit?)</p>
+<p>So really this parameter order is so intuitive that it overrides considerations of ‘less/more important’. If someone wants to specify the second parameter first they can always write <code>flip cons</code> or <code>flip snoc</code>.</p> ]]></description>
+        <link>https://forum.rebol.info/t/parameter-order-in-rebol/1238#post_6</link>
+        <pubDate>Mon, 02 Dec 2024 01:24:52 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-7957</guid>
+      </item>
+      <item>
         <title>Parameter Order in Rebol</title>
         <dc:creator><![CDATA[@hostilefork Brian Dickens]]></dc:creator>
         <description><![CDATA[ <aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="1238">
@@ -2587,16 +3100,16 @@ goto &lt;whatever&gt;
         <dc:creator><![CDATA[@hostilefork Brian Dickens]]></dc:creator>
         <description><![CDATA[ <p>It's been a tough week of contemplation, but...</p>
 <p>...I think a "bad" idea I had along the way here, is actually turning out to be a good idea.</p>
-<h2><a name="p-7934-phase-or-varlist-vs-phase-varlist-1" class="anchor" href="https://forum.rebol.info#p-7934-phase-or-varlist-vs-phase-varlist-1"></a><code>(Phase* -or- VarList*)</code> vs. <code>(Phase* + VarList*)</code></h2>
-<aside class="quote no-group" data-username="hostilefork" data-post="3" data-topic="1898">
+<h2><a name="p-7934-details-or-varlist-vs-details-varlist-1" class="anchor" href="https://forum.rebol.info#p-7934-details-or-varlist-vs-details-varlist-1"></a><code>(Details* -or- VarList*)</code> vs. <code>(Details* + VarList*)</code></h2>
+<aside class="quote no-group quote-modified" data-username="hostilefork" data-post="3" data-topic="1898">
 <div class="title">
 <div class="quote-controls"></div>
 <img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
 <blockquote>
-<p>But it's been on my mind... and it's part of what is making me think through this idea of pairing up <code>(Phase* + VarList*)</code> with reused phases instead of making a new Phase every time you want to make a specialization/combinatorization.</p>
+<p>But it's been on my mind... and it's part of what is making me think through this idea of pairing up <code>(Details* + VarList*)</code> with reused phases instead of making a new Phase every time you want to make a specialization/combinatorization.</p>
 </blockquote>
 </aside>
-<p>So at one point, I grafted in the idea that a FRAME! cell's first Node hold something that's simply a superset of <code>Phase*</code> and <code>VarList*</code>.  If a function composition creates a new Phase, it puts that in the cell and points to the old VarList.  If it creates a new VarList, it puts that in the cell and it points to the old Phase.  If it creates both, it can pick either--doesn't matter.</p>
+<p>So at one point, I grafted in the idea that a FRAME! cell's first Node hold something that's simply a superset of <code>Details*</code> and <code>VarList*</code>.  If a function composition creates a new Details, it puts that in the cell and points to the old VarList.  If it creates a new VarList, it puts that in the cell and it points to the old Details.  If it creates both, it can pick either--doesn't matter.</p>
 <ul>
 <li>
 <p>This brings back the notion of a single pointer serving as an action's identity</p>
@@ -2605,10 +3118,10 @@ goto &lt;whatever&gt;
 <p>This again frees up the space for the stored symbol <em>(...I hate losing features, so was really struggling with any design that lost that...)</em></p>
 </li>
 </ul>
-<p>It seems like an uncomfortable situation of a new class of Context Cells which have in their Payload's Node1 something that can either be a VarList or a Phase.  But I found that when "simplifying" things so that there's never a symbol in the Phase slot, and always a VarList in the VarList slot, that I was having to create questions to reverse-engineer the question of <em>"Are you a <code>VarList*</code>-identity Action or a <code>Phase*</code>-identity Action?"</em></p>
-<p>Previously I'd called this superset of VarList and Phase "Action".  That's a bit confusing since actions are a type of Cell (specifically, FRAME! cells in the antiform state), not a type of Stub.  But, there's only so many words...and since there's no REB_ACTION then it's available.  (Similar naming quandaries exist with <code>String</code> being a Stub type and not a Cell type, but it's not the end of the world...)</p>
-<p>What confused me was that it was seeming like introducing this new <code>Action*</code> was breaking the idea of the "current" <code>Phase*</code> in the Cell, because you could tweak the types of values in a VarList-based FRAME! (or AUGMENT it, etc.) and then be beholden to a "phase" of typechecking that wasn't a Phase.  I couldn't square the terminology and nothing seemed to work.</p>
-<p>But I think by talking it out here and figuring out the limits of what's possible and not, you always have to create a new Phase if you want to introduce new typechecking.  And this concept of having to "harden", plus the viewing through the "lens" of antiform vs. non, answers a bunch of other questions.</p> ]]></description>
+<p>It seems like an uncomfortable situation of a new class of Context Cells which have in their Payload's Node1 something that can either be a VarList or a Details.  But I found that when "simplifying" things so that there's never a symbol in the "Phase" slot, and always a VarList in the VarList slot, that I was having to create questions to reverse-engineer the question of <em>"Are you a <code>VarList*</code>-identity Action or a <code>Details*</code>-identity Action?"</em></p>
+<p>Previously I'd called this superset of VarList and Details "Action".  That's a bit confusing since actions are a type of Cell (specifically, FRAME! cells in the antiform state), not a type of Stub.  So I think actually calling it <strong><code>Phase</code></strong> is probably better.</p>
+<p>What confused me was that it was seeming like introducing this new <code>Phase*</code> was breaking the idea of the "current" <code>Phase*</code> in the Cell, because you could tweak the types of values in a VarList-based FRAME! (or AUGMENT it, etc.) and then be beholden to a "phase" of typechecking that wasn't a Details.  I couldn't square the terminology and nothing seemed to work.</p>
+<p>But I think by talking it out here and figuring out the limits of what's possible and not, you always have to create a new Details if you want to introduce new typechecking.  And this concept of having to "harden", plus the viewing through the "lens" of antiform vs. non, answers a bunch of other questions.</p> ]]></description>
         <link>https://forum.rebol.info/t/frame-action-duality-examined/1898#post_4</link>
         <pubDate>Sat, 30 Nov 2024 10:22:56 +0000</pubDate>
         <guid isPermaLink="false">forum.rebol.info-post-7934</guid>
@@ -2621,7 +3134,7 @@ goto &lt;whatever&gt;
 <div class="quote-controls"></div>
 <img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
 <blockquote>
-<p>I definitely underestimated just how many issues were folded in with the "hardening" process that creating a Phase brought about</p>
+<p>I definitely underestimated just how many issues were folded in with the "hardening" process that creating a Details brought about</p>
 </blockquote>
 </aside>
 <p>This goes further... because there are questions that the evaluator has to ask like "what is the first unspecialized parameter" when dealing with an infix function.</p>
@@ -2693,12 +3206,12 @@ f.a: 10
 </li>
 </ul>
 <p>...I guess I'm going to try to rig this up.  This is all a bit of a mess right now, it's extremely annoying and hard to know where to start.  But very necessary to sort out.</p>
-<p>Mechanically what this means is that when FRAME!s are antiforms, they give answers to questions about their interface based on the VarList* they hold in the cell.  Whereas when they are not antiforms, they consider their interface to be that associated with the Phase* they hold in the cell.  The VarList* in the cell can't answer questions until it has been "hardened", which happens when you create an antiform of a frame, or use an operation like RUN on the plain FRAME! which will implicitly harden it.</p>
+<p>Mechanically what this means is that when FRAME!s are antiforms, they give answers to questions about their interface based on the VarList* they hold in the cell.  Whereas when they are not antiforms, they consider their interface to be that associated with the "Phase" they hold in the cell.  The VarList* in the cell can't answer questions until it has been "hardened", which happens when you create an antiform of a frame, or use an operation like RUN on the plain FRAME! which will implicitly harden it.</p>
 <h2><a name="p-7933-ulterior-motive-disclosure-uparse-optimization-4" class="anchor" href="https://forum.rebol.info#p-7933-ulterior-motive-disclosure-uparse-optimization-4"></a>Ulterior Motive Disclosure: UPARSE Optimization</h2>
 <p>One reason that I've been trying so hard to drive down the "allocated entity count" and reuse Phases is that when UPARSE combinators are turned into parsers, they are often used just once.</p>
 <p>You might write <strong>opt some "a"</strong>, and the "a" combinator could be called 50 times.  But [some "a"] is only called once, by the OPT, and the OPT may well be called only once as well.  If this is so, a native combinator doesn't need a reusable function... it can just take a disposable FRAME! and instead of using it as an archetypal pattern for a call, use its existing allocation for <em>the</em> one call.  <em>(It can even skip typechecking if it's native code and knows what it's doing... poke the input position into the INPUT slot, the parsers into the PARSER slots, and go straight to dispatching the combinated parser.)</em></p>
 <p>So my thinking here is that the function spec of combinators could specify whether they want a FRAME! or an ACTION?.  And if it takes a frame, it could be cheap.</p>
-<p>It's far out and I don't know how that would interact with debugging, or other forms of combinator wrapping.  It's just an idea.  But it's been on my mind... and it's part of what is making me think through this idea of pairing up <code>(Phase* + VarList*)</code> with reused phases instead of making a new Phase every time you want to make a specialization/combinatorization.</p> ]]></description>
+<p>It's far out and I don't know how that would interact with debugging, or other forms of combinator wrapping.  It's just an idea.  But it's been on my mind... and it's part of what is making me think through this idea of pairing up <code>(Details* + VarList*)</code> with reused phases instead of making a new Details every time you want to make a specialization/combinatorization.</p> ]]></description>
         <link>https://forum.rebol.info/t/frame-action-duality-examined/1898#post_3</link>
         <pubDate>Thu, 28 Nov 2024 04:11:52 +0000</pubDate>
         <guid isPermaLink="false">forum.rebol.info-post-7933</guid>
@@ -2881,25 +3394,25 @@ f.a: 10
         <dc:creator><![CDATA[@hostilefork Brian Dickens]]></dc:creator>
         <description><![CDATA[ <h2><a name="p-7929-its-time-to-revisit-this-1" class="anchor" href="https://forum.rebol.info#p-7929-its-time-to-revisit-this-1"></a>It's Time To Revisit This</h2>
 <p>At one point, ACTION! and FRAME! were two different types, whose Cells pointed to two different data structures.</p>
-<p>An ACTION! pointed to a <strong><code>Phase*</code></strong>.  A Phase contained the implementation information for the action... so if it were something like a FUNC, then it would hold the BLOCK! of the body for that specific function.  It also held a pointer to a C function called a <strong><code>Dispatcher*</code></strong> which would know how to interpret those details (e.g. the Func_Dispatcher() would know to run the code in the BLOCK! in the details array).  Invoking a function could wind up running a chain reaction of Phases, that had been composed together to run in the same memory space.</p>
-<p>A FRAME! pointed to a <strong><code>VarList*</code></strong> ... which is the same kind of thing that an OBJECT! points to: a list of keys (symbols) and then Cells for each key's value.  However, the cells could either specify an unfulfilled argument (antiform PARAMETER!) or a specialized value...which includes locals.  While this VarList pointed to the specific Phase it was for, the FRAME! Cell itself also held another Phase*.  Then, whether you could see the locals or not (or which args and locals) depended on the <strong><code>Phase*</code></strong> held in the cell... which is a nuance that made frames quite a bit trickier than objects.</p>
-<h2><a name="p-7929-could-frame-be-just-a-phase-varlist-pairing-thinking-2" class="anchor" href="https://forum.rebol.info#p-7929-could-frame-be-just-a-phase-varlist-pairing-thinking-2"></a>Could FRAME! be Just a (Phase*, VarList*) Pairing? <img src="https://forum.rebol.info/images/emoji/twitter/thinking.png?v=12" title=":thinking:" class="emoji" alt=":thinking:" loading="lazy" width="20" height="20"></h2>
-<p>When you are going to add new execution information... you necessarily must create a new Phase.  There simply isn't anywhere to put code in a VarList.  However, you can reuse a VarList with that new Phase.</p>
-<p>e.g. if you were to ADAPT an ACTION! then you'd produce a new <code>Phase*</code> which would point to the same <code>VarList*</code> as the thing you were adapting... but just give it a new <code>Adapter_Dispatcher()</code> to with some preamble code in the Phase's array to run.  (It also needs to store the function it is adapting, so it can pass control to it when it's done running the preamble.)</p>
-<p>When all ACTION! needed a Phase, things like SPECIALIZE would create a new Phase too, but just a dummy one...since all the information for the specialization exists in a new VarList*.  But ACTION!s had to have a Phase, so that's what it did.</p>
-<p>A tempting thought is that a FRAME! could just be a Phase* and a VarList* paired together in a Cell.  If this were the case, you could create a specialization without making a new Phase... which has been a sought-after optimization for some time.</p>
-<p>There are a few casualties of such a design.  One is that this breaks the notion of a single pointer being an action's "identity"... you've just got a list of parameters and variables paired up with a compatible implementation...and these are being mixed and matched freely by function composition tools.  The HIJACK capability was only designed for Phase pointers, and this would mean you could not hijack a specialization <em>(at least without hijacking all the other specializations of the same function--in practice this is every use case of HIJACK that has come up, but there's nothing in theory saying you wouldn't implement a "unique" service entry point by way of specialization and want to HIJACK that... I can easily imagine it happening, it just hasn't yet.)</em></p>
-<p>Another casualty would be the <a href="https://forum.rebol.info/t/more-comprehensible-errors-with-per-cell-labeling/1357">storing of a Symbol* inside FRAME! values</a>, which is reliant on a VarList* storing its one-and-only Phase* inside it.  If Phases can be mixed with arbitrary Varlists in a FRAME! cell, then there are no free bits for this feature.</p>
+<p>An ACTION! pointed to a <strong><code>DispatchDetails*</code></strong> (or <code>Details*</code> for short).  A Details contained the implementation information for the action... so if it were something like a FUNC, then it would hold the BLOCK! of the body for that specific function.  It also held a pointer to a C function called a <strong><code>Dispatcher*</code></strong> which would know how to interpret those details (e.g. the Func_Dispatcher() would know to run the code in the BLOCK! in the Details array).  Invoking a function could wind up running a chain reaction of Details, that had been composed together to run in the same memory space.</p>
+<p>A FRAME! pointed to a <strong><code>VarList*</code></strong> ... which is the same kind of thing that an OBJECT! points to: a list of keys (symbols) and then Cells for each key's value.  However, the cells could either specify an unfulfilled argument (antiform PARAMETER!) or a specialized value...which includes locals.  While this VarList pointed to the specific Details it was for, the FRAME! Cell itself also held another Details* (as the "Phase").  Then, whether you could see the locals or not (or which args and locals) depended on the <strong><code>VarList*</code></strong> of the Phase held in the cell... which is a nuance that made frames quite a bit trickier than objects.</p>
+<h2><a name="p-7929-could-frame-be-just-a-details-varlist-pairing-thinking-2" class="anchor" href="https://forum.rebol.info#p-7929-could-frame-be-just-a-details-varlist-pairing-thinking-2"></a>Could FRAME! be Just a (Details*, VarList*) Pairing? <img src="https://forum.rebol.info/images/emoji/twitter/thinking.png?v=12" title=":thinking:" class="emoji" alt=":thinking:" loading="lazy" width="20" height="20"></h2>
+<p>When you are going to add new execution information... you necessarily must create a new Details.  There simply isn't anywhere to put code in a VarList.  However, you can reuse a VarList with that new Details.</p>
+<p>e.g. if you were to ADAPT an ACTION! then you'd produce a new <code>Details*</code> which would point to the same <code>VarList*</code> as the thing you were adapting... but just give it a new <code>Adapter_Dispatcher()</code> to with some preamble code in the Phase's array to run.  (It also needs to store the function it is adapting, so it can pass control to it when it's done running the preamble.)</p>
+<p>When all ACTION! needed a unique Details, things like SPECIALIZE would create a new Details too, but just a dummy one...since all the information for the specialization exists in a new VarList*.  But ACTION!s had to have a Details, so that's what it did.</p>
+<p>A tempting thought is that a FRAME! could just be a Details* and a VarList* paired together in a Cell.  If this were the case, you could create a specialization without making a new Details... which has been a sought-after optimization for some time.</p>
+<p>There are a few casualties of such a design.  One is that this breaks the notion of a single pointer being an action's "identity"... you've just got a list of parameters and variables paired up with a compatible implementation...and these are being mixed and matched freely by function composition tools.  The HIJACK capability was only designed for Details pointers, and this would mean you could not hijack a specialization <em>(at least without hijacking all the other specializations of the same function--in practice this is every use case of HIJACK that has come up, but there's nothing in theory saying you wouldn't implement a "unique" service entry point by way of specialization and want to HIJACK that... I can easily imagine it happening, it just hasn't yet.)</em></p>
+<p>Another casualty would be the <a href="https://forum.rebol.info/t/more-comprehensible-errors-with-per-cell-labeling/1357">storing of a Symbol* inside FRAME! values</a>, which is reliant on a VarList* storing its one-and-only Details* inside it.  If Phases can be mixed with arbitrary Varlists in a FRAME! cell, then there are no free bits for this feature.</p>
 <h2><a name="p-7929-elegant-design-fringe-features-3" class="anchor" href="https://forum.rebol.info#p-7929-elegant-design-fringe-features-3"></a>Elegant Design &gt; Fringe Features?</h2>
-<p>It's likely that if I were looking at this from scratch--before HIJACK or symbol caching--I would think that the <strong><code>FRAME! Cell =&gt; (VarList* + Phase*)</code></strong> made the most sense.</p>
-<p>It feels like it decouples things cleanly.  Why <em>would</em> you need to create a new <code>Phase*</code> if you're just specializing out values?  If you've made a new <code>VarList*</code> with the updated values, couldn't it be paired up with the old Phase?</p>
-<p>It may still be possible to implement HIJACK in such a world.  You could ask the Phase* in a FRAME! Cell "what's your VarList*", and if the answer was the same as the VarList* in the Cell then you'd know the Phase was created after the VarList, hence the Phase must be the "identity"...so you hijack that.  Otherwise, the VarList* must be the identity...so you'd hijack it <em>(<img src="https://forum.rebol.info/images/emoji/twitter/raised_hand_with_fingers_splayed.png?v=12" title=":raised_hand_with_fingers_splayed:" class="emoji" alt=":raised_hand_with_fingers_splayed:" loading="lazy" width="20" height="20"> hand waving as to how this would work)</em></p>
+<p>It's likely that if I were looking at this from scratch--before HIJACK or symbol caching--I would think that the <strong><code>FRAME! Cell =&gt; (VarList* + Details*)</code></strong> made the most sense.</p>
+<p>It feels like it decouples things cleanly.  Why <em>would</em> you need to create a new <code>Details*</code> if you're just specializing out values?  If you've made a new <code>VarList*</code> with the updated values, couldn't it be paired up with the old Phase?</p>
+<p>It may still be possible to implement HIJACK in such a world.  You could ask the Details* in a FRAME! Cell "what's your VarList*", and if the answer was the same as the VarList* in the Cell then you'd know the Phase was created after the VarList, hence the Details must be the "identity"...so you hijack that.  Otherwise, the VarList* must be the identity...so you'd hijack it <em>(<img src="https://forum.rebol.info/images/emoji/twitter/raised_hand_with_fingers_splayed.png?v=12" title=":raised_hand_with_fingers_splayed:" class="emoji" alt=":raised_hand_with_fingers_splayed:" loading="lazy" width="20" height="20"> hand waving as to how this would work)</em></p>
 <p>Additionally, it may be possible to sneak a Symbol* into FRAME! Cells if they aren't using their "Coupling".  (e.g. if they're not a METHOD, or RETURN/CONTINUE/YIELD/BREAK/etc.)  A Symbol* in the coupling slot could just indicate it's uncoupled.  That's...fairly random.  Though to be honest, the feature turned out to be somewhat hard to wield anyway, it was never really clear which assignments should rename the function.</p>
 <p>There are a few more glitches, though.</p>
 <h2><a name="p-7929-devils-in-the-details-imp-irreducibility-of-typechecking-4" class="anchor" href="https://forum.rebol.info#p-7929-devils-in-the-details-imp-irreducibility-of-typechecking-4"></a>Devil's In The Details <img src="https://forum.rebol.info/images/emoji/twitter/imp.png?v=12" title=":imp:" class="emoji" alt=":imp:" loading="lazy" width="20" height="20">  Irreducibility Of Typechecking</h2>
-<p>Before you run a Phase, the expectation is that all the unfulfilled slots in a VarList will be filled... with <em>type-correct</em> values.  Calling any function with incorrectly typed cells is bad, but native code actually expects the bit patterns in Cells to be specific to what it asked for...and will crash if it's wrong.</p>
-<p>So if a FRAME! is a mix and match of a <code>VarList*</code> and a <code>Phase*</code>, when does the <code>VarList*</code> get checked?</p>
-<p>There are some weird cases to think about like AUGMENT, which adds to a function's frame.  It only makes an expanded VarList with new keys/cells... there's no implementation code.  So it should be able to reuse whatever Phase* was in the FRAME! Cell it augments.  But this means the type checking and argument gathering has to use the VarList* in the cell, not the VarList* that the Phase was coupled with.</p>
+<p>Before you run a Details, the expectation is that all the unfulfilled slots in a VarList will be filled... with <em>type-correct</em> values.  Calling any function with incorrectly typed cells is bad, but native code actually expects the bit patterns in Cells to be specific to what it asked for...and will crash if it's wrong.</p>
+<p>So if a FRAME! is a mix and match of a <code>VarList*</code> and a <code>Details*</code>, when does the <code>VarList*</code> get checked?</p>
+<p>There are some weird cases to think about like AUGMENT, which adds to a function's frame.  It only makes an expanded VarList with new keys/cells... there's no implementation code.  So it should be able to reuse whatever Details* was in the FRAME! Cell it augments.  But this means the type checking and argument gathering has to use the VarList* in the cell, not the VarList* that the Details was coupled with.</p>
 <p>But wait: the VarList* in the Cell is an arbitrary coupling, with arbitrary tweaked values.  You may have overwritten an argument with a specialized value, that needs checking.  So you can't use that list instead of the VarList* the Phase was coupled with.  <img src="https://forum.rebol.info/images/emoji/twitter/exclamation.png?v=12" title=":exclamation:" class="emoji" alt=":exclamation:" loading="lazy" width="20" height="20"></p>
 <p>Exploring this problem further: if PARAMETER! antiforms are indicative of needing to gather that argument, what happens if you tweak it?</p>
 <pre><code> &gt;&gt; ap-int: copy meta:lite append/
@@ -2913,15 +3426,15 @@ f.a: 10
 <p>Does this mean you've just created a variant of the APPEND function that only takes integers for the value to append?  Well, not so fast.  APPEND is native code, what would happen if you added a type check which would allow types to pass that weren't legal for APPEND?  You still have to run APPEND's type check.</p>
 <p>There's no way to check programmatically if one type constraint is a subset of another.  So if you're allowed to re-type parameters, they have to go through both checks...somehow.</p>
 <h2><a name="p-7929-not-so-simple-5" class="anchor" href="https://forum.rebol.info#p-7929-not-so-simple-5"></a>Not So Simple...</h2>
-<p>This makes it seem like AUGMENT needs to pay for a trivial Phase, in order to get its VarList into a Phase position.  (A trivial Phase can be 8 platform-pointers in size, it's not a huge deal, but annoying.)</p>
+<p>This makes it seem like AUGMENT needs to pay for a trivial Details, in order to get its VarList into a Phase position.  (A trivial Details can be 8 platform-pointers in size, it's not a huge deal, but annoying.)</p>
 <p>And it makes it seem like you can't update FRAME! slots that are PARAMETER! antiforms to be new parameter antiforms, without some yet-to-be-designed mechanic... because there's only one type check when slots are filled, and that is that.</p>
-<p>Furthermore... if there's no moment of type checking and a specialization is just a Cell that pairs together a VarList* and a Phase*, you'd have to type check a specialization every time it's called.  <img src="https://forum.rebol.info/images/emoji/twitter/frowning.png?v=12" title=":frowning:" class="emoji" alt=":frowning:" loading="lazy" width="20" height="20"></p>
-<p>This shows a feature of the previous creation of a "Specialization Phase" when making an ACTION!, that it could check all the VarList slots and make that the Phase's new VarList.</p>
+<p>Furthermore... if there's no moment of type checking and a specialization is just a Cell that pairs together a VarList* and a Details*, you'd have to type check a specialization every time it's called.  <img src="https://forum.rebol.info/images/emoji/twitter/frowning.png?v=12" title=":frowning:" class="emoji" alt=":frowning:" loading="lazy" width="20" height="20"></p>
+<p>This shows a feature of the previous creation of a "Specialization Details" when making an ACTION!, that defined a moment where you could check all the VarList slots and make that the Details's new VarList.</p>
 <h2><a name="p-7929-so-frameaction-unification-was-a-mistake-6" class="anchor" href="https://forum.rebol.info#p-7929-so-frameaction-unification-was-a-mistake-6"></a>So FRAME!/ACTION! Unification Was A Mistake?</h2>
 <p>Well, not so fast.  I'm just mapping out the territory.  <em>(There's actually more to consider when you weigh in things like partial specializations which specify the use of a refinement, but not the specific value for that refinement, which has to encode ordering and other issues.)</em></p>
 <p>It may be that when you invoke a FRAME! as if it were an action, then it remembers if the type check passed when the arguments were filled in.  If it does pass for everything, then it knows that it must have passed the specialized portions, and then marks it ok to not have to test the specialized portions the next time.  This means that if you try and call a "fresh" frame function with bad arguments, you won't validate it, but since the call raised an error that extra typechecking is probably not a big issue, and it will just try again next time.</p>
 <p>Re-typing a PARAMETER! appears to be more involved than first thought.  Just filling in a FRAME! slot isn't going to do it, you'd need another operation.</p>
-<p>Anyway, this has been driving me crazy the last few days so I had to write something down about it.  I definitely underestimated just how many issues were folded in with the "hardening" process that creating a Phase brought about...and how many features were tied into Phase* being a unique "action identity".  I'm going to have to experiment a bit before I can resolve what's best here.</p> ]]></description>
+<p>Anyway, this has been driving me crazy the last few days so I had to write something down about it.  I definitely underestimated just how many issues were folded in with the "hardening" process that creating a Details brought about...and how many features were tied into Details* being a unique "action identity".  I'm going to have to experiment a bit before I can resolve what's best here.</p> ]]></description>
         <link>https://forum.rebol.info/t/frame-action-duality-examined/1898#post_2</link>
         <pubDate>Wed, 27 Nov 2024 22:08:02 +0000</pubDate>
         <guid isPermaLink="false">forum.rebol.info-post-7929</guid>
@@ -4119,294 +4632,6 @@ make parent [...]   ; inside version, parent
         <link>https://forum.rebol.info/t/word-as-member-selection/1843#post_4</link>
         <pubDate>Sun, 17 Nov 2024 17:05:53 +0000</pubDate>
         <guid isPermaLink="false">forum.rebol.info-post-7910</guid>
-      </item>
-      <item>
-        <title>TAG!s Angle Brackets: *They Aren&#39;t There!*</title>
-        <dc:creator><![CDATA[@bradrn]]></dc:creator>
-        <description><![CDATA[ <p>OK, I find that example more convincing than the TAG! one.</p> ]]></description>
-        <link>https://forum.rebol.info/t/tag-s-angle-brackets-they-arent-there/2326#post_6</link>
-        <pubDate>Sun, 17 Nov 2024 02:52:43 +0000</pubDate>
-        <guid isPermaLink="false">forum.rebol.info-post-7909</guid>
-      </item>
-      <item>
-        <title>Refinement Arguments at Head of Args List, Not Tail</title>
-        <dc:creator><![CDATA[@hostilefork Brian Dickens]]></dc:creator>
-        <description><![CDATA[ <aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="2331">
-<div class="title">
-<div class="quote-controls"></div>
-<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
-<blockquote>
-<p>In the corpus of code we have so far, it seems to me that when a refinement adds an argument to a function that it would be preferable if that argument would become the first parameter... not tacked onto the end.</p>
-</blockquote>
-</aside>
-<p>As a counterexample... there's <strong><code>DO:ARGS</code></strong></p>
-<pre><code>do %some-script.r
-
-do:args %some-script.r ["hello" "world"]
-</code></pre>
-<p>That particular case has a possible workaround, that since DO is no longer used to evaluate blocks, the args could go in a block as part of a "do spec"</p>
-<pre><code>do [%some-script.r, args: ["hello" "world"]]
-</code></pre>
-<p>I don't know, but I thought I'd point out the first example I'd noticed where injecting the argument first wasn't ideal.</p>
-<p>Of course, these cases could do what we have to do with configuring refinements that aren't where we want them today, which is to use APPLY</p>
-<pre><code>do // [%some-script.r :args ["hello" "world"]]
-</code></pre>
-<p><em>(Note: I'm still wondering if APPLY should use SET-WORD!s instead of ":refinements", there are tradeoffs for each...)</em></p> ]]></description>
-        <link>https://forum.rebol.info/t/refinement-arguments-at-head-of-args-list-not-tail/2331#post_6</link>
-        <pubDate>Sun, 17 Nov 2024 01:16:10 +0000</pubDate>
-        <guid isPermaLink="false">forum.rebol.info-post-7908</guid>
-      </item>
-      <item>
-        <title>The Semantics of JOIN</title>
-        <dc:creator><![CDATA[@hostilefork Brian Dickens]]></dc:creator>
-        <description><![CDATA[ <p><strong>As <a class="mention" href="https://forum.rebol.info/u/brett">@Brett</a>'s critique of yesteryear pointed out, <a href="https://forum.rebol.info/t/rejoin-ugliness-and-the-usefulness-of-tests/248">REJOIN sucked</a>.</strong></p>
-<p>If naming were consistent, you might think from this pattern:</p>
-<pre><code>append a reduce b &lt;=&gt; repend a b
-</code></pre>
-<p>...that the following would have been true:</p>
-<pre><code>join a reduce b &lt;=&gt; rejoin a b  ; one would have perhaps thought?
-</code></pre>
-<p>But no...REJOIN was single arity (and was a mess).</p>
-<h2><a name="p-7907-so-rejoin-is-in-the-trash-heap-but-what-about-join-1" class="anchor" href="https://forum.rebol.info#p-7907-so-rejoin-is-in-the-trash-heap-but-what-about-join-1"></a>So REJOIN is in the trash heap, but what about JOIN?</h2>
-<p>JOIN implicitly reduced, and was basically this:</p>
-<pre><code>join a b &lt;=&gt; append copy a reduce b
-</code></pre>
-<p>But <strong>b</strong> didn't have to be a BLOCK!, so if it was not, it wasn't reduced and just left as-is.</p>
-<pre><code>rebol2&gt;&gt; join "abc" [1 + 2 3 + 4]
-== "abc37"  ; so the block was reduced
-
-rebol2&gt;&gt; d: 10
-rebol2&gt;&gt; join "abc" 'd
-== "abcd"  ; not abc10, so the word was *not* reduced
-</code></pre>
-<p>Red did not carry forward this definition:</p>
-<pre><code>&gt;&gt; join
-*** Script Error: join has no value
-</code></pre>
-<h2><a name="p-7907-next-level-join-allow-join-datatype-2" class="anchor" href="https://forum.rebol.info#p-7907-next-level-join-allow-join-datatype-2"></a>Next-Level JOIN: Allow JOIN  DATATYPE</h2>
-<p>At some point, it occurred to me that if you could use JOIN with a datatype, it could step in to fill in the desires of REJOIN more clearly:</p>
-<pre><code>&gt;&gt; join binary! [1 + 2 #{DECAFBAD} 2 + 3]
-== #{03DECAFBAD05}
-</code></pre>
-<p>There really had been expressions of this like:</p>
-<pre><code>rebol2&gt;&gt; rejoin [#{} 1 + 2 #{DECAFBAD} 2 + 3]
-== #{03DECAFBAD05}
-</code></pre>
-<p>But see Brett's critique, if the surface-level badness isn't enough to convince you!</p>
-<p>I also wanted to support things that Rebol2 probably meant to, but did not.  This should give a WORD! back:</p>
-<pre><code>rebol2&gt;&gt; join 'a 'b
-== "ab"  ; should be word! `ab`
-</code></pre>
-<p>Plus, I thought it might be nice to have a non-reducing variant, done with <code>@[...]</code></p>
-<pre><code>&gt;&gt; join word! @[a 1 + 2]
-== a1+2
-</code></pre>
-<p>I've mentioned elsewhere that I think having <em>join-like</em> actions be done with JOIN is superior to being some form of MAKE, when there's nebulousness for what MAKE means.</p>
-<h2><a name="p-7907-making-peace-with-uneasiness-about-list-ambiguity-3" class="anchor" href="https://forum.rebol.info#p-7907-making-peace-with-uneasiness-about-list-ambiguity-3"></a>Making Peace (?) With Uneasiness About List Ambiguity</h2>
-<p>Ergonomically, it's nice for JOIN to be able to take either a BLOCK! or some other type.</p>
-<p>One of the biggest uses of JOIN is with files:</p>
-<pre><code>join directory %foo.txt
-</code></pre>
-<p>It would be annoying if you had to write:</p>
-<pre><code>join directory [%foo.txt]
-</code></pre>
-<p>But then, you have the problem that if you're joining onto a BLOCK!, then a BLOCK! is a legitimate thing to join:</p>
-<pre><code>&gt;&gt; join [a b] [1 + 2 10 + 20]
-== [a b 3 30]  ; "traditional" behavior
-
-&gt;&gt; join [a b] [1 + 2]
-== [a b [1 + 2 10 + 20]]  ; ...but this could be valid
-</code></pre>
-<p>We could "fix" this by defining JOIN as a non-reducing construct, then have people use SPREAD and REDUCE:</p>
-<pre><code>&gt;&gt; join [a b] spread reduce [1 + 2 10 + 20]
-== [a b 3 30]
-
-&gt;&gt; join [a b] [1 + 2 10 + 20]
-== [a b [1 + 2 10 + 20]]
-
-&gt;&gt; join [a b] reduce [1 + 2 10 + 20]
-== [a b [3 30]]
-</code></pre>
-<p>But this doesn't exactly square with the JOIN of a DATATYPE! case, and the most common desires.</p>
-<p>If anything, I'd rather make JOIN always take a <strong><code>[...]</code></strong> or <strong><code>@[...]</code></strong> in the second argument, and then create some other non-reducing construct that slaps two things together.</p>
-<pre><code>&gt;&gt; block: [a b]
-
-&gt;&gt; adjoin block [c d]
-== [a b [c d]]
-
-&gt;&gt; adjoin block spread [e f]
-== [a b [c d] e f]
-
-&gt;&gt; block
-== [a b]  ; unmodified (difference from append)
-</code></pre>
-<p>But asking people to write <strong><code>(adjoin directory %foo.txt)</code></strong> is... ugly.</p>
-<p>A compromise is to narrow it, so that you could only use it with single items when joining with non-lists...</p>
-<pre><code>&gt;&gt; join "abc" "def"
-== "abcdef"
-
-&gt;&gt; join [a b c] "def"
-** Error: JOIN with a list must use [...] or @[...]
-</code></pre>
-<p>This would help steer you away from writing code like <strong><code>join list value</code></strong> and think it works, to only find it falling down when value becomes a BLOCK!.</p>
-<h2><a name="p-7907-is-reduce-just-join-block-4" class="anchor" href="https://forum.rebol.info#p-7907-is-reduce-just-join-block-4"></a>Is REDUCE just JOIN BLOCK! ?</h2>
-<p>The implementation of JOIN that I'm working on seems like a more powerful REDUCE.</p>
-<p>But questions start to arise about the binding... what should the binding be?</p>
-<pre><code>&gt;&gt; join [add 1] ['multiply 2 3]
-== [add 1 multiply 2 3]
-</code></pre>
-<p>In that case, I'm going to assume the produced block would have the binding of the [add 1] block.  Since multiply is <strong><code>'multiply</code></strong> and not <strong><code>$multiply</code></strong> it would be unbound and hence an evaluation would be driven by that first argument's binding.</p>
-<p>But what if you just said:</p>
-<pre><code>&gt;&gt; join block! ['add 1 'multiply 2 3]
-== [add 1 multiply 2 3]
-</code></pre>
-<p>Before, the second block's binding was disregarded in the product.  But when there's no first block to get the binding from, does it assume the binding of the second block?  And how would you get an unbound block if you wanted it?</p>
-<p>We could say that you get an unbound block, but if you want a bound block, you'd say:</p>
-<pre><code>&gt;&gt; join $[] ['add 1 'multiply 2 3]
-== [add 1 multiply 2 3]
-</code></pre>
-<p>Then we have similar questions for things like word!:</p>
-<pre><code>&gt;&gt; join word! ["a" "b"]
-== ab
-</code></pre>
-<p>I feel that pretty obviously should be unbound.  But words follow different rules:</p>
-<pre><code>&gt;&gt; join $a ["b"]
-== ab  ; can't necessarily be bound, just because a was...
-</code></pre>
-<p>That would suggest all words come back unbound from a joining process.</p>
-<p>So no shortage of questions.  But in general, I think JOIN is on the right track, and splitting MAKE behaviors that are JOIN-like to it seems good.</p> ]]></description>
-        <link>https://forum.rebol.info/t/the-semantics-of-join/2333#post_1</link>
-        <pubDate>Sat, 16 Nov 2024 18:33:29 +0000</pubDate>
-        <guid isPermaLink="false">forum.rebol.info-post-7907</guid>
-      </item>
-      <item>
-        <title>TAG!s Angle Brackets: *They Aren&#39;t There!*</title>
-        <dc:creator><![CDATA[@hostilefork Brian Dickens]]></dc:creator>
-        <description><![CDATA[ <p>It's a choice.  The systemic pattern of letting you use quoted things to represent their molded representations gives you an economy I like:</p>
-<pre><code>&gt;&gt; left: "foo"
-&gt;&gt; right "bar"
-
-&gt;&gt; unspaced [left '# right]
-== "foo#bar"
-
-&gt;&gt; unspaced [left "#" right]
-== "foo#bar"
-</code></pre>
-<p>It's 3 fewer "ticks".</p>
-<p>Of course, can't work for everything:</p>
-<pre><code>&gt;&gt; unspaced [left "[" right]
-== "foo[bar"
-</code></pre>
-<p>But where it does work, I think it's good.</p>
-<p>People can make up their own minds on when it's more confusing than it is helpful.  Some might like it for string formation, but not string parsing.  Maybe even if a tag is a common parse instruction it might be in double quotes, while something like <strong><code>&lt;br /&gt;</code></strong> would be obviously not a parse instruction and matched by an apostrophe.  <img src="https://forum.rebol.info/images/emoji/twitter/man_shrugging.png?v=12" title=":man_shrugging:" class="emoji" alt=":man_shrugging:" loading="lazy" width="20" height="20"></p> ]]></description>
-        <link>https://forum.rebol.info/t/tag-s-angle-brackets-they-arent-there/2326#post_5</link>
-        <pubDate>Sat, 16 Nov 2024 15:36:14 +0000</pubDate>
-        <guid isPermaLink="false">forum.rebol.info-post-7905</guid>
-      </item>
-      <item>
-        <title>Distinguishing Strings By Delimiters Used</title>
-        <dc:creator><![CDATA[@bradrn]]></dc:creator>
-        <description><![CDATA[ <aside class="quote no-group" data-username="hostilefork" data-post="3" data-topic="2236">
-<div class="title">
-<div class="quote-controls"></div>
-<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
-<blockquote>
-<p>It may not be valueless to have a weak guarantee...that if a string does originate from a LOAD and you don't mess with it, you'll get the same delimiter forms back.</p>
-</blockquote>
-</aside>
-<p>All things considered, I’m not sure that this is a desirable property. Because, if you’re only storing the string itself, this is an impossible goal. You’d have to store the original delimiter choice to do this… and is it really worth passing around an extra piece of data, just to make string printing look very slightly nicer?</p>
-<p>For once, I think Red is on the right track. Choose a heuristic, ideally the most predictable one possible, and be done with it. <code>{foo}</code> and <code>"foo"</code> are the same string, and I don’t see why Ren-C should disguise that fact.</p>
-<p>(Haskell has a similar issue, where strings with non-ASCII characters like <code>"é"</code> get printed back as <code>"\223"</code>. In practise it hasn’t caused too many problems — if you want a string to be printed a certain way, there are functions to do that.)</p> ]]></description>
-        <link>https://forum.rebol.info/t/distinguishing-strings-by-delimiters-used/2236#post_4</link>
-        <pubDate>Sat, 16 Nov 2024 15:12:47 +0000</pubDate>
-        <guid isPermaLink="false">forum.rebol.info-post-7904</guid>
-      </item>
-      <item>
-        <title>Refinement Arguments at Head of Args List, Not Tail</title>
-        <dc:creator><![CDATA[@hostilefork Brian Dickens]]></dc:creator>
-        <description><![CDATA[ <p>TUPLE! is the lowest (giving the pleasing hierarchy in terms of "heft"...lighter things are tighter).</p>
-<p>One of the problems with putting arguments into the chain/tuples is that binding gets tricky.  There's some open issues with that, but if you embed arguments into a sequence then you're tying their binding up in the binding of that sequence.  It's still a ways out.</p>
-<p>I think I still would prefer the "configuring" refinements to put their arguments earlier, it really seems to be preferable in practice.</p>
-<pre><code>&gt;&gt; join:with '+ fence! ['a 'b 'c]
-== {a + b + c}
-</code></pre> ]]></description>
-        <link>https://forum.rebol.info/t/refinement-arguments-at-head-of-args-list-not-tail/2331#post_5</link>
-        <pubDate>Sat, 16 Nov 2024 15:12:45 +0000</pubDate>
-        <guid isPermaLink="false">forum.rebol.info-post-7903</guid>
-      </item>
-      <item>
-        <title>Refinement Arguments at Head of Args List, Not Tail</title>
-        <dc:creator><![CDATA[@bradrn]]></dc:creator>
-        <description><![CDATA[ <aside class="quote no-group" data-username="hostilefork" data-post="3" data-topic="2331">
-<div class="title">
-<div class="quote-controls"></div>
-<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
-<blockquote>
-<p>But I was thinking TUPLE! could do this more generically:</p>
-<p><code>append:dup.2 [a b c] [d e]</code></p>
-</blockquote>
-</aside>
-<p>Actually, this was what I wrote first… but then I remembered that CHAIN! binds tighter than TUPLE!, so this wouldn’t make sense. Or am I misremembering? If this can be done, I think it looks better than using CHAIN!.</p> ]]></description>
-        <link>https://forum.rebol.info/t/refinement-arguments-at-head-of-args-list-not-tail/2331#post_4</link>
-        <pubDate>Sat, 16 Nov 2024 15:07:17 +0000</pubDate>
-        <guid isPermaLink="false">forum.rebol.info-post-7902</guid>
-      </item>
-      <item>
-        <title>TAG!s Angle Brackets: *They Aren&#39;t There!*</title>
-        <dc:creator><![CDATA[@bradrn]]></dc:creator>
-        <description><![CDATA[ <p>Sure, I realise that you <em>can</em> do all these things. I’m just thinking that it seems less confusing to write their string representations as strings.</p> ]]></description>
-        <link>https://forum.rebol.info/t/tag-s-angle-brackets-they-arent-there/2326#post_4</link>
-        <pubDate>Sat, 16 Nov 2024 15:05:40 +0000</pubDate>
-        <guid isPermaLink="false">forum.rebol.info-post-7901</guid>
-      </item>
-      <item>
-        <title>Exact Matching of Variables with the @ Types In UPARSE</title>
-        <dc:creator><![CDATA[@hostilefork Brian Dickens]]></dc:creator>
-        <description><![CDATA[ <p>One downside I discovered of using a SIGIL! for "match anything" is that if you try and apply that more broadly outside of PARSE, you run into trouble if you're going to try using some sequence itself as a matching template.</p>
-<p>For example, if you wanted <strong><code>a.1.2</code></strong> to match against <strong><code>@.1.2</code></strong>.   The <code>@</code> isn't in the first position, it's a decoration on <strong>.1.2</strong></p>
-<p>Of course, there's going to be some trouble no matter what you pick... if it's legal to occur in that position, then you have to deal with the case that it's literally there.</p>
-<p>But if it were <strong><code>*</code></strong> then it would at least afford:</p>
-<pre><code>*.1.2  ; matches a.1.2
-
-['*].1.2   ; matches *.1.2
-
-['[*]].1.2  ; matches [*].1.2
-</code></pre>
-<p>etc.</p>
-<p>This is sort of a tangentially related thing, because if you try and apply the logic of PARSE to this matching scenario, then pretty much everything has to be in a block to quote it literally.</p>
-<p>So whatever this <em>"sequence-<a href="https://en.wikipedia.org/wiki/Glob_(programming)">globbing</a>"</em> domain is, would be different.</p>
-<p>Also, given that I'm talking about something that doesn't exist, what would <code>*</code> really mean?</p>
-<pre><code> a.b.c.1.2  ; would this match *.1.2 but not ?.1.2
-</code></pre>
-<p>If we were to say that PARSE needed to bow to this, then it kind of suggests that <strong><code>?</code></strong> would be "match any one item".</p>
-<p>Anyway, just making the point here... that SIGIL!s are slippery.  If PARSE is trying to set a precedent for a systemic recognizable idea of "match single item" then maybe it shouldn't be done with a sigil.</p>
-<p>(But note that <code>_</code> is equally problematic for sequences, as it makes the slot disappear--and moreover, is no longer legal except in head and tail sequence positions.  So it wouldn't be better than <code>@</code>)</p> ]]></description>
-        <link>https://forum.rebol.info/t/exact-matching-of-variables-with-the-types-in-uparse/1643#post_8</link>
-        <pubDate>Sat, 16 Nov 2024 13:51:47 +0000</pubDate>
-        <guid isPermaLink="false">forum.rebol.info-post-7900</guid>
-      </item>
-      <item>
-        <title>Refinement Arguments at Head of Args List, Not Tail</title>
-        <dc:creator><![CDATA[@hostilefork Brian Dickens]]></dc:creator>
-        <description><![CDATA[ <p>Using another CHAIN! element was intended to let you drop the refinement altogether, to accomplish briefer things like:</p>
-<pre><code>append:2 [a b c] [d e]
-</code></pre>
-<p>But I was thinking TUPLE! could do this more generically:</p>
-<pre><code>append:dup.2 [a b c] [d e]
-</code></pre>
-<p>Even so, if you used a variable, it would probably have to be decorated:</p>
-<pre><code>append:dup.(n + 1) [a b c] [d e]
-
-append:dup.@n [a b c] [d e]
-</code></pre>
-<p>The relatively "noiseless" injection to the head of the args list feels like a better answer to me:</p>
-<pre><code>append:dup 2 [a b c] [d e]
-
-append:dup n [a b c] [d e]
-</code></pre> ]]></description>
-        <link>https://forum.rebol.info/t/refinement-arguments-at-head-of-args-list-not-tail/2331#post_3</link>
-        <pubDate>Sat, 16 Nov 2024 12:59:01 +0000</pubDate>
-        <guid isPermaLink="false">forum.rebol.info-post-7899</guid>
       </item>
   </channel>
 </rss>

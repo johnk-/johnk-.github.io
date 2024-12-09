@@ -5,8 +5,307 @@
     <link>https://forum.rebol.info/latest</link>
     <description>Latest topics</description>
     
-      <lastBuildDate>Sun, 01 Dec 2024 12:40:58 +0000</lastBuildDate>
+      <lastBuildDate>Sat, 07 Dec 2024 20:48:23 +0000</lastBuildDate>
       <atom:link href="https://forum.rebol.info/latest.rss" rel="self" type="application/rss+xml" />
+        <item>
+          <title>Default Values and MAKE FRAME! - 2024 Edition</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Functions</category>
+          <description><![CDATA[
+            <blockquote>
+<p><em><strong>NOTE:</strong> The below summarizes history with some adjustments made for simplification purposes.  See posts in <a href="https://forum.rebol.info/c/archive/61">Archive</a> regarding frames for all the exact detours.</em></p>
+</blockquote>
+<hr>
+<p>Something like this has worked ever since the first FRAME!:</p>
+<pre><code>f: make frame! append/
+f.series: [a b c]
+f.value: 10
+
+&gt;&gt; eval f
+== [a b c 10]
+</code></pre>
+<p>Notice that although APPEND has refinements, you don't have to explicitly go through and set them to NULL.  That was done for you.</p>
+<p>That might make you think the result of <strong>(make frame! append/)</strong> looked like this:</p>
+<pre><code>&gt;&gt; make frame! append/
+== #[frame! [  ; you might think...
+    series: ~null~
+    value: ~null~
+    part: ~null~
+    dup: ~null~
+    line: ~null~
+]]
+</code></pre>
+<p>e.g. all fields defaulting to null, whether they are refinements or not.</p>
+<h2><a name="p-7965-thats-not-what-it-did-here-is-why-1" class="anchor" href="https://forum.rebol.info#p-7965-thats-not-what-it-did-here-is-why-1"></a>That's Not What It Did... Here Is Why</h2>
+<p>Even before the full-on unification of ACTION! and FRAME! into one datatype, there was a concept that you could make an action out of a frame.  This meant some state of the frame variables had to represent the idea that an argument was still to be gathered.</p>
+<p>The goal was something like this:</p>
+<pre><code>f: make frame! append/
+f.value: 10
+; don't assign f.series, leave it however it was
+
+&gt;&gt; run f [a b c]
+== [a b c 10]
+</code></pre>
+<p>If all the argument slots were eagerly set to <strong><code>~null~</code></strong> then you'd get something like:</p>
+<pre><code>&gt;&gt; run f [a b c]
+** Error: APPEND doesn't allow ~null~ for its VALUE argument
+</code></pre>
+<p>So instead, MAKE FRAME! would leave the slots all unset, to indicate they were unspecialized:</p>
+<pre><code>&gt;&gt; make frame! append/
+== #[frame! [
+    series: ~
+    value: ~
+    part: ~
+    dup: ~
+    line: ~
+]]
+</code></pre>
+<p>If it got to the point of execution, optional parameters (e.g. refinements) would be turned from NOTHING into NULL implicitly.  But if you didn't set a slot for a required parameter, it would give a helpful error:</p>
+<pre><code>f: make frame! append/
+f.value: 10
+
+&gt;&gt; eval f
+** Error: APPEND's SERIES argument is unspecified
+</code></pre>
+<h2><a name="p-7965-but-what-if-you-want-to-specialize-to-nothing-2" class="anchor" href="https://forum.rebol.info#p-7965-but-what-if-you-want-to-specialize-to-nothing-2"></a>But What If You Want To Specialize To Nothing?</h2>
+<p>It might seem that "nothing" is a rare thing to want to specialize to.  But it's a legitimate value, and represents a valid frame state.</p>
+<p>e.g. let's say you wanted to write UNSET as a specialization:</p>
+<pre><code>/unset: specialize set/ [value: ~]
+</code></pre>
+<p>This would wind up making UNSET a synonym for SET.  Because it would think you were saying <em>"specialize SET's value to be unspecialized"</em>...which is what it was by default.</p>
+<p>In this sense, using NOTHING as the unspecialized value just pushed the problem around a little bit.  No matter what you pick to represent the unspecialized state, you're going to have a problem.  It just happens that functions which take ~null~ antiforms are relatively common compared to those that take ~ antiforms.</p>
+<h2><a name="p-7965-leveraging-meta-on-a-stable-antiform-3" class="anchor" href="https://forum.rebol.info#p-7965-leveraging-meta-on-a-stable-antiform-3"></a>Leveraging ^META On a Stable Antiform</h2>
+<p>If you start thinking about being sneaky, you might imagine adding extra hidden bits somewhere to say <em>"no, this is a magic kind of specialized NOTHING"</em>.  But sneaky hidden bits are a tangled web, adding cost in the routines to manipulate them.</p>
+<p>So the idea was to use a not-so-hidden bit: any function that could legitimately take "nothing" as an argument had to take it as a ^META parameter.</p>
+<pre><code>x: 1020
+
+f: make frame! set/
+f.var: $x
+f.value: first [~]  ; ~ is meta-NOTHING, aka "quasi-BLANK!", aka "TRASH"
+
+&gt;&gt; eval f
+== ~  ; anti
+
+&gt;&gt; x
+** Error: X is unset (antiform BLANK!)
+</code></pre>
+<p>This works, but creates an additional burden: functions that truly want to receive a value that can represent any stable form must take their arguments as ^META... which usually you'd think you only need for unstable forms.</p>
+<h2><a name="p-7965-theres-still-an-ambiguity-gather-or-error-4" class="anchor" href="https://forum.rebol.info#p-7965-theres-still-an-ambiguity-gather-or-error-4"></a>There's Still an Ambiguity: Gather, Or Error?</h2>
+<p>The above was the status quo for a couple of years: MAKE FRAME! gave you back a frame whose slots were all unset.  Those unset slots represented arguments that were unspecialized.</p>
+<p>But still you have a question: should an unspecialized argument be gathered from a callsite, or should it trigger an error?</p>
+<p>That decision came from the operation.  If you used EVAL on a FRAME!, it would assume all the frame slots were finalized...and any nothing cells would raise errors.  If you used RUN (or converted the FRAME! into an action) then it assumed the unspecialized slots meant you wanted to gather arguments.</p>
+<h2><a name="p-7965-evolution-antiform-parameter-for-unspecialized-slots-5" class="anchor" href="https://forum.rebol.info#p-7965-evolution-antiform-parameter-for-unspecialized-slots-5"></a>Evolution: Antiform PARAMETER! For Unspecialized Slots</h2>
+<p>A big change came through with a user exposure of the PARAMETER! type.  With antiform parameters representing unspecialized slots, you had the signal of "this is unspecialized", but also the information required to gather the parameter: what types it checked, whether it was a refinement or not, whether it should be taken literally from a callsite, etc.</p>
+<p>This heralded even more exposure of the mechanics of function composition to user mode.  Instead of just specializing a function argument to a value, you could do things like "tweak" the argument's accepted types.</p>
+<p>For instance: what if you wanted a version of APPEND that only appended integers?</p>
+<pre><code>&gt;&gt; ap-int: make frame! append/
+
+&gt;&gt; ap-int.value: anti make parameter! [integer!]  ; or whatever syntax
+== ~#[parameter! [integer!]]~  ; anti
+
+&gt;&gt; /ap-int: anti ap-int
+== ~#[frame! ...]~  ; anti
+
+&gt;&gt; ap-int [a b c] 1020
+== [a b c 1020]
+
+&gt;&gt; ap-int [a b c] "illegal"
+** Error: AP-INT requires [integer!] for its value argument
+</code></pre>
+<p>This meant that MAKE FRAME! gave back something that looked rather weird:</p>
+<pre><code>&gt;&gt; make frame! append/
+== #[frame! [
+    series: ~#[parameter! [
+        ~void~ any-series? port! map! object! module! bitset!]
+    ]~
+    value: ~#[parameter! [~void~ element? splice?]]~
+    part: ~#[parameter! :[any-number? any-series? pair!]]~
+    dup: ~#[parameter! :[any-number? pair!]]~
+    line: ~#[parameter! :[]]~
+]]
+</code></pre>
+<p><img src="https://forum.rebol.info/images/emoji/twitter/face_with_diagonal_mouth.png?v=12" title=":face_with_diagonal_mouth:" class="emoji only-emoji" alt=":face_with_diagonal_mouth:" loading="lazy" width="20" height="20"></p>
+<p>Although this gives you a useful and actionable information about the parameters, that's fairly noisy for most purposes.  You haven't done any assignments to the frame, and yet it looks like it's "full".</p>
+<p>Let's put a pin in that.</p>
+<h2><a name="p-7965-are-meta-exceptions-still-needed-6" class="anchor" href="https://forum.rebol.info#p-7965-are-meta-exceptions-still-needed-6"></a>Are ^META Exceptions Still Needed?</h2>
+<p>In this model, there is no way of expressing a specialization of a function to an antiform parameter unless that function defined the parameter as ^META.</p>
+<p>That doesn't <em>necessarily</em> mean we'd have to be prescriptive.  I mentioned that EVAL expects all the arguments to be specified to their final values, while RUN accepts some will be unspecialized.  So EVAL <em>could</em> treat antiform parameters as the actual values to pass, while RUN would gather them from the callsite.</p>
+<p>This would produce a strange conflation.  You couldn't tell by looking at a frame whether or not an antiform parameter was a legitimate argument, or an unspecialized parameter definition.</p>
+<p>As an example, consider the HOLE? function, that tells you whether or not a value is an antiform parameter.  Let's assume it's operating in a world that it doesn't need to take the argument as ^META:</p>
+<pre><code>&gt;&gt; f: make frame! hole/
+== #[frame! [value: ~#[parameter! [any-value?]]~]
+</code></pre>
+<p>The interface says it takes ANY-VALUE? as the first parameter to HOLE?  Yet we don't have any mechanical way of telling that <strong><code>f2</code></strong> isn't a completed frame for calling HOLE?.  So if EVAL accepts this:</p>
+<pre><code>&gt;&gt; eval f
+== ~okay~  ; anti
+</code></pre>
+<p><img src="https://forum.rebol.info/images/emoji/twitter/thinking.png?v=12" title=":thinking:" class="emoji only-emoji" alt=":thinking:" loading="lazy" width="20" height="20"></p>
+<p>It really seems the best plan is to keep erroring when you try to EVAL frames with antiform PARAMETER! in them, when those parameters are required:</p>
+<pre><code>&gt;&gt; eval f2
+** Error: HOLE?'s VALUE parameter is unspecified (antiform PARAMETER!)
+</code></pre>
+<p>It does require the ^META exception: functions which need to accept antiform arguments must take that parameter in a meta form.  A function like HOLE? would fit into this category, and so would SET (which has to take unstable antiforms anyway, e.g. to do SET of a BLOCK! to a PACK)</p>
+<p>Under this design, any function that can accept antiform parameters at all, will also able to be specialized with antiform parameters.</p>
+<h2><a name="p-7965-denoising-make-frame-different-frame-makers-7" class="anchor" href="https://forum.rebol.info#p-7965-denoising-make-frame-different-frame-makers-7"></a>Denoising MAKE FRAME!: Different Frame Makers?</h2>
+<p>I pointed out that having antiform parameters in frame slots is a bit noisy.</p>
+<p>So what if there were two ways of making frames: one that gives you the parameter antiforms (suitable for tweaking and writing your own specialization operations), and another that clears the fields out?</p>
+<p>For instance, keeping the old behavior for MAKE FRAME!:</p>
+<pre><code>&gt;&gt; make frame! append/
+== #[frame! [
+    series: ~
+    value: ~
+    part: ~
+    dup: ~
+    line: ~
+]]
+</code></pre>
+<p>But if you wanted antiform parameters, you could just copy the non-antiform version of the FRAME!:</p>
+<pre><code>&gt;&gt; copy unrun append/
+== #[frame! [
+    series: ~#[parameter! [
+        ~void~ any-series? port! map! object! module! bitset!]
+    ]~
+    value: ~#[parameter! [~void~ element? splice?]]~
+    part: ~#[parameter! :[any-number? any-series? pair!]]~
+    dup: ~#[parameter! :[any-number? pair!]]~
+    line: ~#[parameter! :[]]~
+]]
+</code></pre>
+<p>In this design, you'd have <em>two</em> stable forms which you'd have to use ^META conventions to take as an argument.</p>
+<p>Antiform ~ would still have to turn into ~null~ if EVAL found it in a refinement slot.  But I'm not sure PARAMETER! antiforms would need to do that too.  One could argue that you should never be EVAL'ing a frame with antiform parameters in it, so it could be a sort of safety mechanism (?).  I'm not sure if it's necessary to enable, so I'd probably just raise an error until I saw a compelling case.</p>
+<h2><a name="p-7965-is-the-added-nuance-worth-it-8" class="anchor" href="https://forum.rebol.info#p-7965-is-the-added-nuance-worth-it-8"></a>Is The Added Nuance Worth It?</h2>
+<p>Continuing to handle unset variables as placeholders is not strictly necessary, given that antiform parameters are the more fundamental "unspecialized" slot representation.</p>
+<p>But it's definitely a lot better than something I tried that <em>sucked</em>: which was trying to make variables holding antiform PARAMETER! act like they were unset.  This made manipulating function interfaces programmatically <em>very</em> painful.</p>
+<p>It would mean sacrificing another value to have to be passed ^META.  Though bear in mind, most of the damage is done from having one form: e.g. a function like SET is having to take its value ^META already in order to be able to set things to antiform PARAMETER!.  So it isn't like you'd be able to specialize SET with antiform <code>~</code> to get UNSET if this wasn't done... it would affect the NOTHING? function (and probably not a lot else).</p>
+<p><strong>Having used MAKE FRAME! a fair bit, I am inclined to believe it's worth it.</strong>  It's a clear indicator of whether you've assigned fields or not, with some teeth by actually making the variables unset (erroring on use before assignment, and reacting to things like DEFAULT).</p>
+            <p><small>2 posts - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/default-values-and-make-frame-2024-edition/2347">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/default-values-and-make-frame-2024-edition/2347</link>
+          <pubDate>Sat, 07 Dec 2024 20:48:23 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2347</guid>
+          <source url="https://forum.rebol.info/t/default-values-and-make-frame-2024-edition/2347.rss">Default Values and MAKE FRAME! - 2024 Edition</source>
+        </item>
+        <item>
+          <title>Should (1 + #A) Equal (#A + 1) ?</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Math</category>
+          <description><![CDATA[
+            <p>I ran across this peculiarity:</p>
+<pre><code>rebol2&gt;&gt; 1 + #"A"
+== 66
+
+rebol2&gt;&gt; #"A" + 1
+== #"B"
+</code></pre>
+<p>Red and R3-Alpha do this too.</p>
+<p>Loosely speaking, there's an internal policy which is something along the lines of <em>"if the types don't match, convert the second operand into the type of the first, and then do the add"</em>.</p>
+<p>Because of this, it's necessary to support the addition of characters to each other to get <strong>(<span class="hashtag-raw">#A</span> + 1)</strong> to work:</p>
+<pre><code>red&gt;&gt; #"A" + #"B"
+== #"^(83)"  ; only useful in implementation of old coercion rule
+</code></pre>
+<p>...which seems nonsensical to me.</p>
+<h2><a name="p-7963-what-do-other-languages-do-1" class="anchor" href="https://forum.rebol.info#p-7963-what-do-other-languages-do-1"></a>What Do Other Languages Do?</h2>
+<p>If "implicit type promotion" is supported, many languages, including C, C++, and Java, use a system where the "smaller" type is converted to the "larger" type (<a href="https://pages.mtu.edu/~shene/COURSES/cs201/NOTES/chap02/exp-2.html">e.g., int to float</a>).  Having an idea of what's bigger and what's smaller helps avoid the commutativity problem.</p>
+<p>And in the specific case of adding characters to integers, Rebol is weird to give a different answer depending on order.</p>
+<ul>
+<li>
+<p><strong>Python:</strong> In Python, adding an integer to a character (or vice versa) would raise a TypeError. Python doesn't implicitly convert between these types.</p>
+</li>
+<li>
+<p><strong>JavaScript:</strong> JavaScript would convert the character to its ASCII value and perform integer addition in both cases, resulting in a number.</p>
+</li>
+<li>
+<p><strong>Ruby:</strong> Similar to Python, Ruby would raise a TypeError when trying to add an integer to a character.</p>
+</li>
+<li>
+<p><strong>Java:</strong> Java doesn't allow direct addition between char and int types without explicit casting.</p>
+</li>
+</ul>
+<p>I think adding integers to characters and wanting a character back is the more common operation, so if it's legal, I'd advocate for:</p>
+<pre><code>&gt;&gt; 1 + #A
+== #B
+
+&gt;&gt; #A + 1
+== #B
+</code></pre>
+<p>But if we want to rule out addition of characters to characters (which I do) this commutative behavior doesn't fall out from a system of implicit conversion with an ordering on "bigger" types... since characters are smaller.</p>
+<p>I don't see an obvious "rule" besides hardcoding it.</p>
+<h2><a name="p-7963-what-about-commutativity-in-general-2" class="anchor" href="https://forum.rebol.info#p-7963-what-about-commutativity-in-general-2"></a>What About Commutativity In General?</h2>
+<p>We can imagine decisions on what you would make <strong><code>+</code></strong> mean that would not be commutative.  For instance, if you were allowed to make it mean "join strings":</p>
+<pre><code>&gt;&gt; "abc" + "def"
+== "abcdef"
+
+&gt;&gt; "def" + "abc"
+== "defabc"
+</code></pre>
+<p>So you might try and argue that the rules for <strong>add</strong> are different than the rules for <strong>+</strong>, and it's only when + is acting as ADD that it enforces commutativity.  However... even in the domain of math, you have exceptions... e.g. matrix multiplication is not commutative.</p>
+<p>The more general question of commutativity seems to be that there aren't any popular languages that do it automatically.  e.g. in C++ you have to overload <strong><code>operator+(T1,T2)</code></strong> and <strong><code>operator+(T2,T1)</code></strong> separately...one of them can call the other, but that never happens automatically.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/should-1-a-equal-a-1/2346">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/should-1-a-equal-a-1/2346</link>
+          <pubDate>Fri, 06 Dec 2024 12:30:01 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2346</guid>
+          <source url="https://forum.rebol.info/t/should-1-a-equal-a-1/2346.rss">Should (1 + #A) Equal (#A + 1) ?</source>
+        </item>
+        <item>
+          <title>Design for Something Like FLIP To Reverse Arguments</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Functions</category>
+          <description><![CDATA[
+            <aside class="quote no-group" data-username="bradrn" data-post="6" data-topic="1238">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/bradrn/48/365_2.png" class="avatar"><a href="https://forum.rebol.info/t/parameter-order-in-rebol/1238/6">Parameter Order in Rebol</a></div>
+<blockquote>
+<p>If someone wants to specify the second parameter first they can always write <code>flip cons</code> or <code>flip snoc</code>.</p>
+</blockquote>
+</aside>
+<p>The design of a FLIP-like operation raises some questions.</p>
+<p>If it were an operator that acted on functions, it wouldn't retrigger them.  You'd have to say:</p>
+<pre><code>&gt;&gt; append 'd [a b c]
+== [a b c d]
+
+&gt;&gt; run flip append/ [a b c] 'd
+== [a b c d]
+</code></pre>
+<p>Alternately, I guess you could use slash to run a GROUP!, but then you'd have a disabling slash and a running slash:</p>
+<pre><code>&gt;&gt; /(flip append/) [a b c] 'd
+== [a b c d]
+</code></pre>
+<p>If it were instead something along the lines of RUN, where applying the flipped function was implicit, you could write:</p>
+<pre><code>&gt;&gt; flip append/ [a b c] 'd
+== [a b c d]
+</code></pre>
+<p>I don't think <strong><code>flip/append</code></strong> being a synonym for <strong><code>/(flip append/)</code></strong> is a generically useful idea, compared to the likes of <strong><code>not/even?/</code></strong> for cascading.</p>
+<p>But if the <a href="https://forum.rebol.info/t/dialecting-function-calls-new-weird-powerful/2310">weird idea of dialected CHAIN!</a> ever came to pass, FLIP could go into a distinct mode based on receiving a function in the place other functions have refinements...</p>
+<pre><code>&gt;&gt; append/
+== ~#[frame! [value series]]~
+
+&gt;&gt; flip append/
+== ~#[frame! [series value]]~
+
+&gt;&gt; flip:append [a b c] 'd
+== [a b c d]
+</code></pre>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/design-for-something-like-flip-to-reverse-arguments/2345">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/design-for-something-like-flip-to-reverse-arguments/2345</link>
+          <pubDate>Mon, 02 Dec 2024 14:41:21 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2345</guid>
+          <source url="https://forum.rebol.info/t/design-for-something-like-flip-to-reverse-arguments/2345.rss">Design for Something Like FLIP To Reverse Arguments</source>
+        </item>
         <item>
           <title>The %rebol.r Boot File From Rebol 1.0</title>
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
@@ -2206,200 +2505,6 @@ red&gt;&gt; parse "[aaa]" [begin copy stuff to end skip]
           <discourse:topicArchived>No</discourse:topicArchived>
           <guid isPermaLink="false">forum.rebol.info-topic-2301</guid>
           <source url="https://forum.rebol.info/t/bitten-by-right-side-evaluation-first/2301.rss">Bitten By Right Side Evaluation First</source>
-        </item>
-        <item>
-          <title>Parsing/Destructuring a QUOTED! or QUASIFORM!</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Parsing</category>
-          <description><![CDATA[
-            <p>Quoteds (and quasiforms) can be seen kind of as containers...</p>
-<p>But there isn't a good way to destructure them at the moment.</p>
-<p>One off-the-cuff idea would be that you could SUBPARSE into them:</p>
-<pre><code>&gt;&gt; parse ['a:] [subparse quoted! set-word!]
-== a:
-
-&gt;&gt; parse [''a:] [subparse quoted! subparse quoted! set-word!]
-== a:
-
-&gt;&gt; parse [~(a b c)~] [subparse quasiform! subparse group! [some word!]]
-== c
-</code></pre>
-<p>A bit of a belabored method.  And because combinators require a series, I can't think of any efficient way to do that (vs. fabricating an array to hold a single item, and parsing that as a series.)  But it's better than no method at all.</p>
-<p><strong>UPDATE:</strong> Having come up with a strategy for <a href="https://forum.rebol.info/t/typechecking-quoted-forms-quasiforms-antiforms/2298">doing constraints like <strong><code>quote:quote:block?</code></strong></a>, it seems that covers a lot of use cases:</p>
-<pre><code>&gt;&gt; parse ['a:] [&amp;quote:set-word!]
-== a:
-
-&gt;&gt; parse [''a:] [&amp;quote:quote:set-word!]
-== a:
-
-&gt;&gt; parse [~(a b c)~] [subparse &amp;quasi:group! [some word!]]
-== c
-</code></pre>
-<p>It would require SUBPARSE to be willing to go inside quoted lists, which is easy enough to permit (and no reason not to, since it has to pass the type check you know what you're doing).</p>
-<p>Seems to be reasonably powerful...just have to make peace with this strange new world of <em>dialecting the act of calling functions itself.</em> (!)</p>
-            <p><small>3 posts - 2 participants</small></p>
-            <p><a href="https://forum.rebol.info/t/parsing-destructuring-a-quoted-or-quasiform/2300">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/parsing-destructuring-a-quoted-or-quasiform/2300</link>
-          <pubDate>Fri, 27 Sep 2024 21:59:08 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-2300</guid>
-          <source url="https://forum.rebol.info/t/parsing-destructuring-a-quoted-or-quasiform/2300.rss">Parsing/Destructuring a QUOTED! or QUASIFORM!</source>
-        </item>
-        <item>
-          <title>What Should &quot;New Refinements&quot; (e.g. :FOO) Evaluate To?</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Datatypes</category>
-          <description><![CDATA[
-            <p>We know what new refinements will do when you put them in a dialect like APPLY.:</p>
-<pre><code>call:shell // [  ; infix APPLY
-    [(system.options.boot) --suppress {"*"} print.reb 100]
-
-    :input 'none      ; pipe input from /dev/null
-    :output data: {}  ; write output to string
-]
-</code></pre>
-<p>The <strong><code>:input</code></strong> and <strong><code>:output</code></strong> will be noticed literally by APPLY.  But this doesn't prescribe any particular evaluator meaning for them when not dialected.</p>
-<p>Old refinements (e.g. <strong><code>/input</code></strong> and <strong><code>/output</code></strong>) would evaluate to bound versions of themselves... so effectively synonyms for <strong><code>$/input</code></strong> and <strong><code>$/output</code></strong>.</p>
-<p><em>(This makes me aware of a likely bug in the optimization of paths (chains) of this size... they use a WORD! cell format.  Which means they only capture the binding of the specific word...while array-based sequences get a "whole specifier".  It doesn't seem to me that the length of the sequence should affect what kind of environment it captures.  e.g. <strong><code>[_ input]</code></strong> should capture the same amount of context as the path produced by it does...but if we forced embedded GROUP!s to be fixed in their biding on sequence creation that might be undesirable.  Review.)</em></p>
-<p>Anyway...we know that <strong><code>.input</code></strong> is evaluative (picking the field out of the "current coupled context").  And <strong><code>/input</code></strong> will be evaluative (calling a function).  Then <strong><code>foo:bar</code></strong> will be evaluative, calling FOO with the refinement BAR.</p>
-<p>So what of <strong><code>:foo</code></strong>?  Due to what we want it to do in APPLY, we know that giving it any active meaning in the evaluator would be a bad idea.  But maybe the best idea is to be conservative and error on it for now.  That won't stop you from creating unbound forms (<strong><code>':foo</code></strong>) or bound forms (<strong><code>$:foo</code></strong>)...and discouraging its use as a generic inert form probably has advantages in other contexts besides helping APPLY.</p>
-<p>If it turns out that having it act as a generic unbound version of itself has some great application, I'll reconsider.  But error for now.</p>
-            <p><small>1 post - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/what-should-new-refinements-e-g-foo-evaluate-to/2299">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/what-should-new-refinements-e-g-foo-evaluate-to/2299</link>
-          <pubDate>Fri, 27 Sep 2024 18:11:27 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-2299</guid>
-          <source url="https://forum.rebol.info/t/what-should-new-refinements-e-g-foo-evaluate-to/2299.rss">What Should &quot;New Refinements&quot; (e.g. :FOO) Evaluate To?</source>
-        </item>
-        <item>
-          <title>Typechecking Quoted forms / Quasiforms / Antiforms</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Datatypes</category>
-          <description><![CDATA[
-            <p>Asking questions about antiforms can be a bit tricky.</p>
-<p>If you have a meta result that contains something that might be a pack, you'd have to say:</p>
-<pre><code>if pack? unmeta result' [...]
-</code></pre>
-<p>But you're just asking a question.  What if it contained a meta of a raised error?   Should PACK? be willing to accept raised errors?  If not, that would cause an abrupt failure.</p>
-<p>To dodge the need to do an UNMETA, you could say:</p>
-<pre><code>all [
-    quasiform? result'
-    block! = heart of result'
-] then [
-   ...
-]
-</code></pre>
-<p>And via such a mechanism, you could write a function META-PACK? that would not fail on META-RAISED:</p>
-<pre><code>if meta-pack? result' [...]
-</code></pre>
-<p>That has the nice feature of not forcing you to perform an UNMETA just to answer the question.  You can narrowly ask "is this a meta pack".</p>
-<p>But I think such things need to be in the box.  This question gets asked a lot, and I'm tired of asking it as the ugly and breakable <strong><code>pack? unmeta</code></strong>.</p>
-<h2>
-<a name="what-if-typecheck-functions-had-a-meta-refinement-1" class="anchor" href="https://forum.rebol.info#what-if-typecheck-functions-had-a-meta-refinement-1"></a>What If Typecheck Functions Had a :META refinement...?</h2>
-<p>It doesn't seem like clogging up the namespace with more functions makes a lot of sense, so we might offer a refinement:</p>
-<pre><code>if pack?/meta result' [...]
-</code></pre>
-<p>That puts some separation between the <strong>?</strong> and the thing you're testing.  It's a little less severe with the new format using a CHAIN!:</p>
-<pre><code>if pack?:meta result' [...]
-</code></pre>
-<p>We could put a question mark on the refinement as well <img src="https://forum.rebol.info/images/emoji/twitter/face_with_diagonal_mouth.png?v=12" title=":face_with_diagonal_mouth:" class="emoji" alt=":face_with_diagonal_mouth:" loading="lazy" width="20" height="20"></p>
-<pre><code>if pack?:meta? result' [...]
-</code></pre>
-<p>Okay, no, we won't do that.</p>
-<p>I kind of feel like putting the meta after makes it unclear.  You'd read it like <strong>pack? meta result'</strong>.  Does that mean it should just be UNMETA?</p>
-<pre><code>if pack?:unmeta result' [...]
-</code></pre>
-<p>But at that point, people are probably not going to generally know what the difference is between that and <strong><code>pack? unmeta result</code></strong></p>
-<p>None of this is as good as simply <strong><code>meta-pack?</code></strong>.  But we don't want to generate new words for every possible thing (and questions like <strong><code>meta-integer?</code></strong> are equally legitimate...)</p>
-<h2>
-<a name="what-about-arbitrary-chain-interpretation-2" class="anchor" href="https://forum.rebol.info#what-about-arbitrary-chain-interpretation-2"></a>What About Arbitrary CHAIN! Interpretation?</h2>
-<p>Let's forget for a moment about the existing refinements to META and QUASI.  What if they--as functions--were willing to <em>take other functions as a refinement</em>?</p>
-<pre><code>if meta:pack? result' [...]
-</code></pre>
-<p>This could be a general pattern of solution...</p>
-<pre><code>if (quasi:group? first [~(a b c)~]) [...]
-
-if (quote:word? first ['a b c:]) [...]  ; or quoted:word?
-</code></pre>
-<p>How would it work?  Well, I guess the basic idea would be that it would do a processing step on the argument before typechecking it and passing it to the constraint function.</p>
-<p>So <strong><code>quoted:word?</code></strong> would run QUOTED, and it would be able to inspect the chain as containing WORD?.</p>
-<ul>
-<li>
-<p>If it was passed something like <strong><code>&lt;foo&gt;</code></strong> it would say "I don't even have to ask, that's not a quoted anything".</p>
-</li>
-<li>
-<p>If it was something like <strong><code>'&lt;foo&gt;</code></strong> it would say "okay that's quoted, I need to ask" and it would unquote the thing before passing it to WORD?, which would come back false.</p>
-</li>
-<li>
-<p>If it was <strong><code>'bar</code></strong> it would do the same thing but this time WORD? would return true.</p>
-</li>
-</ul>
-<p><em>It feels a little bit ad-hoc, but the ergonomics are certainly there.</em>  This would be tremendously useful and could create new and useful type constraints.  It's literate... and <strong><code>meta:pack?</code></strong> is going to look better in type specs than <strong><code>meta/pack?</code></strong></p>
-<p>Not only that, but <a href="https://forum.rebol.info/t/intrinsics-functions-without-frames/2050">recognizing <strong>"intrinsics"</strong> in the chain</a> would mean this could be relatively fast--faster than <strong><code>pack? unmeta</code></strong> could be.</p>
-<h2>
-<a name="what-about-refinements-like-metalitehttpsforumrebolinfotmeta-lite-when-you-dont-want-quasiforms2296-3" class="anchor" href="https://forum.rebol.info#what-about-refinements-like-metalitehttpsforumrebolinfotmeta-lite-when-you-dont-want-quasiforms2296-3"></a>What About Refinements Like <a href="https://forum.rebol.info/t/meta-lite-when-you-dont-want-quasiforms/2296"><code>META:LITE</code></a>
-</h2>
-<p>Let's say there's a single-arity logic-bearing function someone makes called LITE, and they get mad that META:LITE doesn't call it to do a meta version of that test.</p>
-<p>I don't know that I care a ton about that.  We have situations in PARSE where you might have a variable named ACROSS and it will ignore that variable if there's a keyword called ACROSS.  You have to escape your words when they run up against reserved dialect words.</p>
-<p>So I guess you'd wind up with something like:</p>
-<pre><code> if meta:(lite/) [...]
-</code></pre>
-<p>Otherwise the keyword would win.</p>
-<h2>
-<a name="what-about-cascading-the-functions-4" class="anchor" href="https://forum.rebol.info#what-about-cascading-the-functions-4"></a>What About Cascading The Functions?</h2>
-<pre><code>if (quoted:quoted:quasi:block? first [''~[a b c]~]) [...]
-</code></pre>
-<p>Well I guess that could work if the rule was that if you used a function name as a refinement, that function would receive all the refinements after it.  Applying that recursively you'd get something that works.</p>
-<p>There could be an optimization that functions like QUOTED would detect when the functions in the chain were ones they recognized, and they could do something optimal.</p>
-<h2>
-<a name="does-any-of-this-solve-the-unmeta-problem-5" class="anchor" href="https://forum.rebol.info#does-any-of-this-solve-the-unmeta-problem-5"></a>Does Any Of This Solve The UNMETA Problem?</h2>
-<p>It's nice syntax, but remember the original issue...where you have a meta-raised-error, and you want to test it to see if it is or isn't a meta pack:</p>
-<pre><code>if pack? unmeta result' [...]
-</code></pre>
-<p>I'm talking about redoing that:</p>
-<pre><code>if meta:pack? result' [...]
-</code></pre>
-<p>But if META is unmeta'ing its argument, and passing it to PACK?, does that still have the same problem?</p>
-<p>It doesn't have to.  META would see that the result is a quasiform, hence a candidate for any function to ask... then it needs to typecheck against what PACK? takes.  But if that typecheck fails, there's no need to raise the error.  You can just say "no, it's not a meta pack".  Done.</p>
-<h2>
-<a name="are-there-less-wacky-ways-to-do-it-6" class="anchor" href="https://forum.rebol.info#are-there-less-wacky-ways-to-do-it-6"></a>Are There Less Wacky Ways To Do It?</h2>
-<p>I dunno.  It's admittedly a bit weird to put that much overloading on words like META and QUASI.  Their type signatures stop making sense (returning LOGIC?...sometimes?)</p>
-<p>The overloading could be reduced if the weird modifiers were QUOTED, METAD, and QUASID.  :-/</p>
-<pre><code>if metad:pack? result' [...]
-</code></pre>
-<p>Errr, no.  Didn't come this far to write things that look like garbage.</p>
-<p>But oddly, quoted:xxx? looks better than quote:xxx?... does that suggest the operator should be called QUOTED too?  <img src="https://forum.rebol.info/images/emoji/twitter/thinking.png?v=12" title=":thinking:" class="emoji" alt=":thinking:" loading="lazy" width="20" height="20"></p>
-<pre><code>&gt;&gt; quoted 1 + 2
-== '3
-</code></pre>
-<p>I've seen it as QUOTE for so long that it's hard to frame it.  It doesn't look <em>terrible</em>, and when you put them side by side the brevity has an advantage:</p>
-<pre><code>if (quoted:quoted:quasi:block? first [''~[a b c]~]) [...]
-
-if (quote:quote:quasi:block? first [''~[a b c]~]) [...]
-</code></pre>
-<p>To say that <strong><code>'a</code></strong> is a QUOTE-WORD! is a little bit caveman-ish, but better than calling it a LIT-WORD!, and it takes one less syllable to say "is a quote word" than to say "is a quote-uhd word".</p>
-<p>Looking at it in that light, it's growing on me to dumb it down.  Maybe not in all circumstances.  Perhaps it could be left as a matter of taste with QUOTED and QUOTE being synonyms... like FUNC and FUNCTION, use whichever you want.</p>
-<h2>
-<a name="i-think-this-is-a-direction-worth-pursuing-7" class="anchor" href="https://forum.rebol.info#i-think-this-is-a-direction-worth-pursuing-7"></a>I Think This Is A Direction Worth Pursuing</h2>
-<p>I've been looking for an answer to this question, and haven't thought of anything this good before.</p>
-<p>Don't have a complete design for the "customized refinement dialect", but I can do some prototyping...</p>
-            <p><small>2 posts - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/typechecking-quoted-forms-quasiforms-antiforms/2298">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/typechecking-quoted-forms-quasiforms-antiforms/2298</link>
-          <pubDate>Tue, 24 Sep 2024 00:16:39 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-2298</guid>
-          <source url="https://forum.rebol.info/t/typechecking-quoted-forms-quasiforms-antiforms/2298.rss">Typechecking Quoted forms / Quasiforms / Antiforms</source>
         </item>
   </channel>
 </rss>
