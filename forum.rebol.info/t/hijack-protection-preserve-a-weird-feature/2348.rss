@@ -1,0 +1,310 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>HIJACK-protection: Preserve a Weird Feature? :face_with_diagonal_mouth:</title>
+    <link>https://forum.rebol.info/t/hijack-protection-preserve-a-weird-feature/2348</link>
+    <description>The HIJACK functionality was proposed by @gchiu, many years ago:
+
+    &gt;&gt; /foo: func [x] [print [&quot;FOO&quot; (x + 1)]
+    &gt;&gt; /foo-reference: foo/
+
+    &gt;&gt; foo 20
+    FOO 21
+
+    &gt;&gt; foo-reference 20
+    FOO 21
+
+    &gt;&gt; /bar: func [x] [print [&quot;HIJACKED!&quot; (x + 1000)]
+
+    &gt;&gt; hijack foo/ bar/
+
+    &gt;&gt; foo 20
+    HIJACKED! 1020
+
+    &gt;&gt; foo-reference 20
+    HIJACKED! 1020
+
+And so, way back when... I worked up a mechanic for how to do this.  There&#39;s some nuance to how efficient it can be, based on whether the thing you&#39;re hijacking uses a parameter list that&#39;s in the same &quot;derivation chain&quot;.
+
+While it was originally a somewhat fringe feature, it became central to certain parts of the implementation--including the web ReplPad.
+
+## What If You Want To Use The Old Implementation?
+
+Note that all references to the old function will run the hijacker.  What if you wanted the old implementation?
+
+The seemingly simplest answer would be to return the old implementation under a new identity by HIJACK:
+
+    &gt;&gt; /foo: func [x] [print [&quot;FOO&quot; (x + 1)]
+    &gt;&gt; /bar: func [x] [print [&quot;HIJACKED!&quot; (x + 1000)]
+
+    &gt;&gt; /foo-old: hijack foo/ bar/
+
+    &gt;&gt; foo 20
+    HIJACKED! 1020
+
+    &gt;&gt; foo-old 20
+    FOO 21
+
+## But I Did Something Different...
+
+In that old era of ACTION! and FRAME! as distinct types, I decided to be clever.
+
+I said that COPY of an ACTION! would create a new action identity that ran the same code... but that wouldn&#39;t be affected by a HIJACK of the old action.
+
+    &gt;&gt; /foo: func [x] [print [&quot;FOO&quot; (x + 1)]
+    &gt;&gt; /bar: func [x] [print [&quot;HIJACKED!&quot; (x + 1000)]
+
+    &gt;&gt; /foo-copy: copy foo/ 
+
+    &gt;&gt; hijack foo/ bar/
+
+    &gt;&gt; foo 20
+    HIJACKED! 1020
+
+    &gt;&gt; foo-copy 20
+    FOO 21
+
+So HIJACK didn&#39;t return anything.
+
+On the one hand: this is strictly more powerful, it means any code anywhere can make a new identity and ensure it won&#39;t be affected by *subsequent* HIJACKs of the original function.
+
+It also lets you avoid ordering problems:
+
+     hijack foo/ (adapt copy foo/ [print &quot;Doesn&#39;t need an extra step!&quot;])
+
+You&#39;d have to do this in multiple steps otherwise, with some kind of dummy hijacking:
+
+     /old-foo: hijack foo/ noop/
+     hijack foo/ (adapt old-foo/ [print &quot;Without COPY, you have to do this&quot;])
+
+So it seemed superior.
+
+BUT this turned out to be more complicated to implement, and opens a bit of a can of worms about the meaning of COPY.
+
+## What Should (Could?) &quot;COPY an ACTION&quot; Mean?
+
+Let&#39;s just simplify matters a little and think about the actions which have an implementation &quot;BLOCK!&quot; behind them...what I&#39;ve called the &quot;Details Array&quot;.
+
+You might imagine that making a copy that would not be subject to the same HIJACK-ings is as easy as making a copy of that array.  Maybe (?) that sounds a little expensive, but, you&#39;d imagine this isn&#39;t done *too* often.
+
+However, consider something like this:
+
+    &gt;&gt; /g: generator [yield 1 yield 2 yield 3]
+
+    &gt;&gt; g
+    == 1
+
+    &gt;&gt; /g-copy: copy g/
+
+    &gt;&gt; g
+    == 2
+
+    &gt;&gt; g-copy
+    == ???  ; what do you think?
+
+There&#39;s actually a huge problem here, in that the Details Array contains delicate state.  You can&#39;t just assume duplicating that state is going to lead to a situation that won&#39;t be confused or crashy.  It may contain unique pointers that one of the instances assumes it can free because it thinks it is unique.
+
+Given this reality, the interaction between COPY of ACTION! and HIJACK was very crafty.  The HIJACK only did a *minor* disruption to the original Details array, basically rewriting a bit of it to say &quot;you&#39;ve been hijacked&quot; but leaving the contents of the array state in place.  Copies were small stubs that could chain through to the original Details identity--and despite the fact that it had been hijacked, still run it.
+
+But things got fairly twisted.  This meant HIJACK couldn&#39;t be simple, and function copies became strange beasts that had to be conscious of the possibility that they were representations of hijackings and be conditional and that.
+
+## Further... COPY of &quot;action&quot; is Now COPY of FRAME!
+
+The unification of FRAME! and action brought about a bit of a semantics problem.
+
+COPY of an &quot;action&quot; now is just a mechanism of getting another FRAME! with the same parameters, that you can tweak.  It doesn&#39;t imply anything about &quot;protect against hijacking&quot;. 
+
+Hence this notion of &quot;make new action identity that can&#39;t be hijacked&quot; would have to be some new operator, not COPY.
+
+We&#39;re thus talking about something called **`make-unhijackable-reference`**.  :face_with_diagonal_mouth: 
+
+## Or... Just Say &quot;Screw It&quot;, HIJACK Returns New Identity?
+
+This is almost certainly the best answer.
+
+Redoing this doesn&#39;t necessarily rule out the idea of inventing MAKE-UNHIJACKABLE-REFERENCE some day.  But that would mean a hijacking would have to preserve the old implementation in a more &quot;costly&quot; way than it has historically, and those references would also be more costly.
+
+Seeing it relatively clearly after having written this post, I think the added cost would be the right way to do it, if this feature were decided to actually matter to anyone. 
+
+So far the only uses of COPY of action to avoid hijackability have been done at the moment of hijacking, to re-use the implementation as part of the hijacking.  The concept of &quot;shielding references from HIJACK&quot; for any other reason is not something that I can think of applications for.
+
+(If you are the one exporting a function, and you think you someone might hijack it and you don&#39;t want to be subject to those hijackings, you can export an ADAPT with an empty block...or something of that sort...and then your implementation is safe, because if someone hijacks that adaptation it won&#39;t affect what the adaptation called.)</description>
+    
+    <lastBuildDate>Thu, 12 Dec 2024 17:00:50 +0000</lastBuildDate>
+    <category>Functions</category>
+    <atom:link href="https://forum.rebol.info/t/hijack-protection-preserve-a-weird-feature/2348.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>HIJACK-protection: Preserve a Weird Feature? :face_with_diagonal_mouth:</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="2348">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>It also lets you avoid ordering problems:</p>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext"> hijack foo/ (adapt copy foo/ [print "Doesn't need an extra step!"])
+</code></pre>
+<p>You'd have to do this in multiple steps otherwise, with some kind of dummy hijacking:</p>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext"> /old-foo: hijack foo/ noop/
+ hijack foo/ (adapt old-foo/ [print "Without COPY, you have to do this"])
+</code></pre>
+</blockquote>
+</aside>
+<p>I've made this slightly more efficient and slightly more foolproof by letting you HIJACK with VOID.</p>
+<p>So you can extract the old code under a new identity, and then if you call the function without hijacking it with a new implementation you get an error:</p>
+<pre><code>&gt;&gt; /old-foo: hijack foo/ void
+
+&gt;&gt; foo 10
+** Error: FRAME! hasn't been associated with code, or HIJACK'd VOID
+</code></pre>
+<p>A little safer, a little cheaper.</p>
+<p>But this would lead to a common pattern--parentheses not necessary, but help illustrate what's going on:</p>
+<pre><code>hijack foo/ (adapt (hijack foo/ void) [
+    print "Some adaptation code, or ENCLOSE, or whatever"
+])
+</code></pre>
+<p>It's not <em>that</em> much worse than when you had to do this with COPY (when COPY semantics made sense).  But it is a little worse.</p>
+<p>If there were one word for it, like STEAL it would be similar:</p>
+<pre><code>hijack foo/ adapt (steal foo/) [
+    print "Some adaptation code, or ENCLOSE, or whatever"
+]
+</code></pre>
+<p>But STEAL actually does something else, kind of interesting, FYI:</p>
+<pre><code>&gt;&gt; x: 10
+== 10
+
+&gt;&gt; steal x: 20
+== 10
+
+&gt;&gt; x
+== 20
+</code></pre>
+<p>What would be nice, would be something that looked like this:</p>
+<pre><code>adapt (hijack foo/) [
+    print "It would be neat if this 'just worked'"
+]
+</code></pre>
+<p>As if creating a new adaptation of that hijack result would somehow in and of itself know how to patch the adapted functionality in to be the new behavior for FOO.  Not that there's a general mechanism for that making sense with this design, but, it "seems convenient".</p>
+<p>Of course, ADAPT could have a refinement...</p>
+<pre><code>adapt:hijack foo/ [
+    print "ADAPT, ENCLOSE, etc. *could* fold in hijacking... :-("
+]
+</code></pre>
+<p>But I'm not a huge fan of anything that makes every such generator need that refinement, they're supposed to be composable orthogonal parts.</p>
+<h2><a name="p-7970-leaving-it-how-it-is-for-now-1" class="anchor" href="https://forum.rebol.info#p-7970-leaving-it-how-it-is-for-now-1"></a>Leaving It How It Is For Now...</h2>
+<p>I had to muck around with HIJACK just because the old way was impeding the design.  Things are in good enough shape now to work and move on.  Just wanted to write some more thoughts down.</p>
+          <p><a href="https://forum.rebol.info/t/hijack-protection-preserve-a-weird-feature/2348/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/hijack-protection-preserve-a-weird-feature/2348/2</link>
+        <pubDate>Wed, 11 Dec 2024 20:55:08 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-2348-2</guid>
+        <source url="https://forum.rebol.info/t/hijack-protection-preserve-a-weird-feature/2348.rss">HIJACK-protection: Preserve a Weird Feature? :face_with_diagonal_mouth:</source>
+      </item>
+      <item>
+        <title>HIJACK-protection: Preserve a Weird Feature? :face_with_diagonal_mouth:</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>The HIJACK functionality was proposed by <a class="mention" href="https://forum.rebol.info/u/gchiu">@gchiu</a>, many years ago:</p>
+<pre><code>&gt;&gt; /foo: func [x] [print ["FOO" (x + 1)]
+&gt;&gt; /foo-reference: foo/
+
+&gt;&gt; foo 20
+FOO 21
+
+&gt;&gt; foo-reference 20
+FOO 21
+
+&gt;&gt; /bar: func [x] [print ["HIJACKED!" (x + 1000)]
+
+&gt;&gt; hijack foo/ bar/
+
+&gt;&gt; foo 20
+HIJACKED! 1020
+
+&gt;&gt; foo-reference 20
+HIJACKED! 1020
+</code></pre>
+<p>And so, way back when... I worked up a mechanic for how to do this.  There's some nuance to how efficient it can be, based on whether the thing you're hijacking uses a parameter list that's in the same "derivation chain".</p>
+<p>While it was originally a somewhat fringe feature, it became central to certain parts of the implementation--including the web ReplPad.</p>
+<h2><a name="p-7968-what-if-you-want-to-use-the-old-implementation-1" class="anchor" href="https://forum.rebol.info#p-7968-what-if-you-want-to-use-the-old-implementation-1"></a>What If You Want To Use The Old Implementation?</h2>
+<p>Note that all references to the old function will run the hijacker.  What if you wanted the old implementation?</p>
+<p>The seemingly simplest answer would be to return the old implementation under a new identity by HIJACK:</p>
+<pre><code>&gt;&gt; /foo: func [x] [print ["FOO" (x + 1)]
+&gt;&gt; /bar: func [x] [print ["HIJACKED!" (x + 1000)]
+
+&gt;&gt; /foo-old: hijack foo/ bar/
+
+&gt;&gt; foo 20
+HIJACKED! 1020
+
+&gt;&gt; foo-old 20
+FOO 21
+</code></pre>
+<h2><a name="p-7968-but-i-did-something-different-2" class="anchor" href="https://forum.rebol.info#p-7968-but-i-did-something-different-2"></a>But I Did Something Different...</h2>
+<p>In that old era of ACTION! and FRAME! as distinct types, I decided to be clever.</p>
+<p>I said that COPY of an ACTION! would create a new action identity that ran the same code... but that wouldn't be affected by a HIJACK of the old action.</p>
+<pre><code>&gt;&gt; /foo: func [x] [print ["FOO" (x + 1)]
+&gt;&gt; /bar: func [x] [print ["HIJACKED!" (x + 1000)]
+
+&gt;&gt; /foo-copy: copy foo/ 
+
+&gt;&gt; hijack foo/ bar/
+
+&gt;&gt; foo 20
+HIJACKED! 1020
+
+&gt;&gt; foo-copy 20
+FOO 21
+</code></pre>
+<p>So HIJACK didn't return anything.</p>
+<p>On the one hand: this is strictly more powerful, it means any code anywhere can make a new identity and ensure it won't be affected by <em>subsequent</em> HIJACKs of the original function.</p>
+<p>It also lets you avoid ordering problems:</p>
+<pre><code> hijack foo/ (adapt copy foo/ [print "Doesn't need an extra step!"])
+</code></pre>
+<p>You'd have to do this in multiple steps otherwise, with some kind of dummy hijacking:</p>
+<pre><code> /old-foo: hijack foo/ noop/
+ hijack foo/ (adapt old-foo/ [print "Without COPY, you have to do this"])
+</code></pre>
+<p>So it seemed superior.</p>
+<p>BUT this turned out to be more complicated to implement, and opens a bit of a can of worms about the meaning of COPY.</p>
+<h2><a name="p-7968-what-should-could-copy-an-action-mean-3" class="anchor" href="https://forum.rebol.info#p-7968-what-should-could-copy-an-action-mean-3"></a>What Should (Could?) "COPY an ACTION" Mean?</h2>
+<p>Let's just simplify matters a little and think about the actions which have an implementation "BLOCK!" behind them...what I've called the "Details Array".</p>
+<p>You might imagine that making a copy that would not be subject to the same HIJACK-ings is as easy as making a copy of that array.  Maybe (?) that sounds a little expensive, but, you'd imagine this isn't done <em>too</em> often.</p>
+<p>However, consider something like this:</p>
+<pre><code>&gt;&gt; /g: generator [yield 1 yield 2 yield 3]
+
+&gt;&gt; g
+== 1
+
+&gt;&gt; /g-copy: copy g/
+
+&gt;&gt; g
+== 2
+
+&gt;&gt; g-copy
+== ???  ; what do you think?
+</code></pre>
+<p>There's actually a huge problem here, in that the Details Array contains delicate state.  You can't just assume duplicating that state is going to lead to a situation that won't be confused or crashy.  It may contain unique pointers that one of the instances assumes it can free because it thinks it is unique.</p>
+<p>Given this reality, the interaction between COPY of ACTION! and HIJACK was very crafty.  The HIJACK only did a <em>minor</em> disruption to the original Details array, basically rewriting a bit of it to say "you've been hijacked" but leaving the contents of the array state in place.  Copies were small stubs that could chain through to the original Details identity--and despite the fact that it had been hijacked, still run it.</p>
+<p>But things got fairly twisted.  This meant HIJACK couldn't be simple, and function copies became strange beasts that had to be conscious of the possibility that they were representations of hijackings and be conditional and that.</p>
+<h2><a name="p-7968-further-copy-of-action-is-now-copy-of-frame-4" class="anchor" href="https://forum.rebol.info#p-7968-further-copy-of-action-is-now-copy-of-frame-4"></a>Further... COPY of "action" is Now COPY of FRAME!</h2>
+<p>The unification of FRAME! and action brought about a bit of a semantics problem.</p>
+<p>COPY of an "action" now is just a mechanism of getting another FRAME! with the same parameters, that you can tweak.  It doesn't imply anything about "protect against hijacking".</p>
+<p>Hence this notion of "make new action identity that can't be hijacked" would have to be some new operator, not COPY.</p>
+<p>We're thus talking about something called <strong><code>make-unhijackable-reference</code></strong>.  <img src="https://forum.rebol.info/images/emoji/twitter/face_with_diagonal_mouth.png?v=12" title=":face_with_diagonal_mouth:" class="emoji" alt=":face_with_diagonal_mouth:" loading="lazy" width="20" height="20"></p>
+<h2><a name="p-7968-or-just-say-screw-it-hijack-returns-new-identity-5" class="anchor" href="https://forum.rebol.info#p-7968-or-just-say-screw-it-hijack-returns-new-identity-5"></a>Or... Just Say "Screw It", HIJACK Returns New Identity?</h2>
+<p>This is almost certainly the best answer.</p>
+<p>Redoing this doesn't necessarily rule out the idea of inventing MAKE-UNHIJACKABLE-REFERENCE some day.  But that would mean a hijacking would have to preserve the old implementation in a more "costly" way than it has historically, and those references would also be more costly.</p>
+<p>Seeing it relatively clearly after having written this post, I think the added cost would be the right way to do it, if this feature were decided to actually matter to anyone.</p>
+<p>So far the only uses of COPY of action to avoid hijackability have been done at the moment of hijacking, to re-use the implementation as part of the hijacking.  The concept of "shielding references from HIJACK" for any other reason is not something that I can think of applications for.</p>
+<p>(If you are the one exporting a function, and you think you someone might hijack it and you don't want to be subject to those hijackings, you can export an ADAPT with an empty block...or something of that sort...and then your implementation is safe, because if someone hijacks that adaptation it won't affect what the adaptation called.)</p>
+          <p><a href="https://forum.rebol.info/t/hijack-protection-preserve-a-weird-feature/2348/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/hijack-protection-preserve-a-weird-feature/2348/1</link>
+        <pubDate>Wed, 11 Dec 2024 12:53:48 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-2348-1</guid>
+        <source url="https://forum.rebol.info/t/hijack-protection-preserve-a-weird-feature/2348.rss">HIJACK-protection: Preserve a Weird Feature? :face_with_diagonal_mouth:</source>
+      </item>
+  </channel>
+</rss>

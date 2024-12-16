@@ -5,8 +5,229 @@
     <link>https://forum.rebol.info/c/development/8</link>
     <description>Topics in the &#39;Development&#39; category Discussion of the development of Rebol itself: language design, implementation and standard library.</description>
     
-      <lastBuildDate>Sat, 07 Dec 2024 20:48:23 +0000</lastBuildDate>
+      <lastBuildDate>Thu, 12 Dec 2024 13:07:42 +0000</lastBuildDate>
       <atom:link href="https://forum.rebol.info/c/development/8.rss" rel="self" type="application/rss+xml" />
+        <item>
+          <title>C++ Magic for LVALUE Checking...or Use Functions?</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>C/C++ Implementation</category>
+          <description><![CDATA[
+            <p>If you write traditional C like:</p>
+<pre><code>BINDING(cellA) = BINDING(cellB);
+</code></pre>
+<p>Regardless of what the BINDING() macro expands to, there's no way to do any sort of validation in any build (debug or otherwise).  Whatever this becomes can only be a simple assignment.</p>
+<p>But if you instead wrote:</p>
+<pre><code>Tweak_Binding(cellA, Binding_Of(cellB));
+</code></pre>
+<p>Then even if the intent is just a simple assignment in a release build, you could define that in a checked build to something that runs arbitrary code :</p>
+<pre><code>#if NO_RUNTIME_CHECKS
+    #define Tweak_Binding(dest,src) \ 
+        (dest)-&gt;extra.binding = (src)-&gt;extra.binding
+#else
+    #define Tweak_Binding(dest,src) \
+        Tweak_Binding_With_Added_Checks((dest), (src))
+#endif
+</code></pre>
+<p><strong>But if you're willing to confine your extra checks to C++ builds, you can leave the source looking like <code>BINDING(cellA) = BINDING(cellB)</code></strong></p>
+<p>This is because C++ has operator overloading, and you can create a wrapper class which "does the right thing", e.g. notices whether a <code>BINDING(...)</code> is used as a left hand side operator or right side operator.</p>
+<h2><a name="p-7972-just-because-i-can-does-that-mean-i-should-1" class="anchor" href="https://forum.rebol.info#p-7972-just-because-i-can-does-that-mean-i-should-1"></a>Just Because I Can, Does That Mean I Should?</h2>
+<p>Most of my original rationale was that I didn't want the source to make it look like you were making a function call when you were not.</p>
+<p>When you see something like <code>Tweak_Binding(...)</code> you don't know how many instructions that's going to be, or what side effects its going to have.  But when you see a plain assignment (that you know compiles in C to something quite simple), then that tells you not much is going on.</p>
+<p>However...I specifically came up with the term <strong><code>"Tweak"</code></strong> as a convention for functions like this that do very little.  It's a pretty good name, and it's learnable to say "oh, if it says Tweak, that means it's as cheap as an assignment".</p>
+<p>Here are some of the points to consider:</p>
+<ol>
+<li>
+<p>Because things like BINDING() are doing weird magic allowing them to be on the left side of assignments, by convention I believe they must be in all caps.  This is kind of noisy.</p>
+<ul>
+<li>On the plus side, it can be brief, with the same term used for extracting and for tweaking.  Since datatypes use the leading-caps with no underscore convention, plain <strong><code>Binding()</code></strong> looks like a parameterized datatype, so it would have to be <strong><code>Binding_Of()</code></strong> for the extractor</li>
+</ul>
+</li>
+<li>
+<p>Using C++ magic to get the RUNTIME_CHECKS means the C build won't have assertion-parity with the C build.  Bugs that only happen in the C build (perhaps on platforms that only offer C) would thus be harder to find.</p>
+</li>
+<li>
+<p>The C++ operator overloading is going to be over the heads of those reading the code who only know C.</p>
+</li>
+<li>
+<p>In debug builds, the C++ compilers do not inline the operator overloading, constructors, etc. that are involved in making the weird objects that are behind the scenes making the trick work.  That means using the C++ debugger to step into an expression like <strong><code>BINDING(cellA) = BINDING(cellB)</code></strong> takes an annoying number of step-in and step-out operations.</p>
+</li>
+</ol>
+<h2><a name="p-7972-heres-the-scary-implementation-2" class="anchor" href="https://forum.rebol.info#p-7972-heres-the-scary-implementation-2"></a>Here's The "Scary" Implementation</h2>
+<p>It really isn't rocket science, but it is something.  And it's something that can't be compiled by plain C compilers, meaning you can't do DEBUG_CHECK_BINDING in C builds.</p>
+<pre><code>#if (! DEBUG_CHECK_BINDING)
+    #define BINDING(cell) \
+        *x_cast(Context**, m_cast(Node**, &amp;(cell)-&gt;extra.node))
+#else
+    struct BindingHolder {
+        Cell* &amp; ref;
+
+        BindingHolder(const Cell* const&amp; ref)
+            : ref (const_cast&lt;Cell* &amp;&gt;(ref))
+        {
+            assert(Is_Bindable_Heart(Cell_Heart(ref)));
+        }
+
+        void operator=(Stub* right) {
+            Assert_Cell_Writable(ref);
+            ref-&gt;extra.node = right;
+            Assert_Cell_Binding_Valid(ref);
+        }
+        void operator=(BindingHolder const&amp; right) {
+            Assert_Cell_Writable(ref);
+            ref-&gt;extra.node = right.ref-&gt;extra.node;
+            Assert_Cell_Binding_Valid(ref);
+        }
+        void operator=(nullptr_t) {
+            Assert_Cell_Writable(ref);
+            ref-&gt;extra.node = nullptr;
+        }
+        template&lt;typename T&gt;
+        void operator=(Option(T) right) {
+            Assert_Cell_Writable(ref);
+            ref-&gt;extra.node = maybe right;
+            Assert_Cell_Binding_Valid(ref);
+        }
+
+        Context* operator-&gt; () const
+          { return x_cast(Context*, ref-&gt;extra.node); }
+
+        operator Context* () const
+          { return x_cast(Context*, ref-&gt;extra.node); }
+    };
+
+    #define BINDING(cell) \
+        BindingHolder{cell}
+#endif
+</code></pre>
+<h2><a name="p-7972-looking-at-them-side-by-side-3" class="anchor" href="https://forum.rebol.info#p-7972-looking-at-them-side-by-side-3"></a>Looking at them Side-By-Side</h2>
+<pre><code>BINDING(cellA) = BINDING(cellB);
+
+Tweak_Binding(cellA, Binding_Of(cellB));
+</code></pre>
+<p>I do feel a pretty strong bias for the briefer notation...</p>
+<p>But I can see the argument for not doing the "weird" thing when there's no increase in functionality... in fact, only losing functionality in C builds.  <em>(Most C++-isms are there to add something that would be fundamentally not possible in C, vs. just syntax sugar like this.)</em></p>
+<p>The invention of the "Tweak" term does change my calculation a little bit here.  Because if it's used only in these "single-assignment-equivalent" circumstances, you can comprehend it as a C assignment statement.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/c-magic-for-lvalue-checking-or-use-functions/2350">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/c-magic-for-lvalue-checking-or-use-functions/2350</link>
+          <pubDate>Thu, 12 Dec 2024 13:07:42 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2350</guid>
+          <source url="https://forum.rebol.info/t/c-magic-for-lvalue-checking-or-use-functions/2350.rss">C++ Magic for LVALUE Checking...or Use Functions?</source>
+        </item>
+        <item>
+          <title>HIJACK-protection: Preserve a Weird Feature? :face_with_diagonal_mouth:</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Functions</category>
+          <description><![CDATA[
+            <p>The HIJACK functionality was proposed by <a class="mention" href="https://forum.rebol.info/u/gchiu">@gchiu</a>, many years ago:</p>
+<pre><code>&gt;&gt; /foo: func [x] [print ["FOO" (x + 1)]
+&gt;&gt; /foo-reference: foo/
+
+&gt;&gt; foo 20
+FOO 21
+
+&gt;&gt; foo-reference 20
+FOO 21
+
+&gt;&gt; /bar: func [x] [print ["HIJACKED!" (x + 1000)]
+
+&gt;&gt; hijack foo/ bar/
+
+&gt;&gt; foo 20
+HIJACKED! 1020
+
+&gt;&gt; foo-reference 20
+HIJACKED! 1020
+</code></pre>
+<p>And so, way back when... I worked up a mechanic for how to do this.  There's some nuance to how efficient it can be, based on whether the thing you're hijacking uses a parameter list that's in the same "derivation chain".</p>
+<p>While it was originally a somewhat fringe feature, it became central to certain parts of the implementation--including the web ReplPad.</p>
+<h2><a name="p-7968-what-if-you-want-to-use-the-old-implementation-1" class="anchor" href="https://forum.rebol.info#p-7968-what-if-you-want-to-use-the-old-implementation-1"></a>What If You Want To Use The Old Implementation?</h2>
+<p>Note that all references to the old function will run the hijacker.  What if you wanted the old implementation?</p>
+<p>The seemingly simplest answer would be to return the old implementation under a new identity by HIJACK:</p>
+<pre><code>&gt;&gt; /foo: func [x] [print ["FOO" (x + 1)]
+&gt;&gt; /bar: func [x] [print ["HIJACKED!" (x + 1000)]
+
+&gt;&gt; /foo-old: hijack foo/ bar/
+
+&gt;&gt; foo 20
+HIJACKED! 1020
+
+&gt;&gt; foo-old 20
+FOO 21
+</code></pre>
+<h2><a name="p-7968-but-i-did-something-different-2" class="anchor" href="https://forum.rebol.info#p-7968-but-i-did-something-different-2"></a>But I Did Something Different...</h2>
+<p>In that old era of ACTION! and FRAME! as distinct types, I decided to be clever.</p>
+<p>I said that COPY of an ACTION! would create a new action identity that ran the same code... but that wouldn't be affected by a HIJACK of the old action.</p>
+<pre><code>&gt;&gt; /foo: func [x] [print ["FOO" (x + 1)]
+&gt;&gt; /bar: func [x] [print ["HIJACKED!" (x + 1000)]
+
+&gt;&gt; /foo-copy: copy foo/ 
+
+&gt;&gt; hijack foo/ bar/
+
+&gt;&gt; foo 20
+HIJACKED! 1020
+
+&gt;&gt; foo-copy 20
+FOO 21
+</code></pre>
+<p>So HIJACK didn't return anything.</p>
+<p>On the one hand: this is strictly more powerful, it means any code anywhere can make a new identity and ensure it won't be affected by <em>subsequent</em> HIJACKs of the original function.</p>
+<p>It also lets you avoid ordering problems:</p>
+<pre><code> hijack foo/ (adapt copy foo/ [print "Doesn't need an extra step!"])
+</code></pre>
+<p>You'd have to do this in multiple steps otherwise, with some kind of dummy hijacking:</p>
+<pre><code> /old-foo: hijack foo/ noop/
+ hijack foo/ (adapt old-foo/ [print "Without COPY, you have to do this"])
+</code></pre>
+<p>So it seemed superior.</p>
+<p>BUT this turned out to be more complicated to implement, and opens a bit of a can of worms about the meaning of COPY.</p>
+<h2><a name="p-7968-what-should-could-copy-an-action-mean-3" class="anchor" href="https://forum.rebol.info#p-7968-what-should-could-copy-an-action-mean-3"></a>What Should (Could?) "COPY an ACTION" Mean?</h2>
+<p>Let's just simplify matters a little and think about the actions which have an implementation "BLOCK!" behind them...what I've called the "Details Array".</p>
+<p>You might imagine that making a copy that would not be subject to the same HIJACK-ings is as easy as making a copy of that array.  Maybe (?) that sounds a little expensive, but, you'd imagine this isn't done <em>too</em> often.</p>
+<p>However, consider something like this:</p>
+<pre><code>&gt;&gt; /g: generator [yield 1 yield 2 yield 3]
+
+&gt;&gt; g
+== 1
+
+&gt;&gt; /g-copy: copy g/
+
+&gt;&gt; g
+== 2
+
+&gt;&gt; g-copy
+== ???  ; what do you think?
+</code></pre>
+<p>There's actually a huge problem here, in that the Details Array contains delicate state.  You can't just assume duplicating that state is going to lead to a situation that won't be confused or crashy.  It may contain unique pointers that one of the instances assumes it can free because it thinks it is unique.</p>
+<p>Given this reality, the interaction between COPY of ACTION! and HIJACK was very crafty.  The HIJACK only did a <em>minor</em> disruption to the original Details array, basically rewriting a bit of it to say "you've been hijacked" but leaving the contents of the array state in place.  Copies were small stubs that could chain through to the original Details identity--and despite the fact that it had been hijacked, still run it.</p>
+<p>But things got fairly twisted.  This meant HIJACK couldn't be simple, and function copies became strange beasts that had to be conscious of the possibility that they were representations of hijackings and be conditional and that.</p>
+<h2><a name="p-7968-further-copy-of-action-is-now-copy-of-frame-4" class="anchor" href="https://forum.rebol.info#p-7968-further-copy-of-action-is-now-copy-of-frame-4"></a>Further... COPY of "action" is Now COPY of FRAME!</h2>
+<p>The unification of FRAME! and action brought about a bit of a semantics problem.</p>
+<p>COPY of an "action" now is just a mechanism of getting another FRAME! with the same parameters, that you can tweak.  It doesn't imply anything about "protect against hijacking".</p>
+<p>Hence this notion of "make new action identity that can't be hijacked" would have to be some new operator, not COPY.</p>
+<p>We're thus talking about something called <strong><code>make-unhijackable-reference</code></strong>.  <img src="https://forum.rebol.info/images/emoji/twitter/face_with_diagonal_mouth.png?v=12" title=":face_with_diagonal_mouth:" class="emoji" alt=":face_with_diagonal_mouth:" loading="lazy" width="20" height="20"></p>
+<h2><a name="p-7968-or-just-say-screw-it-hijack-returns-new-identity-5" class="anchor" href="https://forum.rebol.info#p-7968-or-just-say-screw-it-hijack-returns-new-identity-5"></a>Or... Just Say "Screw It", HIJACK Returns New Identity?</h2>
+<p>This is almost certainly the best answer.</p>
+<p>Redoing this doesn't necessarily rule out the idea of inventing MAKE-UNHIJACKABLE-REFERENCE some day.  But that would mean a hijacking would have to preserve the old implementation in a more "costly" way than it has historically, and those references would also be more costly.</p>
+<p>Seeing it relatively clearly after having written this post, I think the added cost would be the right way to do it, if this feature were decided to actually matter to anyone.</p>
+<p>So far the only uses of COPY of action to avoid hijackability have been done at the moment of hijacking, to re-use the implementation as part of the hijacking.  The concept of "shielding references from HIJACK" for any other reason is not something that I can think of applications for.</p>
+<p>(If you are the one exporting a function, and you think you someone might hijack it and you don't want to be subject to those hijackings, you can export an ADAPT with an empty block...or something of that sort...and then your implementation is safe, because if someone hijacks that adaptation it won't affect what the adaptation called.)</p>
+            <p><small>2 posts - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/hijack-protection-preserve-a-weird-feature/2348">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/hijack-protection-preserve-a-weird-feature/2348</link>
+          <pubDate>Wed, 11 Dec 2024 12:53:48 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2348</guid>
+          <source url="https://forum.rebol.info/t/hijack-protection-preserve-a-weird-feature/2348.rss">HIJACK-protection: Preserve a Weird Feature? :face_with_diagonal_mouth:</source>
+        </item>
         <item>
           <title>Default Values and MAKE FRAME! - 2024 Edition</title>
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
@@ -2007,199 +2228,6 @@ if (quote:quote:quasi:block? first [''~[a b c]~]) [...]
           <discourse:topicArchived>No</discourse:topicArchived>
           <guid isPermaLink="false">forum.rebol.info-topic-2298</guid>
           <source url="https://forum.rebol.info/t/typechecking-quoted-forms-quasiforms-antiforms/2298.rss">Typechecking Quoted forms / Quasiforms / Antiforms</source>
-        </item>
-        <item>
-          <title>Generalized Argument Removal - SPECIALIZE:RELAX</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Functions</category>
-          <description><![CDATA[
-            <p>Let's say you want a version of append that just appends random numbers to things:</p>
-<pre><code>&gt;&gt; append-random: adapt get $append [
-       value: random 10
-   ]
-</code></pre>
-<p>This works, but the function interface still thinks it takes two arguments:</p>
-<pre><code>&gt;&gt; append-random [a b c] [d e]
-== [a b c 10]
-</code></pre>
-<p>So fine, you can just specialize out the argument.  Both ADAPT of a SPECIALIZE and SPECIALIZE of an ADAPT would remove an argument.  But you want the specialize to run first, otherwise it would overwrite the adapted value.  So SPECIALIZE the ADAPT, to put the specialize earlier in the composition process.</p>
-<p><em><strong>But what value do you put in the specialized-out slot if you're just going to overwrite it?</strong></em></p>
-<p>Today we have quite the awesome answer: <strong><a href="https://forum.rebol.info/t/tripwire-in-the-wild/2278">use a TRIPWIRE!</a></strong>  Sounds great!</p>
-<pre><code>&gt;&gt; append-random: specialize (adapt get $append [
-       value: random 10
-   ]) [
-       value: ~&lt;specialized out&gt;~
-   ]
-** Script Error: append expects [~void~ element? splice?] for its value argument
-</code></pre>
-<h2>
-<a name="ooops-specialize-typechecked-that-1" class="anchor" href="https://forum.rebol.info#ooops-specialize-typechecked-that-1"></a>Ooops.  SPECIALIZE Typechecked That</h2>
-<p>There are two good reasons for specialization to type check:</p>
-<ul>
-<li>
-<p>You find out about bad types at the moment of specialization--instead of having to wait until the function is called to know there are problems.</p>
-</li>
-<li>
-<p>It can speed up the system by not type checking those parameters again <em>(though it occurs to me this may be broken right now, and fixing it sooner than later would probably be smart)</em></p>
-</li>
-</ul>
-<p>Historically what I've done just to get things going is to use some value that typechecks in the argument slot:</p>
-<pre><code>&gt;&gt; append-random: specialize (adapt get $append [
-       value: random 10
-   ]) [
-       value: [something that typechecks]
-   ]
-
-&gt;&gt; append-random [a b c]
-== [a b c 7]
-
-&gt;&gt; append-random [a b c]
-== [a b c 9]
-
-&gt;&gt; append-random [a b c]
-== [a b c 7]
-</code></pre>
-<p>For the sake of education, notice what happens if you did it backwards and ADAPT the SPECIALIZE:</p>
-<pre><code>&gt;&gt; append-random: adapt (specialize get $append [
-       value: [something that typechecks]
-   ]) [
-       value: random 10
-   ]
-
-&gt;&gt; append-random [a b c]
-== [a b c [something that typechecks]]
-</code></pre>
-<h2>
-<a name="seems-we-need-specializerelax-2" class="anchor" href="https://forum.rebol.info#seems-we-need-specializerelax-2"></a>Seems We Need SPECIALIZE:RELAX</h2>
-<p>Having to pick an arbitrary meaningless value that won't trip up the type checking is bad.</p>
-<p>While we want to type check 99% of the time, this kind of scenario calls for a version of specialize that does not do typechecking.</p>
-<p>Hence I propose <strong><code>SPECIALIZE:RELAX</code></strong>.</p>
-<p>Tripwires seem like the go-to datatype to use for these specialized-out values.  Rather than just say <strong><code>~&lt;specialized out&gt;~</code></strong> you can be as detailed as you like, to help inform on what should happen:</p>
-<pre><code>&gt;&gt; append-random: specialize:relax (adapt get $append [
-       value: random 10
-   ]) [
-       value: ~&lt;ADAPT phase of APPEND-RANDOM puts INTEGER! here&gt;~
-   ]
-</code></pre>
-<p>Tripwires are great!  <img src="https://forum.rebol.info/images/emoji/twitter/boom.png?v=12" title=":boom:" class="emoji" alt=":boom:" loading="lazy" width="20" height="20">  You don't have to stress too much about cost...the string inside the tag only exists as one instance in memory.</p>
-<p>But you could be lazy and/or cheap, and just unset it. <img src="https://forum.rebol.info/images/emoji/twitter/man_shrugging.png?v=12" title=":man_shrugging:" class="emoji" alt=":man_shrugging:" loading="lazy" width="20" height="20"></p>
-<pre><code>&gt;&gt; append-random: specialize:relax (adapt get $append [
-       value: random 10
-   ]) [
-       value: ~
-   ]
-</code></pre>
-<p>There might be other uses for not typechecking at the moment of specialization, but I can't think of what they would be.</p>
-            <p><small>3 posts - 2 participants</small></p>
-            <p><a href="https://forum.rebol.info/t/generalized-argument-removal-specialize-relax/2297">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/generalized-argument-removal-specialize-relax/2297</link>
-          <pubDate>Mon, 23 Sep 2024 17:37:49 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-2297</guid>
-          <source url="https://forum.rebol.info/t/generalized-argument-removal-specialize-relax/2297.rss">Generalized Argument Removal - SPECIALIZE:RELAX</source>
-        </item>
-        <item>
-          <title>META:LITE - When You Don&#39;t Want Quasiforms</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Semantics</category>
-          <description><![CDATA[
-            <p>There was a time before quasiforms existed, but where there was generic quoting.</p>
-<p>It was in this time that META was invented.  It did the only thing it could do:</p>
-<ul>
-<li>
-<p>When you META'd a plain (or quoted) thing, it got one quote level added</p>
-</li>
-<li>
-<p>When you META'd an "antiform" you would get a plain version of the thing</p>
-</li>
-</ul>
-<p>So it worked like this:</p>
-<pre><code>&gt;&gt; meta first [(d e f)]
-== '(d e f)
-
-&gt;&gt; meta first ['(d e f)]
-== ''(d e f)
-
-&gt;&gt; spread [a b c]
-== (a b c)  ; "antiform"
-
-&gt;&gt; meta spread [a b c]
-== (a b c)
-</code></pre>
-<p><em>(That's not how it works now--for good reasons.  Not only is it a bit too easy to get confused about whether a meta protocol is in effect, the absence of quasiforms leaves a representational hole for values that produce antiforms under evaluation.  But I won't rewrite a <a href="https://forum.rebol.info/t/a-justification-of-generalized-isotopes/1918">A Justification Of Generalized Iostopes</a> here, this post has another purpose.)</em></p>
-<h2>
-<a name="another-historical-twist-meta-of-null-was-null-1" class="anchor" href="https://forum.rebol.info#another-historical-twist-meta-of-null-was-null-1"></a>Another Historical Twist: META of NULL was NULL</h2>
-<p>NULL was an outlier--at various times having no quoted form (and at other times being considered a quote of nothingness, e.g. the lone apostrophe (<strong><code>'</code></strong>)).</p>
-<p>I don't exactly remember what state NULL was in at the time META was being invented.  But regardless, it was initially decided that META and UNMETA of NULL could just give null back.</p>
-<p>This actually turned out to frequently be useful...for instance <a href="https://forum.rebol.info/t/demonstrating-for-both-loop-composability-for-the-win/1833">when writing a loop wrapper like FOR-BOTH</a></p>
-<pre><code>for-both: func [var blk1 blk2 body] [  ; the historical formulation
-    return unmeta all [
-        meta for-each var blk1 body  ; META NULL =&gt; NULL allows chaining BREAK
-        meta for-each var blk2 body
-    ]
-]
-</code></pre>
-<p>Though while it was useful there, plenty of places needed to speak fully abstractly about all possible states.  So as the model shaped up, META of NULL fit into the regular pattern of all things having reified metaforms, giving <strong><code>~null~</code></strong>.</p>
-<h2>
-<a name="i-wanted-a-metalitehttpswwwyoutubecomwatchvimv0g-4cycw-2" class="anchor" href="https://forum.rebol.info#i-wanted-a-metalitehttpswwwyoutubecomwatchvimv0g-4cycw-2"></a><a href="https://www.youtube.com/watch?v=Imv0g-4cycw">I Wanted A META:LITE</a>
-</h2>
-<p>The idea of a META variation that passed through keywords as-is came along as <strong><code>meta:lite</code></strong>.</p>
-<pre><code>&gt;&gt; meta:lite [a b c]
-== '[a b c]
-
-&gt;&gt; spread [a b c]
-== ~(a b c)~  ; null
-
-&gt;&gt; meta:lite spread [a b c]
-== ~(a b c)~
-
-&gt;&gt; meta:lite null
-== ~null~  ; anti
-
-&gt;&gt; meta:lite first [~null~ ~void~]
-== '~null~
-</code></pre>
-<p>So today's META:LITE still produces quasiforms for antiforms--just not for the <code>~null~</code> and <code>~void~</code> antiforms (and I now imagine it should probably pass through <code>~okay~</code> and <code>~end~</code> and <code>~NaN~</code> as well):</p>
-<pre><code>/for-both: func [var blk1 blk2 body] [
-    return unmeta:lite all [
-        meta:lite for-each var blk1 body  ; meta:lite null =&gt; ~null~ antiform
-        meta:lite for-each var blk2 body  ; meta:lite void =&gt; ~void~ antiform
-    ]
-]
-</code></pre>
-<h2>
-<a name="but-what-if-metalite-didnt-make-any-quasiforms-at-all-3" class="anchor" href="https://forum.rebol.info#but-what-if-metalite-didnt-make-any-quasiforms-at-all-3"></a>But What If META:LITE Didn't Make <em>Any</em> Quasiforms At All?</h2>
-<p>By design, <a href="https://forum.rebol.info/t/quasiforms-arent-super-friendly-and-they-shouldnt-be/2273">quasiforms are not very friendly</a>.  So if you have an antiform in your hand... and you know you have an antiform in your hand... it's easy to take a step to a quasiform, but you need another step to get back to a plain form you can interact with.</p>
-<p>So why not have META:LITE take care of it?</p>
-<pre><code>&gt;&gt; meta:lite null
-== ~null~  ; anti
-
-&gt;&gt; meta:lite spread [a b c]
-== (a b c)
-</code></pre>
-<p>This doesn't make a difference to things like FOR-BOTH.  They'll still work--plain forms are just as truthy as quasiforms for the meta states.  They just have to remember to use UNMETA:LITE on the reverse end.  <em>(If you use plain UNMETA it will catch your error, as UNMETA does not accept plain forms.)</em></p>
-<p>It might seem random to pair up the feature of not making quasiforms with passing thru null and void.  But I actually think the kinds of places where you'd want one behavior do overlap significantly with the other.</p>
-<p>And we're really just running out of terms, here.  Throwing another nuance in to say <em>"I want partial META, but only partial in the sense that I'm passing through null and void, not partial in terms of the other antiforms--make those quasiforms"</em> is just starting to go beyond the ability to give names to.</p>
-<p>So in my head, having META:LITE be formulated as "do what META would do in a historical world where quasiforms and meta-nulls didn't exist" feels pretty good.</p>
-<h2>
-<a name="its-still-fundamentally-a-valid-meta-4" class="anchor" href="https://forum.rebol.info#its-still-fundamentally-a-valid-meta-4"></a>It's Still Fundamentally a "Valid META"</h2>
-<p>I couldn't really think of a good name for the operation besides just saying it was an alternate behavior of META. "Lite" is a bit strange but I felt it fit.</p>
-<p>Note that it doesn't make sense as a refinement to REIFY.  Because being willing to produce something that can't be put in a block fundamentally undermines what the word REIFY means.  (<strong><code>reify:...NOT!</code></strong>)</p>
-<p>The thing about META:LITE is that it really is giving you a full-spectrum meta representation of what you had in your hand.  Every input state maps to a unique output state.  The default META happens to also be a fully reifying operation as well...but here we are saying that's not intrinsic to "a meta operation".</p>
-<p><em>(Would there be any use for a META that passes through <em>all</em> antiforms--not just the antiform words--and just quotes everything else?  That's more a variation of QUOTE than it is a variation of META.  I can't offhand think of a case where that would ever be useful.)</em></p>
-            <p><small>1 post - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/meta-lite-when-you-dont-want-quasiforms/2296">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/meta-lite-when-you-dont-want-quasiforms/2296</link>
-          <pubDate>Mon, 23 Sep 2024 13:42:44 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-2296</guid>
-          <source url="https://forum.rebol.info/t/meta-lite-when-you-dont-want-quasiforms/2296.rss">META:LITE - When You Don&#39;t Want Quasiforms</source>
         </item>
   </channel>
 </rss>

@@ -5,8 +5,118 @@
     <link>https://forum.rebol.info/c/development/functions/59</link>
     <description>Topics in the &#39;Functions&#39; category Discussions of Functions and Generators, e.g. how things like RETURN work... or the mechanics of generators and composers like ADAPT, SPECIALIZE, ENCLOSE, HIJACK, etc.</description>
     
-      <lastBuildDate>Sat, 07 Dec 2024 20:48:23 +0000</lastBuildDate>
+      <lastBuildDate>Wed, 11 Dec 2024 12:53:48 +0000</lastBuildDate>
       <atom:link href="https://forum.rebol.info/c/development/functions/59.rss" rel="self" type="application/rss+xml" />
+        <item>
+          <title>HIJACK-protection: Preserve a Weird Feature? :face_with_diagonal_mouth:</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Functions</category>
+          <description><![CDATA[
+            <p>The HIJACK functionality was proposed by <a class="mention" href="https://forum.rebol.info/u/gchiu">@gchiu</a>, many years ago:</p>
+<pre><code>&gt;&gt; /foo: func [x] [print ["FOO" (x + 1)]
+&gt;&gt; /foo-reference: foo/
+
+&gt;&gt; foo 20
+FOO 21
+
+&gt;&gt; foo-reference 20
+FOO 21
+
+&gt;&gt; /bar: func [x] [print ["HIJACKED!" (x + 1000)]
+
+&gt;&gt; hijack foo/ bar/
+
+&gt;&gt; foo 20
+HIJACKED! 1020
+
+&gt;&gt; foo-reference 20
+HIJACKED! 1020
+</code></pre>
+<p>And so, way back when... I worked up a mechanic for how to do this.  There's some nuance to how efficient it can be, based on whether the thing you're hijacking uses a parameter list that's in the same "derivation chain".</p>
+<p>While it was originally a somewhat fringe feature, it became central to certain parts of the implementation--including the web ReplPad.</p>
+<h2><a name="p-7968-what-if-you-want-to-use-the-old-implementation-1" class="anchor" href="https://forum.rebol.info#p-7968-what-if-you-want-to-use-the-old-implementation-1"></a>What If You Want To Use The Old Implementation?</h2>
+<p>Note that all references to the old function will run the hijacker.  What if you wanted the old implementation?</p>
+<p>The seemingly simplest answer would be to return the old implementation under a new identity by HIJACK:</p>
+<pre><code>&gt;&gt; /foo: func [x] [print ["FOO" (x + 1)]
+&gt;&gt; /bar: func [x] [print ["HIJACKED!" (x + 1000)]
+
+&gt;&gt; /foo-old: hijack foo/ bar/
+
+&gt;&gt; foo 20
+HIJACKED! 1020
+
+&gt;&gt; foo-old 20
+FOO 21
+</code></pre>
+<h2><a name="p-7968-but-i-did-something-different-2" class="anchor" href="https://forum.rebol.info#p-7968-but-i-did-something-different-2"></a>But I Did Something Different...</h2>
+<p>In that old era of ACTION! and FRAME! as distinct types, I decided to be clever.</p>
+<p>I said that COPY of an ACTION! would create a new action identity that ran the same code... but that wouldn't be affected by a HIJACK of the old action.</p>
+<pre><code>&gt;&gt; /foo: func [x] [print ["FOO" (x + 1)]
+&gt;&gt; /bar: func [x] [print ["HIJACKED!" (x + 1000)]
+
+&gt;&gt; /foo-copy: copy foo/ 
+
+&gt;&gt; hijack foo/ bar/
+
+&gt;&gt; foo 20
+HIJACKED! 1020
+
+&gt;&gt; foo-copy 20
+FOO 21
+</code></pre>
+<p>So HIJACK didn't return anything.</p>
+<p>On the one hand: this is strictly more powerful, it means any code anywhere can make a new identity and ensure it won't be affected by <em>subsequent</em> HIJACKs of the original function.</p>
+<p>It also lets you avoid ordering problems:</p>
+<pre><code> hijack foo/ (adapt copy foo/ [print "Doesn't need an extra step!"])
+</code></pre>
+<p>You'd have to do this in multiple steps otherwise, with some kind of dummy hijacking:</p>
+<pre><code> /old-foo: hijack foo/ noop/
+ hijack foo/ (adapt old-foo/ [print "Without COPY, you have to do this"])
+</code></pre>
+<p>So it seemed superior.</p>
+<p>BUT this turned out to be more complicated to implement, and opens a bit of a can of worms about the meaning of COPY.</p>
+<h2><a name="p-7968-what-should-could-copy-an-action-mean-3" class="anchor" href="https://forum.rebol.info#p-7968-what-should-could-copy-an-action-mean-3"></a>What Should (Could?) "COPY an ACTION" Mean?</h2>
+<p>Let's just simplify matters a little and think about the actions which have an implementation "BLOCK!" behind them...what I've called the "Details Array".</p>
+<p>You might imagine that making a copy that would not be subject to the same HIJACK-ings is as easy as making a copy of that array.  Maybe (?) that sounds a little expensive, but, you'd imagine this isn't done <em>too</em> often.</p>
+<p>However, consider something like this:</p>
+<pre><code>&gt;&gt; /g: generator [yield 1 yield 2 yield 3]
+
+&gt;&gt; g
+== 1
+
+&gt;&gt; /g-copy: copy g/
+
+&gt;&gt; g
+== 2
+
+&gt;&gt; g-copy
+== ???  ; what do you think?
+</code></pre>
+<p>There's actually a huge problem here, in that the Details Array contains delicate state.  You can't just assume duplicating that state is going to lead to a situation that won't be confused or crashy.  It may contain unique pointers that one of the instances assumes it can free because it thinks it is unique.</p>
+<p>Given this reality, the interaction between COPY of ACTION! and HIJACK was very crafty.  The HIJACK only did a <em>minor</em> disruption to the original Details array, basically rewriting a bit of it to say "you've been hijacked" but leaving the contents of the array state in place.  Copies were small stubs that could chain through to the original Details identity--and despite the fact that it had been hijacked, still run it.</p>
+<p>But things got fairly twisted.  This meant HIJACK couldn't be simple, and function copies became strange beasts that had to be conscious of the possibility that they were representations of hijackings and be conditional and that.</p>
+<h2><a name="p-7968-further-copy-of-action-is-now-copy-of-frame-4" class="anchor" href="https://forum.rebol.info#p-7968-further-copy-of-action-is-now-copy-of-frame-4"></a>Further... COPY of "action" is Now COPY of FRAME!</h2>
+<p>The unification of FRAME! and action brought about a bit of a semantics problem.</p>
+<p>COPY of an "action" now is just a mechanism of getting another FRAME! with the same parameters, that you can tweak.  It doesn't imply anything about "protect against hijacking".</p>
+<p>Hence this notion of "make new action identity that can't be hijacked" would have to be some new operator, not COPY.</p>
+<p>We're thus talking about something called <strong><code>make-unhijackable-reference</code></strong>.  <img src="https://forum.rebol.info/images/emoji/twitter/face_with_diagonal_mouth.png?v=12" title=":face_with_diagonal_mouth:" class="emoji" alt=":face_with_diagonal_mouth:" loading="lazy" width="20" height="20"></p>
+<h2><a name="p-7968-or-just-say-screw-it-hijack-returns-new-identity-5" class="anchor" href="https://forum.rebol.info#p-7968-or-just-say-screw-it-hijack-returns-new-identity-5"></a>Or... Just Say "Screw It", HIJACK Returns New Identity?</h2>
+<p>This is almost certainly the best answer.</p>
+<p>Redoing this doesn't necessarily rule out the idea of inventing MAKE-UNHIJACKABLE-REFERENCE some day.  But that would mean a hijacking would have to preserve the old implementation in a more "costly" way than it has historically, and those references would also be more costly.</p>
+<p>Seeing it relatively clearly after having written this post, I think the added cost would be the right way to do it, if this feature were decided to actually matter to anyone.</p>
+<p>So far the only uses of COPY of action to avoid hijackability have been done at the moment of hijacking, to re-use the implementation as part of the hijacking.  The concept of "shielding references from HIJACK" for any other reason is not something that I can think of applications for.</p>
+<p>(If you are the one exporting a function, and you think you someone might hijack it and you don't want to be subject to those hijackings, you can export an ADAPT with an empty block...or something of that sort...and then your implementation is safe, because if someone hijacks that adaptation it won't affect what the adaptation called.)</p>
+            <p><small>2 posts - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/hijack-protection-preserve-a-weird-feature/2348">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/hijack-protection-preserve-a-weird-feature/2348</link>
+          <pubDate>Wed, 11 Dec 2024 12:53:48 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2348</guid>
+          <source url="https://forum.rebol.info/t/hijack-protection-preserve-a-weird-feature/2348.rss">HIJACK-protection: Preserve a Weird Feature? :face_with_diagonal_mouth:</source>
+        </item>
         <item>
           <title>Default Values and MAKE FRAME! - 2024 Edition</title>
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
@@ -2421,145 +2531,6 @@ s: specialize adapt :base [
           <discourse:topicArchived>No</discourse:topicArchived>
           <guid isPermaLink="false">forum.rebol.info-topic-1467</guid>
           <source url="https://forum.rebol.info/t/chaining-return-types/1467.rss">Chaining Return Types</source>
-        </item>
-        <item>
-          <title>Representing Everything About A Parameter (...except its name)</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Functions</category>
-          <description><![CDATA[
-            <p><strong>I'm aiming to draw out the string labels in parameter lists into their own more compact form, that's just the pointer to the string name.</strong></p>
-<p>We can think of splitting out the symbol as if decorations we currently put on the parameter would be moved to the block:</p>
-<pre><code> func ['foo [&lt;end&gt; word!] /bar [integer!] /no-arg] [...]
- =&gt;
- func [foo '[&lt;end&gt; word!] bar /[integer!] no-arg-refinement /[]] [...]
-</code></pre>
-<p>That's just how to think of how it's stored.  We don't have to <em>write</em> our specs like that...</p>
-<p>There are a number of good reasons to do this, e.g. implementing <a href="https://richardartoul.github.io/jekyll/update/2015/04/26/hidden-classes.html">"hidden classes"</a> as in V8...each time you do  <strong>for-each [x y] ...</strong> or <strong>make object! [a: 10, b: 20]</strong> the system should detect the similarity of the key collection and reuse it, instead of needing unique [x y] and [a b] list copies allocated every time.</p>
-<p>(I'll point out that consistent chipping away at efficiencies means that things like <strong>/[a b]</strong> do not take up more space than <strong>/[a b]</strong> or <strong>[a b]/</strong> or <strong>[a b].</strong> or <strong>.[a b]</strong> ... though these forms are immutable... keep that in mind...)</p>
-<h2>This <em>reduces</em> how much information a "PARAM!" stores</h2>
-<p>Currently all the information for a parameter--including the symbol, types, and other modes--is stuffed into an internal Frankenstein-like type called a PARAM!.  It's compressed into a single cell as a mismash of packed bits and a pointer to a spelling.</p>
-<p><em>(Historical Note: R3-Alpha acted like these freakish cells were WORD!s...but with an off-to-the-side flag that marked them as "UNWORD"s.  This meant they stored a bunch of type bits where most words would store a binding.  These fake words could easily leak and crash the system, so Ren-C gave parameters a dedicated internal type, asserting on cases of use as if they were WORD!.)</em></p>
-<p>The symbol takes one of the four slots in the PARAM!.  The cell header takes another.  So what's left in the remaining two slots is just a bunch of bits... 64 bits is what's available on both 32-bit  and 64-bit platforms.</p>
-<p>There's a bit for whether or not each fundamental type--like a BLOCK! or TEXT!--is accepted by the parameter.  Then there are bits for <em>"is this parameter <code>&lt;skip&gt;</code>-able"</em> or <em>"can this parameter be the <code>&lt;end&gt;</code> of input"</em>.  This means the number of fundamental types allowed has been less than 64...as other parameter options have to fit in this set too.</p>
-<h1>Can PARAM! be replaced with "normal" values?</h1>
-<p>What if params were not a mysterious compressed form, but values that could be inspected more directly as a "parameter spec"?</p>
-<p>I showed this "represenational concept" above (again, just to think of it as the system stores it, not as how you write it at source level):</p>
-<pre><code> func [foo '[&lt;end&gt; word!] bar /[integer!] no-arg-refinement /[]] [...]
-</code></pre>
-<p>When the burden of representing the parameter name is removed, then <strong><code>'[&lt;end&gt; word!]</code></strong> could be the value that represents how the evaluator deals with the <code>foo</code> parameter.  Today the HELP gets a capture of these typeset blocks in the spec just for reference purposes.  But this would mean that what help used would concretely match what was in the spec.</p>
-<h2>Challenge: Mutability of Referenced Type Words</h2>
-<p>Let's imagine you did this:</p>
-<pre><code>&gt;&gt; foo: func [name [text!]] [print [name]]
-&gt;&gt; foo "before"
-before
-
-&gt;&gt; text!: integer!
-&gt;&gt; foo "after"
-after  ; did not reflect the change
-</code></pre>
-<p>Today it would not reflect the change.  This is because when that <code>TEXT!</code> word is looked up, it finds one of the built in DATATYPE!s for representing text, and sets the corresponding bit in the PARAM!.  No matter how you change TEXT!, it will only affect functions created after that point...not any that already set their bits.</p>
-<p>We could address this by saying that if you use any WORD!s in the type spec of a function, then the binding of that word gets forcibly protected (if it isn't already).</p>
-<pre><code>&gt;&gt; x!: text!
-
-&gt;&gt; foo: func [name [x!]] [print [name]]
-
-&gt;&gt; x!: integer!
-** Access Error: variable x! locked
-; ^-- it would be helpful to mention a "lock reason", though we are a bit short
-; on bits for putting in these reasons...maybe only done in 64-bit builds?
-</code></pre>
-<p>This would give a persistence so the parameter description could store <strong><code>x!</code></strong> without worrying about its meaning changing.  That means you can do things like type check a parameter for a specialization at specialization time...and trust it doesn't need rechecking when used.  It also allows performance tricks that cache bits to make the check faster without having to look up the word every time (since you know it won't change).</p>
-<p>It's a little harsh-seeming, but the type dialect has to be hardened somehow.  If you needed to use X! locally for something else, you've always got <strong>use [x!] [...]</strong> to create a new context for it.</p>
-<h2>Challenge: Performance</h2>
-<p>Checking a bit for a fundamental type in a typeset is pretty fast.  Matching a value against a rich type specification dialect isn't necessarily fast, and this is something every function (including natives) do.  It's particularly important for natives, because they interpret the bits of the cell assuming it has been checked...getting the wrong thing means it will crash.</p>
-<p>This is where internal compactions could come into play.  Users might see the parameter spec as <strong>[text! integer!]</strong> but the system could recognize specific common patterns like that and compress them into something like today's PARAM! bits, behind the scenes.</p>
-<p>We might want to rethink the usage of things like <code>&lt;end&gt;</code> to not use TAG!, but to use a type that can be interned for speed.  The problem with tags is that you could see <code>&lt;end&gt;</code> but actually have <code>next &lt;mend&gt;</code>...so if you had a process of locking down the symbol for speedy recognition you'd not be able to do it.  By contrast, ISSUE! (token) has no position and could be canonized to a word, so the process of checking could turn <code>#end</code> into something that is matched faster.</p>
-<h2>Challenge: Mutability Part II - Type Predicates</h2>
-<p>I've suggested essentially the end of the TYPESET! datatype as a concept; replacing it with functions.  This would mean something like:</p>
-<pre><code>any-type!: :any-type?
-</code></pre>
-<p>This would have the same issue with locking, so once you used ANY-TYPE! in a function spec you couldn't change that particular binding's value of ANY-TYPE! to anything else.</p>
-<p>But further, there needs to be a rule that ANY-TYPE? is a pure function.  It needs to give the same answers for the same input, and that answer cannot depend on anything about that input that can mutate.</p>
-<p>Imagine that you specialized a function with a mutable BLOCK!, and the constraint was that it was a BLOCK! of length 2.  Then you append to the block, and call the specialization.  It no longer matches.</p>
-<p>What you could ultimately end up with is a situation where you pay for type checking of specialized arguments every time (which would also mean you couldn't use the slot where the type information would have been for the specialized value...because you'll need both at the same time, an optimization loss)</p>
-<h2>Challenge: Generics Throw A Wrench Into Types</h2>
-<p>There has never been a good answer to how GENERICs (what Rebol2/Red called actions) work.  If you have something like APPEND that's defined to allow you to append to strings and blocks...but then later add an extension that implements GOB!s, how do you say that APPEND now accepts GOB!s...and how do you constrain the parameters to indicate that?</p>
-<p>Historically, the grab bag of parameters for what these generic functions allow or don't is just updated in the bootstrap files.  But users and extensions can't really do this.</p>
-<p>This is a topic in its own right--but it's worth mentioning.</p>
-<h1>Inventory Of Parts to be Represented</h1>
-<p>That's a lot to take in, but I'll close with the list of things that PARAM! bits currently encode:</p>
-<p><strong>Some of these parts are on the element that names the parameter itself:</strong></p>
-<ul>
-<li>
-<p>the spelling of the parameter's name (<a>currently case-sensitive, please read and discuss implications</a>)</p>
-</li>
-<li>
-<p>its quoting status (WORD! -&gt; normal evaluation, QUOTED! WORD! -&gt; hard literal, GET-WORD! -&gt; soft literal)</p>
-</li>
-<li>
-<p>if it's a refinement that outputs to a variable, which can also be used by multiple return...indicated by being a SET-WORD! if so</p>
-</li>
-<li>
-<p>if it's a local, shown by a leading dot (it's possible to indicate that a range of ordinary words are all local by prefixing them with the <code>&lt;local&gt;</code> tag, e.g. <strong><code>&lt;local&gt; x y</code></strong> is the same as <strong><code>.x .y</code></strong>)</p>
-</li>
-<li>
-<p>whether it is optional or not, denoted by a leading slash</p>
-</li>
-</ul>
-<p><strong>The rest is in a BLOCK! which specifies what types the parameter accepts.</strong>  This includes other attributes of the parameter that don't fit on the first value:</p>
-<ul>
-<li>
-<p>if it is willing to accept NULL or not--denoted by <code>&lt;opt&gt;</code>.  <em>(Note: this has been a gray area in "typesets" as NULL is not a value and "has no type")</em></p>
-</li>
-<li>
-<p>if it is willing to treat the end of a series as if it had received NULL--denoted by <code>&lt;end&gt;</code>.  (to help with the conflation, a separate function allows to ask if a parameter's null actually came from reaching the end or not)</p>
-</li>
-<li>
-<p>if the parameter will be skipped over and given as NULL if there is not a precisely matching type in that position slot, <a href="https://forum.rebol.info/t/skip-able-arguments/1013">denoted by <code>&lt;skip&gt;</code></a> <em>(Note: this is only available on hard literal parameters)</em></p>
-</li>
-<li>
-<p>if the parameter is variadic, denoted by <code>&lt;variadic&gt;</code> <em>(Note: this was once <code>&lt;...&gt;</code> but that is now a 4-element TUPLE! corresponding to <code>[&lt; _ _ &gt;]</code>.  While it might seem like that "should be a tag!" that would be a broken interpretation since <code>&lt;</code> is a WORD! and if used for a function or object it would need <strong><code>&lt;/refinement</code></strong> or <strong><code>&lt;.field</code></strong> to be PATH! and TUPLE! respectively)</em></p>
-</li>
-<li>
-<p>whether a parameter is modal, and controls the optional parameter directly after it in the parameter order.  <em>(Note: <a href="https://forum.rebol.info/t/new-parameter-convention-concept-modal-arguments-or-the-arg/1187">this is an experimental feature</a> that is weird and is still being studied, but it has some places where it's looking like it is fairly critical.)</em></p>
-</li>
-</ul>
-<h2>Addendum: ...that's only information the evaluator uses...!</h2>
-<p>That lengthy list doesn't include the HELP description string...which is just the tip of the iceberg for what a user might want to annotate arguments on a function with.</p>
-<p>But Ren-C pushes all of the help information into a "meta" object.  Function makers have a low-level form that doesn't bother making this object (e.g. <strong><code>specialize*</code></strong>) and then a higher-level version that does.  There's a certain amount of default information put into the object:</p>
-<pre><code>&gt;&gt; meta: meta-of :append
-&gt;&gt; words of meta
-== [description return-type return-note parameter-types parameter-notes
-
-&gt;&gt; meta/parameter-notes/dup
-== "Duplicates the insert a specified number of times"
-</code></pre>
-<p>You can tweak the object to your liking, and use FRAME!s as maps from parameter to value.  For example, you could track a property for each parameter being either <code>&lt;cool&gt;</code> or <code>&lt;uncool&gt;</code>:</p>
-<pre><code> &gt;&gt; append meta compose [coolness: (make frame! :append)]
- &gt;&gt; meta/coolness/line: &lt;cool&gt;
- &gt;&gt; meta/coolness/part: &lt;uncool&gt;
-
-&gt;&gt; meta/coolness
-== make frame! [
-    series: '~unset~
-    value: '~unset~
-    part: &lt;uncool&gt;
-    only: '~unset~
-    dup: '~unset~
-    line: &lt;cool&gt;
-]     
-</code></pre>
-<p>It's far from perfect, but it pushes the information out into the open where things like HELP can process it...and it's critical to writing code that inherits and manipulates the information.</p>
-            <p><small>5 posts - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/representing-everything-about-a-parameter-except-its-name/1459">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/representing-everything-about-a-parameter-except-its-name/1459</link>
-          <pubDate>Wed, 06 Jan 2021 18:29:54 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-1459</guid>
-          <source url="https://forum.rebol.info/t/representing-everything-about-a-parameter-except-its-name/1459.rss">Representing Everything About A Parameter (...except its name)</source>
         </item>
   </channel>
 </rss>

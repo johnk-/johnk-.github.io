@@ -5,8 +5,247 @@
     <link>https://forum.rebol.info/latest</link>
     <description>Latest topics</description>
     
-      <lastBuildDate>Sat, 07 Dec 2024 20:48:23 +0000</lastBuildDate>
+      <lastBuildDate>Thu, 12 Dec 2024 13:07:42 +0000</lastBuildDate>
       <atom:link href="https://forum.rebol.info/latest.rss" rel="self" type="application/rss+xml" />
+        <item>
+          <title>C++ Magic for LVALUE Checking...or Use Functions?</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>C/C++ Implementation</category>
+          <description><![CDATA[
+            <p>If you write traditional C like:</p>
+<pre><code>BINDING(cellA) = BINDING(cellB);
+</code></pre>
+<p>Regardless of what the BINDING() macro expands to, there's no way to do any sort of validation in any build (debug or otherwise).  Whatever this becomes can only be a simple assignment.</p>
+<p>But if you instead wrote:</p>
+<pre><code>Tweak_Binding(cellA, Binding_Of(cellB));
+</code></pre>
+<p>Then even if the intent is just a simple assignment in a release build, you could define that in a checked build to something that runs arbitrary code :</p>
+<pre><code>#if NO_RUNTIME_CHECKS
+    #define Tweak_Binding(dest,src) \ 
+        (dest)-&gt;extra.binding = (src)-&gt;extra.binding
+#else
+    #define Tweak_Binding(dest,src) \
+        Tweak_Binding_With_Added_Checks((dest), (src))
+#endif
+</code></pre>
+<p><strong>But if you're willing to confine your extra checks to C++ builds, you can leave the source looking like <code>BINDING(cellA) = BINDING(cellB)</code></strong></p>
+<p>This is because C++ has operator overloading, and you can create a wrapper class which "does the right thing", e.g. notices whether a <code>BINDING(...)</code> is used as a left hand side operator or right side operator.</p>
+<h2><a name="p-7972-just-because-i-can-does-that-mean-i-should-1" class="anchor" href="https://forum.rebol.info#p-7972-just-because-i-can-does-that-mean-i-should-1"></a>Just Because I Can, Does That Mean I Should?</h2>
+<p>Most of my original rationale was that I didn't want the source to make it look like you were making a function call when you were not.</p>
+<p>When you see something like <code>Tweak_Binding(...)</code> you don't know how many instructions that's going to be, or what side effects its going to have.  But when you see a plain assignment (that you know compiles in C to something quite simple), then that tells you not much is going on.</p>
+<p>However...I specifically came up with the term <strong><code>"Tweak"</code></strong> as a convention for functions like this that do very little.  It's a pretty good name, and it's learnable to say "oh, if it says Tweak, that means it's as cheap as an assignment".</p>
+<p>Here are some of the points to consider:</p>
+<ol>
+<li>
+<p>Because things like BINDING() are doing weird magic allowing them to be on the left side of assignments, by convention I believe they must be in all caps.  This is kind of noisy.</p>
+<ul>
+<li>On the plus side, it can be brief, with the same term used for extracting and for tweaking.  Since datatypes use the leading-caps with no underscore convention, plain <strong><code>Binding()</code></strong> looks like a parameterized datatype, so it would have to be <strong><code>Binding_Of()</code></strong> for the extractor</li>
+</ul>
+</li>
+<li>
+<p>Using C++ magic to get the RUNTIME_CHECKS means the C build won't have assertion-parity with the C build.  Bugs that only happen in the C build (perhaps on platforms that only offer C) would thus be harder to find.</p>
+</li>
+<li>
+<p>The C++ operator overloading is going to be over the heads of those reading the code who only know C.</p>
+</li>
+<li>
+<p>In debug builds, the C++ compilers do not inline the operator overloading, constructors, etc. that are involved in making the weird objects that are behind the scenes making the trick work.  That means using the C++ debugger to step into an expression like <strong><code>BINDING(cellA) = BINDING(cellB)</code></strong> takes an annoying number of step-in and step-out operations.</p>
+</li>
+</ol>
+<h2><a name="p-7972-heres-the-scary-implementation-2" class="anchor" href="https://forum.rebol.info#p-7972-heres-the-scary-implementation-2"></a>Here's The "Scary" Implementation</h2>
+<p>It really isn't rocket science, but it is something.  And it's something that can't be compiled by plain C compilers, meaning you can't do DEBUG_CHECK_BINDING in C builds.</p>
+<pre><code>#if (! DEBUG_CHECK_BINDING)
+    #define BINDING(cell) \
+        *x_cast(Context**, m_cast(Node**, &amp;(cell)-&gt;extra.node))
+#else
+    struct BindingHolder {
+        Cell* &amp; ref;
+
+        BindingHolder(const Cell* const&amp; ref)
+            : ref (const_cast&lt;Cell* &amp;&gt;(ref))
+        {
+            assert(Is_Bindable_Heart(Cell_Heart(ref)));
+        }
+
+        void operator=(Stub* right) {
+            Assert_Cell_Writable(ref);
+            ref-&gt;extra.node = right;
+            Assert_Cell_Binding_Valid(ref);
+        }
+        void operator=(BindingHolder const&amp; right) {
+            Assert_Cell_Writable(ref);
+            ref-&gt;extra.node = right.ref-&gt;extra.node;
+            Assert_Cell_Binding_Valid(ref);
+        }
+        void operator=(nullptr_t) {
+            Assert_Cell_Writable(ref);
+            ref-&gt;extra.node = nullptr;
+        }
+        template&lt;typename T&gt;
+        void operator=(Option(T) right) {
+            Assert_Cell_Writable(ref);
+            ref-&gt;extra.node = maybe right;
+            Assert_Cell_Binding_Valid(ref);
+        }
+
+        Context* operator-&gt; () const
+          { return x_cast(Context*, ref-&gt;extra.node); }
+
+        operator Context* () const
+          { return x_cast(Context*, ref-&gt;extra.node); }
+    };
+
+    #define BINDING(cell) \
+        BindingHolder{cell}
+#endif
+</code></pre>
+<h2><a name="p-7972-looking-at-them-side-by-side-3" class="anchor" href="https://forum.rebol.info#p-7972-looking-at-them-side-by-side-3"></a>Looking at them Side-By-Side</h2>
+<pre><code>BINDING(cellA) = BINDING(cellB);
+
+Tweak_Binding(cellA, Binding_Of(cellB));
+</code></pre>
+<p>I do feel a pretty strong bias for the briefer notation...</p>
+<p>But I can see the argument for not doing the "weird" thing when there's no increase in functionality... in fact, only losing functionality in C builds.  <em>(Most C++-isms are there to add something that would be fundamentally not possible in C, vs. just syntax sugar like this.)</em></p>
+<p>The invention of the "Tweak" term does change my calculation a little bit here.  Because if it's used only in these "single-assignment-equivalent" circumstances, you can comprehend it as a C assignment statement.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/c-magic-for-lvalue-checking-or-use-functions/2350">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/c-magic-for-lvalue-checking-or-use-functions/2350</link>
+          <pubDate>Thu, 12 Dec 2024 13:07:42 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2350</guid>
+          <source url="https://forum.rebol.info/t/c-magic-for-lvalue-checking-or-use-functions/2350.rss">C++ Magic for LVALUE Checking...or Use Functions?</source>
+        </item>
+        <item>
+          <title>About the C/C++ Implementation category</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>C/C++ Implementation</category>
+          <description><![CDATA[
+            <p>This category is for discussing issues in the source code for the interpreter itself.</p>
+<p>e.g. what versions of the C or C++ language spec are supported, or how variables are named, or anything pertinent to that.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/about-the-c-c-implementation-category/2349">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/about-the-c-c-implementation-category/2349</link>
+          <pubDate>Thu, 12 Dec 2024 12:22:15 +0000</pubDate>
+          <discourse:topicPinned>Yes</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2349</guid>
+          <source url="https://forum.rebol.info/t/about-the-c-c-implementation-category/2349.rss">About the C/C++ Implementation category</source>
+        </item>
+        <item>
+          <title>HIJACK-protection: Preserve a Weird Feature? :face_with_diagonal_mouth:</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Functions</category>
+          <description><![CDATA[
+            <p>The HIJACK functionality was proposed by <a class="mention" href="https://forum.rebol.info/u/gchiu">@gchiu</a>, many years ago:</p>
+<pre><code>&gt;&gt; /foo: func [x] [print ["FOO" (x + 1)]
+&gt;&gt; /foo-reference: foo/
+
+&gt;&gt; foo 20
+FOO 21
+
+&gt;&gt; foo-reference 20
+FOO 21
+
+&gt;&gt; /bar: func [x] [print ["HIJACKED!" (x + 1000)]
+
+&gt;&gt; hijack foo/ bar/
+
+&gt;&gt; foo 20
+HIJACKED! 1020
+
+&gt;&gt; foo-reference 20
+HIJACKED! 1020
+</code></pre>
+<p>And so, way back when... I worked up a mechanic for how to do this.  There's some nuance to how efficient it can be, based on whether the thing you're hijacking uses a parameter list that's in the same "derivation chain".</p>
+<p>While it was originally a somewhat fringe feature, it became central to certain parts of the implementation--including the web ReplPad.</p>
+<h2><a name="p-7968-what-if-you-want-to-use-the-old-implementation-1" class="anchor" href="https://forum.rebol.info#p-7968-what-if-you-want-to-use-the-old-implementation-1"></a>What If You Want To Use The Old Implementation?</h2>
+<p>Note that all references to the old function will run the hijacker.  What if you wanted the old implementation?</p>
+<p>The seemingly simplest answer would be to return the old implementation under a new identity by HIJACK:</p>
+<pre><code>&gt;&gt; /foo: func [x] [print ["FOO" (x + 1)]
+&gt;&gt; /bar: func [x] [print ["HIJACKED!" (x + 1000)]
+
+&gt;&gt; /foo-old: hijack foo/ bar/
+
+&gt;&gt; foo 20
+HIJACKED! 1020
+
+&gt;&gt; foo-old 20
+FOO 21
+</code></pre>
+<h2><a name="p-7968-but-i-did-something-different-2" class="anchor" href="https://forum.rebol.info#p-7968-but-i-did-something-different-2"></a>But I Did Something Different...</h2>
+<p>In that old era of ACTION! and FRAME! as distinct types, I decided to be clever.</p>
+<p>I said that COPY of an ACTION! would create a new action identity that ran the same code... but that wouldn't be affected by a HIJACK of the old action.</p>
+<pre><code>&gt;&gt; /foo: func [x] [print ["FOO" (x + 1)]
+&gt;&gt; /bar: func [x] [print ["HIJACKED!" (x + 1000)]
+
+&gt;&gt; /foo-copy: copy foo/ 
+
+&gt;&gt; hijack foo/ bar/
+
+&gt;&gt; foo 20
+HIJACKED! 1020
+
+&gt;&gt; foo-copy 20
+FOO 21
+</code></pre>
+<p>So HIJACK didn't return anything.</p>
+<p>On the one hand: this is strictly more powerful, it means any code anywhere can make a new identity and ensure it won't be affected by <em>subsequent</em> HIJACKs of the original function.</p>
+<p>It also lets you avoid ordering problems:</p>
+<pre><code> hijack foo/ (adapt copy foo/ [print "Doesn't need an extra step!"])
+</code></pre>
+<p>You'd have to do this in multiple steps otherwise, with some kind of dummy hijacking:</p>
+<pre><code> /old-foo: hijack foo/ noop/
+ hijack foo/ (adapt old-foo/ [print "Without COPY, you have to do this"])
+</code></pre>
+<p>So it seemed superior.</p>
+<p>BUT this turned out to be more complicated to implement, and opens a bit of a can of worms about the meaning of COPY.</p>
+<h2><a name="p-7968-what-should-could-copy-an-action-mean-3" class="anchor" href="https://forum.rebol.info#p-7968-what-should-could-copy-an-action-mean-3"></a>What Should (Could?) "COPY an ACTION" Mean?</h2>
+<p>Let's just simplify matters a little and think about the actions which have an implementation "BLOCK!" behind them...what I've called the "Details Array".</p>
+<p>You might imagine that making a copy that would not be subject to the same HIJACK-ings is as easy as making a copy of that array.  Maybe (?) that sounds a little expensive, but, you'd imagine this isn't done <em>too</em> often.</p>
+<p>However, consider something like this:</p>
+<pre><code>&gt;&gt; /g: generator [yield 1 yield 2 yield 3]
+
+&gt;&gt; g
+== 1
+
+&gt;&gt; /g-copy: copy g/
+
+&gt;&gt; g
+== 2
+
+&gt;&gt; g-copy
+== ???  ; what do you think?
+</code></pre>
+<p>There's actually a huge problem here, in that the Details Array contains delicate state.  You can't just assume duplicating that state is going to lead to a situation that won't be confused or crashy.  It may contain unique pointers that one of the instances assumes it can free because it thinks it is unique.</p>
+<p>Given this reality, the interaction between COPY of ACTION! and HIJACK was very crafty.  The HIJACK only did a <em>minor</em> disruption to the original Details array, basically rewriting a bit of it to say "you've been hijacked" but leaving the contents of the array state in place.  Copies were small stubs that could chain through to the original Details identity--and despite the fact that it had been hijacked, still run it.</p>
+<p>But things got fairly twisted.  This meant HIJACK couldn't be simple, and function copies became strange beasts that had to be conscious of the possibility that they were representations of hijackings and be conditional and that.</p>
+<h2><a name="p-7968-further-copy-of-action-is-now-copy-of-frame-4" class="anchor" href="https://forum.rebol.info#p-7968-further-copy-of-action-is-now-copy-of-frame-4"></a>Further... COPY of "action" is Now COPY of FRAME!</h2>
+<p>The unification of FRAME! and action brought about a bit of a semantics problem.</p>
+<p>COPY of an "action" now is just a mechanism of getting another FRAME! with the same parameters, that you can tweak.  It doesn't imply anything about "protect against hijacking".</p>
+<p>Hence this notion of "make new action identity that can't be hijacked" would have to be some new operator, not COPY.</p>
+<p>We're thus talking about something called <strong><code>make-unhijackable-reference</code></strong>.  <img src="https://forum.rebol.info/images/emoji/twitter/face_with_diagonal_mouth.png?v=12" title=":face_with_diagonal_mouth:" class="emoji" alt=":face_with_diagonal_mouth:" loading="lazy" width="20" height="20"></p>
+<h2><a name="p-7968-or-just-say-screw-it-hijack-returns-new-identity-5" class="anchor" href="https://forum.rebol.info#p-7968-or-just-say-screw-it-hijack-returns-new-identity-5"></a>Or... Just Say "Screw It", HIJACK Returns New Identity?</h2>
+<p>This is almost certainly the best answer.</p>
+<p>Redoing this doesn't necessarily rule out the idea of inventing MAKE-UNHIJACKABLE-REFERENCE some day.  But that would mean a hijacking would have to preserve the old implementation in a more "costly" way than it has historically, and those references would also be more costly.</p>
+<p>Seeing it relatively clearly after having written this post, I think the added cost would be the right way to do it, if this feature were decided to actually matter to anyone.</p>
+<p>So far the only uses of COPY of action to avoid hijackability have been done at the moment of hijacking, to re-use the implementation as part of the hijacking.  The concept of "shielding references from HIJACK" for any other reason is not something that I can think of applications for.</p>
+<p>(If you are the one exporting a function, and you think you someone might hijack it and you don't want to be subject to those hijackings, you can export an ADAPT with an empty block...or something of that sort...and then your implementation is safe, because if someone hijacks that adaptation it won't affect what the adaptation called.)</p>
+            <p><small>2 posts - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/hijack-protection-preserve-a-weird-feature/2348">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/hijack-protection-preserve-a-weird-feature/2348</link>
+          <pubDate>Wed, 11 Dec 2024 12:53:48 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2348</guid>
+          <source url="https://forum.rebol.info/t/hijack-protection-preserve-a-weird-feature/2348.rss">HIJACK-protection: Preserve a Weird Feature? :face_with_diagonal_mouth:</source>
+        </item>
         <item>
           <title>Default Values and MAKE FRAME! - 2024 Edition</title>
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
@@ -400,7 +639,7 @@ all: func [block] [
 ]
 </code></pre>
 <p>So this is based on a function called EVAL-ONE, that takes a list and two functions.  It isn't defined in %rebol.r and isn't in the reference guide either.  But it's a right fold with early termination.</p>
-<p>One can definitely imagine the Joe Marshall and Carl friction on this (<em>"why all you making all these these usermode functions and calls, why not just use a loop?"</em>).</p>
+<p>One can definitely imagine the Joe Marshall and Carl friction on this (<em>"why are you making all these usermode functions and calls, why not just use a loop?"</em>).</p>
 <p>While there's a time and a place for this, I do think that if you are starting to push out into the usermode layers and finding this mentality is driving it...you're going to end up with something that isn't hitting the mark that Rebol was aiming at.</p>
 <h2><a name="p-7953-why-is-pick-so-weird-6" class="anchor" href="https://forum.rebol.info#p-7953-why-is-pick-so-weird-6"></a>Why Is PICK So Weird?</h2>
 <pre><code>pick: func [series index] [
@@ -2408,103 +2647,6 @@ red&gt;&gt; parse "[aaa]" [begin copy stuff to end skip]
           <discourse:topicArchived>No</discourse:topicArchived>
           <guid isPermaLink="false">forum.rebol.info-topic-2308</guid>
           <source url="https://forum.rebol.info/t/foo-is-now-a-refinement-so-what-is-foo-called/2308.rss">:FOO is now a &quot;Refinement&quot;... so what is /FOO called?</source>
-        </item>
-        <item>
-          <title>SYSTEM.OPTIONS.ARGS vs. SYSTEM.SCRIPT.ARGS</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Modules</category>
-          <description><![CDATA[
-            <p><a href="https://forum.rebol.info/t/revisiting-a-maybe-not-so-weird-old-idea-as-identity/2165/2">I was looking at some code like</a>:</p>
-<pre><code>tests: if try first system.options.args [
-    local-to-file first system.options.args
-] else [
-    %core-tests.r
-]
-</code></pre>
-<p>And it reminded me that I don't like the nuance between SYSTEM.OPTIONS.ARGS and SYSTEM.SCRIPT.ARGS.</p>
-<p>One of them is supposed to capture the command line arguments that spawned the interpreter.  The other is the arguments to the currently running script.  If you spawn the interpreter in such a way that it runs a script, then the two will be the same when that script runs.</p>
-<h2>
-<a name="i-dont-like-the-naming-distinction-or-the-behavior-1" class="anchor" href="https://forum.rebol.info#i-dont-like-the-naming-distinction-or-the-behavior-1"></a>I Don't Like the Naming Distinction or the Behavior</h2>
-<p>It seems flawed to me that you can confuse them (and many people do, in ways that break as their code gets more complex.)  One way to avoid confusion would be to say that all arguments should go one place or the other.</p>
-<p>e.g. drop the idea of giving you verbatim what the command line was.  If you write the command line in such a way that some arguments are given to the script, then remove those from the place where you find the spawning arguments.</p>
-<p>That would give us SYSTEM.BOOT.ARGS which is everything that didn't get picked off to pass to the script.  And the script gets SYSTEM.SCRIPT.ARGS.</p>
-<h2>
-<a name="should-there-be-systembootargs-at-all-2" class="anchor" href="https://forum.rebol.info#should-there-be-systembootargs-at-all-2"></a>Should There Be SYSTEM.BOOT.ARGS At All?</h2>
-<p>I don't know if it's even a good idea.  Why should you be looking at that, vs. whatever was gleaned from it?  This just seems like a way to start building dependencies on the command line argument conventions of the executable that are none of your script's business.</p>
-<p>Anyway, maybe I am wrong and SYSTEM.BOOT.ARGS giving you an exact capture of the arguments which started the executable is useful and should be preserved.  <img src="https://forum.rebol.info/images/emoji/twitter/man_shrugging.png?v=12" title=":man_shrugging:" class="emoji" alt=":man_shrugging:" loading="lazy" width="20" height="20">  I'm just annoyed at how often I've been bitten by this and maybe overreacting.</p>
-<p>But at least renaming it to SYSTEM.BOOT.ARGS helps you avoid confusing it.  The SYSTEM.OPTIONS.ARGS vs. SYSTEM.SCRIPT.ARGS naming hath wrought nothing but pain.</p>
-            <p><small>1 post - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/system-options-args-vs-system-script-args/2303">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/system-options-args-vs-system-script-args/2303</link>
-          <pubDate>Mon, 30 Sep 2024 12:31:23 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-2303</guid>
-          <source url="https://forum.rebol.info/t/system-options-args-vs-system-script-args/2303.rss">SYSTEM.OPTIONS.ARGS vs. SYSTEM.SCRIPT.ARGS</source>
-        </item>
-        <item>
-          <title>A Pattern-Matching Optimized MAP (?)</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Optimization</category>
-          <description><![CDATA[
-            <p>In UPARSE, there's a MAP! of all the combinators.  You can map fundamental datatypes to combinator functions, or you can map literal elements to combinator functions (as keywords like SOME or ACROSS are)... or you can map literal elements to something to substitute as a rule.</p>
-<p><em>(e.g. you can map a literal element to a parse rule block!, and it will use that block as the implementation of whatever you mapped.  You could map <strong><code>&lt;_&gt;</code></strong> to <strong><code>[opt some whitespace]</code></strong> if you wanted.)</em></p>
-<h2>
-<a name="but-now-foobar-foo-and-foo-are-all-becoming-chainhttpsforumrebolinfotintroducingnew-chain-datatype2226-1" class="anchor" href="https://forum.rebol.info#but-now-foobar-foo-and-foo-are-all-becoming-chainhttpsforumrebolinfotintroducingnew-chain-datatype2226-1"></a>But now <code>FOO:BAR</code>, <code>FOO:</code> and <code>:(FOO)</code> are all becoming <a href="https://forum.rebol.info/t/introducingnew-chain-datatype/2226">CHAIN!</a>
-</h2>
-<p>It's likely that <strong><code>foo:bar</code></strong> would be handled by the combinator mechanics themselves, to provide refinements to the combinator.  So it wouldn't be dispatched to the "CHAIN! combinator".</p>
-<p>But we've been handling <strong><code>foo:</code></strong> and <strong><code>:(foo)</code></strong> very differently.  But they're both the same type: CHAIN!.</p>
-<p>Problem is, there are no variadic combinators (yet?).  So you either map the CHAIN! to a combinator that takes an argument or you don't.  The <strong><code>foo:</code></strong> needs an argument, the <strong><code>:(foo)</code></strong> has been evaluating the group and splicing it as a rule to execute.</p>
-<h2>
-<a name="cheap-solution-of-the-moment-hack-the-dispatch-2" class="anchor" href="https://forum.rebol.info#cheap-solution-of-the-moment-hack-the-dispatch-2"></a>Cheap Solution of the Moment: Hack The Dispatch</h2>
-<p>The terrible but "let's keep things moving" answer is that if you have any sequence with a leading blank, it will try dispatching to <strong><code>:*</code></strong> or <strong><code>/*</code></strong> or <strong><code>.*</code></strong> ... e.g. those literal sequence patterns are what you put in the combinator table.</p>
-<p>And if it has a trailing blank, you put <strong><code>*:</code></strong> or <strong><code>*/</code></strong> or <strong><code>*.</code></strong> and give those a combinator.</p>
-<p>If both of those fall through, it goes to the plain CHAIN! or PATH! or TUPLE! combinator.</p>
-<p>Shoddy...of course.  How to do better?</p>
-<h2>
-<a name="could-a-map-like-structure-optimize-pattern-match-3" class="anchor" href="https://forum.rebol.info#could-a-map-like-structure-optimize-pattern-match-3"></a>Could A MAP!-Like Structure Optimize Pattern Match?</h2>
-<p>As a non-compiled language, we can't do much to optimize <a href="https://forum.rebol.info/t/destructure-dialect/1877">something like DESTRUCTURE</a> if the moment we encounter it is the first time we've seen it.</p>
-<p>We <em>could</em> have a data structure that is internally optimized to pattern matching.  e.g. something like a MAP! but that has architecture inside of itself as a data structure that groups patterns that are close to each other together, and branches off at the appropriate points.</p>
-<p>I don't know how to implement it, but I do know that if we turned the combinator map into a list of destructure rules that it tested one at a time in order, that that would be really slow... even if destructure were native.</p>
-            <p><small>1 post - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/a-pattern-matching-optimized-map/2302">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/a-pattern-matching-optimized-map/2302</link>
-          <pubDate>Sat, 28 Sep 2024 23:35:31 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-2302</guid>
-          <source url="https://forum.rebol.info/t/a-pattern-matching-optimized-map/2302.rss">A Pattern-Matching Optimized MAP (?)</source>
-        </item>
-        <item>
-          <title>Bitten By Right Side Evaluation First</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Semantics</category>
-          <description><![CDATA[
-            <p>I was writing some code like this:</p>
-<pre><code>while [not tail? info] [
-    if find leaders info.1.name [
-        leader-protos.(info.1.name): take info
-    ] else [
-        info: next info
-    ]
-]
-</code></pre>
-<p>Due to the post title you probably already see the bug.  TAKE INFO on the right hand side runs <em>before</em> the <strong>info.1.name</strong>.  So it's inserting under the next name.</p>
-<p>I think we can (and should) precalculate the groups on the left hand side.  Basically walk the tuple and push its elements to the stack before doing the right hand side evaluation.</p>
-            <p><small>3 posts - 2 participants</small></p>
-            <p><a href="https://forum.rebol.info/t/bitten-by-right-side-evaluation-first/2301">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/bitten-by-right-side-evaluation-first/2301</link>
-          <pubDate>Sat, 28 Sep 2024 17:53:43 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-2301</guid>
-          <source url="https://forum.rebol.info/t/bitten-by-right-side-evaluation-first/2301.rss">Bitten By Right Side Evaluation First</source>
         </item>
   </channel>
 </rss>

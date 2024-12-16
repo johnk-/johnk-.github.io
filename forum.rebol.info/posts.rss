@@ -5,6 +5,382 @@
     <link>https://forum.rebol.info</link>
     <description>Latest posts</description>
       <item>
+        <title>C++ Magic for LVALUE Checking...or Use Functions?</title>
+        <dc:creator><![CDATA[@hostilefork Brian Dickens]]></dc:creator>
+        <description><![CDATA[ <p>If you write traditional C like:</p>
+<pre><code>BINDING(cellA) = BINDING(cellB);
+</code></pre>
+<p>Regardless of what the BINDING() macro expands to, there's no way to do any sort of validation in any build (debug or otherwise).  Whatever this becomes can only be a simple assignment.</p>
+<p>But if you instead wrote:</p>
+<pre><code>Tweak_Binding(cellA, Binding_Of(cellB));
+</code></pre>
+<p>Then even if the intent is just a simple assignment in a release build, you could define that in a checked build to something that runs arbitrary code :</p>
+<pre><code>#if NO_RUNTIME_CHECKS
+    #define Tweak_Binding(dest,src) \ 
+        (dest)-&gt;extra.binding = (src)-&gt;extra.binding
+#else
+    #define Tweak_Binding(dest,src) \
+        Tweak_Binding_With_Added_Checks((dest), (src))
+#endif
+</code></pre>
+<p><strong>But if you're willing to confine your extra checks to C++ builds, you can leave the source looking like <code>BINDING(cellA) = BINDING(cellB)</code></strong></p>
+<p>This is because C++ has operator overloading, and you can create a wrapper class which "does the right thing", e.g. notices whether a <code>BINDING(...)</code> is used as a left hand side operator or right side operator.</p>
+<h2><a name="p-7972-just-because-i-can-does-that-mean-i-should-1" class="anchor" href="https://forum.rebol.info#p-7972-just-because-i-can-does-that-mean-i-should-1"></a>Just Because I Can, Does That Mean I Should?</h2>
+<p>Most of my original rationale was that I didn't want the source to make it look like you were making a function call when you were not.</p>
+<p>When you see something like <code>Tweak_Binding(...)</code> you don't know how many instructions that's going to be, or what side effects its going to have.  But when you see a plain assignment (that you know compiles in C to something quite simple), then that tells you not much is going on.</p>
+<p>However...I specifically came up with the term <strong><code>"Tweak"</code></strong> as a convention for functions like this that do very little.  It's a pretty good name, and it's learnable to say "oh, if it says Tweak, that means it's as cheap as an assignment".</p>
+<p>Here are some of the points to consider:</p>
+<ol>
+<li>
+<p>Because things like BINDING() are doing weird magic allowing them to be on the left side of assignments, by convention I believe they must be in all caps.  This is kind of noisy.</p>
+<ul>
+<li>On the plus side, it can be brief, with the same term used for extracting and for tweaking.  Since datatypes use the leading-caps with no underscore convention, plain <strong><code>Binding()</code></strong> looks like a parameterized datatype, so it would have to be <strong><code>Binding_Of()</code></strong> for the extractor</li>
+</ul>
+</li>
+<li>
+<p>Using C++ magic to get the RUNTIME_CHECKS means the C build won't have assertion-parity with the C build.  Bugs that only happen in the C build (perhaps on platforms that only offer C) would thus be harder to find.</p>
+</li>
+<li>
+<p>The C++ operator overloading is going to be over the heads of those reading the code who only know C.</p>
+</li>
+<li>
+<p>In debug builds, the C++ compilers do not inline the operator overloading, constructors, etc. that are involved in making the weird objects that are behind the scenes making the trick work.  That means using the C++ debugger to step into an expression like <strong><code>BINDING(cellA) = BINDING(cellB)</code></strong> takes an annoying number of step-in and step-out operations.</p>
+</li>
+</ol>
+<h2><a name="p-7972-heres-the-scary-implementation-2" class="anchor" href="https://forum.rebol.info#p-7972-heres-the-scary-implementation-2"></a>Here's The "Scary" Implementation</h2>
+<p>It really isn't rocket science, but it is something.  And it's something that can't be compiled by plain C compilers, meaning you can't do DEBUG_CHECK_BINDING in C builds.</p>
+<pre><code>#if (! DEBUG_CHECK_BINDING)
+    #define BINDING(cell) \
+        *x_cast(Context**, m_cast(Node**, &amp;(cell)-&gt;extra.node))
+#else
+    struct BindingHolder {
+        Cell* &amp; ref;
+
+        BindingHolder(const Cell* const&amp; ref)
+            : ref (const_cast&lt;Cell* &amp;&gt;(ref))
+        {
+            assert(Is_Bindable_Heart(Cell_Heart(ref)));
+        }
+
+        void operator=(Stub* right) {
+            Assert_Cell_Writable(ref);
+            ref-&gt;extra.node = right;
+            Assert_Cell_Binding_Valid(ref);
+        }
+        void operator=(BindingHolder const&amp; right) {
+            Assert_Cell_Writable(ref);
+            ref-&gt;extra.node = right.ref-&gt;extra.node;
+            Assert_Cell_Binding_Valid(ref);
+        }
+        void operator=(nullptr_t) {
+            Assert_Cell_Writable(ref);
+            ref-&gt;extra.node = nullptr;
+        }
+        template&lt;typename T&gt;
+        void operator=(Option(T) right) {
+            Assert_Cell_Writable(ref);
+            ref-&gt;extra.node = maybe right;
+            Assert_Cell_Binding_Valid(ref);
+        }
+
+        Context* operator-&gt; () const
+          { return x_cast(Context*, ref-&gt;extra.node); }
+
+        operator Context* () const
+          { return x_cast(Context*, ref-&gt;extra.node); }
+    };
+
+    #define BINDING(cell) \
+        BindingHolder{cell}
+#endif
+</code></pre>
+<h2><a name="p-7972-looking-at-them-side-by-side-3" class="anchor" href="https://forum.rebol.info#p-7972-looking-at-them-side-by-side-3"></a>Looking at them Side-By-Side</h2>
+<pre><code>BINDING(cellA) = BINDING(cellB);
+
+Tweak_Binding(cellA, Binding_Of(cellB));
+</code></pre>
+<p>I do feel a pretty strong bias for the briefer notation...</p>
+<p>But I can see the argument for not doing the "weird" thing when there's no increase in functionality... in fact, only losing functionality in C builds.  <em>(Most C++-isms are there to add something that would be fundamentally not possible in C, vs. just syntax sugar like this.)</em></p>
+<p>The invention of the "Tweak" term does change my calculation a little bit here.  Because if it's used only in these "single-assignment-equivalent" circumstances, you can comprehend it as a C assignment statement.</p> ]]></description>
+        <link>https://forum.rebol.info/t/c-magic-for-lvalue-checking-or-use-functions/2350#post_1</link>
+        <pubDate>Thu, 12 Dec 2024 13:07:42 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-7972</guid>
+      </item>
+      <item>
+        <title>About the C/C++ Implementation category</title>
+        <dc:creator><![CDATA[@hostilefork Brian Dickens]]></dc:creator>
+        <description><![CDATA[ <p>This category is for discussing issues in the source code for the interpreter itself.</p>
+<p>e.g. what versions of the C or C++ language spec are supported, or how variables are named, or anything pertinent to that.</p> ]]></description>
+        <link>https://forum.rebol.info/t/about-the-c-c-implementation-category/2349#post_1</link>
+        <pubDate>Thu, 12 Dec 2024 12:22:15 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-7971</guid>
+      </item>
+      <item>
+        <title>HIJACK-protection: Preserve a Weird Feature? :face_with_diagonal_mouth:</title>
+        <dc:creator><![CDATA[@hostilefork Brian Dickens]]></dc:creator>
+        <description><![CDATA[ <aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="2348">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>It also lets you avoid ordering problems:</p>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext"> hijack foo/ (adapt copy foo/ [print "Doesn't need an extra step!"])
+</code></pre>
+<p>You'd have to do this in multiple steps otherwise, with some kind of dummy hijacking:</p>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext"> /old-foo: hijack foo/ noop/
+ hijack foo/ (adapt old-foo/ [print "Without COPY, you have to do this"])
+</code></pre>
+</blockquote>
+</aside>
+<p>I've made this slightly more efficient and slightly more foolproof by letting you HIJACK with VOID.</p>
+<p>So you can extract the old code under a new identity, and then if you call the function without hijacking it with a new implementation you get an error:</p>
+<pre><code>&gt;&gt; /old-foo: hijack foo/ void
+
+&gt;&gt; foo 10
+** Error: FRAME! hasn't been associated with code, or HIJACK'd VOID
+</code></pre>
+<p>A little safer, a little cheaper.</p>
+<p>But this would lead to a common pattern--parentheses not necessary, but help illustrate what's going on:</p>
+<pre><code>hijack foo/ (adapt (hijack foo/ void) [
+    print "Some adaptation code, or ENCLOSE, or whatever"
+])
+</code></pre>
+<p>It's not <em>that</em> much worse than when you had to do this with COPY (when COPY semantics made sense).  But it is a little worse.</p>
+<p>If there were one word for it, like STEAL it would be similar:</p>
+<pre><code>hijack foo/ adapt (steal foo/) [
+    print "Some adaptation code, or ENCLOSE, or whatever"
+]
+</code></pre>
+<p>But STEAL actually does something else, kind of interesting, FYI:</p>
+<pre><code>&gt;&gt; x: 10
+== 10
+
+&gt;&gt; steal x: 20
+== 10
+
+&gt;&gt; x
+== 20
+</code></pre>
+<p>What would be nice, would be something that looked like this:</p>
+<pre><code>adapt (hijack foo/) [
+    print "It would be neat if this 'just worked'"
+]
+</code></pre>
+<p>As if creating a new adaptation of that hijack result would somehow in and of itself know how to patch the adapted functionality in to be the new behavior for FOO.  Not that there's a general mechanism for that making sense with this design, but, it "seems convenient".</p>
+<p>Of course, ADAPT could have a refinement...</p>
+<pre><code>adapt:hijack foo/ [
+    print "ADAPT, ENCLOSE, etc. *could* fold in hijacking... :-("
+]
+</code></pre>
+<p>But I'm not a huge fan of anything that makes every such generator need that refinement, they're supposed to be composable orthogonal parts.</p>
+<h2><a name="p-7970-leaving-it-how-it-is-for-now-1" class="anchor" href="https://forum.rebol.info#p-7970-leaving-it-how-it-is-for-now-1"></a>Leaving It How It Is For Now...</h2>
+<p>I had to muck around with HIJACK just because the old way was impeding the design.  Things are in good enough shape now to work and move on.  Just wanted to write some more thoughts down.</p> ]]></description>
+        <link>https://forum.rebol.info/t/hijack-protection-preserve-a-weird-feature/2348#post_2</link>
+        <pubDate>Wed, 11 Dec 2024 20:55:08 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-7970</guid>
+      </item>
+      <item>
+        <title>Should NOTHING and NIHIL be Offered as Named Actions?</title>
+        <dc:creator><![CDATA[@hostilefork Brian Dickens]]></dc:creator>
+        <description><![CDATA[ <aside class="quote no-group" data-username="hostilefork" data-post="4" data-topic="2234">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">&gt;&gt; no-op
+== ~  ; anti
+</code></pre>
+<p>Don't know about the hyphen. "literate" but as it's an abbreviation already, kind of annoying. We know what a noop is.</p>
+</blockquote>
+</aside>
+<p>AI are usually very circumspect.  But they were pretty much unanimous saying <em>"programmers know what NOOP (or NOP) is, and this is industry-wide (e.g. jQuery.noop). The hyphen is noise, and if someone didn't know what 'noop' was they'd learn it quickly. Once they learned they would find the hyphen unnecessary."</em></p>
+<p>I was motivated to finally pull the trigger on this due to <a href="https://forum.rebol.info/t/preserving-weird-features-hijack-protection/2348">the new rules for HIJACK</a>.  You can use NOOP here as a placeholder, just long enough to get a new identity... then use that identity in a derivation for the function you're going to hijack with.</p>
+<p>Example:</p>
+<pre><code>let /panic-old: hijack panic/ noop/
+
+hijack panic/ adapt panic-old/ [
+    print "PANIC ACTION! is being triggered from a usermode call"
+    print mold reason
+    ;
+    ; ...adaptation falls through to our copy of the original PANIC
+]
+</code></pre>
+<p>Maybe a better placeholder would be some kind of UNREACHABLE that errors when called... if you forgot to fill it in.  But, NOOP is at least not the worst choice.</p>
+<p>(Actually, it occurs to me that if you could HIJACK with VOID, it could just leave the stub as a dummy... and then completely overwrite it with the subsequent HIJACK and just give back NULL to say nothing was there...thus not allocating anything extra.  That's probably best.)</p> ]]></description>
+        <link>https://forum.rebol.info/t/should-nothing-and-nihil-be-offered-as-named-actions/2234#post_5</link>
+        <pubDate>Wed, 11 Dec 2024 13:58:53 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-7969</guid>
+      </item>
+      <item>
+        <title>HIJACK-protection: Preserve a Weird Feature? :face_with_diagonal_mouth:</title>
+        <dc:creator><![CDATA[@hostilefork Brian Dickens]]></dc:creator>
+        <description><![CDATA[ <p>The HIJACK functionality was proposed by <a class="mention" href="https://forum.rebol.info/u/gchiu">@gchiu</a>, many years ago:</p>
+<pre><code>&gt;&gt; /foo: func [x] [print ["FOO" (x + 1)]
+&gt;&gt; /foo-reference: foo/
+
+&gt;&gt; foo 20
+FOO 21
+
+&gt;&gt; foo-reference 20
+FOO 21
+
+&gt;&gt; /bar: func [x] [print ["HIJACKED!" (x + 1000)]
+
+&gt;&gt; hijack foo/ bar/
+
+&gt;&gt; foo 20
+HIJACKED! 1020
+
+&gt;&gt; foo-reference 20
+HIJACKED! 1020
+</code></pre>
+<p>And so, way back when... I worked up a mechanic for how to do this.  There's some nuance to how efficient it can be, based on whether the thing you're hijacking uses a parameter list that's in the same "derivation chain".</p>
+<p>While it was originally a somewhat fringe feature, it became central to certain parts of the implementation--including the web ReplPad.</p>
+<h2><a name="p-7968-what-if-you-want-to-use-the-old-implementation-1" class="anchor" href="https://forum.rebol.info#p-7968-what-if-you-want-to-use-the-old-implementation-1"></a>What If You Want To Use The Old Implementation?</h2>
+<p>Note that all references to the old function will run the hijacker.  What if you wanted the old implementation?</p>
+<p>The seemingly simplest answer would be to return the old implementation under a new identity by HIJACK:</p>
+<pre><code>&gt;&gt; /foo: func [x] [print ["FOO" (x + 1)]
+&gt;&gt; /bar: func [x] [print ["HIJACKED!" (x + 1000)]
+
+&gt;&gt; /foo-old: hijack foo/ bar/
+
+&gt;&gt; foo 20
+HIJACKED! 1020
+
+&gt;&gt; foo-old 20
+FOO 21
+</code></pre>
+<h2><a name="p-7968-but-i-did-something-different-2" class="anchor" href="https://forum.rebol.info#p-7968-but-i-did-something-different-2"></a>But I Did Something Different...</h2>
+<p>In that old era of ACTION! and FRAME! as distinct types, I decided to be clever.</p>
+<p>I said that COPY of an ACTION! would create a new action identity that ran the same code... but that wouldn't be affected by a HIJACK of the old action.</p>
+<pre><code>&gt;&gt; /foo: func [x] [print ["FOO" (x + 1)]
+&gt;&gt; /bar: func [x] [print ["HIJACKED!" (x + 1000)]
+
+&gt;&gt; /foo-copy: copy foo/ 
+
+&gt;&gt; hijack foo/ bar/
+
+&gt;&gt; foo 20
+HIJACKED! 1020
+
+&gt;&gt; foo-copy 20
+FOO 21
+</code></pre>
+<p>So HIJACK didn't return anything.</p>
+<p>On the one hand: this is strictly more powerful, it means any code anywhere can make a new identity and ensure it won't be affected by <em>subsequent</em> HIJACKs of the original function.</p>
+<p>It also lets you avoid ordering problems:</p>
+<pre><code> hijack foo/ (adapt copy foo/ [print "Doesn't need an extra step!"])
+</code></pre>
+<p>You'd have to do this in multiple steps otherwise, with some kind of dummy hijacking:</p>
+<pre><code> /old-foo: hijack foo/ noop/
+ hijack foo/ (adapt old-foo/ [print "Without COPY, you have to do this"])
+</code></pre>
+<p>So it seemed superior.</p>
+<p>BUT this turned out to be more complicated to implement, and opens a bit of a can of worms about the meaning of COPY.</p>
+<h2><a name="p-7968-what-should-could-copy-an-action-mean-3" class="anchor" href="https://forum.rebol.info#p-7968-what-should-could-copy-an-action-mean-3"></a>What Should (Could?) "COPY an ACTION" Mean?</h2>
+<p>Let's just simplify matters a little and think about the actions which have an implementation "BLOCK!" behind them...what I've called the "Details Array".</p>
+<p>You might imagine that making a copy that would not be subject to the same HIJACK-ings is as easy as making a copy of that array.  Maybe (?) that sounds a little expensive, but, you'd imagine this isn't done <em>too</em> often.</p>
+<p>However, consider something like this:</p>
+<pre><code>&gt;&gt; /g: generator [yield 1 yield 2 yield 3]
+
+&gt;&gt; g
+== 1
+
+&gt;&gt; /g-copy: copy g/
+
+&gt;&gt; g
+== 2
+
+&gt;&gt; g-copy
+== ???  ; what do you think?
+</code></pre>
+<p>There's actually a huge problem here, in that the Details Array contains delicate state.  You can't just assume duplicating that state is going to lead to a situation that won't be confused or crashy.  It may contain unique pointers that one of the instances assumes it can free because it thinks it is unique.</p>
+<p>Given this reality, the interaction between COPY of ACTION! and HIJACK was very crafty.  The HIJACK only did a <em>minor</em> disruption to the original Details array, basically rewriting a bit of it to say "you've been hijacked" but leaving the contents of the array state in place.  Copies were small stubs that could chain through to the original Details identity--and despite the fact that it had been hijacked, still run it.</p>
+<p>But things got fairly twisted.  This meant HIJACK couldn't be simple, and function copies became strange beasts that had to be conscious of the possibility that they were representations of hijackings and be conditional and that.</p>
+<h2><a name="p-7968-further-copy-of-action-is-now-copy-of-frame-4" class="anchor" href="https://forum.rebol.info#p-7968-further-copy-of-action-is-now-copy-of-frame-4"></a>Further... COPY of "action" is Now COPY of FRAME!</h2>
+<p>The unification of FRAME! and action brought about a bit of a semantics problem.</p>
+<p>COPY of an "action" now is just a mechanism of getting another FRAME! with the same parameters, that you can tweak.  It doesn't imply anything about "protect against hijacking".</p>
+<p>Hence this notion of "make new action identity that can't be hijacked" would have to be some new operator, not COPY.</p>
+<p>We're thus talking about something called <strong><code>make-unhijackable-reference</code></strong>.  <img src="https://forum.rebol.info/images/emoji/twitter/face_with_diagonal_mouth.png?v=12" title=":face_with_diagonal_mouth:" class="emoji" alt=":face_with_diagonal_mouth:" loading="lazy" width="20" height="20"></p>
+<h2><a name="p-7968-or-just-say-screw-it-hijack-returns-new-identity-5" class="anchor" href="https://forum.rebol.info#p-7968-or-just-say-screw-it-hijack-returns-new-identity-5"></a>Or... Just Say "Screw It", HIJACK Returns New Identity?</h2>
+<p>This is almost certainly the best answer.</p>
+<p>Redoing this doesn't necessarily rule out the idea of inventing MAKE-UNHIJACKABLE-REFERENCE some day.  But that would mean a hijacking would have to preserve the old implementation in a more "costly" way than it has historically, and those references would also be more costly.</p>
+<p>Seeing it relatively clearly after having written this post, I think the added cost would be the right way to do it, if this feature were decided to actually matter to anyone.</p>
+<p>So far the only uses of COPY of action to avoid hijackability have been done at the moment of hijacking, to re-use the implementation as part of the hijacking.  The concept of "shielding references from HIJACK" for any other reason is not something that I can think of applications for.</p>
+<p>(If you are the one exporting a function, and you think you someone might hijack it and you don't want to be subject to those hijackings, you can export an ADAPT with an empty block...or something of that sort...and then your implementation is safe, because if someone hijacks that adaptation it won't affect what the adaptation called.)</p> ]]></description>
+        <link>https://forum.rebol.info/t/hijack-protection-preserve-a-weird-feature/2348#post_1</link>
+        <pubDate>Wed, 11 Dec 2024 12:53:48 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-7968</guid>
+      </item>
+      <item>
+        <title>Performance Implications of Antiform-FRAME!-is-Action</title>
+        <dc:creator><![CDATA[@hostilefork Brian Dickens]]></dc:creator>
+        <description><![CDATA[ <aside class="quote no-group" data-username="hostilefork" data-post="4" data-topic="2083">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>It does mean that if you want to actually take an antiform parameter as an argument, it has to be a ^META parameter...even though it's stable. But that's not such a problem.</p>
+</blockquote>
+</aside>
+<p>It ultimately turned out that this <em>was</em> a problem, and a problem that is resolved now...by pushing back to where NOTHING (antiform blank, e.g. ~ antiform) is the only stable form that requires you to use ^META conventions.</p>
+<aside class="quote no-group" data-username="hostilefork" data-post="4" data-topic="2083">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>When you look at what I mention in the other thread about how you can't really "re-skin" actions anyway (at least with trivial mechanics), I think this suggests that whatever the "MAKE FRAME!" operator is needs to go back to filling the unfulfilled arguments with antiform blank. Antiform parameters need to be friendly when reflecting specs.</p>
+</blockquote>
+</aside>
+<p><a href="https://forum.rebol.info/t/default-values-and-make-frame-2024-edition/2347/2">I followed through the implications of this</a>, to really get all the ducks in a row.</p>
+<p>The results are converging on something quite coherent and useful:</p>
+<pre><code>&gt;&gt; append/
+== ~#[frame! "append" [series value part dup line]]]~  ; anti
+
+&gt;&gt; words of append/
+== [series value part dup line]
+
+&gt;&gt; append.dup
+== ~#[parameter! :[any-number? pair!]]~  ; anti
+
+&gt;&gt; append.dup.text
+== "Duplicates the append a specified number of times"
+
+&gt;&gt; append.dup.optional  ; seems better than ".is-refinement"
+== ~okay~  ; anti
+
+&gt;&gt; append.dup.spec  ; would ".types" be better?  :-/
+== [any-number? pair!]
+</code></pre>
+<p>Here we see the real power coming from the Ren-C concepts.  We're exploiting the duality of FRAME! and action, where the antiform of a frame <em>is</em> the action.  And then further, the idea that there's a separate dot operation for tuple picking...we can keep that meaning so that it still works on the antiform frame, to select out the antiform parameters.</p>
+<p>And MAKE FRAME! goes back to unsetting slots:</p>
+<pre><code>&gt;&gt; make frame! append/
+== #[frame! [
+    series: ~
+    value: ~
+    part: ~
+    dup: ~
+    line: ~
+]]
+</code></pre>
+<p>While COPY UNRUN can be used to get a FRAME! that lets you tinker with the interface:</p>
+<pre><code>&gt;&gt; copy unrun append/  ; UNRUN is just UNQUASI META for antiform frames
+== #[frame! [
+    series: ~#[parameter! [
+        ~void~ any-series? port! map! object! module! bitset!]
+    ]~
+    value: ~#[parameter! [~void~ element? splice?]]~
+    part: ~#[parameter! :[any-number? any-series? pair!]]~
+    dup: ~#[parameter! :[any-number? pair!]]~
+    line: ~#[parameter! :[]]~
+]]
+</code></pre>
+<p>This stuff may look obvious or clear in retrospect (well it <em>should</em> look clear and obvious, though you'd probably have to use it to really have it sink in.)  But it's quite hard to reason about and adjust in a system that has to keep running.</p> ]]></description>
+        <link>https://forum.rebol.info/t/performance-implications-of-antiform-frame-is-action/2083#post_5</link>
+        <pubDate>Mon, 09 Dec 2024 09:07:11 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-7967</guid>
+      </item>
+      <item>
         <title>Default Values and MAKE FRAME! - 2024 Edition</title>
         <dc:creator><![CDATA[@hostilefork Brian Dickens]]></dc:creator>
         <description><![CDATA[ <p><em>Still paying off technical debt, here...this frame stuff has been agonizing.</em></p>
@@ -790,7 +1166,7 @@ all: func [block] [
 ]
 </code></pre>
 <p>So this is based on a function called EVAL-ONE, that takes a list and two functions.  It isn't defined in %rebol.r and isn't in the reference guide either.  But it's a right fold with early termination.</p>
-<p>One can definitely imagine the Joe Marshall and Carl friction on this (<em>"why all you making all these these usermode functions and calls, why not just use a loop?"</em>).</p>
+<p>One can definitely imagine the Joe Marshall and Carl friction on this (<em>"why are you making all these usermode functions and calls, why not just use a loop?"</em>).</p>
 <p>While there's a time and a place for this, I do think that if you are starting to push out into the usermode layers and finding this mentality is driving it...you're going to end up with something that isn't hitting the mark that Rebol was aiming at.</p>
 <h2><a name="p-7953-why-is-pick-so-weird-6" class="anchor" href="https://forum.rebol.info#p-7953-why-is-pick-so-weird-6"></a>Why Is PICK So Weird?</h2>
 <pre><code>pick: func [series index] [
@@ -4226,412 +4602,6 @@ eval compose:deep $() [repeat 2 [append mutable (block) &lt;legal&gt;]]
         <link>https://forum.rebol.info/t/value-vs-series-modification-bit-const-and-mutable/976#post_6</link>
         <pubDate>Wed, 20 Nov 2024 04:12:48 +0000</pubDate>
         <guid isPermaLink="false">forum.rebol.info-post-7916</guid>
-      </item>
-      <item>
-        <title>ENVELOP (and COMPOSE!) By Example</title>
-        <dc:creator><![CDATA[@hostilefork Brian Dickens]]></dc:creator>
-        <description><![CDATA[ <p>So I went ahead and did the transition to arity-2 COMPOSE, so I could see the effects.</p>
-<p>Since bootstrap needs to still work, I needed to have a name for the arity-1 version, and I called it <strong><code>compose1</code></strong>  <em>Which actually isn't a terrible name for the arity-1 version.</em>  Maybe <strong><code>compose-1</code></strong> would separate the <strong>e</strong> and the <strong>1</strong> a little better, but it also adds noise.</p>
-<p>There's also the possibility of <strong><code>compose*</code></strong>, though adding a star usually means "lower level version".  But more generally it could be argued that it's a "special version".</p>
-<p>What its doing is actually:</p>
-<pre><code>compose1 list
-=&gt;
-compose (inside list '()) list
-</code></pre>
-<p>So maybe calling it <strong><code>compose-inside</code></strong> would be more informative, but that wouldn't tell you that you were using groups, so it's <strong><code>compose-groups-inside</code></strong>...</p>
-<aside class="quote no-group" data-username="hostilefork" data-post="5" data-topic="2294">
-<div class="title">
-<div class="quote-controls"></div>
-<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
-<blockquote>
-<p>Stealing the binding from the tip of the block you're composing and using that in the slots is a kind of "weird backchannel". If that's what you're doing, <em>you're the weird one</em>, so maybe your code should reflect that.</p>
-</blockquote>
-</aside>
-<p>Well, when I put it that way, <strong><code>COMPOSE*</code></strong> might be good for this.</p>
-<p>Anyway, I think the competition is between calling it <strong><code>COMPOSE*</code></strong> or <strong><code>COMPOSE1</code></strong></p>
-<p>If we had <a href="https://forum.rebol.info/t/dialecting-function-calls-new-weird-powerful/2310">CHAIN! dialecting</a>, it might permit:</p>
-<pre><code>&gt;&gt; compose [a (1 + 2) b]
-== [a 3 b]
-
-&gt;&gt; compose:${{}} [(a) {{1 + 2}} {b}]
-== [(a) 3 {b}]
-</code></pre>
-<p>But that feature is very speculative, and binding issues may make it non-feasible.</p>
-<aside class="quote no-group quote-modified" data-username="hostilefork" data-post="5" data-topic="2294">
-<div class="title">
-<div class="quote-controls"></div>
-<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
-<blockquote>
-<p>But, It Would Drive The "Noise" Level Higher...</p>
-<p>Some (like <a class="mention" href="https://forum.rebol.info/u/rgchris">@rgchris</a>) do not like symbols in code at all.</p>
-<p>Having COMPOSE frequently instantiated as <strong><code>compose $() [...]</code></strong> would be a thorn. (Though as I've stated, I think you really should be doing <strong><code>compose $() '[...]</code></strong> much more than one would think).</p>
-</blockquote>
-</aside>
-<p><strong>This is a pretty tough call, but I think I'm on the side of saying that COMPOSE should be arity-2.</strong></p>
-<p>Beyond the necessity of providing a binding environment when you want to apply COMPOSE to strings, I'm seeing too many places where an arity-1 COMPOSE <em>can't</em> do what you want.</p>
-<p>I also feel like taking away the assumption of COMPOSE being groups is good--it's not groups, it's the pattern you choose.  I like <strong><code>{{...}}</code></strong> because at least now, that has no meaning and stands out a lot better.</p>
-<p><strong>The harsh reality is that to really make things work... binding has to be thrust into the awareness of those who are building and composing code.</strong></p>
-<p>Being able to evaluate templated code groups (or blocks, or fences...) in an environment that is different than the environment of the surrounding code is not something that has been easy before.</p>
-<p>But I think it's foundational--and as I've said, the most common surrounding context is likely <em>no</em> context... with the intention of inheriting the meaning from wherever you are putting the composed code.</p> ]]></description>
-        <link>https://forum.rebol.info/t/envelop-and-compose-by-example/2294#post_6</link>
-        <pubDate>Wed, 20 Nov 2024 00:32:38 +0000</pubDate>
-        <guid isPermaLink="false">forum.rebol.info-post-7915</guid>
-      </item>
-      <item>
-        <title>hiiamboris&#39;s WITH</title>
-        <dc:creator><![CDATA[@hostilefork Brian Dickens]]></dc:creator>
-        <description><![CDATA[ <aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="2138">
-<div class="title">
-<div class="quote-controls"></div>
-<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
-<blockquote>
-<pre data-code-wrap="plaintext"><code class="lang-plaintext">with x  [..]          == bind [..] x
-with 'x [..]          == bind [..] 'x
-with :fun [..]        == bind [..] :fun
-with [:fun] [..]      == bind [..] :fun
-with [x y 'z] [..]    == bind bind bind [..] 'z y x
-with [x: 1 y: 2] [..] == bind [..] context [x: 1 y: 2]
-</code></pre>
-</blockquote>
-</aside>
-<p>So I was wondering in the design of the WITH-like BIND what plain words should do, as opposed to <code>@word</code>.</p>
-<p>One concept I had was that with plain words, BIND could serve the role of "old USE" and create new bindings.  Then, an <code>@word</code> would mean that you wanted to bind to that particular word.</p>
-<pre><code>x: 10
-y: 20
-eval bind [@x y] [
-   x: 100  ; overwrites X
-   y: 200  ; would not overwrite as plain Y word made new variable
-]
-</code></pre>
-<p>That would be making a distinction between words and <code>@word</code> that lines up with how FOR-EACH and others treat variables.  It was chosen over <code>$word</code> due to the ability to pass the variable reference without a block:</p>
-<pre><code>iterate @var [...]   ; the @ sticks, but $var makes a plain bound word
-</code></pre>
-<p>But BIND has a competing intent, which is when you want to bind to the thing the word points to.</p>
-<pre><code>foo: make object! [x: 10 y: 20]
-bar: make object! [z: 30]
-
-eval bind [@foo @bar] [  ; alternative intent of @
-   assert [all [x = 10, y = 20]]
-   assert [z = 30]
-]
-</code></pre>
-<p>This is more like the PARSE meaning of @ which means "dereference this word".</p>
-<p>Another way of doing that could be GROUP! evaluations:</p>
-<pre><code>eval bind [(foo) (bar)] [
-   assert [all [x = 10, y = 20]]
-   assert [z = 30]
-]
-</code></pre>
-<p>It's worth pointing out that making new variables with BIND can be done easily another way, with FENCE!, so we could say:</p>
-<pre><code>x: 10
-y: 20
-eval bind [x {y: ~}] [  ; instead of [@x y]
-   x: 100  ; overwrites X
-   y: 200  ; would not overwrite as {Y: ~} made new variable
-]
-</code></pre>
-<p>And I think giving a value to a new variable is probably more common than not wanting to, anyway.</p>
-<p>That frees up the <code>@foo</code> to mean "what I intend to bind to is what you get by dereferencing this" intent.</p>
-<p>So binding a single word means bind using the binding of that word.</p>
-<pre><code>block: [print ["The value of x is:" x]]
-
-foo: func [x] [
-    eval bind $x block
-    eval bind [x] block
-]
-
-foo 10  ; would print the message with x as 10
-</code></pre>
-<p><strong>I can't necessarily prove it offhand, but I feel like having <code>bind [@x y]</code> mean something parallel to <code>for-each [@x y]</code> would be beneficial.</strong></p>
-<p>That would indicate producing a new variable for Y, and reusing a binding for X.</p>
-<p>This makes BIND able to function easily as a "LET that takes a block"</p>
-<pre><code>let x
-x: 10
-
-bind 'x [x: 10]
-</code></pre>
-<p>Something about pushing on these symmetries seems more important than giving you a way to dereference variables to implicate the objects they point to, that's briefer than a GROUP!.</p>
-<p>(Honestly, multiple binds are probably not that common, and in fact you wouldn't get a lot of benefit out of it by saying <strong><code>bind [(obj1) (obj2)] ...</code></strong> as opposed to <strong><code>bind obj1 bind obj2 ...</code></strong>)</p>
-<h2><a name="p-7914-the-binding-dialect-likely-needs-more-features-1" class="anchor" href="https://forum.rebol.info#p-7914-the-binding-dialect-likely-needs-more-features-1"></a>The Binding Dialect Likely Needs More Features</h2>
-<p>This is sort of the tip of the iceberg in "meanings you might have for binding requests".  So <strong></strong> could be another way of saying you should dereference, as part of a broader idea of TAG!-instructions:</p>
-<pre><code>foo: make object! [x: 10 y: 20]
-bar: make object! [z: 30]
-
-eval bind [&lt;in&gt; foo &lt;in&gt; bar] [
-   assert [all [x = 10, y = 20]]
-   assert [z = 30]
-]
-</code></pre>
-<p>So really we're talking about the needs of the most common form.</p>
-<h2><a name="p-7914-althoughignoring-the-binding-is-annoying-2" class="anchor" href="https://forum.rebol.info#p-7914-althoughignoring-the-binding-is-annoying-2"></a>Although...Ignoring The Binding Is Annoying</h2>
-<p>This has some consequence, for instance this would have the binding ignored and make a new variable:</p>
-<pre><code> eval bind (bind obj 'x) code
-</code></pre>
-<p>While this would use the binding:</p>
-<pre><code> eval bind (bind obj '@x) code
-</code></pre>
-<p>That would be true of FOR-EACH as well.</p>
-<p>It does point out that if you want to bind to a single object's field and not all of it, then it would be helpful to have a notation for that.</p>
-<pre><code>eval bind [@obj.x] code
-</code></pre>
-<p>This could suggest that maybe undecorated means "evaluate this", such that these would be equivalent:</p>
-<pre><code> bind foo [...]
- bind [foo] [...]
-</code></pre>
-<p>As opposed to the FOR-EACH equivalency, which would be:</p>
-<pre><code> bind 'foo [...]
- bind [foo] [...]
-</code></pre>
-<p>I don't know.  <img src="https://forum.rebol.info/images/emoji/twitter/pouting_cat.png?v=12" title=":pouting_cat:" class="emoji" alt=":pouting_cat:" loading="lazy" width="20" height="20">  I guess I'll just have to try things and see what's most useful.</p> ]]></description>
-        <link>https://forum.rebol.info/t/hiiamboriss-with/2138#post_3</link>
-        <pubDate>Mon, 18 Nov 2024 21:29:06 +0000</pubDate>
-        <guid isPermaLink="false">forum.rebol.info-post-7914</guid>
-      </item>
-      <item>
-        <title>Design for IMPORT</title>
-        <dc:creator><![CDATA[@hostilefork Brian Dickens]]></dc:creator>
-        <description><![CDATA[ <aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="1570">
-<div class="title">
-<div class="quote-controls"></div>
-<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
-<blockquote>
-<p>We could make an IMPORT that can tell when you've assigned it:</p>
-<pre data-code-wrap="plaintext"><code class="lang-plaintext">zip-stuff: import &lt;ZipModule&gt;
-</code></pre>
-<p>Such a form could then avoid consuming a BLOCK! after it naming individual things to export, since you have named an aggregator:</p>
-<p><code>import &lt;ZipModule&gt; [zip unzip]</code></p>
-</blockquote>
-</aside>
-<p>So the idea of a construct that behaves differently based on whether there's something to its left <a href="https://forum.rebol.info/t/skip-able-arguments-2024-update-removed/1013">was lost when <code>&lt;skip&gt;</code>-able parameters were killed off</a>.</p>
-<p>This means today when you write something like:</p>
-<pre><code>vm: import %ws-runtime.reb
-</code></pre>
-<p>...you do get the module that was imported in the <strong>vm:</strong> variable, but it also brings all the exports into the local space as words, too.  It had no detection to tell it not to.</p>
-<p>I'll re-emphasize that modern languages are stressing the idea that you <em>have</em> to namespace things in this way.</p>
-<p>If you want to bring all of those exports into "scope", that could be done with the USE meaning I've been suggesting:</p>
-<pre><code>use import %ws-runtime.reb
-</code></pre>
-<p>But that's kind of an all-or-nothing, where you'd imagine wanting to be able to name just some things to use:</p>
-<pre><code>use:some [foo bar] import %ws-runtime.reb
-</code></pre>
-<aside class="quote no-group" data-username="hostilefork" data-post="3" data-topic="1570">
-<div class="title">
-<div class="quote-controls"></div>
-<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
-<blockquote>
-<p>I think the first lines of the file need to be as good as they can.</p>
-</blockquote>
-</aside>
-<p>Something like <strong><code>use:some [foo bar] import</code></strong> seems to drift a bit from that.</p>
-<p>Losing the detection-of-assignment-on-left does set this back a bit...and isn't something I realized was going away when <strong><code>&lt;skip&gt;</code></strong> was tossed.  But there were good reasons for killing that off, and those good reasons don't go away just because it helped one usage.</p>
-<p>Making USE arity-2 could avoid the <strong><code>use:some</code></strong>, to be more like:</p>
-<pre><code>use &lt;*&gt; import %ws-runtime.reb
-use [foo bar] import %ws-runtime.reb
-vm: import %ws-runtime.reb
-</code></pre>
-<p>What to say for "opt all in" could be something else, maybe <strong>#</strong>.  Or maybe it would look nicer as a specialization?</p>
-<pre><code>use # import %ws-runtime.reb
-use-all import %ws-runtime.reb
-</code></pre>
-<p>I dunno.  Anyway, the generic USE construct would be something you could apply to any object, to bring its definitions into "scope" for word lookup.</p>
-<p>It's probably better to go this direction than have IMPORT use a <strong><code>&lt;skip&gt;</code></strong> parameter.</p>
-<p>Anyway, the design grind goes on.</p> ]]></description>
-        <link>https://forum.rebol.info/t/design-for-import/1570#post_4</link>
-        <pubDate>Mon, 18 Nov 2024 20:06:38 +0000</pubDate>
-        <guid isPermaLink="false">forum.rebol.info-post-7913</guid>
-      </item>
-      <item>
-        <title>ENVELOP (and COMPOSE!) By Example</title>
-        <dc:creator><![CDATA[@hostilefork Brian Dickens]]></dc:creator>
-        <description><![CDATA[ <aside class="quote no-group quote-modified" data-username="hostilefork" data-post="2" data-topic="2294">
-<div class="title">
-<div class="quote-controls"></div>
-<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
-<blockquote>
-<p>Let's bring back an old term...and call it COMBINE.</p>
-<pre data-code-wrap="plaintext"><code class="lang-plaintext">&gt;&gt; code: combine $() '[x + (var)]
-== [x + y]  ; worked even though we passed in an unbound block!
-
-&gt;&gt; eval compose [let x: 10 let y: 20 (as group! code)]
-== 30
-</code></pre>
-<p>...Old COMPOSE Is Still Useful Day-To-Day</p>
-<p>It's useful enough to keep its name, and do what it does. It works out a lot of the time.</p>
-</blockquote>
-</aside>
-<p>So I've been stressing over the mental overhead of having two constructs, instead of just one.</p>
-<h2><a name="p-7912-one-big-advantage-of-arity-2-compose-1" class="anchor" href="https://forum.rebol.info#p-7912-one-big-advantage-of-arity-2-compose-1"></a>One Big Advantage of ARITY-2 COMPOSE</h2>
-<p>It's hard to think of a name for string interpolation, and expanding the scope of COMPOSE's powers seems like it would be a fit.</p>
-<p>But that would <em>always</em> need you to give some capture of context as a parameter.</p>
-<pre><code> &gt;&gt; compose $() "Strings (pick [do don't] 2) have binding"
- == "Strings don't have binding"
-</code></pre>
-<h2><a name="p-7912-composing-unbound-material-should-be-common-2" class="anchor" href="https://forum.rebol.info#p-7912-composing-unbound-material-should-be-common-2"></a>Composing Unbound Material Should Be Common</h2>
-<p>In the modern binding model, unbound code is very much the default currency.</p>
-<p>Many COMPOSEs should probably be making unbound material, and just aren't.  While we're getting away with not doing it, I think that's kind of accidental (and increasingly I've been running into problems where bound compose results are messing things up).</p>
-<h2><a name="p-7912-would-stress-that-you-have-a-choice-3" class="anchor" href="https://forum.rebol.info#p-7912-would-stress-that-you-have-a-choice-3"></a>Would Stress That You Have a Choice</h2>
-<p>If parentheses aren't the best choice for your situation, you can pick something else.</p>
-<pre><code>&gt;&gt; compose ${{}} [{a} (b) [c] {{first [&lt;d&gt; #Z]}} {e}]
-== [{a} (b) [c] &lt;d&gt; {e}]
-</code></pre>
-<h2><a name="p-7912-a-refinement-would-be-wordy-4" class="anchor" href="https://forum.rebol.info#p-7912-a-refinement-would-be-wordy-4"></a>A Refinement Would Be Wordy</h2>
-<p>I'm questioning trying to differentiate the operations with a name difference (COMBINE vs. COMPOSE).  That's confusing.</p>
-<p>A refinement makes more sense.  But even in the ideal case (where refinements are moved to the head) we'd have:</p>
-<pre><code>compose:with $() [...]
-</code></pre>
-<p>And I don't know that ":WITH" is the best name, it acts as if it's adding something vs. overriding a default.  More honestly it would be:</p>
-<pre><code>compose:pattern $() [...]
-</code></pre>
-<h2><a name="p-7912-weird-semantics-5" class="anchor" href="https://forum.rebol.info#p-7912-weird-semantics-5"></a>Weird Semantics...</h2>
-<p>The behavior of stealing the binding from the block means that understanding COMPOSE as a specialization with $() is wrong.</p>
-<p>Stealing the binding from the tip of the block you're composing and using that in the slots is a kind of "weird backchannel".  If that's what you're doing, <em>you're the weird one</em>, so maybe your code should reflect that.</p>
-<h1><a name="p-7912-but-it-would-drive-the-noise-level-higher-6" class="anchor" href="https://forum.rebol.info#p-7912-but-it-would-drive-the-noise-level-higher-6"></a>But, It Would Drive The "Noise" Level Higher</h1>
-<p>Some (like <a class="mention" href="https://forum.rebol.info/u/rgchris">@rgchris</a>) do not like symbols in code at all.</p>
-<p>Having COMPOSE frequently instantiated as <strong><code>compose $() [...]</code></strong>  would be a thorn.  (Though as I've stated, I think you really should be doing <strong><code>compose $() '[...]</code></strong> much more than one would think).</p>
-<p>And it is unfortunate that you need the $ to get the binding and suppress evaluation, plus you might think that would act on the pattern <strong><code>[... $(...) ...]</code></strong></p>
-<p>But the game here is getting correctness.  And it seems to me that if you give people a powerful fundamental, they can adapt and specialize it to do whatever they want, under any name they want.</p>
-<h2><a name="p-7912-should-sneaky-capture-be-the-default-7" class="anchor" href="https://forum.rebol.info#p-7912-should-sneaky-capture-be-the-default-7"></a>Should "Sneaky" Capture Be The Default?</h2>
-<p>For COMPOSE to work with strings it either needs to take a pattern parameter, or be one of the sneaky constructs that uses the current context by default.</p>
-<p>If it shifted to the "sneaky" behavior, then it would be more useful on unbound blocks:</p>
-<pre><code>&gt;&gt; x: 10, compose '[a b (x + 1) c d]
-== [a b 11 c d]
-
-&gt;&gt; x: 10, compose "a b (x + 1) c d"
-== [a b 11 c d]
-</code></pre>
-<p>But if you move code that says <strong><code>compose block</code></strong> from point A to point B, then you will be changing what it uses for its scope.  The same would be true of moving <strong><code>compose $() block</code></strong>, but at least there you can see the capturing construct... the <strong><code>$()</code></strong> should (?) call your attention to it.</p>
-<hr>
-<h1><a name="p-7912-i-think-my-biases-lead-me-to-arity-2-8" class="anchor" href="https://forum.rebol.info#p-7912-i-think-my-biases-lead-me-to-arity-2-8"></a>I Think My Biases Lead Me To Arity-2</h1>
-<p>Looking at all the angles here, I just don't think it's that much of an imposition to pass the pattern.  And you live in a murky binding world if you don't.</p>
-<p>If you are writing enough code where the <strong><code>compose $() [...]</code></strong> pattern is frequent enough to get on your nerves, then there are probably other ways you can attack that repetition that are even larger scale than just specializing that bit out.</p> ]]></description>
-        <link>https://forum.rebol.info/t/envelop-and-compose-by-example/2294#post_5</link>
-        <pubDate>Mon, 18 Nov 2024 19:16:30 +0000</pubDate>
-        <guid isPermaLink="false">forum.rebol.info-post-7912</guid>
-      </item>
-      <item>
-        <title>Breaking MAKE OBJECT! Into Component Operations</title>
-        <dc:creator><![CDATA[@hostilefork Brian Dickens]]></dc:creator>
-        <description><![CDATA[ <aside class="quote no-group" data-username="hostilefork" data-post="4" data-topic="1442">
-<div class="title">
-<div class="quote-controls"></div>
-<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
-<blockquote>
-<p>Since changing MAKE OBJECT! would be too far-reaching a change at the moment, I've retaken CONSTRUCT for this shallower version:</p>
-<pre data-code-wrap="plaintext"><code class="lang-plaintext">&gt;&gt; x: 10
-&gt;&gt; obj: construct [x: x * 2, f: func [] [print ["x is" x "and .x is" .x]]]
-== make object! [
-    x: 20
-    f: ~#[frame! []]~
-]
-
-&gt;&gt; obj.f
-x is 10 and .x is 20
-</code></pre>
-</blockquote>
-</aside>
-<p>I've had some success deploying this <strong><code>.word</code></strong> as member idea, with a shallow object creation... and it seems like the right fit for many cases--enough so that I think it should be the "default" for what we would traditionally think of as the creation of traditional "objects" and "classes".</p>
-<p>But as expected, there are cases that don't fit.  For instance, in the bootstrap process, the configuration files make objects that are a bit more like modules:</p>
-<pre><code>REBOL [Title: "Filesystem configuration file"]
-
-name: 'Filesystem
-source: %filesystem/mod-filesystem.c
-
-os: platform-config.name
-if os = 'Windows [  ; means OS as it was just defined...
-    ...
-]
-</code></pre>
-<p>This looks module-like, but it's done with objects (in particular because the bootstrap executable doesn't do modules correctly).  And additionally, it inherits from a base object.</p>
-<p>So when I talk about the "component" operations, we have to consider:</p>
-<ol>
-<li>
-<p>What kind of thing are we making (OBJECT!, MODULE!, ERROR!, ...)</p>
-</li>
-<li>
-<p>Is there a parent to inherit from?  (if so, we presume this answers 1, which is why MAKE doesn't need to know the type if you pass an instance instead... you can't MAKE ERROR! from a parent that's a MODULE!)</p>
-</li>
-<li>
-<p>Do you want the definitions of the object fields being defined to be visible to the code that's assigning those fields, or do you want the existing bindings to be visible?</p>
-</li>
-</ol>
-<p>With the CONSTRUCT I mention above, that gives you an OBJECT! with no parent...and the fields of the object are not visible to the code doing the assigning.  (I propose this as the default behavior for FENCE!.)</p>
-<p>I added a CONSTRUCT:WITH to pass in a parent, so you could add a parent...<a href="https://forum.rebol.info/t/refinement-arguments-at-head-of-args-list-not-tail/2331">though it would be better if that argument came first</a></p>
-<pre><code>construct:with [
-    something: ...
-    ...
-] parent
-</code></pre>
-<p>vs.</p>
-<pre><code>construct:with parent [
-    something: ...
-    ...
-]
-</code></pre>
-<p>I could just go ahead and make it arity-2, though I'm not thrilled by it.</p>
-<pre><code>construct object! [...]  ; shallow version, no parent
-construct parent [...]  ; shallow version, parent
-
-make object! [...]   ; inside version, no parent
-make parent [...]   ; inside version, parent
-</code></pre>
-<h2><a name="p-7911-why-would-make-vs-construct-be-inside-binding-1" class="anchor" href="https://forum.rebol.info#p-7911-why-would-make-vs-construct-be-inside-binding-1"></a>Why would MAKE vs. CONSTRUCT Be "Inside Binding"?</h2>
-<p>Outside of the inertia of history, I don't know how much sense this makes.  It could be <strong><code>construct:inside</code></strong> vs. plain <strong><code>construct</code></strong>.  :-/</p>
-<pre><code>&gt;&gt; x: 10
-&gt;&gt; construct [x: 20, y: x + 100]
-== #{x: 20 y: 110}
-
-&gt;&gt; x: 10
-&gt;&gt; construct:inside [x: 20, y: x + 100]
-== #{x: 20 y: 120}
-</code></pre>
-<p>The inside version being implemented by <strong><code>wrap:context</code></strong> was one idea I had:</p>
-<pre><code>&gt;&gt; x: 10
-&gt;&gt; wrap:context [x: 20, y: x + 100]
-== #{x: 20 y: 120}
-</code></pre>
-<p>What this has going for it:</p>
-<ul>
-<li>
-<p>"WRAP" really does sound like it's enclosing the code in a context</p>
-</li>
-<li>
-<p>It aligns with what WRAP does to a BLOCK! normally... this would just say "make me a context out of that, vs. giving a block".</p>
-</li>
-</ul>
-<p>But then you have the other parameterization points... MODULE! vs. OBJECT! etc., and whether you want to inherit or not.</p>
-<p><strong>There's simply a lot of parameters here.</strong>  Anyway, there's a lot of new mechanics that need to settle out while contemplating this, just wanted to write that down.</p> ]]></description>
-        <link>https://forum.rebol.info/t/breaking-make-object-into-component-operations/1442#post_5</link>
-        <pubDate>Mon, 18 Nov 2024 02:14:15 +0000</pubDate>
-        <guid isPermaLink="false">forum.rebol.info-post-7911</guid>
-      </item>
-      <item>
-        <title>.WORD as Member Selection</title>
-        <dc:creator><![CDATA[@hostilefork Brian Dickens]]></dc:creator>
-        <description><![CDATA[ <p>One little edge case on this, is whether to distinguish calling a member function from referencing a member variable.</p>
-<pre><code>obj: {
-    x: 10
-    /foo: method [y] [return .x + y]
-    /bar: method [z] [return .foo z]
-}
-</code></pre>
-<p>It's unfortunate in my view that this isn't expressed as:</p>
-<pre><code>/bar: method [z] [return /foo z]
-</code></pre>
-<p>The idea of "left hand side is implicit" that you get from <strong><code>.x</code></strong> for a non-method selection would be complemented nicely by <strong><code>/foo</code></strong> for a "left hand side is implicit" member.</p>
-<p>Instead, what we get is that we've spent a character on a dot, and yet stayed in the domain of vagueness that a plain WORD! has in terms of whether it's a function call or not.</p>
-<p>But staying in that domain of vagueness seems the best choice. I've found it too compelling to say:</p>
-<pre><code>/foo: blah blah
-</code></pre>
-<p>And know from that source that FOO is an action antiform, with it not implying it's the member of any object.</p>
-<p>So this means if you really want to clarify that you're calling a member function, you'd have to write the relatively ugly:</p>
-<pre><code>/bar: method [z] [return /.foo z]
-</code></pre>
-<p>Ick.  <img src="https://forum.rebol.info/images/emoji/twitter/nauseated_face.png?v=12" title=":nauseated_face:" class="emoji" alt=":nauseated_face:" loading="lazy" width="20" height="20"></p>
-<p>Well, for whatever it's worth... I haven't gotten the urge to go around sticking leading slashes on function calls on WORD! just for clarity's sake.  I only use it where it has meaning (e.g. PARSE to differentiate combinator invocation vs. plain function invocation with combinator-synthesized arguments).  This just feels a little different because it feels like it's a stand in for <strong><code>this.foo</code></strong>, which would error if foo was an action.</p>
-<p>But sometimes when you're lining up puzzle pieces you hit these edges, and have to say "it's different when there's nothing to the left".  <img src="https://forum.rebol.info/images/emoji/twitter/man_shrugging.png?v=12" title=":man_shrugging:" class="emoji" alt=":man_shrugging:" loading="lazy" width="20" height="20"></p> ]]></description>
-        <link>https://forum.rebol.info/t/word-as-member-selection/1843#post_4</link>
-        <pubDate>Sun, 17 Nov 2024 17:05:53 +0000</pubDate>
-        <guid isPermaLink="false">forum.rebol.info-post-7910</guid>
       </item>
   </channel>
 </rss>

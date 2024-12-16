@@ -142,68 +142,6 @@ while [[result @/block]: eval/next block] [
           <source url="https://forum.rebol.info/t/re-imagining-eval-next/767.rss">Re-imagining EVAL/NEXT</source>
         </item>
         <item>
-          <title>QUOTE_BYTE Values (Antiform, Normal, Quasi, Quoted)</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Internals</category>
-          <description><![CDATA[
-            <p>The "game" of Rebol is played with cells that are the size of four platform pointers.  So on a 32-bit platform a cell is 16 bytes in size, and on a 64-bit platform they are 32 bytes in size.</p>
-<p>I've illustrated Ren-C's spin on this "game" previously:</p>
-<p></p><div class="lightbox-wrapper"><a class="lightbox" href="https://forum.rebol.info/uploads/default/original/1X/198e92149d15782107ac8c2852d336c9cea200d1.png" data-download-href="https://forum.rebol.info/uploads/default/198e92149d15782107ac8c2852d336c9cea200d1" title="ren-c-cell"><img src="https://forum.rebol.info/uploads/default/optimized/1X/198e92149d15782107ac8c2852d336c9cea200d1_2_690x281.png" alt="ren-c-cell" data-base62-sha1="3E5omo3mg1b0FRQoFVFHU57OGqt" width="690" height="281" srcset="https://forum.rebol.info/uploads/default/optimized/1X/198e92149d15782107ac8c2852d336c9cea200d1_2_690x281.png, https://forum.rebol.info/uploads/default/optimized/1X/198e92149d15782107ac8c2852d336c9cea200d1_2_1035x421.png 1.5x, https://forum.rebol.info/uploads/default/original/1X/198e92149d15782107ac8c2852d336c9cea200d1.png 2x" data-dominant-color="EDEDED"></a></div><p></p>
-<p>The bits and bytes in the header are arranged in a platform-independent way.  Regardless of the endianness of the machine, the bits in the header will be in the same order.  The first byte is chosen with a pattern that specifically will never occur as a leading byte in a UTF-8 sequence...allowing an arbitrary pointer to be discerned as pointing to a cell or to the beginning of a UTF-8 string.</p>
-<p>The "payload" is specifically aligned to a 64-bit boundary on both 32-bit and 64-bit platforms.  This is important if it contains something like a double precision floating point number.  It is also a union, which means that if it has constituent fields, they must be read from exactly the same union definition which was used to assign them.  The "extra" is separate, meaning it is decoupled from the payload and can be assigned and read on its own terms (e.g. BLOCK! and WORD! could have a "binding" in extra that is read and written in common, without invalidating their payloads).</p>
-<p>The HEART_BYTE encodes what we would think of as the underlying datatype, and cues the interpretation of the contents of the cell.  For instance the byte corresponding to a BLOCK! tells us that the payload consists of a pointer to an array of more cells as well as an index into the block.</p>
-<h2><a name="p-6802-enter-the-quote_byte-1" class="anchor" href="https://forum.rebol.info#p-6802-enter-the-quote_byte-1"></a>Enter the QUOTE_BYTE</h2>
-<p>Bits in the header are scarce.  And at one time, quoting was implemented by only two bits... for quoting levels of 0, 1, 2, or 3.  Higher quoting levels were achieved by changing the HEART_BYTE to indicate QUOTED!, and then the payload was changed to point to a single-element array that held the quoted cell, and an integer of the quoting level up beyond millions.  It was tricky to do, but it worked.</p>
-<p>Eventually, the complex mechanics behind flipping to a different payload for higher levels of quoting was scrapped, and an entire byte in the header was sacrificed for the quote level.  This permitted from 0-255 levels of quoting, and I decided that was more than enough.</p>
-<p>When isotopes were originally introduced, there was a flag taken to say something was an antiform.  However, I realized that something should not be quoted and be an antiform at the same time.  Hence the antiform state could be thought of as a special value of the QUOTE_BYTE.</p>
-<p>Initially I chose 255 for antiforms, leaving 0-254 as the ordinary quoting levels.  But the theory of isotopes evolved to where not only were there antiforms, but there needed to be a form of quoting that would produce antiforms under evaluation...so-called <em>quasiforms</em>.  And it began to make sense to think of the antiform state as being obviously "less" than other quoting levels, so it became 0.</p>
-<p>What it worked out to was:</p>
-<ul>
-<li>
-<p>Quoting byte of 0 is an isotope: <strong><code>#define ANTIFORM_0 0</code></strong></p>
-</li>
-<li>
-<p>Quoting byte of 1 is plain not-quoted: <strong><code>#define NOQUOTE_1 1</code></strong></p>
-</li>
-<li>
-<p>Quoting byte of 2 is a quasiform: <strong><code>#define QUASI_2 2</code></strong></p>
-</li>
-<li>
-<p>Quoting byte of 3 is single quoted plain form: <strong><code>#define ONEQUOTE_3 3</code></strong></p>
-</li>
-</ul>
-<p>A quoting byte of 4 is a single-quoted quasiform.  e.g. there's no such thing as a quasi-quoted, just a quoted-quasi: <strong><code>'~foo~</code></strong> is legal but <strong><code>~'foo~</code></strong> is not.</p>
-<p>So the interpretation of the QUOTE_BYTE proceeds like that.</p>
-<ul>
-<li>
-<p>Quoting byte of 5 is a double quoted plain form</p>
-</li>
-<li>
-<p>Quoting byte of 6 is a double quoted quasiform</p>
-</li>
-<li>
-<p>Quoting byte of 7 is a triple quoted plain form</p>
-</li>
-<li>
-<p>Quoting byte of 8 is a triple quoted quasiform</p>
-</li>
-</ul>
-<p>etc.</p>
-<p>So although mechanically the byte holds a value of 0 for antiform, it still conceptually is what we might call a quote level of "negative one".</p>
-<p>Evaluator drops one level of quoting, with the base case that quasiforms produce antiform and the normal form does whatever its evaluator rule is (WORD! looks up, etc.)</p>
-<p>The QUOTE operator won't work on antiforms and the UNQUOTE operator won't work on quasiforms.  Instead you have to use the META and UNMETA operations, which handle those exceptions but just act like QUOTE and UNQUOTE otherwise.</p>
-            <p><small>3 posts - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/quote-byte-values-antiform-normal-quasi-quoted/2091">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/quote-byte-values-antiform-normal-quasi-quoted/2091</link>
-          <pubDate>Thu, 04 Jan 2024 18:16:58 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-2091</guid>
-          <source url="https://forum.rebol.info/t/quote-byte-values-antiform-normal-quasi-quoted/2091.rss">QUOTE_BYTE Values (Antiform, Normal, Quasi, Quoted)</source>
-        </item>
-        <item>
           <title>Invisibility Reviewed Through Modern Eyes</title>
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
           <category>Internals</category>
@@ -1626,91 +1564,87 @@ uparse data [repeat (:[min max]) rule]
           <source url="https://forum.rebol.info/t/vaporizing-failed-conditionals-in-reduce/1665.rss">Vaporizing Failed Conditionals In REDUCE</source>
         </item>
         <item>
-          <title>Understanding FRAME!s and Phases</title>
+          <title>Understanding FRAME! &quot;Lensing&quot;</title>
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
           <category>Internals</category>
           <description><![CDATA[
             <p>Good news: <a href="https://github.com/metaeducation/ren-c/issues/393"><strong>an old issue is (seemingly) mostly addressed!</strong></a></p>
 <p>Among the various implications of this design improvement, you can AUGMENT a function with new fields that share the name of either locals or specialized values.  The only names you cannot use in extending a function are those that are public parameters on the interface!</p>
-<pre><code>&gt;&gt; ap10: specialize :append [value: 10]
+<pre><code>&gt;&gt; /ap10: specialize append/ [value: 10]
 &gt;&gt; ap10 [a b c]
 == [a b c 10]
 
-&gt;&gt; wow!: adapt (augment :ap10 [/value [integer!]]) [insert series value]
-&gt;&gt; wow!/value [a b c] 20
+&gt;&gt; /wow: adapt (augment ap10/ [:value [integer!]]) [insert series value]
+&gt;&gt; wow:value [a b c] 20
 == [20 a b c 10]
 </code></pre>
 <p>So what's going on here is that underneath the hood, the <em>single</em> FRAME! for this function call has <em>two</em> slots with the label <strong><code>value</code></strong>.  But they're never in effect and visible at the same time.  This is great news for composability of functions.</p>
 <p>I'm going to try to explain here a little bit of how this works.</p>
-<h2>
-<a name="every-function-is-defined-by-an-exemplar-frame-1" class="anchor" href="https://forum.rebol.info#every-function-is-defined-by-an-exemplar-frame-1"></a>Every Function Is Defined By an "Exemplar" FRAME!</h2>
-<p>Some time ago I penned the prophetic post: <a href="https://forum.rebol.info/t/seeing-all-action-s-as-variadic-frame-makers/1002">"Seeing all ACTION!s as Variadic FRAME! Makers"</a>.  This set the stage for what ultimately became an implementation mechanism where the interface to all ACTION!s are defined by a FRAME!.</p>
+<h2><a name="p-5284-every-function-has-a-paramlist-frame-1" class="anchor" href="https://forum.rebol.info#p-5284-every-function-has-a-paramlist-frame-1"></a>Every Function Has a "ParamList" FRAME!</h2>
+<p>Some time ago I penned the prophetic post: <a href="https://forum.rebol.info/t/seeing-all-action-s-as-variadic-frame-makers/1002">"Seeing all ACTION!s as Variadic FRAME! Makers"</a>.  This set the stage for what ultimately became an implementation mechanism where the interface to all actions are defined by a FRAME!.</p>
 <p>So if you write something like:</p>
-<pre><code>foo: func [return: [] x [tag! text!] y [integer!] &lt;local&gt; z] [
-    print ["internal foo view:" mold binding of 'x]
+<pre><code>/foo: func [return: [integer!] x [tag! text!] y [integer!] &lt;local&gt; z] [
+    print ["internal foo view:" mold binding of $x]
+    return 5
 ]
 </code></pre>
-<p>Inside of FOO there is a FRAME! that lays out a map of the parameters and locals.  This is called the "exemplar".  We can get direct access to that frame:</p>
-<pre><code>&gt;&gt; exemplar of :foo
-== make frame! [
-    return: make typeset! []
-    x: make typeset! [#[datatype! text!] #[datatype! tag!]]
-    y: make typeset! [#[datatype! integer!]]
+<p>Inside of FOO there is a FRAME! that lays out a map of the parameters and locals.  This is called the "ParamList".  Internally, it looks something like this:</p>
+<pre><code>#[frame! [
+    return: #[parameter! [integer!]]
+    x: ~#[parameter! [tag! text!]]~
+    y: ~#[parameter! [integer!]]~
     z: ~
-]
+]]
 </code></pre>
-<p>This isn't an "ordinary" frame for the function.  The fields don't hold legitimate values for a function invocation...they are holding typesets.  Except for Z which is a local, so it holds the value that it will have when a frame is made.  <em>(more on that in a second)</em></p>
+<p>This isn't an "execution" frame for the function.  X and Y don't hold legitimate values for a function invocation...they are holding antiform parameters.  RETURN is a special slot known to FUNC which it will fill in with a Except for Z which is a local, so it holds the value that it will have when a frame is made.  <em>(more on that in a second)</em></p>
 <p>So now let's try making an ordinary frame for the function:</p>
-<pre><code>&gt;&gt; f: make frame! :foo
-== make frame! [
+<pre><code>&gt;&gt; f: make frame! foo/
+== #[frame! [
     x: ~
     y: ~
-]
+]]
 </code></pre>
-<p>Okay, that's neat.  It doesn't <em>seem</em> to have the RETURN or Z fields because we aren't supposed to be setting those.  They are there--the memory is part of the frame, and part of what will actually be backing the variables when you DO the function.  But they are hidden in this "phaseless" view.</p>
+<p>Okay, that's neat.  It doesn't <em>seem</em> to have the RETURN or Z fields because we aren't supposed to be setting those.  They are there--the memory is part of the frame, and part of what will actually be backing the variables when you EVAL the frame function.  But they are hidden.</p>
 <p>I put code inside the function to print out its internal view of that same frame.  Let's try running and see what it says:</p>
 <pre><code>&gt;&gt; f.x: "Hello"
 
 &gt;&gt; f.y: 1020
 
 &gt;&gt; do f
-internal foo view: make frame! [
-    return: '#[action! [^value /isotope]]
+internal foo view: #[frame! [
+    return: ~#[frame! [^atom :run]]~
     x: "Hello"
     y: 1020
     z: ~
-]
+]]
 </code></pre>
 <p>Hey, look at that.  <strong>When we see the frame from <em>inside</em> the function, it has access to RETURN and Z.</strong>  How does it know to hide the fields on the outside, but give access to them on the inside?</p>
-<p>The answer is that each FRAME! value can optionally hold a "phase".  A phase is itself just an ACTION!--it's which step of the composition you are running.  The phase informs which of the fields are supposed to be visible.</p>
-<h2>
-<a name="now-lets-specialize-it-2" class="anchor" href="https://forum.rebol.info#now-lets-specialize-it-2"></a>Now, Let's SPECIALIZE It...</h2>
-<p>Let's make a new function BAR which fixes the value of Y.</p>
-<pre><code>spfoo: specialize :foo [y: 304]
+<p>The answer is that each FRAME! Cell instance can optionally hold a <strong>"Lens"</strong>.  A Lens is itself is a ParamList.  The Lens informs which of the fields are supposed to be visible.</p>
+<h2><a name="p-5284-now-lets-specialize-it-2" class="anchor" href="https://forum.rebol.info#p-5284-now-lets-specialize-it-2"></a>Now, Let's SPECIALIZE It...</h2>
+<p>Let's make a new function SPFOO which fixes the value of Y.</p>
+<pre><code>/spfoo: specialize foo/ [y: 304]
 </code></pre>
 <p>And now let's look at what its internal "fake" exemplar FRAME! looks like:</p>
-<pre><code>&gt;&gt; exemplar of :spfoo
-== make frame! [
-    return: make typeset! []
-    x: make typeset! [#[datatype! text!] #[datatype! tag!]]
+<pre><code>#[frame! [
+    return: #[parameter! [integer!]]
+    x: ~#[parameter! [tag! text!]]~
     y: 304
     z: ~
-]
+]]
 </code></pre>
-<p>Something you'll notice is that <em>the type information for Y is now lost, and the slot where the type information would have been has been replaced by the specialized value</em>.  That's a nice little efficiency trick.</p>
+<p>Something you'll notice is that <em>the type information for Y is now lost, and the slot where the type information would have been has been replaced by the specialized value</em>.  That's a nice little efficiency trick.  (We can still check the type, because FOO's ParamList has it.)</p>
 <p>Now if we make a frame for SPFOO, the only thing it will let us set is X:</p>
-<pre><code>&gt;&gt; f: make frame! :spfoo
-== make frame! [
+<pre><code>&gt;&gt; f: make frame! spfoo/
+== #[frame! [
     x: ~
-]
+]]
 </code></pre>
-<h2>
-<a name="what-if-we-were-to-adapt-the-specialization-3" class="anchor" href="https://forum.rebol.info#what-if-we-were-to-adapt-the-specialization-3"></a>What if We Were to ADAPT the Specialization?</h2>
+<h2><a name="p-5284-what-if-we-were-to-adapt-the-specialization-3" class="anchor" href="https://forum.rebol.info#p-5284-what-if-we-were-to-adapt-the-specialization-3"></a>What if We Were to ADAPT the Specialization?</h2>
 <p>So this raises an interesting question about the "inside" and "outside" view of things.</p>
 <p>At an interface level, I would argue that it should not usually be possible to tell the difference between SPFOO and any other function that takes a single parameter X.</p>
 <p>So what happens if we ADAPT the SPFOO function and get access to the frame on the inside?</p>
-<pre><code>adspfoo: adapt :spfoo [
-    print ["inside adaptation:" mold binding of 'x]
+<pre><code>/adspfoo: adapt spfoo/ [
+    print ["inside adaptation:" mold binding of $x]
 ]
 
 &gt;&gt; adspfoo "What happens?"
@@ -1718,7 +1652,7 @@ inside adaptation: make frame! [
     x: "What happens?"
 ]
 internal foo view: make frame! [
-    return: '#[action! [^value /isotope]]
+    return: ~#[frame! [^atom :run]]~
     x: "What happens?"
     y: 304
     z: ~
@@ -1726,17 +1660,17 @@ internal foo view: make frame! [
 </code></pre>
 <p>Ta-da.  ADAPT only saw a function with an X parameter, and none of the other details are exposed to it.  Its view of the frame only sees X.  <em>But it's all the same frame...</em> memory is being reused, just the access to it is controlled.</p>
 <p><strong>Pretty slick, huh?</strong>  Anyway, I'm sure there are bugs but the groundwork is there.  Please experiment and let me know if anything seems to be counterintuitive.</p>
-<p><em>(There's a lot of thinking that needs to be done about how RETURN plays into this...it's a weird case that needs study.  Being inside the ADAPT and not having access to the RETURN is irritating, but it may just be necessary to prevent that access and make you use an ENCLOSE if you might want to return.)</em></p>
+<p><em>(Note that when you're inside the ADAPT, you don't have access to RETURN.  It's not part of the interface, and we want you to be able to ADAPT functions that don't have RETURN.  If you need greater control, use ENCLOSE.)</em></p>
             <p><small>2 posts - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/understanding-frame-s-and-phases/1645">Read full topic</a></p>
+            <p><a href="https://forum.rebol.info/t/understanding-frame-lensing/1645">Read full topic</a></p>
           ]]></description>
-          <link>https://forum.rebol.info/t/understanding-frame-s-and-phases/1645</link>
+          <link>https://forum.rebol.info/t/understanding-frame-lensing/1645</link>
           <pubDate>Wed, 04 Aug 2021 17:32:38 +0000</pubDate>
           <discourse:topicPinned>No</discourse:topicPinned>
           <discourse:topicClosed>No</discourse:topicClosed>
           <discourse:topicArchived>No</discourse:topicArchived>
           <guid isPermaLink="false">forum.rebol.info-topic-1645</guid>
-          <source url="https://forum.rebol.info/t/understanding-frame-s-and-phases/1645.rss">Understanding FRAME!s and Phases</source>
+          <source url="https://forum.rebol.info/t/understanding-frame-lensing/1645.rss">Understanding FRAME! &quot;Lensing&quot;</source>
         </item>
         <item>
           <title>Thinking We Might Should Nix PROTECT/HIDE For Now</title>
@@ -2269,6 +2203,71 @@ red&gt;&gt; type? :x
           <discourse:topicArchived>No</discourse:topicArchived>
           <guid isPermaLink="false">forum.rebol.info-topic-1301</guid>
           <source url="https://forum.rebol.info/t/should-get-word-of-unset-variables-raise-an-error/1301.rss">Should GET-WORD! of unset variables raise an error?</source>
+        </item>
+        <item>
+          <title>Enfix Arity 0: A Puzzle From 2017, Now Believed to be Solved!</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Internals</category>
+          <description><![CDATA[
+            <blockquote>
+<p>Here's the kind of question <a class="mention" href="https://forum.rebol.info/u/salotz">@salotz</a> may find informative, in light of the <a href="https://forum.rebol.info/t/make-a-rebol-minimum-viable-rebol-interpreters/1245">"how can we model the evaluator in a minimal way"</a>...where putting the evaluator on one sheet of paper like a lambda calculus or Lisp is simply not the objective.  Maybe this helps illustrate the difference?</p>
+</blockquote>
+<hr>
+<p>In 2017 while trying to formalize some code I faced a question: <strong>How should the evaluator deal with a function that is marked as getting its first argument from the left (e.g. "enfix") if that operation takes no arguments?</strong></p>
+<p>R3-Alpha only had arity-2 infix functions, and didn't allow you to make your own.  Red lets you make your own, but keeps the rule:</p>
+<pre><code>red&gt;&gt; foo: func [x] [print mold x]
+== func [x][print mold x]
+
+red&gt;&gt; bar: make op! :foo
+*** Script Error: making an op! requires a function with only 2 arguments
+</code></pre>
+<p>But Ren-C took a different tack, trying to generalize the mechanic so that "enfix" functions could take any number of arguments...and it only spoke to the question of how they got their first.  You might make a ternary operator where the condition was on the left and the branches on the right.  Or you might make a postfix operator which took a single argument--punctuating an evaluation.</p>
+<p>We have some of those today.  SO is an interesting variation on ASSERT that just validates its left hand expression:</p>
+<pre><code>&gt;&gt; 2 + 1 = 3 so print "No problem."
+No problem
+
+&gt;&gt; 1020 - 304 = 421 so print "Math is broken"
+** Script Error: assertion failure: [#[false] so]
+** Where: so console
+** Near: [... = 421 so ~~ print "Math is broken"]
+</code></pre>
+<p>But what--if anything--should happen when you make an enfix function which takes no arguments?  How is that different from a <em>non</em>-enfix function with no arguments?</p>
+<p>I remember where I was when writing down that issue.  It was at one of a number of chains of a coffee place called <a href="https://www.kofficoffee.com/pages/locations">"Koffe", but this one in South Palm Springs</a>.  And <a href="https://github.com/metaeducation/ren-c/issues/581">it has sat around as Issue #581</a> for a long while.</p>
+<p>But with the passage of time, I think the answer to this has become clear.  An enfix 0-arity function is simply sequenced in the <em>same evaluator step as the left hand side</em>.</p>
+<p><a href="https://github.com/metaeducation/ren-c/blob/fb5e29d593e650b2dbc02963a93348c2ac862b22/tests/functions/enfix.test.reb#L198-L332">If you want to see some cool tests that show the nuances, look here.</a>  But the issue sums up the general gist:</p>
+<pre><code>&gt;&gt; bar: func [] [&lt;bar&gt;]
+&gt;&gt; enbar: enfixed func [] [&lt;enbar&gt;]
+
+&gt;&gt; evaluate @var [1020 bar 304]
+== [bar 304]  ; one step, did not run bar yet, still pending
+
+; Note: I'm not totally thrilled with the @var skippable method of telling
+; EVALUATE where to put the value if you care.  I'm thinking we probably should
+; be biting the bullet and figuring out a smarter multiple-return-value idea.
+
+&gt;&gt; var
+== 1020
+
+&gt;&gt; evaluate @var [1020 enbar 304]
+== [304]  ; one step, ran enbar during that step besides being arity-0
+
+&gt;&gt; var
+== &lt;enbar&gt;
+</code></pre>
+<p>One nuance is how enfix functions which have arguments to their left which are marked <code>&lt;skip&gt;</code> will effectively degrade to becoming non-enfix and run in the next step.  <a href="https://forum.rebol.info/t/default-now-usable-in-case-switch/739">Without that, the clever DEFAULT operation would not work.</a>  I'm open to the idea that there might be a use case for a left-hand-skipping operation that runs in the same step as the left even when it skips.  But... since I can't think of any--and I know DEFAULT needs otherwise--I'll wait until someone points out a need before getting too concerned about it.</p>
+<hr>
+<p><strong>These edge cases really shed light on the big picture.</strong>  I've said time and again that you don't do yourself any favors in language design by throwing yourself softballs.  You should be looking for pathological cases and if you can't solve them, building a rationale behind why--and articulating the shape of the things you <em>can</em> solve.</p>
+<p>On Ren-C I've been chipping away at these issues a little at a time, and it feels good to see this old one get closed.  I'm pretty sure that people using the evaluator to invent cool things will appreciate that it bends (to the extent coherence will allow it to!)</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/enfix-arity-0-a-puzzle-from-2017-now-believed-to-be-solved/1251">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/enfix-arity-0-a-puzzle-from-2017-now-believed-to-be-solved/1251</link>
+          <pubDate>Thu, 12 Dec 2019 06:56:13 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-1251</guid>
+          <source url="https://forum.rebol.info/t/enfix-arity-0-a-puzzle-from-2017-now-believed-to-be-solved/1251.rss">Enfix Arity 0: A Puzzle From 2017, Now Believed to be Solved!</source>
         </item>
   </channel>
 </rss>

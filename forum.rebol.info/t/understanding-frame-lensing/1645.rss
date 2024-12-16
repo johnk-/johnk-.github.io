@@ -1,0 +1,270 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Understanding FRAME! &quot;Lensing&quot;</title>
+    <link>https://forum.rebol.info/t/understanding-frame-lensing/1645</link>
+    <description>Good news: [**an old issue is (seemingly) mostly addressed!**](https://github.com/metaeducation/ren-c/issues/393)
+
+Among the various implications of this design improvement, you can AUGMENT a function with new fields that share the name of either locals or specialized values.  The only names you cannot use in extending a function are those that are public parameters on the interface!
+
+    &gt;&gt; /ap10: specialize append/ [value: 10]
+    &gt;&gt; ap10 [a b c]
+    == [a b c 10]
+
+    &gt;&gt; /wow: adapt (augment ap10/ [:value [integer!]]) [insert series value]
+    &gt;&gt; wow:value [a b c] 20
+    == [20 a b c 10]
+
+So what&#39;s going on here is that underneath the hood, the *single* FRAME! for this function call has *two* slots with the label **`value`**.  But they&#39;re never in effect and visible at the same time.  This is great news for composability of functions.
+
+I&#39;m going to try to explain here a little bit of how this works.
+
+## Every Function Has a &quot;ParamList&quot; FRAME!
+
+Some time ago I penned the prophetic post: [&quot;Seeing all ACTION!s as Variadic FRAME! Makers&quot;](https://forum.rebol.info/t/seeing-all-action-s-as-variadic-frame-makers/1002).  This set the stage for what ultimately became an implementation mechanism where the interface to all actions are defined by a FRAME!.
+
+So if you write something like:
+
+    /foo: func [return: [integer!] x [tag! text!] y [integer!] &lt;local&gt; z] [
+        print [&quot;internal foo view:&quot; mold binding of $x]
+        return 5
+    ]
+
+Inside of FOO there is a FRAME! that lays out a map of the parameters and locals.  This is called the &quot;ParamList&quot;.  Internally, it looks something like this:
+
+    #[frame! [
+        return: #[parameter! [integer!]]
+        x: ~#[parameter! [tag! text!]]~
+        y: ~#[parameter! [integer!]]~
+        z: ~
+    ]]
+
+This isn&#39;t an &quot;execution&quot; frame for the function.  X and Y don&#39;t hold legitimate values for a function invocation...they are holding antiform parameters.  RETURN is a special slot known to FUNC which it will fill in with a Except for Z which is a local, so it holds the value that it will have when a frame is made.  *(more on that in a second)*
+
+So now let&#39;s try making an ordinary frame for the function:
+
+    &gt;&gt; f: make frame! foo/
+    == #[frame! [
+        x: ~
+        y: ~
+    ]]
+
+Okay, that&#39;s neat.  It doesn&#39;t *seem* to have the RETURN or Z fields because we aren&#39;t supposed to be setting those.  They are there--the memory is part of the frame, and part of what will actually be backing the variables when you EVAL the frame function.  But they are hidden.
+
+I put code inside the function to print out its internal view of that same frame.  Let&#39;s try running and see what it says:
+
+    &gt;&gt; f.x: &quot;Hello&quot;
+
+    &gt;&gt; f.y: 1020
+
+    &gt;&gt; do f
+    internal foo view: #[frame! [
+        return: ~#[frame! [^atom :run]]~
+        x: &quot;Hello&quot;
+        y: 1020
+        z: ~
+    ]]
+
+Hey, look at that.  **When we see the frame from *inside* the function, it has access to RETURN and Z.**  How does it know to hide the fields on the outside, but give access to them on the inside?
+
+The answer is that each FRAME! Cell instance can optionally hold a **&quot;Lens&quot;**.  A Lens is itself is a ParamList.  The Lens informs which of the fields are supposed to be visible.
+
+## Now, Let&#39;s SPECIALIZE It...
+
+Let&#39;s make a new function SPFOO which fixes the value of Y.
+
+    /spfoo: specialize foo/ [y: 304]
+
+And now let&#39;s look at what its internal &quot;fake&quot; exemplar FRAME! looks like:
+
+    #[frame! [
+        return: #[parameter! [integer!]]
+        x: ~#[parameter! [tag! text!]]~
+        y: 304
+        z: ~
+    ]]
+
+Something you&#39;ll notice is that *the type information for Y is now lost, and the slot where the type information would have been has been replaced by the specialized value*.  That&#39;s a nice little efficiency trick.  (We can still check the type, because FOO&#39;s ParamList has it.)
+
+Now if we make a frame for SPFOO, the only thing it will let us set is X:
+
+    &gt;&gt; f: make frame! spfoo/
+    == #[frame! [
+        x: ~
+    ]]
+
+## What if We Were to ADAPT the Specialization?
+
+So this raises an interesting question about the &quot;inside&quot; and &quot;outside&quot; view of things.
+
+At an interface level, I would argue that it should not usually be possible to tell the difference between SPFOO and any other function that takes a single parameter X.
+
+So what happens if we ADAPT the SPFOO function and get access to the frame on the inside?
+
+    /adspfoo: adapt spfoo/ [
+        print [&quot;inside adaptation:&quot; mold binding of $x]
+    ]
+
+    &gt;&gt; adspfoo &quot;What happens?&quot;
+    inside adaptation: make frame! [
+        x: &quot;What happens?&quot;
+    ]
+    internal foo view: make frame! [
+        return: ~#[frame! [^atom :run]]~
+        x: &quot;What happens?&quot;
+        y: 304
+        z: ~
+    ]
+
+Ta-da.  ADAPT only saw a function with an X parameter, and none of the other details are exposed to it.  Its view of the frame only sees X.  *But it&#39;s all the same frame...* memory is being reused, just the access to it is controlled.
+
+**Pretty slick, huh?**  Anyway, I&#39;m sure there are bugs but the groundwork is there.  Please experiment and let me know if anything seems to be counterintuitive.
+
+*(Note that when you&#39;re inside the ADAPT, you don&#39;t have access to RETURN.  It&#39;s not part of the interface, and we want you to be able to ADAPT functions that don&#39;t have RETURN.  If you need greater control, use ENCLOSE.)*</description>
+    
+    <lastBuildDate>Sun, 15 Dec 2024 14:48:01 +0000</lastBuildDate>
+    <category>Internals</category>
+    <atom:link href="https://forum.rebol.info/t/understanding-frame-lensing/1645.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Understanding FRAME! &quot;Lensing&quot;</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>The following might not ultimately turn out to be a great idea.  But it's an idea I'm giving a shot to.</p>
+<p>I'm trying to make an option available for easily pushing parameters down through the stack, which is <strong>"frame tunneling"</strong>.</p>
+<p>So that's to say you can capture the view of a function at a level where certain variables are visible, and pass that frame down to a lower level that is expecting it.</p>
+<p>For instance, let's make a function that you can optionally pass a frame of an augmented function to:</p>
+<pre><code>/lower: func [x :augmented [frame!]] [
+    print "running lower"
+    compose [x (if augmented [spread reduce [augmented.y augmented.z]])]
+]
+</code></pre>
+<p>And then, let's make a higher level wrapper that adds more arguments:</p>
+<pre><code>/higher: adapt (augment lower/ [y z]) [
+    print "running higher"
+    augmented: binding of $y
+]
+</code></pre>
+<p>So what you get is:</p>
+<pre><code>&gt;&gt; lower 10
+running lower
+== [10]
+
+&gt;&gt; higher 10 20 30
+running higher
+running lower
+== [10 20 30]
+</code></pre>
+<p>I wanted to mention this issue, because now that we have this rather effective "functions are black boxes to the outside" mechanic, it's throwing a wrench into some hacks that were able to get away with seeing things they shouldn't have been able to see.  So more formal methods of exchanging information between higher layers and lower layers of purposefully collaborating functions are needed.</p>
+          <p><a href="https://forum.rebol.info/t/understanding-frame-lensing/1645/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/understanding-frame-lensing/1645/2</link>
+        <pubDate>Fri, 06 Aug 2021 11:47:51 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1645-2</guid>
+        <source url="https://forum.rebol.info/t/understanding-frame-lensing/1645.rss">Understanding FRAME! &quot;Lensing&quot;</source>
+      </item>
+      <item>
+        <title>Understanding FRAME! &quot;Lensing&quot;</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>Good news: <a href="https://github.com/metaeducation/ren-c/issues/393"><strong>an old issue is (seemingly) mostly addressed!</strong></a></p>
+<p>Among the various implications of this design improvement, you can AUGMENT a function with new fields that share the name of either locals or specialized values.  The only names you cannot use in extending a function are those that are public parameters on the interface!</p>
+<pre><code>&gt;&gt; /ap10: specialize append/ [value: 10]
+&gt;&gt; ap10 [a b c]
+== [a b c 10]
+
+&gt;&gt; /wow: adapt (augment ap10/ [:value [integer!]]) [insert series value]
+&gt;&gt; wow:value [a b c] 20
+== [20 a b c 10]
+</code></pre>
+<p>So what's going on here is that underneath the hood, the <em>single</em> FRAME! for this function call has <em>two</em> slots with the label <strong><code>value</code></strong>.  But they're never in effect and visible at the same time.  This is great news for composability of functions.</p>
+<p>I'm going to try to explain here a little bit of how this works.</p>
+<h2><a name="p-5284-every-function-has-a-paramlist-frame-1" class="anchor" href="https://forum.rebol.info#p-5284-every-function-has-a-paramlist-frame-1"></a>Every Function Has a "ParamList" FRAME!</h2>
+<p>Some time ago I penned the prophetic post: <a href="https://forum.rebol.info/t/seeing-all-action-s-as-variadic-frame-makers/1002">"Seeing all ACTION!s as Variadic FRAME! Makers"</a>.  This set the stage for what ultimately became an implementation mechanism where the interface to all actions are defined by a FRAME!.</p>
+<p>So if you write something like:</p>
+<pre><code>/foo: func [return: [integer!] x [tag! text!] y [integer!] &lt;local&gt; z] [
+    print ["internal foo view:" mold binding of $x]
+    return 5
+]
+</code></pre>
+<p>Inside of FOO there is a FRAME! that lays out a map of the parameters and locals.  This is called the "ParamList".  Internally, it looks something like this:</p>
+<pre><code>#[frame! [
+    return: #[parameter! [integer!]]
+    x: ~#[parameter! [tag! text!]]~
+    y: ~#[parameter! [integer!]]~
+    z: ~
+]]
+</code></pre>
+<p>This isn't an "execution" frame for the function.  X and Y don't hold legitimate values for a function invocation...they are holding antiform parameters.  RETURN is a special slot known to FUNC which it will fill in with a Except for Z which is a local, so it holds the value that it will have when a frame is made.  <em>(more on that in a second)</em></p>
+<p>So now let's try making an ordinary frame for the function:</p>
+<pre><code>&gt;&gt; f: make frame! foo/
+== #[frame! [
+    x: ~
+    y: ~
+]]
+</code></pre>
+<p>Okay, that's neat.  It doesn't <em>seem</em> to have the RETURN or Z fields because we aren't supposed to be setting those.  They are there--the memory is part of the frame, and part of what will actually be backing the variables when you EVAL the frame function.  But they are hidden.</p>
+<p>I put code inside the function to print out its internal view of that same frame.  Let's try running and see what it says:</p>
+<pre><code>&gt;&gt; f.x: "Hello"
+
+&gt;&gt; f.y: 1020
+
+&gt;&gt; do f
+internal foo view: #[frame! [
+    return: ~#[frame! [^atom :run]]~
+    x: "Hello"
+    y: 1020
+    z: ~
+]]
+</code></pre>
+<p>Hey, look at that.  <strong>When we see the frame from <em>inside</em> the function, it has access to RETURN and Z.</strong>  How does it know to hide the fields on the outside, but give access to them on the inside?</p>
+<p>The answer is that each FRAME! Cell instance can optionally hold a <strong>"Lens"</strong>.  A Lens is itself is a ParamList.  The Lens informs which of the fields are supposed to be visible.</p>
+<h2><a name="p-5284-now-lets-specialize-it-2" class="anchor" href="https://forum.rebol.info#p-5284-now-lets-specialize-it-2"></a>Now, Let's SPECIALIZE It...</h2>
+<p>Let's make a new function SPFOO which fixes the value of Y.</p>
+<pre><code>/spfoo: specialize foo/ [y: 304]
+</code></pre>
+<p>And now let's look at what its internal "fake" exemplar FRAME! looks like:</p>
+<pre><code>#[frame! [
+    return: #[parameter! [integer!]]
+    x: ~#[parameter! [tag! text!]]~
+    y: 304
+    z: ~
+]]
+</code></pre>
+<p>Something you'll notice is that <em>the type information for Y is now lost, and the slot where the type information would have been has been replaced by the specialized value</em>.  That's a nice little efficiency trick.  (We can still check the type, because FOO's ParamList has it.)</p>
+<p>Now if we make a frame for SPFOO, the only thing it will let us set is X:</p>
+<pre><code>&gt;&gt; f: make frame! spfoo/
+== #[frame! [
+    x: ~
+]]
+</code></pre>
+<h2><a name="p-5284-what-if-we-were-to-adapt-the-specialization-3" class="anchor" href="https://forum.rebol.info#p-5284-what-if-we-were-to-adapt-the-specialization-3"></a>What if We Were to ADAPT the Specialization?</h2>
+<p>So this raises an interesting question about the "inside" and "outside" view of things.</p>
+<p>At an interface level, I would argue that it should not usually be possible to tell the difference between SPFOO and any other function that takes a single parameter X.</p>
+<p>So what happens if we ADAPT the SPFOO function and get access to the frame on the inside?</p>
+<pre><code>/adspfoo: adapt spfoo/ [
+    print ["inside adaptation:" mold binding of $x]
+]
+
+&gt;&gt; adspfoo "What happens?"
+inside adaptation: make frame! [
+    x: "What happens?"
+]
+internal foo view: make frame! [
+    return: ~#[frame! [^atom :run]]~
+    x: "What happens?"
+    y: 304
+    z: ~
+]
+</code></pre>
+<p>Ta-da.  ADAPT only saw a function with an X parameter, and none of the other details are exposed to it.  Its view of the frame only sees X.  <em>But it's all the same frame...</em> memory is being reused, just the access to it is controlled.</p>
+<p><strong>Pretty slick, huh?</strong>  Anyway, I'm sure there are bugs but the groundwork is there.  Please experiment and let me know if anything seems to be counterintuitive.</p>
+<p><em>(Note that when you're inside the ADAPT, you don't have access to RETURN.  It's not part of the interface, and we want you to be able to ADAPT functions that don't have RETURN.  If you need greater control, use ENCLOSE.)</em></p>
+          <p><a href="https://forum.rebol.info/t/understanding-frame-lensing/1645/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/understanding-frame-lensing/1645/1</link>
+        <pubDate>Wed, 04 Aug 2021 17:32:38 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1645-1</guid>
+        <source url="https://forum.rebol.info/t/understanding-frame-lensing/1645.rss">Understanding FRAME! &quot;Lensing&quot;</source>
+      </item>
+  </channel>
+</rss>
