@@ -1,0 +1,174 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Exceptions or longjmp() Across Client C/C++ Code</title>
+    <link>https://forum.rebol.info/t/exceptions-or-longjmp-across-client-c-c-code/2354</link>
+    <description>So there&#39;s a somewhat uncomfortable issue in using the API, of what to do if an abrupt failure happens.
+
+    void my_c_function(int x) {
+        char* memory = malloc(1020);
+        ...
+        rebElide(&quot;append 1020&quot;, rebI(x));  // can&#39;t append to integers, FAILs
+    }
+
+Currently what happens in this situation depends on whether you&#39;re in the body of an API native which is being invoked by the trampoline or not.  If you&#39;re not, the program just terminates.  If you are, then there will be a longjmp or C++ exception (based on which you built with) thrown up the stack which gets caught at the trampoline layer of the API native invocation, and then propagated by that.
+
+Either way you&#39;ll get a memory leak.  :roll_eyes: 
+
+## Every API Could Return Failure Values
+
+Then you would be forced to check it:
+
+    Value* abrupt;
+    Value* result = rebValue(&amp;abrupt, &quot;append 1020&quot;, rebI(x));
+    if (abrupt) {  // an ERROR! value, we&#39;d presume
+        free(memory);
+        /* handle error */
+    }
+
+Currently if you want to do something like this, there are tools like ENRESCUE, which will give you an ERROR! if there&#39;s a failure, or a ^META of whatever else:
+
+    Value* meta = rebValue(&quot;sys.util/enrescue [append 1020&quot;, rebI(x), &quot;]&quot;);
+    if (rebUnboxLogic(&quot;error?&quot;, meta&quot;)) {
+        free(memory);
+        /* handle error */
+    }
+    Value* result = rebValue(meta);  // evaluating meta will unmeta it
+
+So yes, we could make that easier...and should:
+
+    Value* value;
+    Value* error = rebRescue(&amp;value, &quot;append 1020&quot;, rebI(x));
+    if (error) {
+        free(memory);
+        /* handle error */
+    }
+    /* use value, corrupt if error was non-null */
+
+The API is built programmatically, so there&#39;s no real reason it couldn&#39;t have a Rescue variation for every entry point:
+
+    int result;
+    Value* error = rebRescueUnboxInteger(&amp;result, ...);
+
+I... guess we could do that.  :face_with_diagonal_mouth:  It&#39;s a bit unfortunate that you have to make separate entry points in C for all of these things.   JavaScript can have interface modifiers:
+
+    const [error, result] = reb.Rescue.UnboxInteger(...);
+
+## But Let&#39;s Say You Don&#39;t Want That...
+
+What if you want plain old `rebElide()`, not `rebRescueElide()`, and you want something automatic to happen.
+
+The API exports C functions that are declared with **`extern &quot;C&quot;`**.  This means they cannot throw C++ exceptions.  So if you want C++ exceptions so your code is unwound properly, that would have to be done in an inline wrapper of some kind, kind of like:
+
+    inline void rebElide(...) {  // not extern &quot;C&quot;
+        Value* error = rebRescueElide(...);  // extern &quot;C&quot;, can&#39;t throw
+        if (error)
+            throw error;  // throw is legal in non-extern &quot;C&quot; (if C++)
+    }
+
+But then, `rebFunction()` would have to do its own exception handling to intercept these throws so you didn&#39;t cross the interpreter stack.  It&#39;s doable.
+
+The other option is to use `longjmp()`.
+
+## What Do Other Languages Do?
+
+Well, one case would be Ruby, which has `rb_rescue2()`, `rb_protect()`, `rb_ensure()`...
+
+[http://silverhammermba.github.io/emberb/c/#rescue](http://silverhammermba.github.io/emberb/c/#rescue)
+
+These seem to be longjmp()-based, and nothing special.  Won&#39;t work with C++.
+
+That&#39;s actually where I adopted the term RESCUE from (in the sense used here, and SYS.UTIL/RESCUE).
+
+Long ago I thought to mirror the Ruby API, but I don&#39;t think we need to.  There doesn&#39;t need to be a special &quot;Dangerous Function&quot; type or routines to handle it.  Instead we just say that your dangerous function is simply a **`rebFunction()`** which has a C function as its implementation.  So we piggy-back on whatever exception handling protects that implementation.
+
+Anyway, short term I&#39;ve just made a new **`rebRescue()`** function implementing the better idea, and gotten rid of the very-very-old Ruby clone routines.  More work is needed, but I do want an answer for being able to properly run destructors in C++ code.
+
+## Added Convenience: rebMalloc(), rebRealloc(), rebFree()...
+
+For the sake of convenience, there is a memory allocator which lets you allocate memory that will be cleaned up automatically in case of a failure, and doesn&#39;t require destructors to do it.  It&#39;s just taken care of when a failed frame is taken off the stack.
+
+These actually back the memory with a BINARY! series, and are cleaned up by the same mechanics that clean up unmanaged series that are in flight when an internal error occurs.
+
+Just an added thing, but better to use C++ constructs if you have a C++ codebase and if the API is tweaked to properly support destructors, which it should be able to do without needing to compile the interpreter itself as C++!</description>
+    
+    <lastBuildDate>Sat, 21 Dec 2024 17:36:12 +0000</lastBuildDate>
+    <category>Language Bridging</category>
+    <atom:link href="https://forum.rebol.info/t/exceptions-or-longjmp-across-client-c-c-code/2354.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Exceptions or longjmp() Across Client C/C++ Code</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>So there's a somewhat uncomfortable issue in using the API, of what to do if an abrupt failure happens.</p>
+<pre><code>void my_c_function(int x) {
+    char* memory = malloc(1020);
+    ...
+    rebElide("append 1020", rebI(x));  // can't append to integers, FAILs
+}
+</code></pre>
+<p>Currently what happens in this situation depends on whether you're in the body of an API native which is being invoked by the trampoline or not.  If you're not, the program just terminates.  If you are, then there will be a longjmp or C++ exception (based on which you built with) thrown up the stack which gets caught at the trampoline layer of the API native invocation, and then propagated by that.</p>
+<p>Either way you'll get a memory leak.  <img src="https://forum.rebol.info/images/emoji/twitter/roll_eyes.png?v=12" title=":roll_eyes:" class="emoji" alt=":roll_eyes:" loading="lazy" width="20" height="20"></p>
+<h2><a name="p-7981-every-api-could-return-failure-values-1" class="anchor" href="https://forum.rebol.info#p-7981-every-api-could-return-failure-values-1"></a>Every API Could Return Failure Values</h2>
+<p>Then you would be forced to check it:</p>
+<pre><code>Value* abrupt;
+Value* result = rebValue(&amp;abrupt, "append 1020", rebI(x));
+if (abrupt) {  // an ERROR! value, we'd presume
+    free(memory);
+    /* handle error */
+}
+</code></pre>
+<p>Currently if you want to do something like this, there are tools like ENRESCUE, which will give you an ERROR! if there's a failure, or a ^META of whatever else:</p>
+<pre><code>Value* meta = rebValue("sys.util/enrescue [append 1020", rebI(x), "]");
+if (rebUnboxLogic("error?", meta")) {
+    free(memory);
+    /* handle error */
+}
+Value* result = rebValue(meta);  // evaluating meta will unmeta it
+</code></pre>
+<p>So yes, we could make that easier...and should:</p>
+<pre><code>Value* value;
+Value* error = rebRescue(&amp;value, "append 1020", rebI(x));
+if (error) {
+    free(memory);
+    /* handle error */
+}
+/* use value, corrupt if error was non-null */
+</code></pre>
+<p>The API is built programmatically, so there's no real reason it couldn't have a Rescue variation for every entry point:</p>
+<pre><code>int result;
+Value* error = rebRescueUnboxInteger(&amp;result, ...);
+</code></pre>
+<p>I... guess we could do that.  <img src="https://forum.rebol.info/images/emoji/twitter/face_with_diagonal_mouth.png?v=12" title=":face_with_diagonal_mouth:" class="emoji" alt=":face_with_diagonal_mouth:" loading="lazy" width="20" height="20">  It's a bit unfortunate that you have to make separate entry points in C for all of these things.   JavaScript can have interface modifiers:</p>
+<pre><code>const [error, result] = reb.Rescue.UnboxInteger(...);
+</code></pre>
+<h2><a name="p-7981-but-lets-say-you-dont-want-that-2" class="anchor" href="https://forum.rebol.info#p-7981-but-lets-say-you-dont-want-that-2"></a>But Let's Say You Don't Want That...</h2>
+<p>What if you want plain old <code>rebElide()</code>, not <code>rebRescueElide()</code>, and you want something automatic to happen.</p>
+<p>The API exports C functions that are declared with <strong><code>extern "C"</code></strong>.  This means they cannot throw C++ exceptions.  So if you want C++ exceptions so your code is unwound properly, that would have to be done in an inline wrapper of some kind, kind of like:</p>
+<pre><code>inline void rebElide(...) {  // not extern "C"
+    Value* error = rebRescueElide(...);  // extern "C", can't throw
+    if (error)
+        throw error;  // throw is legal in non-extern "C" (if C++)
+}
+</code></pre>
+<p>But then, <code>rebFunction()</code> would have to do its own exception handling to intercept these throws so you didn't cross the interpreter stack.  It's doable.</p>
+<p>The other option is to use <code>longjmp()</code>.</p>
+<h2><a name="p-7981-what-do-other-languages-do-3" class="anchor" href="https://forum.rebol.info#p-7981-what-do-other-languages-do-3"></a>What Do Other Languages Do?</h2>
+<p>Well, one case would be Ruby, which has <code>rb_rescue2()</code>, <code>rb_protect()</code>, <code>rb_ensure()</code>...</p>
+<p><a href="http://silverhammermba.github.io/emberb/c/#rescue">http://silverhammermba.github.io/emberb/c/#rescue</a></p>
+<p>These seem to be longjmp()-based, and nothing special.  Won't work with C++.</p>
+<p>That's actually where I adopted the term RESCUE from (in the sense used here, and SYS.UTIL/RESCUE).</p>
+<p>Long ago I thought to mirror the Ruby API, but I don't think we need to.  There doesn't need to be a special "Dangerous Function" type or routines to handle it.  Instead we just say that your dangerous function is simply a <strong><code>rebFunction()</code></strong> which has a C function as its implementation.  So we piggy-back on whatever exception handling protects that implementation.</p>
+<p>Anyway, short term I've just made a new <strong><code>rebRescue()</code></strong> function implementing the better idea, and gotten rid of the very-very-old Ruby clone routines.  More work is needed, but I do want an answer for being able to properly run destructors in C++ code.</p>
+<h2><a name="p-7981-added-convenience-rebmalloc-rebrealloc-rebfree-4" class="anchor" href="https://forum.rebol.info#p-7981-added-convenience-rebmalloc-rebrealloc-rebfree-4"></a>Added Convenience: rebMalloc(), rebRealloc(), rebFree()...</h2>
+<p>For the sake of convenience, there is a memory allocator which lets you allocate memory that will be cleaned up automatically in case of a failure, and doesn't require destructors to do it.  It's just taken care of when a failed frame is taken off the stack.</p>
+<p>These actually back the memory with a BINARY! series, and are cleaned up by the same mechanics that clean up unmanaged series that are in flight when an internal error occurs.</p>
+<p>Just an added thing, but better to use C++ constructs if you have a C++ codebase and if the API is tweaked to properly support destructors, which it should be able to do without needing to compile the interpreter itself as C++!</p>
+          <p><a href="https://forum.rebol.info/t/exceptions-or-longjmp-across-client-c-c-code/2354/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/exceptions-or-longjmp-across-client-c-c-code/2354/1</link>
+        <pubDate>Sat, 21 Dec 2024 17:19:10 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-2354-1</guid>
+        <source url="https://forum.rebol.info/t/exceptions-or-longjmp-across-client-c-c-code/2354.rss">Exceptions or longjmp() Across Client C/C++ Code</source>
+      </item>
+  </channel>
+</rss>

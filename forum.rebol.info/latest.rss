@@ -5,8 +5,426 @@
     <link>https://forum.rebol.info/latest</link>
     <description>Latest topics</description>
     
-      <lastBuildDate>Thu, 12 Dec 2024 13:07:42 +0000</lastBuildDate>
+      <lastBuildDate>Sun, 22 Dec 2024 16:29:39 +0000</lastBuildDate>
       <atom:link href="https://forum.rebol.info/latest.rss" rel="self" type="application/rss+xml" />
+        <item>
+          <title>Get_Xxx_Flag() vs Has_Xxx_Flag() ?</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>C/C++ Implementation</category>
+          <description><![CDATA[
+            <p>Kind of a fiddly naming issue, but there are a lot of places where flag-testing helpers are defined, which usually have 4 variants like this:</p>
+<pre><code>#define Set_Details_Flag(p,name) \
+    Set_Flavor_Flag(DETAILS, ensure(Details*, (p)), name)
+
+#define Get_Details_Flag(p,name) \
+    Get_Flavor_Flag(DETAILS, ensure(Details*, (p)), name)
+
+#define Clear_Details_Flag(p,name) \
+    Clear_Flavor_Flag(DETAILS, ensure(Details*, (p)), name)
+
+#define Not_Details_Flag(p,name) \
+    Not_Flavor_Flag(DETAILS, ensure(Details*, (p)), name)
+</code></pre>
+<p>The savings add up for having things like the NOT form, it unclutters things pretty well:</p>
+<pre><code>Not_Details_Flag(details, CAN_BE_DISPATCHED_AS_INTRINSIC)
+// vs
+not Get_Details_Flag(details, CAN_BE_DISPATCHED_AS_INTRINSIC)
+</code></pre>
+<p>I hadn't really questioned these.  But lately I've been wondering... would HAS be better than GET?</p>
+<pre><code>if (Has_Details_Flag(...)) ...
+
+if (Get_Details_Flag(...)) ...
+</code></pre>
+<p>It's a subtle semantics thing.  You could argue that even if a flag is not set, the structure still <em>has</em> the flag.</p>
+<p>But is "if Get(...)" like asking if the get operation itself succeeded?  <img src="https://forum.rebol.info/images/emoji/twitter/frowning.png?v=12" title=":frowning:" class="emoji" alt=":frowning:" loading="lazy" width="20" height="20"></p>
+<p>Of course, in the interpreter we have taken for granted that <strong><code>if get $var</code></strong> isn't asking if you successfully got the variable, but whether the variable's contents are null or not.  And <strong><code>has obj field</code></strong> is really asking about the presence or absence of the field.</p>
+<p>When I first thought of it, I was thinking that HAS was better.  But after writing this I'm kind of thinking GET may be the more consistent choice after all.</p>
+<p>To be painfully precise, we'd call it: <strong><code>Is_Details_Flag_Set(...)</code></strong>... but I certainly prefer <strong><code>Get_Details_Flag(...)</code></strong> to that.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/get-xxx-flag-vs-has-xxx-flag/2358">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/get-xxx-flag-vs-has-xxx-flag/2358</link>
+          <pubDate>Sun, 22 Dec 2024 16:29:39 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2358</guid>
+          <source url="https://forum.rebol.info/t/get-xxx-flag-vs-has-xxx-flag/2358.rss">Get_Xxx_Flag() vs Has_Xxx_Flag() ?</source>
+        </item>
+        <item>
+          <title>What Should Returning a String From a Native Do?</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Language Bridging</category>
+          <description><![CDATA[
+            <p>I've raved about <a href="https://forum.rebol.info/t/no-preprocessing-no-ffi-just-awesome-rebfunction/2224">how cool rebFunction() is</a>... though it may seem like mundane C interop, it's not.  <strong>It's quite novel.</strong></p>
+<p>But to recap, a trivial example:</p>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">const char* Add_1000_Spec = "[ \
+    -{Adds 1000 to whatever you pass in}- \
+    return: [integer!] \
+    x [integer!] \
+]";
+Bounce Add_1000_Impl(Context* binding)
+{
+    int x = rebUnboxInteger("x");
+    int bigger = x + 1000;
+    return rebInteger(bigger);
+}
+
+Value* action = rebFunction(Add_1000_Spec, &amp;Add_1000_Impl);
+</code></pre>
+<p>So here you see us returning a synthesized Rebol Value, an INTEGER!.</p>
+<p>You can return other things, such as <strong><code>rebDelegate("...");</code></strong> which defers execution to code which can do all kinds of things like throw or raise errors, or produce unstable antiforms.</p>
+<h2><a name="p-7984-but-no-return-states-overlap-utf-8-strings-1" class="anchor" href="https://forum.rebol.info#p-7984-but-no-return-states-overlap-utf-8-strings-1"></a>But No Return States Overlap UTF-8 Strings</h2>
+<p>This is by design.  All Cells and Stubs in the system are out-of-band from valid UTF-8 leading characters.</p>
+<p>This means that the meaning for this is wide open:</p>
+<pre><code>const char* Return_Utf8_Spec = "[ \
+    -{return of a C const char literal pointer}- \
+    return: [???] -{what do you think?}- \
+]";
+Bounce Return_Utf8_Impl(Context* binding)
+{
+    return "😸 Some UTF-8 Here 😸";
+}
+</code></pre>
+<h2><a name="p-7984-obvious-answer-return-text-2" class="anchor" href="https://forum.rebol.info#p-7984-obvious-answer-return-text-2"></a>"Obvious" Answer: Return TEXT!</h2>
+<p>You might think that it's completely obvious what should happen in this case: that it returns TEXT! and that's the end of that.</p>
+<p>Hence this would be a synonym for:</p>
+<pre><code>return rebText("😸 Some UTF-8 Here 😸");
+</code></pre>
+<p>Given that we could make the "instructions" legal to return as well, it could be equivalent to something even shorter:</p>
+<pre><code>return rebT("😸 Some UTF-8 Here 😸");
+</code></pre>
+<p>So this doesn't really rock anyone's world with a capability they didn't already have.</p>
+<h2><a name="p-7984-or-it-could-run-code-3" class="anchor" href="https://forum.rebol.info#p-7984-or-it-could-run-code-3"></a>OR... It Could Run Code...</h2>
+<p>I'll point out that plain C strings aren't generally seen in the API as being equivalent to text literals.  They're equivalent to code.</p>
+<pre><code>rebElide("this isn't a string -{but this is}-");
+</code></pre>
+<p>So shifting into non-code interpretation requires some kind of marker.</p>
+<p>By this logic, we might say that the specific relationship between <strong>return</strong> and a string runs code...but more than that, <em>delegated</em> code.</p>
+<p>This is to say that because you are returning, you can do things safely that you couldn't do otherwise... because you've passed control back to the trampoline.  Hence something like a FAIL would not cross your own C stack levels.</p>
+<pre><code>return "fail -{This would be safe!}-"
+</code></pre>
+<p>It's not as powerful as <strong><code>rebDelegate()</code></strong>, because you can't splice things in variadically.  And you might wonder how it could work at all...since it doesn't have a way to capture the shadowed binding variable.</p>
+<p><strong>But interestingly, it doesn't need to capture the shadowed variable, because in processing the return it's actually the point of control of the Dispatcher that passed the variable in the first place!</strong></p>
+<p>So indeed, you have access to the full context...including the local variables in the frame.</p>
+<pre><code>const char* Return_Delegates_Spec = "[ \
+    -{Demonstrate returning UTF-8 as delegation}- \
+    return: [tag!] \
+    x [integer!] \
+]";
+Bounce Return_Delegates_Impl(Context* binding)
+{
+    if (rebUnboxInteger("x") &gt; 1020)
+         return rebValue("&lt;nice large number!&gt;");
+    return "raise [-{X value is too small:}- x]";
+}
+</code></pre>
+<h2><a name="p-7984-rebdelegate-still-is-a-lot-more-full-featured-4" class="anchor" href="https://forum.rebol.info#p-7984-rebdelegate-still-is-a-lot-more-full-featured-4"></a>rebDelegate() Still Is  A Lot More Full-Featured</h2>
+<p>Not only can you splice, but you can use commas to separate runs of text:</p>
+<pre><code>return rebDelegate(
+    "you", "can",
+    "do", "this"
+    "and splice", values, "in the midst"
+);
+</code></pre>
+<p>That doesn't wind up doing anything weird like giving you "cando".  The commas in the variadic are token stops.</p>
+<p>C++ offers raw strings and you can do things like:</p>
+<pre><code>return R"(fail [
+    -{You can write a really long failure message here}-
+    -{And the raw string will do the right thing}-
+])"
+</code></pre>
+<p>I'm used to the commas, but maybe that's an improvement over:</p>
+<pre><code>return rebDelegate("fail [",
+    "-{You can write a really long failure message here}-",
+    "-{And the raw string will do the right thing}-"
+"]");
+</code></pre>
+<h2><a name="p-7984-overall-i-think-string-as-delegation-is-the-winning-choice-5" class="anchor" href="https://forum.rebol.info#p-7984-overall-i-think-string-as-delegation-is-the-winning-choice-5"></a>Overall, I Think String-As-Delegation Is The Winning Choice</h2>
+<p>Making a TEXT! string is both counter to the default interpretation of C strings, and will have a well-known shorthand.</p>
+<p>I don't think <strong><code>return rebD()</code></strong> for rebDelegate() has any particular clarity to it.</p>
+<p>Where I see this being most useful is for short failure messages, which are pretty common to be returned...even in the middle of functions.</p>
+<p>But it also lets you do things you couldn't otherwise, like <strong><code>return "quit 1"</code></strong> or <strong><code>return "halt"</code></strong>.</p>
+<p>If you want to return nothing, you can just say <strong><code>return "~"</code></strong> instead of <strong><code>return rebNothing()</code></strong>... we can make that particular case fast where it doesn't call the evaluator (and maybe some other cases too...)</p>
+<p>Really, it's just a greater force multiplier!</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/what-should-returning-a-string-from-a-native-do/2357">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/what-should-returning-a-string-from-a-native-do/2357</link>
+          <pubDate>Sun, 22 Dec 2024 07:39:50 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2357</guid>
+          <source url="https://forum.rebol.info/t/what-should-returning-a-string-from-a-native-do/2357.rss">What Should Returning a String From a Native Do?</source>
+        </item>
+        <item>
+          <title>Equivalent to [[nodiscard]] ?</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Foreign Inspiration</category>
+          <description><![CDATA[
+            <p>C++ has an attribute on functions called <code>[[nodiscard]]</code> that instructs the compiler to make sure you do something with a result.</p>
+<p><a href="https://en.cppreference.com/w/cpp/language/attributes/nodiscard" class="inline-onebox">C++ attribute: nodiscard (since C++17) - cppreference.com</a></p>
+<p>I've long wondered about whether there's some kind of discard-sensitivity that should/could be thrown in, e.g. for noticing when a stray value in evaluation doesn't do anything:</p>
+<pre><code>&gt;&gt; append [a b c] [d e] 2 print "Could we error?"
+** Error: 2 was discarded
+</code></pre>
+<p>How much code would break if we didn't allow stray values like that in the evaluator?  I could actually test that question.</p>
+<p>Anyway, the mechanics behind RAISE means there's already a place to implement this.  There's a spot where it is decided if a definitional error would be discarded, and if so it's escalated to an abrupt failure.  It's only okay if it falls out of the evaluation to get picked up by someone else, and stays as a hot potato.</p>
+<p>But could we have other hot potatoes?  Results of functions that are marked NO-DISCARD?   Plain values?</p>
+<p>I can't offhand think of any important techniques this would break.  But I'll have to try it and see.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/equivalent-to-nodiscard/2356">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/equivalent-to-nodiscard/2356</link>
+          <pubDate>Sat, 21 Dec 2024 18:44:50 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2356</guid>
+          <source url="https://forum.rebol.info/t/equivalent-to-nodiscard/2356.rss">Equivalent to [[nodiscard]] ?</source>
+        </item>
+        <item>
+          <title>Multiple Return Values in JavaScript</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Foreign Inspiration</category>
+          <description><![CDATA[
+            <p>rebRescue() in the C API returns an error, or null if no error... in which case your result is the value that's passed by pointer-to-pointer:</p>
+<pre><code> Value* result;
+ Value* error = rebRescue(&amp;result, "append 123 456");  // illegal, fails
+ if (error) {  // non-0 pointer value means not ~null~ antiform
+     /* handle error */
+ }
+ else {
+     /* result is valid */
+ }
+</code></pre>
+<p>But JavaScript doesn't have pointer-to-value semantics.  So you have to use multi-returns.</p>
+<p>I didn't know how they did that, so I looked it up.  <a href="https://stackoverflow.com/questions/2917175/return-multiple-values-in-javascript/2917186#2917186">There are two ways</a>.  You can destructure an array:</p>
+<pre><code>function getValues() {
+    return [getFirstValue(), getSecondValue()]
+}
+const [a, b] = getValues()  ; any names you want here
+</code></pre>
+<p>Or you can destructure an object, where you have to use the names of the fields as the same names as your destructure variables:</p>
+<pre><code>function getValues() {
+    return {
+        first: getFirstValue(),
+        second: getSecondValue(),
+    }
+}
+
+const {first, second} = getValues()
+</code></pre>
+<p>If you don't want to use the exact names, there's another syntax:</p>
+<pre><code>const {a: first, b: second} = getValues()
+</code></pre>
+<p>I don't know if naming multi-returns is super important, and have had bigger ambitions for antiform objects.</p>
+<p>The StackOverflow question has someone prescribing that it's very important to pick the named version over the non-named one.  I don't agree, and plan on using the array form for <code>rebRescue()</code></p>
+<p><strong>The much bigger issue in my mind is forgetting to do the destructure, and getting back a value that's in-band as a plain array or object, when you really just forgot to destructure.</strong>  Isotopes do a very good thing here, not seen in other languages...decaying to the first item by default, and generalizing moving the out-of-band into band via meta/quasi/etc. forms in order to write peer destructuring operators when you need to.</p>
+<p>This is a repeat of JavaScript's issue with Promise, where if you forget to do an AWAIT then you wind up with a Promise by value that you didn't expect.  But AWAIT is terrible for all kinds of other reasons, so we're not going down that road.</p>
+<p><a href="https://journal.stuffwithstuff.com/2015/02/01/what-color-is-your-function/" class="inline-onebox">What Color is Your Function? – journal.stuffwithstuff.com</a></p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/multiple-return-values-in-javascript/2355">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/multiple-return-values-in-javascript/2355</link>
+          <pubDate>Sat, 21 Dec 2024 18:32:13 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2355</guid>
+          <source url="https://forum.rebol.info/t/multiple-return-values-in-javascript/2355.rss">Multiple Return Values in JavaScript</source>
+        </item>
+        <item>
+          <title>Exceptions or longjmp() Across Client C/C++ Code</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Language Bridging</category>
+          <description><![CDATA[
+            <p>So there's a somewhat uncomfortable issue in using the API, of what to do if an abrupt failure happens.</p>
+<pre><code>void my_c_function(int x) {
+    char* memory = malloc(1020);
+    ...
+    rebElide("append 1020", rebI(x));  // can't append to integers, FAILs
+}
+</code></pre>
+<p>Currently what happens in this situation depends on whether you're in the body of an API native which is being invoked by the trampoline or not.  If you're not, the program just terminates.  If you are, then there will be a longjmp or C++ exception (based on which you built with) thrown up the stack which gets caught at the trampoline layer of the API native invocation, and then propagated by that.</p>
+<p>Either way you'll get a memory leak.  <img src="https://forum.rebol.info/images/emoji/twitter/roll_eyes.png?v=12" title=":roll_eyes:" class="emoji" alt=":roll_eyes:" loading="lazy" width="20" height="20"></p>
+<h2><a name="p-7981-every-api-could-return-failure-values-1" class="anchor" href="https://forum.rebol.info#p-7981-every-api-could-return-failure-values-1"></a>Every API Could Return Failure Values</h2>
+<p>Then you would be forced to check it:</p>
+<pre><code>Value* abrupt;
+Value* result = rebValue(&amp;abrupt, "append 1020", rebI(x));
+if (abrupt) {  // an ERROR! value, we'd presume
+    free(memory);
+    /* handle error */
+}
+</code></pre>
+<p>Currently if you want to do something like this, there are tools like ENRESCUE, which will give you an ERROR! if there's a failure, or a ^META of whatever else:</p>
+<pre><code>Value* meta = rebValue("sys.util/enrescue [append 1020", rebI(x), "]");
+if (rebUnboxLogic("error?", meta")) {
+    free(memory);
+    /* handle error */
+}
+Value* result = rebValue(meta);  // evaluating meta will unmeta it
+</code></pre>
+<p>So yes, we could make that easier...and should:</p>
+<pre><code>Value* value;
+Value* error = rebRescue(&amp;value, "append 1020", rebI(x));
+if (error) {
+    free(memory);
+    /* handle error */
+}
+/* use value, corrupt if error was non-null */
+</code></pre>
+<p>The API is built programmatically, so there's no real reason it couldn't have a Rescue variation for every entry point:</p>
+<pre><code>int result;
+Value* error = rebRescueUnboxInteger(&amp;result, ...);
+</code></pre>
+<p>I... guess we could do that.  <img src="https://forum.rebol.info/images/emoji/twitter/face_with_diagonal_mouth.png?v=12" title=":face_with_diagonal_mouth:" class="emoji" alt=":face_with_diagonal_mouth:" loading="lazy" width="20" height="20">  It's a bit unfortunate that you have to make separate entry points in C for all of these things.   JavaScript can have interface modifiers:</p>
+<pre><code>const [error, result] = reb.Rescue.UnboxInteger(...);
+</code></pre>
+<h2><a name="p-7981-but-lets-say-you-dont-want-that-2" class="anchor" href="https://forum.rebol.info#p-7981-but-lets-say-you-dont-want-that-2"></a>But Let's Say You Don't Want That...</h2>
+<p>What if you want plain old <code>rebElide()</code>, not <code>rebRescueElide()</code>, and you want something automatic to happen.</p>
+<p>The API exports C functions that are declared with <strong><code>extern "C"</code></strong>.  This means they cannot throw C++ exceptions.  So if you want C++ exceptions so your code is unwound properly, that would have to be done in an inline wrapper of some kind, kind of like:</p>
+<pre><code>inline void rebElide(...) {  // not extern "C"
+    Value* error = rebRescueElide(...);  // extern "C", can't throw
+    if (error)
+        throw error;  // throw is legal in non-extern "C" (if C++)
+}
+</code></pre>
+<p>But then, <code>rebFunction()</code> would have to do its own exception handling to intercept these throws so you didn't cross the interpreter stack.  It's doable.</p>
+<p>The other option is to use <code>longjmp()</code>.</p>
+<h2><a name="p-7981-what-do-other-languages-do-3" class="anchor" href="https://forum.rebol.info#p-7981-what-do-other-languages-do-3"></a>What Do Other Languages Do?</h2>
+<p>Well, one case would be Ruby, which has <code>rb_rescue2()</code>, <code>rb_protect()</code>, <code>rb_ensure()</code>...</p>
+<p><a href="http://silverhammermba.github.io/emberb/c/#rescue">http://silverhammermba.github.io/emberb/c/#rescue</a></p>
+<p>These seem to be longjmp()-based, and nothing special.  Won't work with C++.</p>
+<p>That's actually where I adopted the term RESCUE from (in the sense used here, and SYS.UTIL/RESCUE).</p>
+<p>Long ago I thought to mirror the Ruby API, but I don't think we need to.  There doesn't need to be a special "Dangerous Function" type or routines to handle it.  Instead we just say that your dangerous function is simply a <strong><code>rebFunction()</code></strong> which has a C function as its implementation.  So we piggy-back on whatever exception handling protects that implementation.</p>
+<p>Anyway, short term I've just made a new <strong><code>rebRescue()</code></strong> function implementing the better idea, and gotten rid of the very-very-old Ruby clone routines.  More work is needed, but I do want an answer for being able to properly run destructors in C++ code.</p>
+<h2><a name="p-7981-added-convenience-rebmalloc-rebrealloc-rebfree-4" class="anchor" href="https://forum.rebol.info#p-7981-added-convenience-rebmalloc-rebrealloc-rebfree-4"></a>Added Convenience: rebMalloc(), rebRealloc(), rebFree()...</h2>
+<p>For the sake of convenience, there is a memory allocator which lets you allocate memory that will be cleaned up automatically in case of a failure, and doesn't require destructors to do it.  It's just taken care of when a failed frame is taken off the stack.</p>
+<p>These actually back the memory with a BINARY! series, and are cleaned up by the same mechanics that clean up unmanaged series that are in flight when an internal error occurs.</p>
+<p>Just an added thing, but better to use C++ constructs if you have a C++ codebase and if the API is tweaked to properly support destructors, which it should be able to do without needing to compile the interpreter itself as C++!</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/exceptions-or-longjmp-across-client-c-c-code/2354">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/exceptions-or-longjmp-across-client-c-c-code/2354</link>
+          <pubDate>Sat, 21 Dec 2024 17:19:10 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2354</guid>
+          <source url="https://forum.rebol.info/t/exceptions-or-longjmp-across-client-c-c-code/2354.rss">Exceptions or longjmp() Across Client C/C++ Code</source>
+        </item>
+        <item>
+          <title>The Grand Leading-Slash &quot;Safety, or Burden?&quot; Question</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Philosophy</category>
+          <description><![CDATA[
+            <p>Overall, I have been tremendously happy with how the ideas of the <strong><a href="https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905">Big Alien Proposal</a></strong> have worked out.</p>
+<p>That started from the concept that when slashes appear, they either come <em>before</em> a function they run, or <em>after</em> a function they suppress execution for.</p>
+<pre><code>foo.bar
+; ^-- foo is an entity from which BAR is being selected.  BAR is not
+; allowed to be an antiform frame, so this syntax cannot invoke a
+; function call (though it can invoke an 'accessor', e.g. a "getter"
+; which is 0-arity).
+
+foo/bar
+; ^-- foo is an entity from which BAR (an a FRAME! or antiform FRAME!)
+; is being selected and then invoked.  This will generate an error if
+; bar is not a frame or antiform frame.
+
+foo.bar/
+; ^-- bar is a field which is an antiform FRAME!, whose execution is
+; being suppressed.  This expression will return an antiform frame, or
+; an error if not an antiform frame.
+
+foo
+; ^-- conventional WORD! reference, will run an antiform frame as an
+; action invocation or fetch other values as-is
+
+/foo
+; ^-- invocation reference, will run an antiform frame (or plain frame)
+; as an action invocation and give errors on other types
+
+foo/
+; ^-- action suppression, will give you back an antiform frame as-is
+; and error on other types.
+</code></pre>
+<p><em>(If you're curious about why <strong><code>/foo</code></strong> will run plain FRAME! as well as antiform, while <strong><code>foo/</code></strong> will not return an antiform frame for plain FRAME!, this is based on the idea that it's better to be conservative when fetching values so that you won't get surprised by getting a plain frame back from <strong><code>foo/</code>~</strong> which gives everything back as-is.)</em></p>
+<hr>
+<p>I've written elsewhere <a href="https://forum.rebol.info/t/trailing-slash-is-a-winner-for-defused-actions/2327">how pleased I am that the way you suppress a function's execution is by throwing up a "barrier"</a> with a separating slash that makes it clear arguments are not being gathered at the callsite.  That's really slick.</p>
+<p>For this idea to work, something else had to be used for refinements.  That meant <a href="https://forum.rebol.info/t/introducingnew-chain-datatype/2226">invention of the CHAIN! datatype</a> has opened a lot of interesting doors, and I find it's quite learnable to see things like <strong><code>trim:auto:tail</code></strong> instead of <strong><code>trim/auto/tail</code></strong>.</p>
+<p><em>I actually prefer it!</em>  What some might think of a disadvantage of being "less noticeable" turns into an advantage... <strong><code>trim:auto</code></strong> really could have been a function called <strong><code>trim-auto</code></strong> just as easily.  Why would you want a slash to make the fact that it has a refinement "pop"?  The slashes to make function calls or suppression pop are much better applied.</p>
+<p><strong>So that's all good. <img src="https://forum.rebol.info/images/emoji/twitter/smile_cat.png?v=12" title=":smile_cat:" class="emoji" alt=":smile_cat:" loading="lazy" width="20" height="20"> No regrets!</strong></p>
+<h2><a name="p-7975-but-leading-slash-for-functions-rule-hasnt-100-geld-1" class="anchor" href="https://forum.rebol.info#p-7975-but-leading-slash-for-functions-rule-hasnt-100-geld-1"></a>But... Leading-Slash For Functions Rule Hasn't 100% Gel'd</h2>
+<p>Another part of the proposal was that in order to get tighter control on what was a function or not, you would be required to assign functions using a leading-slash kind of SET-WORD!.</p>
+<pre><code>&gt;&gt; foo: func [a b] [return a + b]
+** Error: FOO: can't be used to assign antiform FRAME!, use /FOO:
+
+&gt;&gt; /foo: func [a b] [return a + b]
+== ~#[frame! "foo" [a b]]]~  ; anti
+</code></pre>
+<p><strong>It hasn't fully settled with me after working with it for some time.</strong></p>
+<p>As I mentioned above, colons for refinements was easy to adapt to...and now that I'm adapted, I prefer it.</p>
+<p>But I'm still typing <strong><code>test: cascade [add/ even?/]</code></strong>.  I love the trailing slashes (and this will be even better when the whole cascade can be done with just <strong><code>even?/add/</code></strong>).  But I'm kind of cursing under my breath the thought of having typed <strong><code>test:</code></strong> and having to backspace over it so it says <strong><code>/test:</code></strong>.  And then I go "hrmph."</p>
+<p>When I'm reading code, I probably appreciate it more than I find it to be "messy".  It gives you a better compass.  The eye can scan and comprehend much better... it's of particular value when you're not using an obvious function generator like FUNC, but something else.  This cues readers to go "oh, I guess that's a function generator".</p>
+<p>Yet still... it's a burden in a way the other changes are not.  It's the only change that increases the character count.</p>
+<h2><a name="p-7975-whats-at-stake-by-not-enforcing-this-2" class="anchor" href="https://forum.rebol.info#p-7975-whats-at-stake-by-not-enforcing-this-2"></a>What's At Stake By Not Enforcing This?</h2>
+<p>Ren-C has a powerful story about how antiforms can't be put in blocks, which means you can write this kind of code and it "just works":</p>
+<pre><code>block2: collect [
+    for-each 'item block1 [keep item]
+]
+
+assert [equal? block1 block2]
+</code></pre>
+<p>When you compare it to Rebol2/R3-Alpha/Red, it's one of those vastly superior situations.  You aren't getting tricked into receiving an ITEM in the FOR-EACH that would generate an unset variable error, or conflate with the state that gets returned when an item can't be picked from a block, or accidentally run a function.  It's a solid solution.</p>
+<p>But that's only for blocks.  What about other places, like objects?</p>
+<p>If we don't put barriers on how action antiforms get assigned to variables, we get the problem all over again:</p>
+<pre><code>for-each [key value] obj [
+    if integer? value [  ; oops, what if VALUE is an action antiform!
+        print "Found an integer"
+    ]
+]
+</code></pre>
+<p>There's no way in this case to say "variables can't hold antiforms".  Logic is an antiform.  Words holding antiform frames are actions.</p>
+<p>Getting this under control with slashes is the kind of thing I've been trying to do for a long time, I've just never had the syntax.  Leading slashes felt like it could be the key:</p>
+<pre><code>for-each [key value] obj [...]  ; value can't be frame antiform
+
+for-each [key /value] obj [...]  ; value must be frame antiform
+
+for-each [key ~/value] obj [...]  ; value may be frame antiform
+</code></pre>
+<p>But if these rules are applied everywhere, what you have to do gets more complex:</p>
+<pre><code>set $x does [print "Is this an error?"]
+
+set $/x does [print "Do you have to do this?"]
+
+&gt;&gt; var: $x
+== x  ; bound
+
+set var does [print "If this errors, how to make VAR into bound /x?"]
+
+set:active var does [print "Do you use refinements?"] (or just SET:ANY ?)
+</code></pre>
+<p>Nothing is free.  And the already more complicated world where <strong><code>x:</code></strong> is a CHAIN! instead of a fundamental different type of word has its own issues, that these all pile on top of.</p>
+<h2><a name="p-7975-theres-likely-not-enough-value-in-optional-slash-3" class="anchor" href="https://forum.rebol.info#p-7975-theres-likely-not-enough-value-in-optional-slash-3"></a>There's Likely Not Enough Value In Optional Slash</h2>
+<p>If <strong><code>/foo: func [...] [...]</code></strong> will enforce that the thing you're assigning is an antiform action, but <strong><code>foo: func [...] [...]</code></strong> still works... I have a feeling that the complexity it takes to offer the feature doesn't give a sufficient payoff to be worth it.</p>
+<p>You have everyone paying the tax of dealing with complicated path structures and bookkeeping--vs. being able to just SET and GET words and tuples at will... and then you're not even giving any additional guarantees in the source.</p>
+<p>This makes me feel like it really is an all-in or not-at-all situation.</p>
+<h2><a name="p-7975-long-story-short-im-still-weighing-it-4" class="anchor" href="https://forum.rebol.info#p-7975-long-story-short-im-still-weighing-it-4"></a>Long Story Short: I'm Still Weighing It</h2>
+<p>I'm not ready to make a verdict.</p>
+<p>The techniques for working with these new CHAIN! and PATH! situations are still being learned.  Most of my hesitance isn't from the looks or typing an extra character, but from frustrations in that...and maybe that frustration will lessen as I work on it more.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/the-grand-leading-slash-safety-or-burden-question/2352">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/the-grand-leading-slash-safety-or-burden-question/2352</link>
+          <pubDate>Thu, 19 Dec 2024 01:12:09 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2352</guid>
+          <source url="https://forum.rebol.info/t/the-grand-leading-slash-safety-or-burden-question/2352.rss">The Grand Leading-Slash &quot;Safety, or Burden?&quot; Question</source>
+        </item>
         <item>
           <title>C++ Magic for LVALUE Checking...or Use Functions?</title>
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
@@ -107,7 +525,7 @@ Tweak_Binding(cellA, Binding_Of(cellB));
 <p>I do feel a pretty strong bias for the briefer notation...</p>
 <p>But I can see the argument for not doing the "weird" thing when there's no increase in functionality... in fact, only losing functionality in C builds.  <em>(Most C++-isms are there to add something that would be fundamentally not possible in C, vs. just syntax sugar like this.)</em></p>
 <p>The invention of the "Tweak" term does change my calculation a little bit here.  Because if it's used only in these "single-assignment-equivalent" circumstances, you can comprehend it as a C assignment statement.</p>
-            <p><small>1 post - 1 participant</small></p>
+            <p><small>2 posts - 1 participant</small></p>
             <p><a href="https://forum.rebol.info/t/c-magic-for-lvalue-checking-or-use-functions/2350">Read full topic</a></p>
           ]]></description>
           <link>https://forum.rebol.info/t/c-magic-for-lvalue-checking-or-use-functions/2350</link>
@@ -2344,309 +2762,6 @@ defUnit "px",  "px", true,   "1:96 in",         "pixel", "pixels"
           <discourse:topicArchived>No</discourse:topicArchived>
           <guid isPermaLink="false">forum.rebol.info-topic-2314</guid>
           <source url="https://forum.rebol.info/t/dimension-conversions-in-arturo/2314.rss">Dimension Conversions in Arturo</source>
-        </item>
-        <item>
-          <title>Barriers to Source-To-Source Transformations</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>General Tools</category>
-          <description><![CDATA[
-            <p><strong>Doing source-to-source transformations <em>seems</em> like something Rebol would be great at.</strong></p>
-<p>Why not LOAD your file (powered by TRANSCODE)... do some structural tweaks, and spit it back out again with SAVE (powered by MOLD).  What could be simpler?</p>
-<p>But the first thing you'll notice is: <strong>Oops, all your comments are gone.</strong></p>
-<p>Next you'll see <strong>the indentation and spacing is almost all thrown out</strong>.  Cells in arrays store a NEWLINE_BEFORE marker to record if they had a newline before them (and there's an additional NEWLINE_AT_TAIL marker on the array as a whole)...but that's all you get.  MOLD just uses some heuristics to indent the code in a canon style.</p>
-<h2><a name="p-7839-vague-proposals-appear-then-fizzle-1" class="anchor" href="https://forum.rebol.info#p-7839-vague-proposals-appear-then-fizzle-1"></a>Vague Proposals Appear, Then Fizzle</h2>
-<p>If you wait long enough, someone will suggest that there be a mode in which TRANSCODE doesn't toss out the whitespace information, but keeps it around somehow.</p>
-<p>One terrible version of this idea actually interleaves weird values into the arrays, where your processing code would have to skip it:</p>
-<pre><code>&gt;&gt; transcode:verbatim "a b  c   d"
-== [a b #[space! 2] c #[space 3] d]
-</code></pre>
-<p>That is a complete dead end, as it would mean any transformation code you used could not be shared with "normal code".</p>
-<p>So what you'd need instead would be some way to expand out that NEWLINE_BEFORE flag into richer information.  But cells use pretty much all their bits (although there are 32 bits free in the headers of cells in the 64 bit build...however I'd be loathe to use it for this.)</p>
-<p>One idea would be to load the data into the cells as in the :VERBATIM example above, except have operations skip over them as if they weren't there.</p>
-<ul>
-<li>
-<p>On the one hand, this this would fundamentally screw with the "simple" design the language is aiming for.</p>
-</li>
-<li>
-<p>On the other hand, this is essentially what UTF-8 Everywhere does for <strong><code>String</code></strong> in managing the series length (in codepoints) as being independent of the number of physical units (in bytes).  It would just be extending that logic to <strong><code>Array</code></strong>, meaning arrays would have to be enumerated with a function like <code>Skip_Element()</code> or <code>Step_Back_Element()</code> instead of just incrementing a pointer with ++ and --.</p>
-</li>
-<li>
-<p>I've actually thought about moving away from pure pointer incrementing and decrementing in order to allow arrays to be built out of discontiguous segments, which could help several scenarios in optimization...with reconciliation into contiguous bits being done on an as-needed basis.</p>
-</li>
-</ul>
-<p>Another concept would be to have cells be able to "redirect" the <strong><code>Extra</code></strong> pointer in the second slot, and set a header flag saying "the Extra in this cell can be found by following the pointer in the extra slot".  And then that can point to an allocation somewhere that holds the formatting information.</p>
-<h2><a name="p-7839-not-happening-any-time-soon-but-worth-remembering-2" class="anchor" href="https://forum.rebol.info#p-7839-not-happening-any-time-soon-but-worth-remembering-2"></a>Not Happening Any Time Soon, But Worth Remembering</h2>
-<p>I can't hold Ren-C's interesting ideas hostage to such things, there's too much other stuff going on.</p>
-<p>But noticing the similarity of the UTF-8 Everywhere transition to the idea of skipped formatting cells...and then tying that into what could be the advantages of discontiguous arrays...got me to think.</p>
-<p>We could perhaps have discontiguous strings as well--leveraging illegal UTF-8 bytes as the signal of pointers embedded in the data.  It might be interesting if the mechanics could be merged.</p>
-            <p><small>1 post - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/barriers-to-source-to-source-transformations/2313">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/barriers-to-source-to-source-transformations/2313</link>
-          <pubDate>Fri, 11 Oct 2024 02:23:03 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-2313</guid>
-          <source url="https://forum.rebol.info/t/barriers-to-source-to-source-transformations/2313.rss">Barriers to Source-To-Source Transformations</source>
-        </item>
-        <item>
-          <title>FENCE! In PARSE: What Should It Do?</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Parsing</category>
-          <description><![CDATA[
-            <p>FENCE! is coming soon.  How soon?  ...soon.</p>
-<p>When it gets here I'm going to want to kick the tires a bit with purposes in dialects.  And so of course a big question is: <strong>What will FENCE! do in PARSE?</strong>  <em>(By default, I mean...you can override it with whatever FENCE! combinator you want.)</em></p>
-<p>It <em>might</em> seem an obvious use for it would be to make objects, e.g. act as GATHER:</p>
-<p>So instead of:</p>
-<pre><code>&gt;&gt; parse "aaabbb" [
-      gather [
-          emit x: collect some ["a", keep (&lt;a&gt;)]
-          emit y: collect some ["b", keep (&lt;b&gt;)]
-      ]
-  ]
-== make object! [
-    x: [&lt;a&gt; &lt;a&gt; &lt;a&gt;]
-    y: [&lt;b&gt; &lt;b&gt; &lt;b&gt;]
-]
-</code></pre>
-<p>You might imagine writing:</p>
-<pre><code>&gt;&gt; parse "aaabbb" [
-      {
-          x: collect some ["a", keep (&lt;a&gt;)]
-          y: collect some ["b", keep (&lt;b&gt;)]
-      }
-  ]
-== make object! [
-    x: [&lt;a&gt; &lt;a&gt; &lt;a&gt;]
-    y: [&lt;b&gt; &lt;b&gt; &lt;b&gt;]
-]
-</code></pre>
-<p><strong>But I don't know if that's obviously a great application.</strong></p>
-<p>We shouldn't be thinking inside-the-box that just because FENCE! is used for making objects sometimes, that's the most pressing need for them in dialects.  I actually think GATHER does a good enough job at what it does...and I think the above example reads more clearly with it.</p>
-<p>But I've pointed to other rather weak areas, <strong><a href="https://forum.rebol.info/t/implicit-capture-in-parse-how-to-get-it/1718">like how we don't have implicit capture</a></strong>.</p>
-<pre><code>parse isodate [
-    year: between &lt;here&gt; "-"
-    month: between &lt;here&gt; "-"
-    day: between &lt;here&gt; "T"
-    ...
-]
-</code></pre>
-<p>I'm not saying this is what we should use fences for, but just to kick-off that "outside-the-box" brainstorm:</p>
-<pre><code>parse isodate [{year} "-" {month} "-" {day} "T" ...]
-</code></pre>
-<p>If my only choices were between that and an alternate for GATHER+EMIT, I'd pick that, because I think we'd get a lot more mileage out of it.</p>
-<p>Remember also that there are lots of variations, like <strong><code>${...}</code></strong> and <strong><code>:{...}</code></strong> and whatever combinations in paths in chains and tuples you can think of.  Ideally how it's used makes some sense across these variants.  But we should remember that dialecting is about serving the domain, not making sacrifices to some god-of-consistency.</p>
-<p><strong>Anyway...it's going to take time to build up a sense of what being "fency" means.</strong></p>
-<p>But if any pet applications start coming to mind, pitch them.</p>
-            <p><small>1 post - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/fence-in-parse-what-should-it-do/2312">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/fence-in-parse-what-should-it-do/2312</link>
-          <pubDate>Thu, 10 Oct 2024 18:52:05 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-2312</guid>
-          <source url="https://forum.rebol.info/t/fence-in-parse-what-should-it-do/2312.rss">FENCE! In PARSE: What Should It Do?</source>
-        </item>
-        <item>
-          <title>Should Strings Nest Levels To Avoid Escaping?</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Datatypes</category>
-          <description><![CDATA[
-            <p>There's a historically convenient feature in strings:</p>
-<pre><code>str: {This was {a historically legal} string.}
-</code></pre>
-<p>Each time you used an open brace inside a string, it would increment a "nesting count".  And when you used a close brace it would drop the nesting count.  When you got to zero, your string was finished.</p>
-<p>It works in a lot of cases, but not if you have unpaired braces in your content:</p>
-<pre><code>c-code: { if char = '}' { printf("This won't work.\n"); } }
-</code></pre>
-<p>We're going to be getting some instant improvement here with the new string format, using dashes.  Since at least one dash is required (otherwise you'd get a fence), cases like the above will "just work":</p>
-<pre><code>c-code: -{ if char = '}' { printf("This will work!\n"); } }-
-</code></pre>
-<p>But should we still support the nesting idea?</p>
-<pre><code>str: -{Should this -{still be a legal}- string?}-
-</code></pre>
-<p>The alternative would be to force you to use more dashes:</p>
-<pre><code>str: --{This -{is definitely a legal}- string.}--
-</code></pre>
-<p>As we can see from the above, that move from one dash to two dashes does lengthen things.  The tightness is appealing to have as an option.</p>
-<h2><a name="p-7836-but-its-complicated-1" class="anchor" href="https://forum.rebol.info#p-7836-but-its-complicated-1"></a>But It's Complicated...</h2>
-<p>Let's put aside equal counts for a moment.  What happens if you nest <em>higher</em> counts (which contain lower counts, by definition)</p>
-<pre><code>str: -{What ---{do you think this}--- should do?}-  ; [1]
-</code></pre>
-<p>If it were rotely searching for <strong><code>}-</code></strong> then it would find it at <strong><code>this}-</code></strong> and consider that the end.</p>
-<pre><code>str: -{To look at ---{another one, consider}- this...}-  ; [2]
-</code></pre>
-<p><strong>Do we want the rule that if you ever enclose code with the dashed brace style like <strong><code>--{</code></strong> and <strong><code>}--</code></strong> the enclosure will always need more dashes than what it encloses?</strong></p>
-<p>When I put it that way, I think that we don't want to force that escalation.  You can always go there if you need to (case 2 above requires it, or using quotes on the outside instead).  But I think being able to dodge it in cases where things are paired (as in case 1) is worth the dodge.</p>
-<p><em>(Note that if you are trying to analyze the inside of the string for matched pairs that are other than the ones you asked for from the outside delimiter, then suddenly you're maintaining a stack of quote levels where nest level has an independent associated number of dashes, instead of just maintaining a total nesting count.  Not that this is a difficult problem, but it's just "another thing".)</em></p>
-            <p><small>1 post - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/should-strings-nest-levels-to-avoid-escaping/2311">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/should-strings-nest-levels-to-avoid-escaping/2311</link>
-          <pubDate>Thu, 10 Oct 2024 06:44:45 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-2311</guid>
-          <source url="https://forum.rebol.info/t/should-strings-nest-levels-to-avoid-escaping/2311.rss">Should Strings Nest Levels To Avoid Escaping?</source>
-        </item>
-        <item>
-          <title>Dialecting Function Calls: New, Weird, Powerful</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Dialects/DSLs</category>
-          <description><![CDATA[
-            <p>The advent of the <a href="https://forum.rebol.info/t/introducingnew-chain-datatype/2226">CHAIN! datatype</a> has provoked the idea of <em>dialecting function calls themselves</em>.</p>
-<p>I've given examples like pointing the variable to blame for a failure...because you often don't really want an error message to implicate the location where the error itself is raised, but rather some callsite arbitrarily far up the stack.</p>
-<p>The proposal I had for this was to change:</p>
-<pre><code>fail:blame ["This failure will implicate VAR at callsite"] $var
-</code></pre>
-<p>Into:</p>
-<pre><code>fail:$var ["This failure will implicate VAR at callsite"]
-</code></pre>
-<p>Another idea I mentioned was the concept of folding the function you want to use as a predicate into the chain.  At first I suggested allowing these names to conflate with what looked like a refinement:</p>
-<pre><code>&gt;&gt; any:even? [1 3 8 7 10]
-== 8
-</code></pre>
-<p>The rationalizing I used was to say "Well, in dialects we have cases where if a keyword isn't recognized then it falls back to looking up the word."   That's how PARSE works... like in this historical case:</p>
-<pre><code>red&gt;&gt; begin: "[" end: "]"
-== "]"
-
-red&gt;&gt; parse "[aaa]" [begin copy stuff to end skip]
-== false
-</code></pre>
-<p>Er, so maybe I should say "that's how PARSE doesn't work".  In any case, the END keyword overrode the END variable definition.  But BEGIN matched, because there's no parse keyword for BEGIN.</p>
-<p><em>(Note: This is a reason why Ren-C uses <strong><code>&lt;end&gt;</code></strong> the tag combinator instead of END the word combinator...and other tag combinators for noun-like things.)</em></p>
-<p>So maybe it's not the best plan to follow the lead there.  Another idea would be to use a TYPE-WORD!</p>
-<pre><code>&gt;&gt; any:&amp;even? [1 3 8 7 10]
-== 8
-</code></pre>
-<p>It's a little clunkier, but it's clearer what's going on.  In this case, the predicate is a single arity function which returns NULL or OKAY...and that's what ANY wants, so it's a particularly good match.</p>
-<p>That also works for my suggestion of <strong><code>quote:&amp;word?</code></strong> and <strong><code>meta:&amp;raised?</code></strong>.  Though it implies that if you composed them together you'd have to say <strong><code>quote:&amp;quote:&amp;word?</code></strong>, and it doesn't look as good as <strong><code>quote:quote:word?</code></strong></p>
-<p>Also...in this case the predicate is a single arity function that returns a logic.  But other cases aren't, and wouldn't make sense to use <code>&amp;</code>.  What about them?</p>
-<h2><a name="p-7835-is-conflation-stupid-or-outside-the-box-genius-1" class="anchor" href="https://forum.rebol.info#p-7835-is-conflation-stupid-or-outside-the-box-genius-1"></a>Is Conflation Stupid, Or Outside-The-Box Genius?</h2>
-<p>I can't really tell if allowing you to write the likes of <strong><code>any:even?</code></strong> and proceeding blissfully along outweighs the missing "conscious marker" of why EVEN? wouldn't be any refinement you can find on the HELP for ANY.</p>
-<p>Part of me thinks "that's the way this game is played".  Another part of me is thinking about how the system wouldn't know what to do with this.  How would the system know how to specialize that, and put EVEN? into the :PREDICATE slot?  Would <strong><code>any:even?/</code></strong> just throw up its hands and error?  For that matter, does <strong><code>any:&amp;even?/</code></strong> really get any easier?</p>
-<p><strong>I guess that aspect of "it doesn't get any easier either way" suggests we have room to experiment and see how it feels.</strong></p>
-<p>Actions would have to have some kind of "Interpret Chain" hook that would go from CHAIN! =&gt; FRAME!.  Because this is likely to be performance sensitive, the system should offer some kind of parameterization of the default hook (e.g. "if you don't recognize anything from the spec, fetch it and throw it into parameter named XXX" or "if you see something with a certain sigil, fetch it and throw it into a parameter named YYY")</p>
-<p>I guess I'd like to try living in the <strong><code>any:even?</code></strong> and <strong><code>meta:raised?</code></strong> universe a bit and get a bit more informed before making the stupid vs. genius verdict.</p>
-            <p><small>1 post - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/dialecting-function-calls-new-weird-powerful/2310">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/dialecting-function-calls-new-weird-powerful/2310</link>
-          <pubDate>Tue, 08 Oct 2024 17:59:30 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-2310</guid>
-          <source url="https://forum.rebol.info/t/dialecting-function-calls-new-weird-powerful/2310.rss">Dialecting Function Calls: New, Weird, Powerful</source>
-        </item>
-        <item>
-          <title>Should sequences permit non-head SIGILs?</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Datatypes</category>
-          <description><![CDATA[
-            <p>Historically I was very much opposed to SET-WORD! and GET-WORD! being in paths, because the ergonomics were bad:</p>
-<pre><code>red&gt;&gt; p: to path! reduce [first [:a] first [b:]]
-== :a/b:
-
-&gt;&gt; type? p
-== path!
-</code></pre>
-<p>You have something that's neither a SET-PATH! nor a GET-PATH! but it has colons at the beginning and the end.  It's all kinds of confusing.</p>
-<p>Ren-C has addressed that particular can of worms with a <a href="https://forum.rebol.info/t/introducingnew-chain-datatype/2226">full design for the CHAIN! sequence type</a>, and rules for its nesting in PATH! (and how TUPLE! nests in it).  So you can get these weird looking structures, but they destructure unambiguously.</p>
-<h2><a name="p-7831-as-for-sigils-at-the-head-they-must-be-illegal-1" class="anchor" href="https://forum.rebol.info#p-7831-as-for-sigils-at-the-head-they-must-be-illegal-1"></a>As For Sigils... At The Head They Must Be Illegal</h2>
-<p>You can't put a sigil in a sequence head position, because that would be ambiguous with wanting to apply the sigil to the path as a whole.</p>
-<pre><code>&gt;&gt; to path! [$foo bar]
-** Error: This needs to be an error
-</code></pre>
-<p>The only way to allow it would be if we invented <a href="https://forum.rebol.info/t/what-is-a-path-or-a-quasi-word/2292/2">some kind of lexical escaping</a> so we could tell the difference between $|foo/bar| and $|foo|/bar ... <em><strong>and I do not want lexical escaping of this kind</strong></em>.</p>
-<h2><a name="p-7831-but-sigils-at-non-head-positions-maybe-roll_eyes-2" class="anchor" href="https://forum.rebol.info#p-7831-but-sigils-at-non-head-positions-maybe-roll_eyes-2"></a>But Sigils At Non-Head Positions... Maybe?  <img src="https://forum.rebol.info/images/emoji/twitter/roll_eyes.png?v=12" title=":roll_eyes:" class="emoji" alt=":roll_eyes:" loading="lazy" width="20" height="20"></h2>
-<p>There's no fundamental reason why sigils couldn't be on non-head positions in sequences.  It works.</p>
-<pre><code>&gt;&gt; $a:$b
-== a:$b  ; bound
-</code></pre>
-<p>Part of me says <em>"ugh, no, it makes everything uglier, don't let people make these ugly things!"</em></p>
-<p>But one very compelling reason just for the above syntax is what I've called "dialecting function calls", such as for pointing the blame to a callsite with a FAIL.</p>
-<p>So instead of:</p>
-<pre><code>my-api: func [x y z] [
-    if true [
-        if y &lt; 100 [
-            fail:blame ["Value must be &gt;= 100, not" y] $y
-        ]
-     ]
- ]
-</code></pre>
-<p>You could write:</p>
-<pre><code>my-api: func [x y z] [
-    if true [
-        if y &lt; 100 [
-            fail:$y ["Value must be &gt;= 100, not" y]
-        ]
-     ]
- ]
-</code></pre>
-<p>When you look at it like that, it's hardly a monstrosity.  It's letting you push the variable to blame into the chain for invoking the function, in a way that's out-of-band with other refinements.</p>
-<p>It could offer a cheaper way of asking to fetch variables, using @ to take the place of the old "get word" concept:</p>
-<pre><code>&gt;&gt; block: [index offset pointer]
-&gt;&gt; index: 3
-
-&gt;&gt; block.index
-== offset
-
-&gt;&gt; block.(index)
-== pointer
-
-&gt;&gt; block.@index
-== pointer
-</code></pre>
-<p>It's measurably less expensive (no array allocation, cheaper to naviate to on fetch).  It doesn't use a GROUP! so it doesn't get in the way of COMPOSE-ing.</p>
-<h2><a name="p-7831-think-i-have-to-allow-it-3" class="anchor" href="https://forum.rebol.info#p-7831-think-i-have-to-allow-it-3"></a>Think I Have To Allow It...</h2>
-<p>I'd originally thought that it would be cleaner to disallow it.  But seems to me there are too many interesting uses.</p>
-<p>As a medium, Rebol is very free, and you have a lot of power to make hideous things.  So it's about using your judgment, and I think people should know when it's getting too crazy.</p>
-<hr>
-<h2><a name="p-7831-i-almost-hate-to-point-it-out-but-4" class="anchor" href="https://forum.rebol.info#p-7831-i-almost-hate-to-point-it-out-but-4"></a>I Almost Hate To Point It Out, But...</h2>
-<p>This is true of quotes as well.</p>
-<pre><code>&gt;&gt; 'a:''b:'''c
-== a:''b:'''c
-</code></pre>
-<p>There's an unambiguous way of interpreting that.</p>
-<pre><code>&gt;&gt; quote to chain! [a ''b '''c]
-== 'a:''b:'''c
-</code></pre>
-<p>I don't love it, but, maybe there's cases where <strong><code>foo:'bar</code></strong> would be useful in a dialect, and if it's mechanically consistent I shouldn't prohibit it.  <img src="https://forum.rebol.info/images/emoji/twitter/man_shrugging.png?v=12" title=":man_shrugging:" class="emoji" alt=":man_shrugging:" loading="lazy" width="20" height="20">  I don't know.</p>
-            <p><small>1 post - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/should-sequences-permit-non-head-sigils/2309">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/should-sequences-permit-non-head-sigils/2309</link>
-          <pubDate>Mon, 07 Oct 2024 19:06:08 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-2309</guid>
-          <source url="https://forum.rebol.info/t/should-sequences-permit-non-head-sigils/2309.rss">Should sequences permit non-head SIGILs?</source>
-        </item>
-        <item>
-          <title>:FOO is now a &quot;Refinement&quot;... so what is /FOO called?</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Naming</category>
-          <description><![CDATA[
-            <p>There are pieces of code that use leading-slash-words as dialect parts, without having anything to do with them being "refinements".</p>
-<p>We might call them <strong><code>RUN-WORD</code></strong>, because that's what <strong><code>/FOO</code></strong> does in the evaluator... runs FOO if it's a function, and errors if not.</p>
-<p>More visually they could be <strong><code>SLASH-WORD</code></strong> with the implied fact the "slash" comes before the word helping to distinguish it from <strong><code>FOO/</code></strong>.  But it seems that they both have equal claim on being slash words to me.</p>
-<p>I'm going to call them RUN-WORD just to keep moving along, but think about it.</p>
-            <p><small>1 post - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/foo-is-now-a-refinement-so-what-is-foo-called/2308">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/foo-is-now-a-refinement-so-what-is-foo-called/2308</link>
-          <pubDate>Mon, 07 Oct 2024 01:46:37 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-2308</guid>
-          <source url="https://forum.rebol.info/t/foo-is-now-a-refinement-so-what-is-foo-called/2308.rss">:FOO is now a &quot;Refinement&quot;... so what is /FOO called?</source>
         </item>
   </channel>
 </rss>

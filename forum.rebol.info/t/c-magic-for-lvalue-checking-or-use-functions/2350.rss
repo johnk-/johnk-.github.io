@@ -108,9 +108,177 @@ But I can see the argument for not doing the &quot;weird&quot; thing when there&
 
 The invention of the &quot;Tweak&quot; term does change my calculation a little bit here.  Because if it&#39;s used only in these &quot;single-assignment-equivalent&quot; circumstances, you can comprehend it as a C assignment statement.</description>
     
-    <lastBuildDate>Thu, 12 Dec 2024 15:52:06 +0000</lastBuildDate>
+    <lastBuildDate>Sat, 21 Dec 2024 10:05:06 +0000</lastBuildDate>
     <category>C/C++ Implementation</category>
     <atom:link href="https://forum.rebol.info/t/c-magic-for-lvalue-checking-or-use-functions/2350.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>C++ Magic for LVALUE Checking...or Use Functions?</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="2350">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">Tweak_Binding(cellA, Binding_Of(cellB));
+</code></pre>
+</blockquote>
+</aside>
+<p>After a bit of contemplation, I decided this is the better path.  When you look at the code in context, the all-caps BINDING is actually jarring.</p>
+<p>I ended up choosing even longer names:</p>
+<pre><code>Tweak_Cell_Binding(x, Cell_Binding(y));
+</code></pre>
+<p>You actually get something for your typing there... you reinforce that what you're passing is a cell.</p>
+<p>But the term "Tweak" is doing the heavy lifting here, as a term that you know when you see it is doing the equivalent of an assignment...with extra checking only in debug builds.</p>
+<p>Plain inline functions are easily adapted to, and it's much easier to debug and instrument.  Using "general trickery" may provide some brevity, but at the cost of not having your helper functions tailored to the specific fields you are working with.</p>
+<p>I'll invoke one of my favorite phrases lately: "it's a false economy".  There are actually several other changes that have made this kind of thing less necessary.</p>
+<h2><a name="p-7980-heres-some-more-code-in-this-vein-getting-dropped-1" class="anchor" href="https://forum.rebol.info#p-7980-heres-some-more-code-in-this-vein-getting-dropped-1"></a>Here's Some More Code In This Vein Getting Dropped</h2>
+<p>The need for lengthy explanations is another reason for dropping it.  Lots of explanation for something that doesn't do anything an inline function can't do better.</p>
+<h3><a name="p-7980-nodeholder-2" class="anchor" href="https://forum.rebol.info#p-7980-nodeholder-2"></a>NodeHolder</h3>
+<pre><code>//=//// NODE HOLDER C++ TEMPLATE //////////////////////////////////////////=//
+//
+// The NodeHolder is a neat trick which is used by accessors like LINK() and
+// MISC() to be able to put type checking onto the extraction of a node
+// subclass, while not causing errors if used as the left-hand side of an
+// assignment (on a possibly uninitialized piece of data).  This means you
+// don't need to have separate macros:
+//
+//    LINK(Property, s) = foo;
+//    bar = LINK(Property, s);
+//
+// It simply puts the reference in a state of suspended animation until it
+// knows if it's going to be used on the left hand side of an assignment or
+// not.  If it's on the left, it accepts the assignment--type checked to the
+// template parameter.  If it's on the right, it runs a validating cast of
+// the template parameter type.
+
+#if CPLUSPLUS_11
+    template&lt;typename T&gt;
+    struct NodeHolder {
+        const Node* &amp; ref;
+
+        NodeHolder(const Node* const&amp; ref)
+            : ref (const_cast&lt;const Node* &amp;&gt;(ref))
+          {}
+
+        void operator=(T &amp;right)
+          { ref = right; }
+        void operator=(NodeHolder&lt;T&gt; const&amp; right)
+          { ref = right.ref; }
+        void operator=(nullptr_t)
+          { ref = nullptr; }
+
+        T operator-&gt; () const
+          { return cast(T, m_cast(Node*, ref)); }
+
+        operator T () const
+          { return cast(T, m_cast(Node*, ref)); }
+    };
+
+  #if RUNTIME_CHECKS
+    template&lt;class T&gt;
+    INLINE void Corrupt_Pointer_If_Debug(NodeHolder&lt;T&gt; const&amp; nh)
+      { nh.ref = p_cast(Node*, cast(uintptr_t, 0xDECAFBAD)); }
+  #endif
+#endif
+</code></pre>
+<h3><a name="p-7980-link-misc-inode-comments-3" class="anchor" href="https://forum.rebol.info#p-7980-link-misc-inode-comments-3"></a>LINK, MISC, INODE Comments</h3>
+<pre><code>//=//// LINK, MISC, and INODE HELPERS /////////////////////////////////////=//
+//
+// Every Stub Node has two generic platform-pointer-sized slots, called LINK
+// and MISC, that can store arbitrary information.  How that is interpreted
+// depends on the Flex subtype (its FLAVOR_XXX byte).  If a Stub isn't a
+// Flex that uses its INFO bits, then it can use that space for another
+// generic platform-pointer slot.
+//
+// Some of these slots hold other Node pointers that need to be GC marked.  But
+// rather than a switch() statement based on subtype to decide what to mark
+// or not, the GC is guided by generic flags in the Stub header called
+// LINK_NODE_NEEDS_MARK, MISC_NODE_NEEDS_MARK, and INFO_NODE_NEEDS_MARK.
+//
+// Yet the link and misc actually mean different things for different subtypes.
+// A FLAVOR_NONSYMBOL node's LINK points to a list that maps byte positions to
+// UTF-8 codepoint boundaries.  But a FLAVOR_SYMBOL Flex uses the LINK for a
+// pointer to another symbol's synonym.
+//
+// A C program could typically deal with this using a union, to name the same
+// memory offset in different ways.  Here `link` would be a union {}:
+//
+//      BookmarkList* books = string.link.bookmarks;
+//      string.link.bookmarks = books;
+//
+//      const Symbol* synonym = symbol.link.synonym;
+//      symbol.link.synonym = synonym;
+//
+// The GC could then read a generic field like `stub-&gt;link.node` when doing
+// its marking.  This would be fine in C so long as the types were compatible,
+// it's called "type punning".
+//
+// But that's not legal in C++!
+//
+//  "It's undefined behavior to read from the member of the union that
+//   wasn't most recently written."
+//
+//  https://en.cppreference.com/w/cpp/language/union
+//
+// We use a workaround that brings in some heavy checked build benefits.  The
+// LINK() and MISC() macros force all assignments and reads through a common
+// field.  e.g. the following assigns and reads the same field ("node"), but
+// the instances document it is for "bookmarks" or "synonym":
+//
+//      BookmarkList* books = LINK(Bookmarks, string);  // reads `node`
+//      LINK(Bookmarks, string) = books;
+//
+//      const Symbol* synonym = LINK(Synonym, symbol);  // also reads `node`
+//      LINK(Synonym, symbol) = synonym;
+//
+// The syntax is *almost* as readable, but throws in benefits of offering some
+// helpful debug runtime checks that you're accessing what the Flex holds.
+// It has yet another advantage because it allows new "members" to be "added"
+// by extension code that wouldn't be able to edit a union in a core header.
+//
+// To use the LINK(), MISC() or INODE(), you define two macros, like this:
+//
+//      #define LINK_Bookmarks_TYPE     BookmarkList*
+//      #define HAS_LINK_Bookmarks      FLAVOR_NONSYMBOL
+//
+// You get the desired properties of being easy to find cases of a particular
+// interpretation of the field, along with type checking on the assignment,
+// and a cast operation that does potentially heavy debug checks on the
+// extraction.
+//
+</code></pre>
+<h2><a name="p-7980-link-misc-inode-implementation-4" class="anchor" href="https://forum.rebol.info#p-7980-link-misc-inode-implementation-4"></a>LINK, MISC, INODE Implementation</h2>
+<pre><code>#if NO_RUNTIME_CHECKS || NO_CPLUSPLUS_11
+    #define LINK(Field,stub) \
+        *x_cast(LINK_##Field##_TYPE*, m_cast(Node**, &amp;(stub)-&gt;link.node))
+
+    #define MISC(Field,stub) \
+        *x_cast(MISC_##Field##_TYPE*, m_cast(Node**, &amp;(stub)-&gt;misc.node))
+
+    #define INODE(Field,stub) \
+        *x_cast(INODE_##Field##_TYPE*, m_cast(Node**, &amp;(stub)-&gt;info.node))
+#else
+    #define LINK(Field,stub) \
+        NodeHolder&lt;LINK_##Field##_TYPE&gt;( \
+            ensure_flavor(HAS_LINK_##Field, (stub))-&gt;link.node)
+
+    #define MISC(Field,stub) \
+        NodeHolder&lt;MISC_##Field##_TYPE&gt;( \
+            ensure_flavor(HAS_MISC_##Field, (stub))-&gt;misc.node)
+
+    #define INODE(Field,stub) \
+        NodeHolder&lt;INODE_##Field##_TYPE&gt;( \
+            ensure_flavor(HAS_INODE_##Field, (stub))-&gt;info.node)
+#endif
+</code></pre>
+          <p><a href="https://forum.rebol.info/t/c-magic-for-lvalue-checking-or-use-functions/2350/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/c-magic-for-lvalue-checking-or-use-functions/2350/2</link>
+        <pubDate>Sat, 21 Dec 2024 09:42:41 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-2350-2</guid>
+        <source url="https://forum.rebol.info/t/c-magic-for-lvalue-checking-or-use-functions/2350.rss">C++ Magic for LVALUE Checking...or Use Functions?</source>
+      </item>
       <item>
         <title>C++ Magic for LVALUE Checking...or Use Functions?</title>
         <dc:creator><![CDATA[hostilefork]]></dc:creator>

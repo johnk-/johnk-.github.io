@@ -5,6 +5,928 @@
     <link>https://forum.rebol.info</link>
     <description>Latest posts</description>
       <item>
+        <title>ENVELOP (and COMPOSE!) By Example</title>
+        <dc:creator><![CDATA[@hostilefork Brian Dickens]]></dc:creator>
+        <description><![CDATA[ <aside class="quote no-group" data-username="hostilefork" data-post="6" data-topic="2294">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>This is a pretty tough call, but I think I'm on the side of saying that COMPOSE should be arity-2.</p>
+<p>Beyond the necessity of providing a binding environment when you want to apply COMPOSE to strings, I'm seeing too many places where an arity-1 COMPOSE <em>can't</em> do what you want.</p>
+</blockquote>
+</aside>
+<p>I've had a bit of time to ruminate on this, and "deal with my feelings" about it.</p>
+<p>I find myself lamenting things like this:</p>
+<pre><code>compose $(a).b
+=&gt;
+compose $() $(a).b
+; or...
+compose $() '(a).b
+; ...when would you use which ??
+</code></pre>
+<p>But it's hard to gauge because this is kind of the first year where binding has any sort of shot of working.  The existing corpus has kind of  a selection bias... it doesn't do very ambitious things with binding, because none were possible.</p>
+<p>These little decisions may matter more than we know, and glossing over them could be a pretty bad idea.  I think that's where my leaning is, and arity-2 compose still seems like it's probably the right direction.</p>
+<h2><a name="p-7987-whats-really-got-me-puzzled-is-use-existing-binding-1" class="anchor" href="https://forum.rebol.info#p-7987-whats-really-got-me-puzzled-is-use-existing-binding-1"></a>What's Really Got Me Puzzled Is "Use Existing Binding"</h2>
+<p>The operator I can't quite entirely get my mind around is actually the one that doesn't bring in a binding from outside, but that uses bindings that are "already there".</p>
+<p>How much of the binding should be used, exactly?</p>
+<p>This one seems "obvious":</p>
+<pre><code> foo: func [x y] [
+     return compose-existing [a (x + y) b]
+ ]
+</code></pre>
+<p>You'd want that to add the function parameters, right?  We'd presume here that comes from taking the binding on the tip, which was established when the block evaluated.  The contents are unbound, so that tip binding gets used...</p>
+<p>Except what if the GROUP! had a binding?  Should that be honored, or does it only take the binding from the tip?</p>
+<p>This is a semantic problem, because we're descending down into a nested structure that may not be fit for evaluation--and may not be intended to ever be evaluated as some kind of cohesive form.  We don't know what this structure is going to be used for.  So how would COMPOSE know if it was a good idea to be descending the structure, using evaluator-like rules to inherit the bindings?</p>
+<p><strong>Seen in this light, it makes a stronger case for arity-2 COMPOSE.</strong>  Which in fact faces some problems of its own, when there's a binding on the patterns you are composing already.  Though that's a narrower problem, because it <em>definitely</em> wouldn't be deriving binding as it descends into a structure, so it really would only be cases where the specific thing it found on descent had a binding on it.</p>
+<p>A safe default would be to error if the things you are trying to compose have already been bound.  Then perhaps have a <strong><code>compose:override</code></strong> switch to say to use the passed in binding.  (Or probably better to just require a predicate function that gets passed the list and you have to decide what to do with it, instead of getting involved in the details.)</p>
+<h2><a name="p-7987-but-there-are-casual-cases-which-come-up-2" class="anchor" href="https://forum.rebol.info#p-7987-but-there-are-casual-cases-which-come-up-2"></a>But There Are Casual Cases Which Come Up</h2>
+<p>Consider for instance the ENCODE and DECODE operations.  The way I'm working them up is that there's a dialected block for specifying the encoder and decoder.</p>
+<pre><code> encode 'UTF-8 string  ; use default settings
+ encode [UTF-8] string  ; equivalent form of dialected block
+ encode [UTF-8 ...] string  ; block can pass settings
+</code></pre>
+<p>But I also thought it would be good if it "pre-composed" the block.  So the meaning of GROUP!s in all encode dialects is to compose.  This is an expedient convention, which frees the authors of encoders from having to worry about it and lets users assume they know what groups will do, because it's very likely that you want to supply settings from expressions or variables:</p>
+<pre><code>num-bytes: 4
+encode [BE +/- (num-bytes)] integer
+</code></pre>
+<p>This is one of the cases where traditional "just do it" COMPOSE feels like a fit.  But with arity-2 compose it winds up being a mouthful, something like:</p>
+<pre><code>compose (bind binding of spec '()) spec
+</code></pre>
+<p>You have to produce a GROUP! which has the same binding as the BLOCK!.</p>
+<p>There needs to be a shorter way to say this, and I think arity-2 compose can do this for us if it uses a different part of speech:</p>
+<pre><code>compose @() spec
+</code></pre>
+<p>This goes along with some other uses of THE-XXX! to mean "reuse binding".  It's better to do this with something that's explicitly seen by the COMPOSE operation as a signal of meaning, instead of making an assumption about what an unbound GROUP! meant:</p>
+<pre><code>compose '() spec  ; looks "intentional" here...
+compose patern spec  ; but an unbound group could just be an accident
+</code></pre>
+<p>This still gives the freedom to use other patterns like <strong><code>@{{}}</code></strong> or <strong><code>@(&lt;*&gt;)</code></strong> without having to use some other refinement to the process.  These would be meaningless for strings--as there's no binding to reuse.</p>
+<p>I don't know what it means in terms of descending.  Just use the tip is probably the sanest default.</p>
+<p><strong>I think with this adjustment, arity-2 compose still comes out ahead.</strong></p>
+<p>I'm still wondering about the COMPOSE* operation with sneaky environment capture, and assumption of parentheses.  Maybe COMPOSE** would look for doubled parentheses.</p>
+<pre><code>&gt;&gt; x: 1000, y: 20
+
+&gt;&gt; compose* "The sum is (x + y), with an easy comma."
+== "The sum is 1020, with an easy comma."
+
+&gt;&gt; compose** "The sum is ((x + y)), with an easy comma."
+== "The sum is 1020, with an easy comma."
+
+&gt;&gt; compose $(()) "Is that ((x + y)), actually worth it?"
+== "Is that 1020, actually worth it?"
+</code></pre>
+<p>More food for thought.</p> ]]></description>
+        <link>https://forum.rebol.info/t/envelop-and-compose-by-example/2294#post_7</link>
+        <pubDate>Sun, 22 Dec 2024 20:23:54 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-7987</guid>
+      </item>
+      <item>
+        <title>-&gt; for Lightweight Lambda (&quot;Arrow Functions&quot;)</title>
+        <dc:creator><![CDATA[@hostilefork Brian Dickens]]></dc:creator>
+        <description><![CDATA[ <aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="2172">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p><em>But wait, you'd never use it with a branch... because a branch only produces one value.</em></p>
+<p>UNLESS... what if what this form of lambda did was unpack packs?</p>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">case [
+    true [pack [10 + 20, 3 + 4]]  ; makes antiform ~['30 '7]~
+    ...
+] then [a b] -&gt; [
+    assert [a = 30, b = 7]
+]
+
+case [
+    true [pack [10 + 20, 3 + 4]]
+    ...
+] then a -&gt; [
+    assert [a = 30]
+]
+</code></pre>
+<p>So I've been thinking this is what it should actually do.</p>
+</blockquote>
+</aside>
+<p>It occurs to me that both can be possible, using a notation that suggests the semantics... quasiform block!</p>
+<pre><code>case [
+    true [pack [10 + 20, 3 + 4]]  ; makes antiform ~['30 '7]~
+    ...
+] then ~[a b]~ -&gt; [
+    assert [a = 30, b = 7]
+]
+</code></pre>
+<p>Maybe it looks a little bit weird, but is coherent considering that this is how antiform packs are proxied in places like multi-return values:</p>
+<pre><code>foo: func [
+    return: [~[integer! integer!]~ text!]
+    x [integer!]
+][
+    if even? x [
+        return pack [x + 1, x + 2]
+    ]
+    return "It wasn't even..."
+]
+</code></pre>
+<p>Anyway, this means that plain block can suggest multiple arguments, quasi-block can suggest unpacking, and you have both forms.</p>
+<aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="2172">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p><strong>Is There A Good Name For "Lambda Lite"?</strong></p>
+<p>We could call it an "unpacking lambda". Maybe it's controlled with a refinement:</p>
+<p><code> &gt;&gt; foo: lambda/unpack [a b] [a + b + 20]</code></p>
+</blockquote>
+</aside>
+<p>I think we can probably get away with calling this ARROW.</p>
+<p><a href="https://www.digitalocean.com/community/tutorials/understanding-arrow-functions-in-javascript">"Arrow functions"</a> is an established terminology.  If people want to make a variable called ARROW they probably wouldn't notice they were overriding it, because all uses will be through <strong><code>-&gt;</code></strong>... and it'd be available as LIB.ARROW.</p>
+<aside class="quote no-group quote-modified" data-username="hostilefork" data-post="2" data-topic="2172">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<ol>
+<li>does <strong><code>-&gt;</code></strong> make a deep copy of the block?</li>
+<li>or does it just make a small structure that pairs the name of the parameter(s) with the body of code?</li>
+</ol>
+<p>Today's it's [2]... <strong><code>-&gt;</code></strong> just makes that small structure (while LAMBDA makes the full copy). But this means you get the semantics of a non-copying construct:</p>
+</blockquote>
+</aside>
+<p>Branches definitely shouldn't be deep copied.  Whether they run or not.  Especially not if they don't.  But if they do it would make a deep copy each time...pretty useless.</p>
+<p>It's a bit unsettling to say that <strong><code>x -&gt; [...]</code></strong> and <strong><code>lambda [x] [...]</code></strong> have distinct semantics, but I think having it run a different function generator called ARROW may help make it seem less insane.</p> ]]></description>
+        <link>https://forum.rebol.info/t/for-lightweight-lambda-arrow-functions/2172#post_4</link>
+        <pubDate>Sun, 22 Dec 2024 17:49:54 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-7986</guid>
+      </item>
+      <item>
+        <title>Get_Xxx_Flag() vs Has_Xxx_Flag() ?</title>
+        <dc:creator><![CDATA[@hostilefork Brian Dickens]]></dc:creator>
+        <description><![CDATA[ <p>Kind of a fiddly naming issue, but there are a lot of places where flag-testing helpers are defined, which usually have 4 variants like this:</p>
+<pre><code>#define Set_Details_Flag(p,name) \
+    Set_Flavor_Flag(DETAILS, ensure(Details*, (p)), name)
+
+#define Get_Details_Flag(p,name) \
+    Get_Flavor_Flag(DETAILS, ensure(Details*, (p)), name)
+
+#define Clear_Details_Flag(p,name) \
+    Clear_Flavor_Flag(DETAILS, ensure(Details*, (p)), name)
+
+#define Not_Details_Flag(p,name) \
+    Not_Flavor_Flag(DETAILS, ensure(Details*, (p)), name)
+</code></pre>
+<p>The savings add up for having things like the NOT form, it unclutters things pretty well:</p>
+<pre><code>Not_Details_Flag(details, CAN_BE_DISPATCHED_AS_INTRINSIC)
+// vs
+not Get_Details_Flag(details, CAN_BE_DISPATCHED_AS_INTRINSIC)
+</code></pre>
+<p>I hadn't really questioned these.  But lately I've been wondering... would HAS be better than GET?</p>
+<pre><code>if (Has_Details_Flag(...)) ...
+
+if (Get_Details_Flag(...)) ...
+</code></pre>
+<p>It's a subtle semantics thing.  You could argue that even if a flag is not set, the structure still <em>has</em> the flag.</p>
+<p>But is "if Get(...)" like asking if the get operation itself succeeded?  <img src="https://forum.rebol.info/images/emoji/twitter/frowning.png?v=12" title=":frowning:" class="emoji" alt=":frowning:" loading="lazy" width="20" height="20"></p>
+<p>Of course, in the interpreter we have taken for granted that <strong><code>if get $var</code></strong> isn't asking if you successfully got the variable, but whether the variable's contents are null or not.  And <strong><code>has obj field</code></strong> is really asking about the presence or absence of the field.</p>
+<p>When I first thought of it, I was thinking that HAS was better.  But after writing this I'm kind of thinking GET may be the more consistent choice after all.</p>
+<p>To be painfully precise, we'd call it: <strong><code>Is_Details_Flag_Set(...)</code></strong>... but I certainly prefer <strong><code>Get_Details_Flag(...)</code></strong> to that.</p> ]]></description>
+        <link>https://forum.rebol.info/t/get-xxx-flag-vs-has-xxx-flag/2358#post_1</link>
+        <pubDate>Sun, 22 Dec 2024 16:29:39 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-7985</guid>
+      </item>
+      <item>
+        <title>What Should Returning a String From a Native Do?</title>
+        <dc:creator><![CDATA[@hostilefork Brian Dickens]]></dc:creator>
+        <description><![CDATA[ <p>I've raved about <a href="https://forum.rebol.info/t/no-preprocessing-no-ffi-just-awesome-rebfunction/2224">how cool rebFunction() is</a>... though it may seem like mundane C interop, it's not.  <strong>It's quite novel.</strong></p>
+<p>But to recap, a trivial example:</p>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">const char* Add_1000_Spec = "[ \
+    -{Adds 1000 to whatever you pass in}- \
+    return: [integer!] \
+    x [integer!] \
+]";
+Bounce Add_1000_Impl(Context* binding)
+{
+    int x = rebUnboxInteger("x");
+    int bigger = x + 1000;
+    return rebInteger(bigger);
+}
+
+Value* action = rebFunction(Add_1000_Spec, &amp;Add_1000_Impl);
+</code></pre>
+<p>So here you see us returning a synthesized Rebol Value, an INTEGER!.</p>
+<p>You can return other things, such as <strong><code>rebDelegate("...");</code></strong> which defers execution to code which can do all kinds of things like throw or raise errors, or produce unstable antiforms.</p>
+<h2><a name="p-7984-but-no-return-states-overlap-utf-8-strings-1" class="anchor" href="https://forum.rebol.info#p-7984-but-no-return-states-overlap-utf-8-strings-1"></a>But No Return States Overlap UTF-8 Strings</h2>
+<p>This is by design.  All Cells and Stubs in the system are out-of-band from valid UTF-8 leading characters.</p>
+<p>This means that the meaning for this is wide open:</p>
+<pre><code>const char* Return_Utf8_Spec = "[ \
+    -{return of a C const char literal pointer}- \
+    return: [???] -{what do you think?}- \
+]";
+Bounce Return_Utf8_Impl(Context* binding)
+{
+    return "😸 Some UTF-8 Here 😸";
+}
+</code></pre>
+<h2><a name="p-7984-obvious-answer-return-text-2" class="anchor" href="https://forum.rebol.info#p-7984-obvious-answer-return-text-2"></a>"Obvious" Answer: Return TEXT!</h2>
+<p>You might think that it's completely obvious what should happen in this case: that it returns TEXT! and that's the end of that.</p>
+<p>Hence this would be a synonym for:</p>
+<pre><code>return rebText("😸 Some UTF-8 Here 😸");
+</code></pre>
+<p>Given that we could make the "instructions" legal to return as well, it could be equivalent to something even shorter:</p>
+<pre><code>return rebT("😸 Some UTF-8 Here 😸");
+</code></pre>
+<p>So this doesn't really rock anyone's world with a capability they didn't already have.</p>
+<h2><a name="p-7984-or-it-could-run-code-3" class="anchor" href="https://forum.rebol.info#p-7984-or-it-could-run-code-3"></a>OR... It Could Run Code...</h2>
+<p>I'll point out that plain C strings aren't generally seen in the API as being equivalent to text literals.  They're equivalent to code.</p>
+<pre><code>rebElide("this isn't a string -{but this is}-");
+</code></pre>
+<p>So shifting into non-code interpretation requires some kind of marker.</p>
+<p>By this logic, we might say that the specific relationship between <strong>return</strong> and a string runs code...but more than that, <em>delegated</em> code.</p>
+<p>This is to say that because you are returning, you can do things safely that you couldn't do otherwise... because you've passed control back to the trampoline.  Hence something like a FAIL would not cross your own C stack levels.</p>
+<pre><code>return "fail -{This would be safe!}-"
+</code></pre>
+<p>It's not as powerful as <strong><code>rebDelegate()</code></strong>, because you can't splice things in variadically.  And you might wonder how it could work at all...since it doesn't have a way to capture the shadowed binding variable.</p>
+<p><strong>But interestingly, it doesn't need to capture the shadowed variable, because in processing the return it's actually the point of control of the Dispatcher that passed the variable in the first place!</strong></p>
+<p>So indeed, you have access to the full context...including the local variables in the frame.</p>
+<pre><code>const char* Return_Delegates_Spec = "[ \
+    -{Demonstrate returning UTF-8 as delegation}- \
+    return: [tag!] \
+    x [integer!] \
+]";
+Bounce Return_Delegates_Impl(Context* binding)
+{
+    if (rebUnboxInteger("x") &gt; 1020)
+         return rebValue("&lt;nice large number!&gt;");
+    return "raise [-{X value is too small:}- x]";
+}
+</code></pre>
+<h2><a name="p-7984-rebdelegate-still-is-a-lot-more-full-featured-4" class="anchor" href="https://forum.rebol.info#p-7984-rebdelegate-still-is-a-lot-more-full-featured-4"></a>rebDelegate() Still Is  A Lot More Full-Featured</h2>
+<p>Not only can you splice, but you can use commas to separate runs of text:</p>
+<pre><code>return rebDelegate(
+    "you", "can",
+    "do", "this"
+    "and splice", values, "in the midst"
+);
+</code></pre>
+<p>That doesn't wind up doing anything weird like giving you "cando".  The commas in the variadic are token stops.</p>
+<p>C++ offers raw strings and you can do things like:</p>
+<pre><code>return R"(fail [
+    -{You can write a really long failure message here}-
+    -{And the raw string will do the right thing}-
+])"
+</code></pre>
+<p>I'm used to the commas, but maybe that's an improvement over:</p>
+<pre><code>return rebDelegate("fail [",
+    "-{You can write a really long failure message here}-",
+    "-{And the raw string will do the right thing}-"
+"]");
+</code></pre>
+<h2><a name="p-7984-overall-i-think-string-as-delegation-is-the-winning-choice-5" class="anchor" href="https://forum.rebol.info#p-7984-overall-i-think-string-as-delegation-is-the-winning-choice-5"></a>Overall, I Think String-As-Delegation Is The Winning Choice</h2>
+<p>Making a TEXT! string is both counter to the default interpretation of C strings, and will have a well-known shorthand.</p>
+<p>I don't think <strong><code>return rebD()</code></strong> for rebDelegate() has any particular clarity to it.</p>
+<p>Where I see this being most useful is for short failure messages, which are pretty common to be returned...even in the middle of functions.</p>
+<p>But it also lets you do things you couldn't otherwise, like <strong><code>return "quit 1"</code></strong> or <strong><code>return "halt"</code></strong>.</p>
+<p>If you want to return nothing, you can just say <strong><code>return "~"</code></strong> instead of <strong><code>return rebNothing()</code></strong>... we can make that particular case fast where it doesn't call the evaluator (and maybe some other cases too...)</p>
+<p>Really, it's just a greater force multiplier!</p> ]]></description>
+        <link>https://forum.rebol.info/t/what-should-returning-a-string-from-a-native-do/2357#post_1</link>
+        <pubDate>Sun, 22 Dec 2024 07:39:50 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-7984</guid>
+      </item>
+      <item>
+        <title>Equivalent to [[nodiscard]] ?</title>
+        <dc:creator><![CDATA[@hostilefork Brian Dickens]]></dc:creator>
+        <description><![CDATA[ <p>C++ has an attribute on functions called <code>[[nodiscard]]</code> that instructs the compiler to make sure you do something with a result.</p>
+<p><a href="https://en.cppreference.com/w/cpp/language/attributes/nodiscard" class="inline-onebox">C++ attribute: nodiscard (since C++17) - cppreference.com</a></p>
+<p>I've long wondered about whether there's some kind of discard-sensitivity that should/could be thrown in, e.g. for noticing when a stray value in evaluation doesn't do anything:</p>
+<pre><code>&gt;&gt; append [a b c] [d e] 2 print "Could we error?"
+** Error: 2 was discarded
+</code></pre>
+<p>How much code would break if we didn't allow stray values like that in the evaluator?  I could actually test that question.</p>
+<p>Anyway, the mechanics behind RAISE means there's already a place to implement this.  There's a spot where it is decided if a definitional error would be discarded, and if so it's escalated to an abrupt failure.  It's only okay if it falls out of the evaluation to get picked up by someone else, and stays as a hot potato.</p>
+<p>But could we have other hot potatoes?  Results of functions that are marked NO-DISCARD?   Plain values?</p>
+<p>I can't offhand think of any important techniques this would break.  But I'll have to try it and see.</p> ]]></description>
+        <link>https://forum.rebol.info/t/equivalent-to-nodiscard/2356#post_1</link>
+        <pubDate>Sat, 21 Dec 2024 18:44:50 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-7983</guid>
+      </item>
+      <item>
+        <title>Multiple Return Values in JavaScript</title>
+        <dc:creator><![CDATA[@hostilefork Brian Dickens]]></dc:creator>
+        <description><![CDATA[ <p>rebRescue() in the C API returns an error, or null if no error... in which case your result is the value that's passed by pointer-to-pointer:</p>
+<pre><code> Value* result;
+ Value* error = rebRescue(&amp;result, "append 123 456");  // illegal, fails
+ if (error) {  // non-0 pointer value means not ~null~ antiform
+     /* handle error */
+ }
+ else {
+     /* result is valid */
+ }
+</code></pre>
+<p>But JavaScript doesn't have pointer-to-value semantics.  So you have to use multi-returns.</p>
+<p>I didn't know how they did that, so I looked it up.  <a href="https://stackoverflow.com/questions/2917175/return-multiple-values-in-javascript/2917186#2917186">There are two ways</a>.  You can destructure an array:</p>
+<pre><code>function getValues() {
+    return [getFirstValue(), getSecondValue()]
+}
+const [a, b] = getValues()  ; any names you want here
+</code></pre>
+<p>Or you can destructure an object, where you have to use the names of the fields as the same names as your destructure variables:</p>
+<pre><code>function getValues() {
+    return {
+        first: getFirstValue(),
+        second: getSecondValue(),
+    }
+}
+
+const {first, second} = getValues()
+</code></pre>
+<p>If you don't want to use the exact names, there's another syntax:</p>
+<pre><code>const {a: first, b: second} = getValues()
+</code></pre>
+<p>I don't know if naming multi-returns is super important, and have had bigger ambitions for antiform objects.</p>
+<p>The StackOverflow question has someone prescribing that it's very important to pick the named version over the non-named one.  I don't agree, and plan on using the array form for <code>rebRescue()</code></p>
+<p><strong>The much bigger issue in my mind is forgetting to do the destructure, and getting back a value that's in-band as a plain array or object, when you really just forgot to destructure.</strong>  Isotopes do a very good thing here, not seen in other languages...decaying to the first item by default, and generalizing moving the out-of-band into band via meta/quasi/etc. forms in order to write peer destructuring operators when you need to.</p>
+<p>This is a repeat of JavaScript's issue with Promise, where if you forget to do an AWAIT then you wind up with a Promise by value that you didn't expect.  But AWAIT is terrible for all kinds of other reasons, so we're not going down that road.</p>
+<p><a href="https://journal.stuffwithstuff.com/2015/02/01/what-color-is-your-function/" class="inline-onebox">What Color is Your Function? – journal.stuffwithstuff.com</a></p> ]]></description>
+        <link>https://forum.rebol.info/t/multiple-return-values-in-javascript/2355#post_1</link>
+        <pubDate>Sat, 21 Dec 2024 18:32:13 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-7982</guid>
+      </item>
+      <item>
+        <title>Exceptions or longjmp() Across Client C/C++ Code</title>
+        <dc:creator><![CDATA[@hostilefork Brian Dickens]]></dc:creator>
+        <description><![CDATA[ <p>So there's a somewhat uncomfortable issue in using the API, of what to do if an abrupt failure happens.</p>
+<pre><code>void my_c_function(int x) {
+    char* memory = malloc(1020);
+    ...
+    rebElide("append 1020", rebI(x));  // can't append to integers, FAILs
+}
+</code></pre>
+<p>Currently what happens in this situation depends on whether you're in the body of an API native which is being invoked by the trampoline or not.  If you're not, the program just terminates.  If you are, then there will be a longjmp or C++ exception (based on which you built with) thrown up the stack which gets caught at the trampoline layer of the API native invocation, and then propagated by that.</p>
+<p>Either way you'll get a memory leak.  <img src="https://forum.rebol.info/images/emoji/twitter/roll_eyes.png?v=12" title=":roll_eyes:" class="emoji" alt=":roll_eyes:" loading="lazy" width="20" height="20"></p>
+<h2><a name="p-7981-every-api-could-return-failure-values-1" class="anchor" href="https://forum.rebol.info#p-7981-every-api-could-return-failure-values-1"></a>Every API Could Return Failure Values</h2>
+<p>Then you would be forced to check it:</p>
+<pre><code>Value* abrupt;
+Value* result = rebValue(&amp;abrupt, "append 1020", rebI(x));
+if (abrupt) {  // an ERROR! value, we'd presume
+    free(memory);
+    /* handle error */
+}
+</code></pre>
+<p>Currently if you want to do something like this, there are tools like ENRESCUE, which will give you an ERROR! if there's a failure, or a ^META of whatever else:</p>
+<pre><code>Value* meta = rebValue("sys.util/enrescue [append 1020", rebI(x), "]");
+if (rebUnboxLogic("error?", meta")) {
+    free(memory);
+    /* handle error */
+}
+Value* result = rebValue(meta);  // evaluating meta will unmeta it
+</code></pre>
+<p>So yes, we could make that easier...and should:</p>
+<pre><code>Value* value;
+Value* error = rebRescue(&amp;value, "append 1020", rebI(x));
+if (error) {
+    free(memory);
+    /* handle error */
+}
+/* use value, corrupt if error was non-null */
+</code></pre>
+<p>The API is built programmatically, so there's no real reason it couldn't have a Rescue variation for every entry point:</p>
+<pre><code>int result;
+Value* error = rebRescueUnboxInteger(&amp;result, ...);
+</code></pre>
+<p>I... guess we could do that.  <img src="https://forum.rebol.info/images/emoji/twitter/face_with_diagonal_mouth.png?v=12" title=":face_with_diagonal_mouth:" class="emoji" alt=":face_with_diagonal_mouth:" loading="lazy" width="20" height="20">  It's a bit unfortunate that you have to make separate entry points in C for all of these things.   JavaScript can have interface modifiers:</p>
+<pre><code>const [error, result] = reb.Rescue.UnboxInteger(...);
+</code></pre>
+<h2><a name="p-7981-but-lets-say-you-dont-want-that-2" class="anchor" href="https://forum.rebol.info#p-7981-but-lets-say-you-dont-want-that-2"></a>But Let's Say You Don't Want That...</h2>
+<p>What if you want plain old <code>rebElide()</code>, not <code>rebRescueElide()</code>, and you want something automatic to happen.</p>
+<p>The API exports C functions that are declared with <strong><code>extern "C"</code></strong>.  This means they cannot throw C++ exceptions.  So if you want C++ exceptions so your code is unwound properly, that would have to be done in an inline wrapper of some kind, kind of like:</p>
+<pre><code>inline void rebElide(...) {  // not extern "C"
+    Value* error = rebRescueElide(...);  // extern "C", can't throw
+    if (error)
+        throw error;  // throw is legal in non-extern "C" (if C++)
+}
+</code></pre>
+<p>But then, <code>rebFunction()</code> would have to do its own exception handling to intercept these throws so you didn't cross the interpreter stack.  It's doable.</p>
+<p>The other option is to use <code>longjmp()</code>.</p>
+<h2><a name="p-7981-what-do-other-languages-do-3" class="anchor" href="https://forum.rebol.info#p-7981-what-do-other-languages-do-3"></a>What Do Other Languages Do?</h2>
+<p>Well, one case would be Ruby, which has <code>rb_rescue2()</code>, <code>rb_protect()</code>, <code>rb_ensure()</code>...</p>
+<p><a href="http://silverhammermba.github.io/emberb/c/#rescue">http://silverhammermba.github.io/emberb/c/#rescue</a></p>
+<p>These seem to be longjmp()-based, and nothing special.  Won't work with C++.</p>
+<p>That's actually where I adopted the term RESCUE from (in the sense used here, and SYS.UTIL/RESCUE).</p>
+<p>Long ago I thought to mirror the Ruby API, but I don't think we need to.  There doesn't need to be a special "Dangerous Function" type or routines to handle it.  Instead we just say that your dangerous function is simply a <strong><code>rebFunction()</code></strong> which has a C function as its implementation.  So we piggy-back on whatever exception handling protects that implementation.</p>
+<p>Anyway, short term I've just made a new <strong><code>rebRescue()</code></strong> function implementing the better idea, and gotten rid of the very-very-old Ruby clone routines.  More work is needed, but I do want an answer for being able to properly run destructors in C++ code.</p>
+<h2><a name="p-7981-added-convenience-rebmalloc-rebrealloc-rebfree-4" class="anchor" href="https://forum.rebol.info#p-7981-added-convenience-rebmalloc-rebrealloc-rebfree-4"></a>Added Convenience: rebMalloc(), rebRealloc(), rebFree()...</h2>
+<p>For the sake of convenience, there is a memory allocator which lets you allocate memory that will be cleaned up automatically in case of a failure, and doesn't require destructors to do it.  It's just taken care of when a failed frame is taken off the stack.</p>
+<p>These actually back the memory with a BINARY! series, and are cleaned up by the same mechanics that clean up unmanaged series that are in flight when an internal error occurs.</p>
+<p>Just an added thing, but better to use C++ constructs if you have a C++ codebase and if the API is tweaked to properly support destructors, which it should be able to do without needing to compile the interpreter itself as C++!</p> ]]></description>
+        <link>https://forum.rebol.info/t/exceptions-or-longjmp-across-client-c-c-code/2354#post_1</link>
+        <pubDate>Sat, 21 Dec 2024 17:19:10 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-7981</guid>
+      </item>
+      <item>
+        <title>C++ Magic for LVALUE Checking...or Use Functions?</title>
+        <dc:creator><![CDATA[@hostilefork Brian Dickens]]></dc:creator>
+        <description><![CDATA[ <aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="2350">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">Tweak_Binding(cellA, Binding_Of(cellB));
+</code></pre>
+</blockquote>
+</aside>
+<p>After a bit of contemplation, I decided this is the better path.  When you look at the code in context, the all-caps BINDING is actually jarring.</p>
+<p>I ended up choosing even longer names:</p>
+<pre><code>Tweak_Cell_Binding(x, Cell_Binding(y));
+</code></pre>
+<p>You actually get something for your typing there... you reinforce that what you're passing is a cell.</p>
+<p>But the term "Tweak" is doing the heavy lifting here, as a term that you know when you see it is doing the equivalent of an assignment...with extra checking only in debug builds.</p>
+<p>Plain inline functions are easily adapted to, and it's much easier to debug and instrument.  Using "general trickery" may provide some brevity, but at the cost of not having your helper functions tailored to the specific fields you are working with.</p>
+<p>I'll invoke one of my favorite phrases lately: "it's a false economy".  There are actually several other changes that have made this kind of thing less necessary.</p>
+<h2><a name="p-7980-heres-some-more-code-in-this-vein-getting-dropped-1" class="anchor" href="https://forum.rebol.info#p-7980-heres-some-more-code-in-this-vein-getting-dropped-1"></a>Here's Some More Code In This Vein Getting Dropped</h2>
+<p>The need for lengthy explanations is another reason for dropping it.  Lots of explanation for something that doesn't do anything an inline function can't do better.</p>
+<h3><a name="p-7980-nodeholder-2" class="anchor" href="https://forum.rebol.info#p-7980-nodeholder-2"></a>NodeHolder</h3>
+<pre><code>//=//// NODE HOLDER C++ TEMPLATE //////////////////////////////////////////=//
+//
+// The NodeHolder is a neat trick which is used by accessors like LINK() and
+// MISC() to be able to put type checking onto the extraction of a node
+// subclass, while not causing errors if used as the left-hand side of an
+// assignment (on a possibly uninitialized piece of data).  This means you
+// don't need to have separate macros:
+//
+//    LINK(Property, s) = foo;
+//    bar = LINK(Property, s);
+//
+// It simply puts the reference in a state of suspended animation until it
+// knows if it's going to be used on the left hand side of an assignment or
+// not.  If it's on the left, it accepts the assignment--type checked to the
+// template parameter.  If it's on the right, it runs a validating cast of
+// the template parameter type.
+
+#if CPLUSPLUS_11
+    template&lt;typename T&gt;
+    struct NodeHolder {
+        const Node* &amp; ref;
+
+        NodeHolder(const Node* const&amp; ref)
+            : ref (const_cast&lt;const Node* &amp;&gt;(ref))
+          {}
+
+        void operator=(T &amp;right)
+          { ref = right; }
+        void operator=(NodeHolder&lt;T&gt; const&amp; right)
+          { ref = right.ref; }
+        void operator=(nullptr_t)
+          { ref = nullptr; }
+
+        T operator-&gt; () const
+          { return cast(T, m_cast(Node*, ref)); }
+
+        operator T () const
+          { return cast(T, m_cast(Node*, ref)); }
+    };
+
+  #if RUNTIME_CHECKS
+    template&lt;class T&gt;
+    INLINE void Corrupt_Pointer_If_Debug(NodeHolder&lt;T&gt; const&amp; nh)
+      { nh.ref = p_cast(Node*, cast(uintptr_t, 0xDECAFBAD)); }
+  #endif
+#endif
+</code></pre>
+<h3><a name="p-7980-link-misc-inode-comments-3" class="anchor" href="https://forum.rebol.info#p-7980-link-misc-inode-comments-3"></a>LINK, MISC, INODE Comments</h3>
+<pre><code>//=//// LINK, MISC, and INODE HELPERS /////////////////////////////////////=//
+//
+// Every Stub Node has two generic platform-pointer-sized slots, called LINK
+// and MISC, that can store arbitrary information.  How that is interpreted
+// depends on the Flex subtype (its FLAVOR_XXX byte).  If a Stub isn't a
+// Flex that uses its INFO bits, then it can use that space for another
+// generic platform-pointer slot.
+//
+// Some of these slots hold other Node pointers that need to be GC marked.  But
+// rather than a switch() statement based on subtype to decide what to mark
+// or not, the GC is guided by generic flags in the Stub header called
+// LINK_NODE_NEEDS_MARK, MISC_NODE_NEEDS_MARK, and INFO_NODE_NEEDS_MARK.
+//
+// Yet the link and misc actually mean different things for different subtypes.
+// A FLAVOR_NONSYMBOL node's LINK points to a list that maps byte positions to
+// UTF-8 codepoint boundaries.  But a FLAVOR_SYMBOL Flex uses the LINK for a
+// pointer to another symbol's synonym.
+//
+// A C program could typically deal with this using a union, to name the same
+// memory offset in different ways.  Here `link` would be a union {}:
+//
+//      BookmarkList* books = string.link.bookmarks;
+//      string.link.bookmarks = books;
+//
+//      const Symbol* synonym = symbol.link.synonym;
+//      symbol.link.synonym = synonym;
+//
+// The GC could then read a generic field like `stub-&gt;link.node` when doing
+// its marking.  This would be fine in C so long as the types were compatible,
+// it's called "type punning".
+//
+// But that's not legal in C++!
+//
+//  "It's undefined behavior to read from the member of the union that
+//   wasn't most recently written."
+//
+//  https://en.cppreference.com/w/cpp/language/union
+//
+// We use a workaround that brings in some heavy checked build benefits.  The
+// LINK() and MISC() macros force all assignments and reads through a common
+// field.  e.g. the following assigns and reads the same field ("node"), but
+// the instances document it is for "bookmarks" or "synonym":
+//
+//      BookmarkList* books = LINK(Bookmarks, string);  // reads `node`
+//      LINK(Bookmarks, string) = books;
+//
+//      const Symbol* synonym = LINK(Synonym, symbol);  // also reads `node`
+//      LINK(Synonym, symbol) = synonym;
+//
+// The syntax is *almost* as readable, but throws in benefits of offering some
+// helpful debug runtime checks that you're accessing what the Flex holds.
+// It has yet another advantage because it allows new "members" to be "added"
+// by extension code that wouldn't be able to edit a union in a core header.
+//
+// To use the LINK(), MISC() or INODE(), you define two macros, like this:
+//
+//      #define LINK_Bookmarks_TYPE     BookmarkList*
+//      #define HAS_LINK_Bookmarks      FLAVOR_NONSYMBOL
+//
+// You get the desired properties of being easy to find cases of a particular
+// interpretation of the field, along with type checking on the assignment,
+// and a cast operation that does potentially heavy debug checks on the
+// extraction.
+//
+</code></pre>
+<h2><a name="p-7980-link-misc-inode-implementation-4" class="anchor" href="https://forum.rebol.info#p-7980-link-misc-inode-implementation-4"></a>LINK, MISC, INODE Implementation</h2>
+<pre><code>#if NO_RUNTIME_CHECKS || NO_CPLUSPLUS_11
+    #define LINK(Field,stub) \
+        *x_cast(LINK_##Field##_TYPE*, m_cast(Node**, &amp;(stub)-&gt;link.node))
+
+    #define MISC(Field,stub) \
+        *x_cast(MISC_##Field##_TYPE*, m_cast(Node**, &amp;(stub)-&gt;misc.node))
+
+    #define INODE(Field,stub) \
+        *x_cast(INODE_##Field##_TYPE*, m_cast(Node**, &amp;(stub)-&gt;info.node))
+#else
+    #define LINK(Field,stub) \
+        NodeHolder&lt;LINK_##Field##_TYPE&gt;( \
+            ensure_flavor(HAS_LINK_##Field, (stub))-&gt;link.node)
+
+    #define MISC(Field,stub) \
+        NodeHolder&lt;MISC_##Field##_TYPE&gt;( \
+            ensure_flavor(HAS_MISC_##Field, (stub))-&gt;misc.node)
+
+    #define INODE(Field,stub) \
+        NodeHolder&lt;INODE_##Field##_TYPE&gt;( \
+            ensure_flavor(HAS_INODE_##Field, (stub))-&gt;info.node)
+#endif
+</code></pre> ]]></description>
+        <link>https://forum.rebol.info/t/c-magic-for-lvalue-checking-or-use-functions/2350#post_2</link>
+        <pubDate>Sat, 21 Dec 2024 09:42:41 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-7980</guid>
+      </item>
+      <item>
+        <title>Limiting API Entry Points in Favor of Exchanging Strings</title>
+        <dc:creator><![CDATA[@hostilefork Brian Dickens]]></dc:creator>
+        <description><![CDATA[ <aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="540">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>If the "official" API scales back the number of entry points, what justifies a new one?</p>
+</blockquote>
+</aside>
+<p>There are some conveniences I think people might want to define--even just in their own files, e.g.:</p>
+<pre><code>#define rebFunction(...)  rebValue("function", __VA_ARGS__)
+
+Value* f1 = rebFunction("[x y] [if x &gt; y [return x] return y]"); 
+</code></pre>
+<p>This is 6 characters briefer than having to write it out the long way:</p>
+<pre><code>Value* f2 = rebValue("function [x y] [if x &gt; y [return x] return y]");
+</code></pre>
+<p><em>(Not a huge savings, but how much you'd care really depends how many times you're calling it.)</em></p>
+<p>I've previously had a convention about their name hinted they weren't actually part of the API:</p>
+<pre><code>#define rebFunctionX(...)  rebValue("function", __VA_ARGS__)
+
+Value* f1 = rebFunctionX("[x y] [if x &gt; y [return x] return y]"); 
+</code></pre>
+<p>Maybe that's helpful, maybe it isn't.  Maybe <strong>rebxFunction()</strong> is better.  The idea here is that you don't want to get in trouble by putting things in the API's "namespace" that may eventually become an API itself.  But also, the behavior of APIs is supposed to not change based on the definition of words...and here we're dealing with something that would change if the meaning of "function" changed.</p>
+<p><img src="https://forum.rebol.info/images/emoji/twitter/thinking.png?v=12" title=":thinking:" class="emoji only-emoji" alt=":thinking:" loading="lazy" width="20" height="20"></p>
+<hr>
+<p>In any case... <strong>I chose this particular example to point out a contention in naming with <a href="https://forum.rebol.info/t/no-preprocessing-no-ffi-just-awesome-rebfunction/2224">the implemented-with-a-<code>CFunction*</code> rebFunction() API entry point</a></strong>.</p>
+<p>So perhaps that should be called <strong><code>rebNative()</code></strong> or <strong><code>rebNativeFunction()</code></strong> instead?  (Probably just rebNative() would be fine.)</p> ]]></description>
+        <link>https://forum.rebol.info/t/limiting-api-entry-points-in-favor-of-exchanging-strings/540#post_4</link>
+        <pubDate>Thu, 19 Dec 2024 14:29:43 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-7979</guid>
+      </item>
+      <item>
+        <title>API Idea: Prepared Statements</title>
+        <dc:creator><![CDATA[@hostilefork Brian Dickens]]></dc:creator>
+        <description><![CDATA[ <aside class="quote no-group" data-username="IngoHohmann" data-post="1" data-topic="2353">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/ingohohmann/48/195_2.png" class="avatar"> IngoHohmann:</div>
+<blockquote>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">rebElide("f: function[a] [return a * 2]");
+handle = rebPrepare("print [(f #1) #2]");
+rebCall(handle, 5, "apples");
+</code></pre>
+</blockquote>
+</aside>
+<p>Looking at this question 7 years later...I think we're not going to get too much better than functions for the "prepared statement handle", in terms of "parameterized thing you can execute".</p>
+<pre><code>rebElide("f: function[a] [return a * 2]");
+Value* printer = rebValue("lambda [a label] [print [(f a) label]]");
+rebElide(printer, 5, "-{apples}-");
+</code></pre>
+<p>The good news is that you should be able to use <a href="https://forum.rebol.info/t/looking-into-a-usermode-pointfree/1236">innovations like POINTFREE</a> (or whatever it's called), or any other in-language conveniences to define these functions.</p>
+<pre><code>rebElide("f: function[a] [return a * 2]");
+Value* printer = rebValue("pointfree [print [(f _) _]]");  // single scan
+rebElide(printer, 5, "-{apples}-");  // not scanning POINTFREE/PRINT
+rebElide(printer, 10, "-{bananas}-");  // not scanning POINTFREE/PRINT
+rebElide(printer, 15, "-{kiwis}-");  // not scanning POINTFREE/PRINT
+</code></pre>
+<p>It's not completely known how that will work, but this is pretty much what's on the table for "prepared statements"...just various convenient usermode function generators.</p>
+<h2><a name="p-7977-convenience-entry-points-possible-1" class="anchor" href="https://forum.rebol.info#p-7977-convenience-entry-points-possible-1"></a>Convenience Entry Points Possible...</h2>
+<p>I've mentioned the idea of <a href="https://forum.rebol.info/t/limiting-api-entry-points-in-favor-of-exchanging-strings/540/4">making macros to make these calls briefer</a>.</p>
+<pre><code>#define rebPointfree(...)  rebValue("pointfree [", __VA_ARGS__, "]")
+
+rebPointfree("print [(f _) _]")
+</code></pre>
+<p>So that should be able to syntactically match the brevity of <a class="mention" href="https://forum.rebol.info/u/ingohohmann">@IngoHohmann</a> 's <strong><code>rebPrepare()</code></strong></p> ]]></description>
+        <link>https://forum.rebol.info/t/api-idea-prepared-statements/2353#post_2</link>
+        <pubDate>Thu, 19 Dec 2024 14:12:01 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-7977</guid>
+      </item>
+      <item>
+        <title>No Preprocessing, No FFI, Just Awesome: rebFunction()</title>
+        <dc:creator><![CDATA[@hostilefork Brian Dickens]]></dc:creator>
+        <description><![CDATA[ <aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="2224">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>You can ask to be called back again after that work is done (<code>rebContinue()</code>)...or you can just transfer control to some additional code and let what it does be the answer (<code>rebDelegate()</code>).</p>
+<p>And within that code, it can use the definitional RETURN to deliver the value to the caller of your native!</p>
+</blockquote>
+</aside>
+<p>While this is kind of cool, I wondered if it was a bit superfluous, and couldn't just be done with CATCH and THROW, and define with <code>rebLambda()</code> instead of <code>rebFunction()</code></p>
+<pre><code>const char* Use_Catch_Spec = "[ \
+    -{Showing that you can use CATCH in an API Continuation}- \
+    return: [tag!]  /* here is the problem, discussed below */ \
+    arg [integer!] \
+];
+Bounce Use_Catch_Spec_Impl(Specifier* specifier)
+{
+    int bigger = rebUnboxInteger(arg) + 1000;  // whatever C processing
+
+    return rebDelegate("catch [",  /* here is the catch */
+        "if", rebI(bigger), "&gt; 10000 [throw &lt;big&gt;]",  /* a throw */
+        "print -{It wasn't big!}-",
+        "throw &lt;small&gt;"  /* another throw */
+     "]");
+}
+</code></pre>
+<p>The problem is the longstanding one that lambdas don't have a notation to say they do type checking.  And type checking is a nice feature to have.  But we don't have a way to denote it besides <strong><code>[return: ...]</code></strong> in specs, which implies that there is a RETURN function available.  <img src="https://forum.rebol.info/images/emoji/twitter/thinking.png?v=12" title=":thinking:" class="emoji" alt=":thinking:" loading="lazy" width="20" height="20"></p>
+<p>Could we ignore this, and say the <strong><code>RETURN:</code></strong> can be dissociated from the idea that a variable in the frame is also called return?</p>
+<pre><code>&gt;&gt; /foo: lambda [return: [integer!] return] [return + 1]
+
+&gt;&gt; foo 5
+== 6
+
+&gt;&gt; /bar: lambda [return: [block!] return] [return + 1]
+** Error: BAR is supposed to return [block!]
+</code></pre>
+<p>This doesn't seem as crazy as it might have seemed at one time.  There's kind of a similar question about yielders, which currently do it with:</p>
+<pre><code> &gt;&gt; /y: yielder [yield: [integer] x] [yield x + 1, yield x + 2]
+
+ &gt;&gt; y 10
+ == 11
+
+ &gt;&gt; y 20
+ == 22
+</code></pre>
+<p>Would it read better as:</p>
+<pre><code> &gt;&gt; /y: yielder [return: [integer] x] [yield x + 1, yield x + 2]
+</code></pre>
+<p>In that case, I kind of feel like the <strong>yield:</strong> reinforces the fact that if you want to call an argument or local RETURN for some reason (and you well might, e.g. as a specialization of YIELD:FINAL for instance)... it feels better.</p>
+<p>Anyway... the existence of LAMBDA has gone from an appeasement of people who wanted functions to drop out their last result to instead being a building block of necessity--for making higher level constructs like FUNC that have alternative definitions of RETURN, or for simply writing service code that wants to use RETURN as defined in its calling context.  That can apply to API functions as well, so there will need to be a rebLambda().</p> ]]></description>
+        <link>https://forum.rebol.info/t/no-preprocessing-no-ffi-just-awesome-rebfunction/2224#post_4</link>
+        <pubDate>Thu, 19 Dec 2024 02:04:12 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-7976</guid>
+      </item>
+      <item>
+        <title>The Grand Leading-Slash &quot;Safety, or Burden?&quot; Question</title>
+        <dc:creator><![CDATA[@hostilefork Brian Dickens]]></dc:creator>
+        <description><![CDATA[ <p>Overall, I have been tremendously happy with how the ideas of the <strong><a href="https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905">Big Alien Proposal</a></strong> have worked out.</p>
+<p>That started from the concept that when slashes appear, they either come <em>before</em> a function they run, or <em>after</em> a function they suppress execution for.</p>
+<pre><code>foo.bar
+; ^-- foo is an entity from which BAR is being selected.  BAR is not
+; allowed to be an antiform frame, so this syntax cannot invoke a
+; function call (though it can invoke an 'accessor', e.g. a "getter"
+; which is 0-arity).
+
+foo/bar
+; ^-- foo is an entity from which BAR (an a FRAME! or antiform FRAME!)
+; is being selected and then invoked.  This will generate an error if
+; bar is not a frame or antiform frame.
+
+foo.bar/
+; ^-- bar is a field which is an antiform FRAME!, whose execution is
+; being suppressed.  This expression will return an antiform frame, or
+; an error if not an antiform frame.
+
+foo
+; ^-- conventional WORD! reference, will run an antiform frame as an
+; action invocation or fetch other values as-is
+
+/foo
+; ^-- invocation reference, will run an antiform frame (or plain frame)
+; as an action invocation and give errors on other types
+
+foo/
+; ^-- action suppression, will give you back an antiform frame as-is
+; and error on other types.
+</code></pre>
+<p><em>(If you're curious about why <strong><code>/foo</code></strong> will run plain FRAME! as well as antiform, while <strong><code>foo/</code></strong> will not return an antiform frame for plain FRAME!, this is based on the idea that it's better to be conservative when fetching values so that you won't get surprised by getting a plain frame back from <strong><code>foo/</code>~</strong> which gives everything back as-is.)</em></p>
+<hr>
+<p>I've written elsewhere <a href="https://forum.rebol.info/t/trailing-slash-is-a-winner-for-defused-actions/2327">how pleased I am that the way you suppress a function's execution is by throwing up a "barrier"</a> with a separating slash that makes it clear arguments are not being gathered at the callsite.  That's really slick.</p>
+<p>For this idea to work, something else had to be used for refinements.  That meant <a href="https://forum.rebol.info/t/introducingnew-chain-datatype/2226">invention of the CHAIN! datatype</a> has opened a lot of interesting doors, and I find it's quite learnable to see things like <strong><code>trim:auto:tail</code></strong> instead of <strong><code>trim/auto/tail</code></strong>.</p>
+<p><em>I actually prefer it!</em>  What some might think of a disadvantage of being "less noticeable" turns into an advantage... <strong><code>trim:auto</code></strong> really could have been a function called <strong><code>trim-auto</code></strong> just as easily.  Why would you want a slash to make the fact that it has a refinement "pop"?  The slashes to make function calls or suppression pop are much better applied.</p>
+<p><strong>So that's all good. <img src="https://forum.rebol.info/images/emoji/twitter/smile_cat.png?v=12" title=":smile_cat:" class="emoji" alt=":smile_cat:" loading="lazy" width="20" height="20"> No regrets!</strong></p>
+<h2><a name="p-7975-but-leading-slash-for-functions-rule-hasnt-100-geld-1" class="anchor" href="https://forum.rebol.info#p-7975-but-leading-slash-for-functions-rule-hasnt-100-geld-1"></a>But... Leading-Slash For Functions Rule Hasn't 100% Gel'd</h2>
+<p>Another part of the proposal was that in order to get tighter control on what was a function or not, you would be required to assign functions using a leading-slash kind of SET-WORD!.</p>
+<pre><code>&gt;&gt; foo: func [a b] [return a + b]
+** Error: FOO: can't be used to assign antiform FRAME!, use /FOO:
+
+&gt;&gt; /foo: func [a b] [return a + b]
+== ~#[frame! "foo" [a b]]]~  ; anti
+</code></pre>
+<p><strong>It hasn't fully settled with me after working with it for some time.</strong></p>
+<p>As I mentioned above, colons for refinements was easy to adapt to...and now that I'm adapted, I prefer it.</p>
+<p>But I'm still typing <strong><code>test: cascade [add/ even?/]</code></strong>.  I love the trailing slashes (and this will be even better when the whole cascade can be done with just <strong><code>even?/add/</code></strong>).  But I'm kind of cursing under my breath the thought of having typed <strong><code>test:</code></strong> and having to backspace over it so it says <strong><code>/test:</code></strong>.  And then I go "hrmph."</p>
+<p>When I'm reading code, I probably appreciate it more than I find it to be "messy".  It gives you a better compass.  The eye can scan and comprehend much better... it's of particular value when you're not using an obvious function generator like FUNC, but something else.  This cues readers to go "oh, I guess that's a function generator".</p>
+<p>Yet still... it's a burden in a way the other changes are not.  It's the only change that increases the character count.</p>
+<h2><a name="p-7975-whats-at-stake-by-not-enforcing-this-2" class="anchor" href="https://forum.rebol.info#p-7975-whats-at-stake-by-not-enforcing-this-2"></a>What's At Stake By Not Enforcing This?</h2>
+<p>Ren-C has a powerful story about how antiforms can't be put in blocks, which means you can write this kind of code and it "just works":</p>
+<pre><code>block2: collect [
+    for-each 'item block1 [keep item]
+]
+
+assert [equal? block1 block2]
+</code></pre>
+<p>When you compare it to Rebol2/R3-Alpha/Red, it's one of those vastly superior situations.  You aren't getting tricked into receiving an ITEM in the FOR-EACH that would generate an unset variable error, or conflate with the state that gets returned when an item can't be picked from a block, or accidentally run a function.  It's a solid solution.</p>
+<p>But that's only for blocks.  What about other places, like objects?</p>
+<p>If we don't put barriers on how action antiforms get assigned to variables, we get the problem all over again:</p>
+<pre><code>for-each [key value] obj [
+    if integer? value [  ; oops, what if VALUE is an action antiform!
+        print "Found an integer"
+    ]
+]
+</code></pre>
+<p>There's no way in this case to say "variables can't hold antiforms".  Logic is an antiform.  Words holding antiform frames are actions.</p>
+<p>Getting this under control with slashes is the kind of thing I've been trying to do for a long time, I've just never had the syntax.  Leading slashes felt like it could be the key:</p>
+<pre><code>for-each [key value] obj [...]  ; value can't be frame antiform
+
+for-each [key /value] obj [...]  ; value must be frame antiform
+
+for-each [key ~/value] obj [...]  ; value may be frame antiform
+</code></pre>
+<p>But if these rules are applied everywhere, what you have to do gets more complex:</p>
+<pre><code>set $x does [print "Is this an error?"]
+
+set $/x does [print "Do you have to do this?"]
+
+&gt;&gt; var: $x
+== x  ; bound
+
+set var does [print "If this errors, how to make VAR into bound /x?"]
+
+set:active var does [print "Do you use refinements?"] (or just SET:ANY ?)
+</code></pre>
+<p>Nothing is free.  And the already more complicated world where <strong><code>x:</code></strong> is a CHAIN! instead of a fundamental different type of word has its own issues, that these all pile on top of.</p>
+<h2><a name="p-7975-theres-likely-not-enough-value-in-optional-slash-3" class="anchor" href="https://forum.rebol.info#p-7975-theres-likely-not-enough-value-in-optional-slash-3"></a>There's Likely Not Enough Value In Optional Slash</h2>
+<p>If <strong><code>/foo: func [...] [...]</code></strong> will enforce that the thing you're assigning is an antiform action, but <strong><code>foo: func [...] [...]</code></strong> still works... I have a feeling that the complexity it takes to offer the feature doesn't give a sufficient payoff to be worth it.</p>
+<p>You have everyone paying the tax of dealing with complicated path structures and bookkeeping--vs. being able to just SET and GET words and tuples at will... and then you're not even giving any additional guarantees in the source.</p>
+<p>This makes me feel like it really is an all-in or not-at-all situation.</p>
+<h2><a name="p-7975-long-story-short-im-still-weighing-it-4" class="anchor" href="https://forum.rebol.info#p-7975-long-story-short-im-still-weighing-it-4"></a>Long Story Short: I'm Still Weighing It</h2>
+<p>I'm not ready to make a verdict.</p>
+<p>The techniques for working with these new CHAIN! and PATH! situations are still being learned.  Most of my hesitance isn't from the looks or typing an extra character, but from frustrations in that...and maybe that frustration will lessen as I work on it more.</p> ]]></description>
+        <link>https://forum.rebol.info/t/the-grand-leading-slash-safety-or-burden-question/2352#post_1</link>
+        <pubDate>Thu, 19 Dec 2024 01:12:09 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-7975</guid>
+      </item>
+      <item>
+        <title>What to call Antiform PARAMETER! (&quot;Hole&quot;?)</title>
+        <dc:creator><![CDATA[@hostilefork Brian Dickens]]></dc:creator>
+        <description><![CDATA[ <aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="2351">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>Looking over this, UNSPECIALIZED is a pretty lengthy name.</p>
+<p>In a frame, these represent information for parameters that need to be gathered.</p>
+<p>Should <em>this</em> be what's called a HOLE? It almost makes the most sense. "A frame with holes in it needs to fill those holes from the callsite</p>
+</blockquote>
+</aside>
+<p>A lot of things have jumbled around as I've gotten more experience with this.  Notably the idea of making antiform parameters "vacant" in order to let them act as unfulfilled in FRAME! turned out to be a very poor choice in practice.</p>
+<p>I've written up how antiform parameters were normalized, and NOTHING is the unspecialized state exclusive to MAKE FRAME!:</p>
+<p><a href="https://forum.rebol.info/t/default-values-and-make-frame-2024-edition/2347" class="inline-onebox">Default Values and MAKE FRAME! - 2024 Edition</a></p>
+<p>What this means is we have an in-memory FRAME! representation for functions, which is what you get back from UNRUN (all it does is remove the antiform state on the FRAME! by changing the quote byte from ANTIFORM_0 to NOQUOTE_1), which gives a plain frame that looks like this:</p>
+<pre><code>&gt;&gt; unrun append/
+== #[frame! [
+    series: ~#[
+        parameter! [~void~ any-series? port! map! object! module! bitset!]
+    ]~
+    value: ~#[parameter! [~void~ element? splice?]]~
+    part: ~#[parameter! :[any-number? any-series? pair!]]~
+    dup: ~#[parameter! :[any-number? pair!]]~
+    line: ~#[parameter! :[]]~
+]]
+</code></pre>
+<p>But in contexts where you're not just trying to de-antiform an action, but actually inquire about the parameters, you might think to ask it like this:</p>
+<pre><code>&gt;&gt; parameters of append/
+== #[frame! [
+    series: ~#[
+        parameter! [~void~ any-series? port! map! object! module! bitset!]
+    ]~
+    value: ~#[parameter! [~void~ element? splice?]]~
+    part: ~#[parameter! :[any-number? any-series? pair!]]~
+    dup: ~#[parameter! :[any-number? pair!]]~
+    line: ~#[parameter! :[]]~
+]]
+</code></pre>
+<p>There might be some shade of distinction...where UNRUN might give you a mutable view of an action, and PARAMETERS OF gives you a read-only view.  I don't know.</p>
+<p>But you might ask: <em>"Why not have PARAMETERS OF give back a frame with <em>plain</em> PARAMETER! instead of the antiforms, so they're 'easier' to work with?"</em></p>
+<p>That would be more costly and require a separate allocation.  The thing is, that what you see there is actually just a <em>Lens</em> of the actual frame that contains non-antiform cells also (specializations and locals), but because of the view it's only showing you the antiform parameters.</p>
+<p>But also, a frame with non-antiform PARAMETER! in it isn't useful for building functions.</p>
+<p>So really this is <strong><code>holes of append/</code></strong> <img src="https://forum.rebol.info/images/emoji/twitter/frowning.png?v=12" title=":frowning:" class="emoji" alt=":frowning:" loading="lazy" width="20" height="20"></p>
+<h2><a name="p-7973-could-parameter-be-the-antiform-ofsomething-else-1" class="anchor" href="https://forum.rebol.info#p-7973-could-parameter-be-the-antiform-ofsomething-else-1"></a>Could PARAMETER be the antiform of...something else?</h2>
+<p>It feels like maybe it should be the case that parameter is the name of the antiform.  But the antiform of <em>what</em> exactly?</p>
+<p>It isn't really a TYPESET! because there's more information in it (a textual description, whether it's optional or literal, etc.)  It could be maybe a TYPESPEC!</p>
+<p>This is enough information to gather an argument at a callsite.  A GATHER?  Maybe a MATCHER?</p>
+<p><em>"parameters are the antiform of matcher!"</em></p>
+<p>The problem is that what's in a PARAMETER! cell is so particular to gathering parameters, and for most practical purposes they're always antiforms.</p>
+<h2><a name="p-7973-or-is-there-no-real-reason-to-use-antiforms-here-2" class="anchor" href="https://forum.rebol.info#p-7973-or-is-there-no-real-reason-to-use-antiforms-here-2"></a>Or Is There No Real Reason To Use Antiforms Here?</h2>
+<p>Things have shaken around, and antiform parameters are legal to pass at callsites as non-^META values.  The only restriction that you get is that you can't specialize frame slots to antiform parameters (without a bit of effort).</p>
+<p><strong>So why not just say that plain PARAMETER! is what represents unspecialized slots?</strong></p>
+<p>What led me to resist this initially was that whatever represented unspecialized slots couldn't be passed as a plain argument to functions.  This meant if you were going to make some query function for PARAMETER! you had to ^META it, and the meta mechanics are tailored to helping you manage antiforms&lt;-&gt;quasiforms&lt;-&gt;plain.  If PARAMETER! was irregular then it breaks this rhythm, because your meta form is quoted, not quasi...it could be made to work but it would then be rather irregular.</p>
+<p><em>Yet things have changed.</em>  You can pass "unspecializeds" normally, you just can't specialize to their value (by definition, since they're a value that represents a lack of specialization).  Though I described a workaround through ENCLOSE-based meta mechanics if you ever <em>really</em> need to do this to a parameter that wasn't already defined ^META.</p>
+<p><strong>I think being too invested in the isotope story works against practical usage here.</strong>  If plain PARAMETER! represents unspecialized values in function interfaces, that avoids needing another name for them.  You'll have to learn that they are a little weird, but their weirdness is not "you can't put these in blocks" (which there's a good reason for with other types, but never was a particularly good one for parameter antiforms).</p>
+<h2><a name="p-7973-its-really-the-best-option-3" class="anchor" href="https://forum.rebol.info#p-7973-its-really-the-best-option-3"></a>It's Really The Best Option</h2>
+<p>Putting aside whether you know what this code is doing or not:</p>
+<pre><code>   let f: make frame! make varargs! condition
+   for-each [key param] (parameters of f) [
+       all [not param.optional, ~end~ = f.(key)] then [
+           f.(key): value
+           break
+       ]
+   ]
+</code></pre>
+<p>vs.</p>
+<pre><code>   let f: make frame! make varargs! condition
+   for-each [key hole] (holes of f) [
+       all [not hole.optional, ~end~ = f.(key)] then [
+           f.(key): value
+           break
+       ]
+   ]
+</code></pre>
+<p>vs.</p>
+<pre><code>   let f: make frame! make varargs! condition
+   for-each [key unspecialized] (unspecialized of f) [
+       all [not unspecialized.optional, ~end~ = f.(key)] then [
+           f.(key): value
+           break
+       ]
+   ]
+</code></pre>
+<p><strong>It needs to be the <code>PARAMETERS OF</code>, and the variable needs to be called <code>PARAM</code>.</strong></p>
+<p>So would dropping antiform PARAMETER! be for the best&gt;  Isotopes solve a lot of problems, but once NOTHING moved to the sole unspecialized state in MAKE FRAME! scenarios, having parameter antiforms just seems to be causing mechanical and terminology problems here without adding a lot of benefit...</p>
+<h2><a name="p-7973-wed-lose-one-piece-of-terra-firma-maybe-4" class="anchor" href="https://forum.rebol.info#p-7973-wed-lose-one-piece-of-terra-firma-maybe-4"></a>We'd Lose One Piece Of Terra Firma, Maybe?</h2>
+<p>If you write a function like:</p>
+<pre><code>/specialize-x: func [/action [action?] value] [
+    let f: copy unrun action/
+    f.x: value
+    return runs f
+]
+</code></pre>
+<p>That could specialize any function's X value and give you back a function with X fixed.  Unless you passed an antiform parameter...which is a stable value (by necessity) and would be legal since you didn't give value a type spec.</p>
+<p>But in today's antiform-PARAMETER!-is-unspecialized world, if you said:</p>
+<pre><code>/specialize-x: func [/action [action?] element [element?]] [
+    let f: copy unrun action/
+    f.x: element
+    return runs f
+]
+</code></pre>
+<p>You'd be able to promise that the specialization would work.  There's arguably a non-zero value to say that the set of things you can put in blocks is a subset of all things you can specialize a value in a frame to.</p>
+<p>But what about null, or any of the other antiform states that are legal to specialize to?  That seems kind of arbitrary.</p>
+<p>Really, it may just be that there needs to be a SPECIALIZABLE? (or NOT/PARAMETER?) constraint, and that would address this issue without the "maybe not even that useful" guarantee that array elements can always act as specializations.  Who said that specialization-ability and put-in-block-ability had anything to do with each other, anyway?</p>
+<p><em>Not only that, there's nothing stopping there being a richer way of saying 'yes I want to specialize with this PARAMETER! explicitly'.</em>*  I've tried to avoid making there be any hidden bits, but SPECIALIZE could offer the feature and implement it however it wanted to.  Which doesn't even have to be hidden, it could be METASPECIALIZE and just fulfill all the arguments as one level meta of what was expected.  <img src="https://forum.rebol.info/images/emoji/twitter/man_shrugging.png?v=12" title=":man_shrugging:" class="emoji" alt=":man_shrugging:" loading="lazy" width="20" height="20"></p> ]]></description>
+        <link>https://forum.rebol.info/t/what-to-call-antiform-parameter-hole/2351#post_2</link>
+        <pubDate>Tue, 17 Dec 2024 02:17:33 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-7973</guid>
+      </item>
+      <item>
         <title>C++ Magic for LVALUE Checking...or Use Functions?</title>
         <dc:creator><![CDATA[@hostilefork Brian Dickens]]></dc:creator>
         <description><![CDATA[ <p>If you write traditional C like:</p>
@@ -3814,794 +4736,6 @@ f.a: 10
         <link>https://forum.rebol.info/t/frame-action-duality-examined/1898#post_2</link>
         <pubDate>Wed, 27 Nov 2024 22:08:02 +0000</pubDate>
         <guid isPermaLink="false">forum.rebol.info-post-7929</guid>
-      </item>
-      <item>
-        <title>ENHEX and DEHEX testing, another &quot;Micro-Dialect&quot;</title>
-        <dc:creator><![CDATA[@hostilefork Brian Dickens]]></dc:creator>
-        <description><![CDATA[ <p>Sometimes it's the small examples that I think drive home what the project is about most clearly.  And this is pretty darn close to the essential complexity of the problem being addressed.</p>
-<p>So I thought maybe it would be good to look at the impact of a decision like arity-2 COMPOSE here, just to see it "in context".</p>
-<pre data-code-wrap="plaintext"><code class="lang-plaintext">parse compose $() [
-    "a%20b" &lt;-&gt; "a b"
-    "a%25b" &lt;-&gt; "a%b"
-    "a%ce%b2c" -&gt; "aβc" -&gt; "a%CE%B2c"  [1]
-    "%2b%2b" -&gt; "++" -&gt; "++"  [2]
-    "a%2Bb" -&gt; "a+b" -&gt; "a+b"  [2]
-    "a%62c" -&gt; "abc" -&gt; "abc"  [2]
-    "a%CE%B2c" &lt;-&gt; "aβc"
-    (as text! #{2F666F726D3F763D254335253939}) -&gt; "/form?v=ř"
-][ some [
-    let encoded: text!
-    let arrow: ['&lt;-&gt; | '-&gt;]
-    let decoded: text!
-    let re-encoded: [when (arrow = '-&gt;) ['-&gt; text!] | (encoded)]
-    optional block!  ; headnote comment
-    (
-        let de: dehex encoded
-        if de != decoded [
-            fail ["Decode of" @encoded "gave" @de "expected" @decoded]
-        ]
-        let en: enhex decoded
-        if en != re-encoded [
-            fail ["Encode of" @decoded "gave" @en "expected" @re-encoded]
-        ]
-    )
-]]
-</code></pre>
-<p>So the question I might ask is: <em>try and compare it with fresh eyes...what does that adjustment feel like?</em></p>
-<p>Does it feel like a "wart" appeared?  Does it feel like a "missing parameter" showed up?</p>
-<p>I'll stress again that COMPOSE on a string can't work unless it either takes this parameter to draw a binding from, or unless COMPOSE "sneakily" captures the binding environment in which it is executing.</p>
-<p>I've suggested that the sneaky form use <code>compose*</code>, so let's look at that as well:</p>
-<pre data-code-wrap="plaintext"><code class="lang-plaintext">parse compose* [
-    "a%20b" &lt;-&gt; "a b"
-    "a%25b" &lt;-&gt; "a%b"
-    "a%ce%b2c" -&gt; "aβc" -&gt; "a%CE%B2c"  [1]
-    "%2b%2b" -&gt; "++" -&gt; "++"  [2]
-    "a%2Bb" -&gt; "a+b" -&gt; "a+b"  [2]
-    "a%62c" -&gt; "abc" -&gt; "abc"  [2]
-    "a%CE%B2c" &lt;-&gt; "aβc"
-    (as text! #{2F666F726D3F763D254335253939}) -&gt; "/form?v=ř"
-][ some [
-    let encoded: text!
-    let arrow: ['&lt;-&gt; | '-&gt;]
-    let decoded: text!
-    let re-encoded: [when (arrow = '-&gt;) ['-&gt; text!] | (encoded)]
-    optional block!  ; headnote comment
-    (
-        let de: dehex encoded
-        if de != decoded [
-            fail ["Decode of" @encoded "gave" @de "expected" @decoded]
-        ]
-        let en: enhex decoded
-        if en != re-encoded [
-            fail ["Encode of" @decoded "gave" @en "expected" @re-encoded]
-        ]
-    )
-]]
-</code></pre>
-<p>To me, this is more unsettling than the <code>$()</code>.  It seems so much easier to explain that if you'd said <code>${&lt;?&gt;}</code> instead then it would have looked for FENCE!s beginning with <code>&lt;?&gt;</code></p>
-<p>(I'll intentionally paste it all out again here, because I'm trying to make a point.)</p>
-<pre data-code-wrap="plaintext"><code class="lang-plaintext">parse compose ${&lt;?&gt;} [
-    "a%20b" &lt;-&gt; "a b"
-    "a%25b" &lt;-&gt; "a%b"
-    "a%ce%b2c" -&gt; "aβc" -&gt; "a%CE%B2c"  [1]
-    "%2b%2b" -&gt; "++" -&gt; "++"  [2]
-    "a%2Bb" -&gt; "a+b" -&gt; "a+b"  [2]
-    "a%62c" -&gt; "abc" -&gt; "abc"  [2]
-    "a%CE%B2c" &lt;-&gt; "aβc"
-    {&lt;?&gt; as text! #{2F666F726D3F763D254335253939}} -&gt; "/form?v=ř"
-][ some [
-    let encoded: text!
-    let arrow: ['&lt;-&gt; | '-&gt;]
-    let decoded: text!
-    let re-encoded: [when (arrow = '-&gt;) ['-&gt; text!] | (encoded)]
-    optional block!  ; headnote comment
-    (
-        let de: dehex encoded
-        if de != decoded [
-            fail ["Decode of" @encoded "gave" @de "expected" @decoded]
-        ]
-        let en: enhex decoded
-        if en != re-encoded [
-            fail ["Encode of" @decoded "gave" @en "expected" @re-encoded]
-        ]
-    )
-]]
-</code></pre>
-<p>Anyway, I'm very reticent to make plain <code>compose</code> capture its calling environment.  And if I'm not willing to do that, the options are that it take the binding from its template argument (won't work for strings, and a bit of a weird behavior to use as a default for lists), or it be arity-2.</p>
-<p>I feel like arity-2 is winning, for me, so far.</p> ]]></description>
-        <link>https://forum.rebol.info/t/enhex-and-dehex-testing-another-micro-dialect/2323#post_2</link>
-        <pubDate>Fri, 22 Nov 2024 06:37:50 +0000</pubDate>
-        <guid isPermaLink="false">forum.rebol.info-post-7928</guid>
-      </item>
-      <item>
-        <title>Abbreviations As Synonyms</title>
-        <dc:creator><![CDATA[@hostilefork Brian Dickens]]></dc:creator>
-        <description><![CDATA[ <aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="1211">
-<div class="title">
-<div class="quote-controls"></div>
-<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
-<blockquote>
-<p><strong>I Propose Abbreviations As Synonyms For What They Abbreviate</strong></p>
-<p>Purely synonyms. <code>/FUNC: FUNCTION/</code>.</p>
-</blockquote>
-</aside>
-<p>Well, five years ago I put this idea forth.</p>
-<p>Since locals-gathering function has been dead for some time now, I decided the <a href="https://forum.rebol.info/t/dropping-with-in-static/2335/2">end of the PARSE-based wrapper</a> that implemented the "higher-level" function was as good a time as any to finally make the change.</p>
-<p>The FUNCTION native is now shorthanded as FUNC, as full synonyms.</p>
-<p>Red still operates on the old idea:</p>
-<pre><code>red&gt;&gt; x: 10
-red&gt;&gt; foo: function [y] [x: y]
-red&gt;&gt; foo 20
-red&gt;&gt; x
-== 10
-
-red&gt;&gt; x: 10
-red&gt;&gt; bar: func [y] [x: y]
-red&gt;&gt; bar 20
-red&gt;&gt; x
-== 20
-</code></pre>
-<p>But as I point out at the top of this thread, <a href="https://forum.rebol.info/t/rethinking-auto-gathered-set-word-locals/1150">and in other posts</a>, it's just not good.</p>
-<p>So nice to finally get this crossed off.</p> ]]></description>
-        <link>https://forum.rebol.info/t/abbreviations-as-synonyms/1211#post_4</link>
-        <pubDate>Fri, 22 Nov 2024 05:14:56 +0000</pubDate>
-        <guid isPermaLink="false">forum.rebol.info-post-7927</guid>
-      </item>
-      <item>
-        <title>SET-WORD! To Initialize Locals In Function Specs?</title>
-        <dc:creator><![CDATA[@hostilefork Brian Dickens]]></dc:creator>
-        <description><![CDATA[ <p>When <a href="https://forum.rebol.info/t/dropping-with-in-static/2335">the higher-level FUNCTION code</a> was removed, that removed the code for assigning default values to locals.</p>
-<p>As I mentioned, it was done with GROUP!s:</p>
-<pre><code>/foo: function [arg1 arg2 &lt;local&gt; x y (1 + 2) z (null)] [...body...]
-</code></pre>
-<p>The way it worked was to augment the function's body:</p>
-<pre><code>/foo: function [arg1 arg2 &lt;local&gt; x y z] [
-   y: '3
-   z: ~null~
-   (...body...)
-]
-</code></pre>
-<p>It evaluated the expression once, and then used a ^META of the evaluation product as the thing to assign.</p>
-<h2><a name="p-7926-native-local-handling-brings-long-desired-advantage-1" class="anchor" href="https://forum.rebol.info#p-7926-native-local-handling-brings-long-desired-advantage-1"></a>Native <code>&lt;local&gt;</code> Handling Brings Long-Desired Advantage</h2>
-<aside class="quote no-group quote-modified" data-username="hostilefork" data-post="1" data-topic="2210">
-<div class="title">
-<div class="quote-controls"></div>
-<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
-<blockquote>
-<p>As it so happens, there's potential to exploit this for efficiency. The frame mechanics have a slot for each local in the function archetype that currently just holds nothing (~ antiform), and it could hold this default value / expression. So it wouldn't just save on typing the local name and then later the name again and the expression...but you're avoiding the need to perform the evaluation to do the assignment on each call!</p>
-</blockquote>
-</aside>
-<p>This theoretical advantage was not realized by the FUNCTION abstraction, as it was just injecting assignments into the body.</p>
-<p>But now that the FUNC native is orchestrating the situation, the advantage is there.</p>
-<h2><a name="p-7926-feature-question-multi-returns-2" class="anchor" href="https://forum.rebol.info#p-7926-feature-question-multi-returns-2"></a>Feature Question: Multi-Returns</h2>
-<p>When I brought up the question of <strong><code>[&lt;local&gt; word: expr]</code></strong> instead of <strong><code>[&lt;local&gt; word (expr)]</code></strong>, I didn't consider whether you could do multi-returns:</p>
-<pre><code>/bar: function [arg &lt;local&gt; [begin end]: (find series "a")] [...]
-</code></pre>
-<p>First of all, I'm not certain that feels like it "belongs" in the spec.  <img src="https://forum.rebol.info/images/emoji/twitter/face_with_raised_eyebrow.png?v=12" title=":face_with_raised_eyebrow:" class="emoji" alt=":face_with_raised_eyebrow:" loading="lazy" width="20" height="20"></p>
-<p>Secondly, this would require some significant redesign.  <img src="https://forum.rebol.info/images/emoji/twitter/fearful.png?v=12" title=":fearful:" class="emoji" alt=":fearful:" loading="lazy" width="20" height="20"></p>
-<p>The problem is, that at the time of the spec processing, there's no object in existence to bind into and do such an evaluation.</p>
-<p>So this would have to somehow collect the words inside the SET-BLOCK, save the expression, make the archetypal frame, bind into the <em>archetypal frame</em> and evaluate into its locals.</p>
-<p>Continuing on this...</p>
-<h2><a name="p-7926-set-words-not-being-bound-has-other-consequences-3" class="anchor" href="https://forum.rebol.info#p-7926-set-words-not-being-bound-has-other-consequences-3"></a>SET-WORD!s Not Being Bound Has Other Consequences</h2>
-<p>Evaluating the expression, and then writing it into a slot of a partially constructed archetypal FRAME! has other things that are ruled out:</p>
-<aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="2210">
-<div class="title">
-<div class="quote-controls"></div>
-<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
-<blockquote>
-<p>What binding rules is it using? Could you initialize local3 and then say <strong><code>local4: (local2 * arg1)</code></strong>?</p>
-<ul>
-<li>Almost certainly not, and it would just be using the binding of the spec block</li>
-</ul>
-</blockquote>
-</aside>
-<p>So that can't work, because what's happening is that the expression is just being evaluated and put in a spot that represents local4.  No "SET" is actually happening, because there's no completed context to assign it to.</p>
-<p>That rules out other ideas, like <a href="https://forum.rebol.info/t/a-dream-for-debugging-generalized-accessors/2259">assigning an "accessor"</a>.</p>
-<p>When put this way, it makes it seem like using a GROUP! is clearer, because it makes you aware that there's no actual SET-WORD! to assign to.</p>
-<h2><a name="p-7926-does-this-suggest-a-redesign-is-needed-4" class="anchor" href="https://forum.rebol.info#p-7926-does-this-suggest-a-redesign-is-needed-4"></a>Does This Suggest A Redesign Is Needed?</h2>
-<p>The system <em>could</em> generate the archetypal frame, with nothing in the local slots, and then bind the expressions into it and run them...just as they would run had it been an instantiated function.</p>
-<p>So this would be a two-phase thing, that would enable things like multi-returns, accessors, weird-infix-functions that capture the thing they're assigning to in order to know their names...etc.</p>
-<p><strong>It's definitely a lot more than I bargained for when I suggested the feature.</strong>  So what would happen here is that only a subset would be implemented, with the rest being done at a future date...</p>
-<p><strong>What it does point out is the set of things that the GROUP!-based syntax cannot do.</strong></p>
-<pre><code> /foo: function [arg1 arg2 &lt;local&gt; x y (1 + 2) z (null)] [...body...]
-</code></pre>
-<p>So the big question is whether that's by design ("we don't plan to implement anything more, it's a simple low-hanging fruit you can take advantage of if it fits")... or if it's too limited.</p>
-<h2><a name="p-7926-then-is-freeform-dialecting-good-5" class="anchor" href="https://forum.rebol.info#p-7926-then-is-freeform-dialecting-good-5"></a>Then... Is Freeform Dialecting Good?</h2>
-<p>It forces the question of "is the word and set-word mix good"</p>
-<pre><code> /foo: function [arg1 arg2 &lt;local&gt; x y: 1 + 2 z: null] [...body...]
-</code></pre>
-<p><em>Instinctually, I feel uneasy about that.</em></p>
-<p>If we went that direction, I'd kind of rather have all the locals be SET-WORD!, and allow you to chain the assignments:</p>
-<pre><code> /foo: function [arg1 arg2 &lt;local&gt; x: y: z: ~] [...body...]
-</code></pre>
-<p>I think that if people were hinted that they <em>could</em> assign the locals there, and if they found out this gave them an efficiency boost, the feature might be taken advantage of more.</p>
-<p>But they would not be able to be assigned in terms of arguments, so that's a limitation.</p>
-<p>And if it's going to be limited anyway, might it be best to let people in on the limitations and just keep it as WORD! plus GROUP! ?</p>
-<h2><a name="p-7926-leaning-to-stick-with-word-optional-group-6" class="anchor" href="https://forum.rebol.info#p-7926-leaning-to-stick-with-word-optional-group-6"></a>Leaning To: Stick With WORD! + optional GROUP!</h2>
-<p>Really, what we're talking about here is an optimization.</p>
-<ol>
-<li>
-<p>If a local wants a fixed value upon entry to the function on each call, that fixed value can be stored by the archetypal frame and copied into a new instance's cell, at the same cost that initializing it with nothing would cost.</p>
-</li>
-<li>
-<p>If you are initializing a local in such a way, you don't have to repeat its name to initialize it... because you're putting the initial value beside it.</p>
-</li>
-</ol>
-<p>If the function creation process becomes two-pass, doing strange bindings/etc., you're starting to drift from the "optimizing" part of the optimization.  And I'm concerned about the complexity cost of that code.  Thinking about it now, there are details to where I'm not sure how it would work.</p>
-<p>Evaluating a GROUP! and dropping its value into the slot of an incomplete archetype you're building is cheap-as-free, and not complicated.</p>
-<p>It's a natural extension of just listing out locals as words, and I think it turns out to probably be for the best.</p> ]]></description>
-        <link>https://forum.rebol.info/t/set-word-to-initialize-locals-in-function-specs/2210#post_2</link>
-        <pubDate>Fri, 22 Nov 2024 04:04:06 +0000</pubDate>
-        <guid isPermaLink="false">forum.rebol.info-post-7926</guid>
-      </item>
-      <item>
-        <title>Dropping `&lt;with&gt;`, `&lt;in&gt;`, `&lt;static&gt;`</title>
-        <dc:creator><![CDATA[@hostilefork Brian Dickens]]></dc:creator>
-        <description><![CDATA[ <aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="2335">
-<div class="title">
-<div class="quote-controls"></div>
-<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
-<blockquote>
-<p>Feature-wise, there's a slight loss of the commentary capacity of <code>&lt;with&gt;</code>.</p>
-<pre data-code-wrap="plaintext"><code class="lang-plaintext">global-var: 10
-
-foo: function [arg1 arg2 &lt;with&gt; global-var] [  ; no-op, but useful?
-    global-var: 20
-    return arg1 + arg2
-]
-</code></pre>
-</blockquote>
-</aside>
-<p>So... deleting this information does seem lossy.  It's helpful to see when something uses non-local declarations.</p>
-<p>But the premise of the language is that you get these things as visible by default.</p>
-<p>Some time ago I wondered about the idea that only functions would have this visibility, and any non-functions you would need <code>&lt;with&gt;</code> to see and modify.</p>
-<p>Today that would mean you'd have to explicitly bind it:</p>
-<pre><code>global-var: 10
-
-foo: function [
-    arg1 arg2
-]
-bind @global-var [
-    global-var: 20
-    return arg1 + arg2
-]
-</code></pre>
-<p>But this feels like an uphill battle, and you're probably inconveniencing as many or more situations than you are clarifying.</p>
-<p>Perhaps it's better to just count one's small victories...e.g. that you have to pre-declare <code>global-var</code>, and typos like <code>globl-var:</code> won't work.</p>
-<p>A lot of these cases are really situations where you should make an object with data members and methods, anyway... vs. have some sneaky relationship between global variables and certain functions.</p>
-<h2><a name="p-7925-i-decided-to-tolerate-with-in-the-specs-for-now-1" class="anchor" href="https://forum.rebol.info#p-7925-i-decided-to-tolerate-with-in-the-specs-for-now-1"></a>I decided to tolerate <code>&lt;with&gt;</code> in the specs for now</h2>
-<p>What the native code actually does is a better-than-nothing enforcement, that it checks to make sure the thing you mention for with has a binding.  This caught some stale <code>&lt;with&gt;</code>.</p>
-<h2><a name="p-7925-and-i-might-bring-back-static-2" class="anchor" href="https://forum.rebol.info#p-7925-and-i-might-bring-back-static-2"></a>and... I <em>Might</em> Bring Back <code>&lt;static&gt;</code></h2>
-<p>Since I've been able to easily implement the <code>&lt;local&gt;</code> initialization feature, as well as settle on <a href="https://forum.rebol.info/t/set-word-to-initialize-locals-in-function-specs/2210/2">why it uses a WORD!+GROUP! instead of a SET-WORD</a>, I might be willing to add the feature back.</p>
-<p>But as that thread explains, the notation of WORD!+GROUP! limits you in terms of what you can do with your assignments.  The workaround for locals is to put the assignments in the body.  The workaround for statics is to use BIND.</p>
-<p>I'll weigh the pros and cons, but for right now BIND is getting exercised...and the PARSE wrapper that slowed down every function generation is gone.</p> ]]></description>
-        <link>https://forum.rebol.info/t/dropping-with-in-static/2335#post_3</link>
-        <pubDate>Fri, 22 Nov 2024 00:31:11 +0000</pubDate>
-        <guid isPermaLink="false">forum.rebol.info-post-7925</guid>
-      </item>
-      <item>
-        <title>Dropping `&lt;with&gt;`, `&lt;in&gt;`, `&lt;static&gt;`</title>
-        <dc:creator><![CDATA[@hostilefork Brian Dickens]]></dc:creator>
-        <description><![CDATA[ <h2><a name="p-7924-the-dying-parse3-based-func-wrapper-1" class="anchor" href="https://forum.rebol.info#p-7924-the-dying-parse3-based-func-wrapper-1"></a>The Dying PARSE3-BASED FUNC Wrapper</h2>
-<p>Here's a snapshot of the code that was written to PARSE the spec, and produce a new one...creating any necessary objects for <code>&lt;static&gt;</code> etc.</p>
-<p>As a shortcut, it first did a search with FIND to see if the spec contained any TAG!.  If it did not, it would fall through to the normal func.  <em>(Though this did mean that any <code>&lt;local&gt;</code> tags would trigger the longer version, even though that was supplied by FUNC.)</em></p>
-<p>It used PARSE3 because UPARSE was built on top of it, and because it would of course be way too slow at this time.</p>
-<p><strong>As I often say about these things... as grotesque as they may seem, they exercise the system asking if we can do certain things in usermode.</strong>  And it shows a good bet for not having written this as tailored native code, because that would all be getting thrown out right now!</p>
-<p>And it's not getting <em>completely</em> thrown out... because it's shifting to be part of the test code (and I'm making it use UPARSE, since the performance no longer matters).</p>
-<pre><code>/function: func [
-    "Augment action with &lt;static&gt;, &lt;in&gt;, &lt;with&gt; features"
-
-    return: [action?]
-    spec "Help string (opt) followed by arg words (and opt type and string)"
-        [block!]
-    body "The body block of the function"
-        [&lt;const&gt; block!]
-    &lt;local&gt;
-        new-spec var loc other
-        new-body defaulters statics
-][
-    ; The lower-level FUNC is implemented as a native, and this wrapper
-    ; does a fast shortcut to check to see if the spec has no tags...and if
-    ; not, it quickly falls through to that fast implementation.
-    ;
-    all [
-        not find spec tag?/
-        return func spec body
-    ]
-
-    ; Rather than MAKE BLOCK! LENGTH OF SPEC here, we copy the spec and clear
-    ; it.  This costs slightly more, but it means we inherit the file and line
-    ; number of the original spec...so when we pass NEW-SPEC to FUNC or PROC
-    ; it uses that to give the FILE OF and LINE OF the function itself.
-    ;
-    ; !!! General API control to set the file and line on blocks is another
-    ; possibility, but since it's so new, we'd rather get experience first.
-    ;
-    new-spec: clear copy spec  ; also inherits binding
-
-    new-body: null
-    statics: null
-    defaulters: null
-    var: #dummy  ; enter PARSE with truthy state (gets overwritten)
-    loc: null
-
-    parse3 spec [opt some [
-        :(if var '[  ; so long as we haven't reached any &lt;local&gt; or &lt;with&gt; etc.
-            var: [
-                &amp;set-word? | &amp;get-word? | &amp;any-word? | &amp;refinement?
-                | quoted!
-                | the-group!  ; new soft-literal format
-            ] (
-                append new-spec var
-            )
-            |
-            other: block! (
-                append new-spec other  ; data type blocks
-            )
-            |
-            other: across some text! (
-                append new-spec spaced other  ; spec notes
-            )
-        ] else [
-            'bypass
-        ])
-    |
-        other: group! (
-            if not var [
-                fail [
-                    ; &lt;where&gt; spec
-                    ; &lt;near&gt; other
-                    "Default value not paired with argument:" (mold other)
-                ]
-            ]
-            defaulters: default [inside body copy '[]]
-            append defaulters spread compose [
-                (var): default (meta eval inside spec other)
-            ]
-        )
-    |
-        (var: null)  ; everything below this line resets var
-        bypass  ; failing here means rolling over to next rule
-    |
-        '&lt;local&gt; (append new-spec &lt;local&gt;)
-        opt some [var: word! other: opt group! (
-            append new-spec var
-            if other [
-                defaulters: default [inside body copy '[]]
-                append defaulters spread compose [  ; always sets
-                    (var): (meta eval inside spec other)
-                ]
-            ]
-        )]
-        (var: null)  ; don't consider further GROUP!s or variables
-    |
-        '&lt;in&gt; (
-            new-body: default [
-                copy:deep body
-            ]
-        )
-        opt some [
-            other: [object! | word! | tuple!] (
-                if not object? other [
-                    other: ensure [any-context?] get inside spec other
-                ]
-                new-body: bind other new-body
-            )
-        ]
-    |
-        '&lt;with&gt; opt some [
-            other: [word! | path!]  ; !!! Check if bound?
-        |
-            text!  ; skip over as commentary
-        ]
-    |
-        ; For static variables to see each other, the GROUP!s can't have an
-        ; hardened context.  We ignore their binding here for now.
-        ;
-        ; https://forum.rebol.info/t/2132
-        ;
-        '&lt;static&gt; (
-            statics: default [copy inside spec '[]]
-            new-body: default [
-                copy:deep body
-            ]
-        )
-        opt some [
-            var: word!, other: opt group! (
-                append statics setify var
-                append statics any [
-                    bindable maybe other  ; !!! ignore binding on group
-                    '~
-                ]
-            )
-        ]
-        (var: null)
-    |
-        &lt;end&gt; accept (~)
-    |
-        other: &lt;here&gt; (
-            fail [
-                ; &lt;where&gt; spec
-                ; &lt;near&gt; other
-                "Invalid spec item:" @(other.1)
-                "in spec" @spec
-            ]
-        )
-    ]]
-
-    if statics [
-        statics: make object! statics
-        new-body: bind statics new-body
-    ]
-
-    ; The constness of the body parameter influences whether FUNC will allow
-    ; mutations of the created function body or not.  It's disallowed by
-    ; default, but TWEAK can be used to create variations e.g. a compatible
-    ; implementation with Rebol2's FUNC.
-    ;
-    if const? body [new-body: const new-body]
-
-    return func new-spec either defaulters [
-        append defaulters as group! bindable any [new-body body]
-    ][
-        any [new-body body]
-    ]
-]
-</code></pre> ]]></description>
-        <link>https://forum.rebol.info/t/dropping-with-in-static/2335#post_2</link>
-        <pubDate>Thu, 21 Nov 2024 23:29:27 +0000</pubDate>
-        <guid isPermaLink="false">forum.rebol.info-post-7924</guid>
-      </item>
-      <item>
-        <title>Dropping `&lt;with&gt;`, `&lt;in&gt;`, `&lt;static&gt;`</title>
-        <dc:creator><![CDATA[@hostilefork Brian Dickens]]></dc:creator>
-        <description><![CDATA[ <p>In R3-Alpha, there was the idea that FUNC was lower-level, <a href="https://github.com/rebol/rebol/blob/25033f897b2bd466068d7663563cd3ff64740b94/src/mezz/base-funcs.r#L28C1-L56C2">and "FUNCTION" was built on top of it</a>.</p>
-<p>Its principal difference was automatically collecting SET-WORD!s as locals.  But it added two refinements: <strong>/WITH</strong> and <strong>/EXTERN</strong>.</p>
-<p>/EXTERN was a way of saying what shouldn't get collected as a local variable due to being a SET-WORD!:</p>
-<pre><code>global-var: 10
-
-foo: function/extern [arg1 arg2] [
-    local-var: "hi"
-    global-var: 20  ; /EXTERN protected this from being collected local
-    return arg1 + arg2
-] [global-var]
-</code></pre>
-<p>/WITH was a way of making static variables:</p>
-<pre><code>accumulate: function/with [x] [
-   return state: state + x
-] [state: 0]
-</code></pre>
-<h2><a name="p-7923-early-on-ren-c-moved-everything-into-the-spec-1" class="anchor" href="https://forum.rebol.info#p-7923-early-on-ren-c-moved-everything-into-the-spec-1"></a>Early On, Ren-C Moved Everything Into The Spec</h2>
-<p>I didn't like seeing the refinement arguments at the end (of what could be a very long function definition).</p>
-<p>It didn't occur to me to suggest that <a href="https://forum.rebol.info/t/refinement-arguments-at-head-of-args-list-not-tail/2331">refinement arguments be moved to the head</a> (which they probably should).  But what did occur to me was that the function spec could incorporate these properties.</p>
-<p>I actually thought <code>&lt;with&gt;</code> seemed better than extern, as a nicer word for "Use these existing variables".  And <code>&lt;static&gt;</code> seemed like a well-known term for static variables:</p>
-<pre><code>foo: function [arg1 arg2 &lt;with&gt; global-var] [
-    local-var: "hi"
-    global-var: 20
-    return arg1 + arg2
-]
-
-accumulate: function [x &lt;static&gt; state (0)] [
-   return state: state + x
-]
-</code></pre>
-<p>The subtlety of wanting to use an object instance was also added, as <code>&lt;in&gt;</code>:</p>
-<pre><code>obj: make object! [a: 10 b: 20]
-
-bar: function [x &lt;in&gt; obj] [
-   return a + b + x
-]
-</code></pre>
-<p>To my eyes, that all seemed like improvement.</p>
-<p><strong>But it didn't come without cost: The spec had to be transformed into something the lower-level FUNC could understand.</strong></p>
-<p>This meant there was a layer of parsing and production of a new spec that was a tax on every function creation.</p>
-<h2><a name="p-7923-time-passes-set-word-gathering-is-panned-2" class="anchor" href="https://forum.rebol.info#p-7923-time-passes-set-word-gathering-is-panned-2"></a>Time Passes, SET-WORD! Gathering Is Panned</h2>
-<p>It didn't take long for me to decide that <a href="https://forum.rebol.info/t/rethinking-auto-gathered-set-word-locals/1150">SET-WORD! locals-gathering was bad</a>... a gimmick that only made sense in very limited domains (perhaps code-golf)</p>
-<p>This motivated having an answer for how to implement LET, as "virtual binding" became the new plan.</p>
-<p>Once that transition went through, the effect of <strong><code>&lt;with&gt;</code></strong> was to become commentary.  Since all it did was remove SET-WORD!s from the collection list, and there was no collection any longer.</p>
-<p>Though virtual binding did open up a new possibility, that if your block had a different binding than the spec, then the WITH might import visibility of terms to that block:</p>
-<pre><code>global-variable: 10
-
-block: /get-block-from-somewhere ...  ; doesn't know about GLOBAL-VARIABLE
-
-/foo: function [x &lt;with&gt; global-variable] block
-</code></pre>
-<p>But this would be a binding operation, that is better generalized as:</p>
-<pre><code>/foo: function [x] (bind @global-variable block)
-</code></pre>
-<h2><a name="p-7923-pushing-the-features-to-bind-make-the-most-sense-3" class="anchor" href="https://forum.rebol.info#p-7923-pushing-the-features-to-bind-make-the-most-sense-3"></a>Pushing The Features To BIND Make The Most Sense</h2>
-<p>Not just <code>&lt;with&gt;</code>, but the <code>&lt;static&gt;</code> and <code>&lt;in&gt;</code> features seemed to be better as BIND operations as well.</p>
-<p>The static syntax of not using SET-WORD!s was based on the idea that SET-WORD!s were reserved for local variables (and RETURN: syntax).  So it was a WORD! followed by a GROUP! to initialize.</p>
-<p>I think it's better done with just <a href="https://forum.rebol.info/t/rethinking-static-in-the-function-spec-dialect/2139">BIND to a FENCE!</a></p>
-<pre><code>accumulate: function [
-    x
-] bind {state: 0} [
-   return state: state + x
-]
-</code></pre>
-<p><code>&lt;in&gt;</code> is similar.</p>
-<pre><code>obj: make object! [a: 10 b: 20]
-
-bar: function [
-   x
-] bind obj [
-   return a + b + x
-]
-</code></pre>
-<h2><a name="p-7923-uglier-maybe-more-general-yes-faster-definitely-4" class="anchor" href="https://forum.rebol.info#p-7923-uglier-maybe-more-general-yes-faster-definitely-4"></a>Uglier?  Maybe.  More General?  Yes.  Faster?  Definitely.</h2>
-<p>Feature-wise, there's a slight loss of the commentary capacity of <code>&lt;with&gt;</code>.</p>
-<pre><code>global-var: 10
-
-foo: function [arg1 arg2 &lt;with&gt; global-var] [  ; no-op, but useful?
-    global-var: 20
-    return arg1 + arg2
-]
-</code></pre>
-<p>But besides that, there's no loss of features to move everything to a BIND operation on the body.</p>
-<p>Not having to PARSE the spec and generate a whole new one is a big performance win.</p>
-<p>So I'm letting go of those features.</p> ]]></description>
-        <link>https://forum.rebol.info/t/dropping-with-in-static/2335#post_1</link>
-        <pubDate>Thu, 21 Nov 2024 22:06:22 +0000</pubDate>
-        <guid isPermaLink="false">forum.rebol.info-post-7923</guid>
-      </item>
-      <item>
-        <title>Red&#39;s Take on String Interpolation</title>
-        <dc:creator><![CDATA[@hostilefork Brian Dickens]]></dc:creator>
-        <description><![CDATA[ <p>I'm a bit torn regarding default interpolation (and COMPOSE in general).</p>
-<p>Conventional wisdom for interpolation or templating would be to use something fairly uncommon.</p>
-<p>But if you can customize it and choose alternatives, that makes it seem like maybe you should capitalize on a more common thing...even if it competes for the notational space.</p>
-<p><a href="https://github.com/red/REP/issues/112">Red gives some examples, e.g. in URL interpolation</a>, so consider something like:</p>
-<pre><code>&gt;&gt; compose* http://(site)/(resource)?param=(date as "yyyy")
-== http://example.com/whatever.html?param=1998
-</code></pre>
-<p>Compare that to:</p>
-<pre><code>&gt;&gt; compose* http://{{site}}/{{resource}}?param={{date as "yyyy"}}
-== http://example.com/whatever.html?param=1998
-</code></pre>
-<p>Something gets lost, there.</p>
-<p>Single braces might be more out-of-band than parentheses, while not looking all that bad, and maybe two stars could be used when you want to double them up:</p>
-<pre><code>&gt;&gt; compose* http://{site}/{resource}?param={date as "yyyy"}
-== http://example.com/whatever.html?param=1998
-
-&gt;&gt; compose** http://{{site}}/{{resource}}?param={{date as "yyyy"}}
-== http://example.com/whatever.html?param=1998
-</code></pre>
-<p>Though it still doesn't look quite as good as the plain parentheses do.  And it has the problem that you're frequently interpolating braced strings:</p>
-<pre><code>compose* -{Here's your {1 + 2} escape}-
-
-compose* -{Here's your (1 + 2) escape}-  ; feels better
-</code></pre>
-<p>Parentheses could use the doubled-up shorthand idea with <code>**</code>:</p>
-<pre><code>&gt;&gt; compose* http://(site)/(resource)?param=(date as "yyyy")
-== http://example.com/whatever.html?param=1998
-
-&gt;&gt; compose** http://((site))/((resource))?param=((date as "yyyy"))
-== http://example.com/whatever.html?param=1998
-</code></pre>
-<p>There's a sort of weird logic to going with plain parentheses that I'm finding compelling.  On the surface it's naive, but in practice it may be that if you offer enough ways to raise and alter the escaping then picking something that simple makes sense.</p>
-<p>I think that having the "real" COMPOSE be arity-2 helps the whole thing come across as less naive, because you're passing in not just a pattern but also a binding environment.  So saying <em>"look, this <code>compose*</code> and <code>print*</code> stuff is just for convenience, the real COMPOSE is solid"</em> feels more intelligent.</p>
-<p>There's a non-zero benefit to aligning with historical Rebol in this design aspect.  (But certainly a lot of benefit from being able to customize the pattern!)</p> ]]></description>
-        <link>https://forum.rebol.info/t/reds-take-on-string-interpolation/2121#post_7</link>
-        <pubDate>Thu, 21 Nov 2024 08:18:16 +0000</pubDate>
-        <guid isPermaLink="false">forum.rebol.info-post-7922</guid>
-      </item>
-      <item>
-        <title>First Bootstrap In At Least 6 Months: Watershed Changes</title>
-        <dc:creator><![CDATA[@hostilefork Brian Dickens]]></dc:creator>
-        <description><![CDATA[ <p>Evolving Ren-C is a messy and difficult balancing act.  Due to the experimental nature and bus-factor-of-one staffing, it's not always a good use of time to completely push through a change in all code...until it's seen to be a good change.</p>
-<p>The adoption of dozens of experimental ideas had led to a situation where being able to bootstrap the codebase stalled... for possibly the longest period yet.  This is to say that while the old 2018-era executable is used to make all the <code>.h</code> and <code>.c</code> files to build the current sources, the executable it built would be unable to do so.</p>
-<p>But a few days ago, I managed to accomplish bootstrap. And I've gotten several other codebases that had been atrophying (Whitespacers, Rebol-HTTPD, Query) up to date.</p>
-<p>While there are a lot of shaky parts (in particular, the workings of the new form of methodization that relies on <a href="https://forum.rebol.info/t/word-as-member-selection/1843/3">leading-dot <strong>.member</strong> accesses</a>), I'd say overall things are very promising.</p>
-<p>One of the toughest points was the institution of "strict mode"... where you cannot assign to a variable that has not been pre-declared in some way (either as a module-level declaration, a LET, a <code>&lt;local&gt;</code>, made with WRAP, etc.)  This is a big change, but a good one... for all the reasons "strict mode" is known to be good, but also because it eliminated <a href="https://forum.rebol.info/t/caching-binding-lookup-and-attachment-binding/2128">"attachment binding"</a></p>
-<h2><a name="p-7921-not-easy-but-very-instructive-1" class="anchor" href="https://forum.rebol.info#p-7921-not-easy-but-very-instructive-1"></a>Not Easy, But Very Instructive</h2>
-<p>In some ways, the story of Ren-C's evolution is told by Rebmake, and the process which produces all the <strong><code>.h</code></strong> and <strong><code>.c</code></strong> files that the build relies on.</p>
-<p>It's certainly one of the top 3 biggest and snakiest Rebol codebases (I'd argue it's probably the <em>trickiest</em> codebase of its size, moreso than Red or Atronix Zoe).  And it contains the code of Carl, Shixin, Brett, BrianH, myself, and others... a mixture of styles, and patches, and hacks.  Some huge bends come from needing to run in an executable that's not much beyond a patched version of what ran in 2018.</p>
-<p>I've also explained why <a href="https://forum.rebol.info/t/new-build-executables-new-build-strategy/1432">adopting Rebmake was very consequential, and complicating</a>.   It brought concerns to the build process to be a superset of CMake and GNU make, instead of being narrow and focused like other approaches (Giulio and Andreas tried their hands at much more succinct ideas, and Oldes <a href="https://forum.rebol.info/t/siskin-builder-rebol-based-build-tool-by-oldes/1672">is using something much lighter in daily work today</a>).</p>
-<p>But this has informed the design, hardened it, and challenged it.</p>
-<h2><a name="p-7921-a-new-weird-world-driven-by-reason-and-experience-2" class="anchor" href="https://forum.rebol.info#p-7921-a-new-weird-world-driven-by-reason-and-experience-2"></a>A New "Weird" World: Driven By Reason and Experience</h2>
-<p>With changes like <strong><code>:refinement</code></strong> instead of <strong><code>/refinement</code></strong>, and the switch to where actions are assigned as <strong><code>/foo: func [...] [...]</code></strong>, plus member variables being indicated with <strong><code>.field</code></strong> -- things are starting to look quite different.</p>
-<p><em>But I can say with confidence that from a usage perspective, it is very clearly better.</em></p>
-<p>The slashes for functions is quite empowering.  Unlike the pox of <strong><code>:deactivating</code></strong> GET-WORD!s, slashes tell you <strong>what you know</strong> instead of <strong>what you DON'T know</strong>.</p>
-<p>Refinements being done with colons does come out as what seems like a casualty of that, where you can have something like:</p>
-<pre><code>data: copy:part series pos
-</code></pre>
-<p>It mingles refinements and assignments notationally, which some might find bad.  Though I think it's nothing like mingling field accesses and refinements with both being slashes.</p>
-<p>And once you get used to it, I think it actually is nice to have the colons blend more quietly.  This allows the slashes to stand out, and it really is a better use of it popping.</p>
-<p>The <strong><code>.field</code></strong> accesses are--I think--a pretty definite win.  I've made it so that the lone period (<strong><code>.</code></strong>) defaults to one of those sneaky functions that looks at the current environment, and gives you the object that the <strong><code>.field</code></strong> accesses are from.  So if you really want to bring all those fields into scope where you can use them undecorated, you'd be able to do something along the lines of:</p>
-<pre><code>use &lt;*&gt; .
-print ["Now I can access" field "without dots"]
-</code></pre>
-<p><em>(Though the notation for that is still in flux.)</em></p>
-<p>But really, it's very hard to keep things straight and know what's an argument and what's a member... so I <em>like</em> the dots.  (They were added on purpose...and are harder to implement than just doing lookup in the object as a higher priority for regular words, so of course I must like them!)</p>
-<h2><a name="p-7921-sowhats-not-working-well-3" class="anchor" href="https://forum.rebol.info#p-7921-sowhats-not-working-well-3"></a>So...What's NOT Working Well?</h2>
-<p>One of the biggest problems I've run into is that the easy interplay between WORD! and SET-WORD! and GET-WORD! has been replaced by some really finicky sequence mechanics.</p>
-<p>For instance, this no longer works:</p>
-<pre><code> &gt;&gt; to word! first [a: 10]
- ** Error
-</code></pre>
-<p>TO's rule is reversibility.  And <strong><code>(to chain! 'a)</code></strong> shouldn't be biased to either <strong><code>a:</code></strong> or <strong><code>:a</code></strong></p>
-<p>Maybe you could argue for saying that <strong><code>a:</code></strong> is more useful, and so TO for sequences should put words at the head.  But that's not really the case for <strong><code>a.</code></strong> or <strong><code>a/</code></strong>, is it?</p>
-<p>Then you have composites like <strong><code>/a:</code></strong>, and the question of just how many routines have to deal with these composites... and what the rules are.  If you do a <strong>SET</strong> of plain <strong>a</strong> to an action, should that be an error unless you change it to set <strong>/a</strong> ?  Should SET support <strong>/a:</strong> or make you extract things down?</p>
-<p>I've been building little parts to help attack this, such as a function RESOLVE for picking the variable out of a sequence:</p>
-<pre><code>&gt;&gt; resolve first [/a:]
-== a
-
-&gt;&gt; resolve first [a.b/]
-== a.b
-</code></pre>
-<p>And that's the kind of thing that helps pick up the slack from things like TO WORD!.</p>
-<p>It's still new and awkward territory.  There's certainly going to be some amount of irreducible complexity that comes from working with these new parts, but I'm hopeful that I'll be able to reduce the pain as things develop.</p>
-<h2><a name="p-7921-overall-things-are-reasonably-strong-4" class="anchor" href="https://forum.rebol.info#p-7921-overall-things-are-reasonably-strong-4"></a>Overall, Things Are Reasonably Strong</h2>
-<p>I talk about how Ren-C's development methodology just keeps solidifying, to let it move on to building higher things.</p>
-<p>Even with many pieces teetering on the edge, there's still a solidity underneath it all that means I almost never wind up chasing Heisenbugs.  When a part needs to be hardened, it can be hardened.</p>
-<p>In any case, it's good to see it bootstrapping after a long time of not.  I'm hopeful that by the end of the year I'll feel comfortable enough to make new bootstrap executables and push out the web build, so expect a big "drop" sometime in December.</p> ]]></description>
-        <link>https://forum.rebol.info/t/first-bootstrap-in-at-least-6-months-watershed-changes/2334#post_1</link>
-        <pubDate>Thu, 21 Nov 2024 05:08:04 +0000</pubDate>
-        <guid isPermaLink="false">forum.rebol.info-post-7921</guid>
-      </item>
-      <item>
-        <title>Red&#39;s Take on String Interpolation</title>
-        <dc:creator><![CDATA[@hostilefork Brian Dickens]]></dc:creator>
-        <description><![CDATA[ <p>The key is making it very light, and not to break the readability flow.</p>
-<p><strong><code>print*</code></strong> might be light enough, with the <code>*</code> warning "I'm doing extra processing on this string" (and "I'm doing implicit environment capture"?)</p>
-<pre><code>&gt;&gt; print* "Number is {{num}}"
-Number is 10
-</code></pre>
-<p>There's also <strong><code>print+</code></strong>... a little less noisy, but maybe too much so... the <code>+</code> blends a bit and looks like a T, right against a T.</p>
-<pre><code>&gt;&gt; print+ "Number is {{num}}"
-Number is 10
-</code></pre>
-<p>I can empathize that there needs to be <em>something</em> there to clue you into the extra work going on.</p>
-<p>It may look nicer--but it is less efficient to have to scan the code every time.  (Though investing on making that scan fast helps the whole system.)</p> ]]></description>
-        <link>https://forum.rebol.info/t/reds-take-on-string-interpolation/2121#post_6</link>
-        <pubDate>Thu, 21 Nov 2024 01:41:19 +0000</pubDate>
-        <guid isPermaLink="false">forum.rebol.info-post-7920</guid>
-      </item>
-      <item>
-        <title>Red&#39;s Take on String Interpolation</title>
-        <dc:creator><![CDATA[@bradrn]]></dc:creator>
-        <description><![CDATA[ <p>On PRINT, I tend towards not doing implicit interpolation there. But it could work quite well as a refinement: <code>print:interpolate "Number is {{num}}"</code>.</p> ]]></description>
-        <link>https://forum.rebol.info/t/reds-take-on-string-interpolation/2121#post_5</link>
-        <pubDate>Thu, 21 Nov 2024 01:38:47 +0000</pubDate>
-        <guid isPermaLink="false">forum.rebol.info-post-7919</guid>
-      </item>
-      <item>
-        <title>Red&#39;s Take on String Interpolation</title>
-        <dc:creator><![CDATA[@hostilefork Brian Dickens]]></dc:creator>
-        <description><![CDATA[ <aside class="quote no-group quote-modified" data-username="hiiamboris" data-post="3" data-topic="2121">
-<div class="title">
-<div class="quote-controls"></div>
- hiiamboris:</div>
-<blockquote>
-<p><em>"Try to look at these expressions and visualize how the resulting string will look like, and if I've got all spaces and quotes right. Not a human task, eh?"</em></p>
-</blockquote>
-</aside>
-<p>I've proposed that COMPOSE be arity-2 and able to interpolate strings, e.g.</p>
-<pre><code>&gt;&gt; num: 10
-
-&gt;&gt; print compose ${{}} "Number is {{num}}, so there."
-Number is 10, so there.
-</code></pre>
-<p>Having to say <strong>compose ${{}}</strong> is <em>noisy</em> for day to day use of a common construct like PRINT.</p>
-<p>But even this trivial case shows a benefit of being able to put the comma right up against the number if you want to.  That's hard to do, as PRINT typically adds spaces around everything.  So you have to do something like this:</p>
-<pre><code>&gt;&gt; print unspaced ["Number is" _ num ", so there."]
-Number is 10, so there.
-</code></pre>
-<p>An experiment interprets BLOCK! in the source as grouping things tightly:</p>
-<pre><code>&gt;&gt; print ["Number is" [num ","] "so there."]
-Number is 10, so there.
-</code></pre>
-<p>Still, it's lousy compared to interpolation (see hiiamboris's examples for other ones).</p>
-<h2><a name="p-7918-what-if-print-of-a-text-did-sneaky-interpolation-1" class="anchor" href="https://forum.rebol.info#p-7918-what-if-print-of-a-text-did-sneaky-interpolation-1"></a>What If PRINT of a TEXT! did "Sneaky Interpolation"?</h2>
-<p>We could make it so that PRINT is one of the sneaky constructs that captures the binding from its callsite, and that it assumes some interpolation delimiter:</p>
-<pre><code>&gt;&gt; num: 10
-
-&gt;&gt; print "Number is {{num}}, so there."
-Number is 10, so there.
-</code></pre>
-<p>Then we could say that if you don't want that, you can put the string in a block:</p>
-<pre><code>&gt;&gt; print ["When using a block, {{...}} would not interpolate."]
-When using a block, {{...}} would not interpolate.
-</code></pre>
-<p>There's another option to pass PRINT an <code>@var</code>, and if you did then that would suppress interpolation as well.</p>
-<pre><code>&gt;&gt; str: "Number is {{num}}, so there."
-
-&gt;&gt; print str
-Number is 10, so there.
-
-&gt;&gt; print [str]
-Number is {{num}}, so there.
-
-&gt;&gt; print @str
-Number is {{num}}, so there.
-</code></pre>
-<h2><a name="p-7918-it-could-be-an-option-2" class="anchor" href="https://forum.rebol.info#p-7918-it-could-be-an-option-2"></a>It Could Be An Option</h2>
-<p>There could be some way of turning this behavior on or off, and specifying what the delimiters are.</p>
-<p>Maybe the default PRINT wouldn't have it, but you could say:</p>
-<pre><code>/print: make-sneaky-print '(())  ; note unbound, since it captures binding
-</code></pre>
-<p>It's a little bit of a relearning of habits to know that plain <strong>print str</strong> would have this extra processing overhead.  But, I think it is learnable, and I'd definitely use it.</p>
-<h2><a name="p-7918-other-options-brief-operators-other-names-3" class="anchor" href="https://forum.rebol.info#p-7918-other-options-brief-operators-other-names-3"></a>Other Options: Brief Operators, Other Names</h2>
-<p>This could be a different word like <strong><code>echo</code></strong> or <strong><code>say</code></strong> or something like that, though I'm not crazy about either of those.</p>
-<p>It could also be an operator you could make arbitrarily brief:</p>
-<pre><code>print op "Number is {{num}}, so there."
-</code></pre>
-<p>But I don't know there's anything on the <a href="https://forum.rebol.info/t/tapping-the-untapped-potential-of-short-words/395">list of short words</a> that would make the cut.</p>
-<p>It could be the result of some decoration:</p>
-<pre><code>print @["Number is {{num}}, so there."]
-</code></pre>
-<p>But that's not what that is intended to mean.</p>
-<p>It could be done with a different string type:</p>
-<pre><code>print %"Number is {{num}}, so there."
-
-print &lt;Number is {{num}}, so there.&gt;
-</code></pre>
-<p>The TAG! doesn't seem completely crazy, though I have other ideas for what TAG! means in PRINT as a formatting instruction.</p>
-<p>It seems to me that giving the power to a plain PRINT is the most useful.</p>
-<h2><a name="p-7918-most-likely-alternative-sneaky-compose-4" class="anchor" href="https://forum.rebol.info#p-7918-most-likely-alternative-sneaky-compose-4"></a>Most Likely Alternative: Sneaky COMPOSE</h2>
-<p>I've debated if COMPOSE should use sneaky binding, and maybe it should.</p>
-<p>Maybe its default should be <strong>{{...}}</strong> as well, and just make that out of band, as something that doesn't get other meaning in the system.</p>
-<pre><code>&gt;&gt; compose '[(1 + 2) {{3 + 4}} {5 + 6}]
-== [(1 + 2) 7 {5 + 6}]
-
-print compose "Number is {{num}}, so there."
-
-print compose:with $() "Number is (num), so there."
-</code></pre>
-<p>Or maybe the default should stay at <code>(...)</code> for the natural brevity:</p>
-<pre><code>&gt;&gt; compose '[(1 + 2) {{3 + 4}} {5 + 6}]
-== [3 {{3 + 4}} {5 + 6}]
-
-print compose "Number is (num), so there."
-
-print compose:with ${{}} "Number is {{num}}, so there."
-</code></pre>
-<p>It's just that parentheses seem so common in code and text that you'd often be pushing them out of the way.</p>
-<p><em>I still feel like having it built into PRINT is a sort of convenience that it's hard to like any extra word in there, even just COMPOSE.</em>  And if it's built-in, then {{...}} seems better than (...)</p> ]]></description>
-        <link>https://forum.rebol.info/t/reds-take-on-string-interpolation/2121#post_4</link>
-        <pubDate>Wed, 20 Nov 2024 20:17:37 +0000</pubDate>
-        <guid isPermaLink="false">forum.rebol.info-post-7918</guid>
-      </item>
-      <item>
-        <title>Design for IMPORT</title>
-        <dc:creator><![CDATA[@bradrn]]></dc:creator>
-        <description><![CDATA[ <p>I like the idea of separating USE and IMPORT like that. It feels like a very clean design to me.</p>
-<p>As for ‘opt all in’, I like the syntax <code>use &lt;*&gt; object</code> or <code>use # object</code>. I don’t feel like a specialisation or refinement is necessary. There’s probably further dialecting possibilities for the first argument of USE, if we just think about what people would want to do.</p> ]]></description>
-        <link>https://forum.rebol.info/t/design-for-import/1570#post_5</link>
-        <pubDate>Wed, 20 Nov 2024 05:32:34 +0000</pubDate>
-        <guid isPermaLink="false">forum.rebol.info-post-7917</guid>
-      </item>
-      <item>
-        <title>Value (vs. Series) Modification Bit: CONST and MUTABLE</title>
-        <dc:creator><![CDATA[@hostilefork Brian Dickens]]></dc:creator>
-        <description><![CDATA[ <p>The const feature was implemented via CELL_FLAG_CONST, a bit that a cell could have set (or not) in its header.</p>
-<p>But there was a second bit... called CELL_FLAG_EXPLICITLY_MUTABLE.</p>
-<p>This bit protected a block from the "wave of constness".</p>
-<p>It was necessitated by some behaviors that I ultimately deemed to be bugs.  Now that those bugs are gone, it's no longer mandatory to have it.</p>
-<p>So I took it out, but found it broke a test:</p>
-<pre><code>block: mutable [a b c]
-eval compose:deep $() [repeat 2 [append (block) &lt;legal&gt;]]
-assert [block = [&lt;legal&gt; &lt;legal&gt;]]
-</code></pre>
-<p>So previously, that mutable would put the CELL_FLAG_EXPLICITLY_MUTABLE bit on.  Then, when the COMPOSE ran, you'd get:</p>
-<pre><code> eval [repeat 2 [append [a b c] &lt;legal&gt;]]
-</code></pre>
-<p>Because REPEAT is iterative, it applies CONST to its body.  And that CONST would get applied to the <code>[a b c]</code>...but, CELL_FLAG_EXPLICITLY_MUTABLE overruled it.</p>
-<h2><a name="p-7916-but-i-dont-like-cell_flag_explicitly_mutable-1" class="anchor" href="https://forum.rebol.info#p-7916-but-i-dont-like-cell_flag_explicitly_mutable-1"></a>But I Don't Like CELL_FLAG_EXPLICITLY_MUTABLE</h2>
-<p>There are other ways to get past the const wave, such as quoting it:</p>
-<pre><code>block: [a b c]
-eval compose:deep $() [repeat 2 [append '(block) &lt;legal&gt;]]
-</code></pre>
-<p>Or you could do <strong>append mutable</strong>:</p>
-<pre><code>block: [a b c]
-eval compose:deep $() [repeat 2 [append mutable (block) &lt;legal&gt;]]
-</code></pre>
-<p>Admittedly, these require you to have some control of the code the block is being fed into, vs. being able to put a "magic bit" on the block to counteract the const wave.</p>
-<p>But the semantics of this magic bit are nebulous.  I would not have added such a thing if it wasn't for working around the things I decided were bugs.  It's not clear when (if ever) it should stop protecting the value, and that just opens a can of worms.</p>
-<p>Cell flags are a pretty scarce resource, and giving one up for something that makes the code harder to understand than a simple CONST bit that's on or off is not a good investment.</p> ]]></description>
-        <link>https://forum.rebol.info/t/value-vs-series-modification-bit-const-and-mutable/976#post_6</link>
-        <pubDate>Wed, 20 Nov 2024 04:12:48 +0000</pubDate>
-        <guid isPermaLink="false">forum.rebol.info-post-7916</guid>
       </item>
   </channel>
 </rss>
