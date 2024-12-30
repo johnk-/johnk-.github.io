@@ -56,7 +56,7 @@ Ren-C uses continuations to implement stacklessness, based on a trampoline.  Tra
 <meta property="og:article:section" content="Functions" />
 <meta property="og:article:section:color" content="25AAE2" />
 <meta name="twitter:label1" value="Reading time" />
-<meta name="twitter:data1" value="3 mins 🕑" />
+<meta name="twitter:data1" value="4 mins 🕑" />
 <meta name="twitter:label2" value="Likes" />
 <meta name="twitter:data2" value="2 ❤" />
 <meta property="article:published_time" content="2023-12-18T03:58:16+00:00" />
@@ -132,7 +132,7 @@ Ren-C uses continuations to implement stacklessness, based on a trampoline.  Tra
                   <time  datetime='2023-12-18T03:58:16Z' class='post-time'>
                     December 18, 2023,  3:58am
                   </time>
-                  <meta itemprop='dateModified' content='2023-12-18T04:23:32Z'>
+                  <meta itemprop='dateModified' content='2024-12-27T07:58:01Z'>
               <span itemprop='position'>1</span>
               </span>
             </div>
@@ -140,21 +140,19 @@ Ren-C uses continuations to implement stacklessness, based on a trampoline.  Tra
               <p>Looking into some of <a href="../the-sherman-rebol-to-scheme-compiler/2076.html">Joe Marshall's historical participation in Rebol</a>, he speaks about Rebol 1.0 having "continuations" and "tail calls".</p>
 <p>Ren-C uses continuations to implement <a href="../stackless-is-here-today-now/1844.html">stacklessness, based on a trampoline</a>.  Trampolines are generally slower than the fiddly technique Joe describes Rebol 1.0 as having used--but such fiddly methods are not standard C, and do not translate well to WebAssembly.  In any case, the outcomes are similar.</p>
 <p>Tail calls are a different feature.  But if you have continuations, then your code is likely structured in such a way that tail calls are not that difficult to add.</p>
-<h2>
-<a name="so-what-is-a-tail-call-1" class="anchor" href="2082.html#so-what-is-a-tail-call-1"></a>So What Is A Tail Call?</h2>
+<h2><a name="p-6770-so-what-is-a-tail-call-1" class="anchor" href="2082.html#p-6770-so-what-is-a-tail-call-1"></a>So What Is A Tail Call?</h2>
 <p>When you invoke a function, the interpreter has to allocate some space for its arguments and locals.  This information is then associated with a stack level structure, which also takes some space... and is put in a chain representing the call stack.</p>
 <p>If that function calls itself recursively, the recursion will also need new stack space for its arguments and locals...and another stack level structure.</p>
 <p>With recursive algorithms where a function calls itself hundreds or thousands of times, you can use up a lot of memory (and/or generate a stack overflow).</p>
 <p>Tail calls are based on the observation that right at the moment a function is about to return, it doesn't need its stack level or arguments/locals anymore.  So if you're willing to have your call stack suffer some amount of "amnesia" about the "real" stack depth, you can reuse the current call's stack level for a recursion.</p>
-<h2>
-<a name="ren-c-supports-explicit-tail-calls-with-returnrun-2" class="anchor" href="2082.html#ren-c-supports-explicit-tail-calls-with-returnrun-2"></a>Ren-C Supports Explicit Tail Calls With RETURN/RUN</h2>
+<h2><a name="p-6770-ren-c-supports-explicit-tail-calls-with-returnrun-2" class="anchor" href="2082.html#p-6770-ren-c-supports-explicit-tail-calls-with-returnrun-2"></a>Ren-C Supports Explicit Tail Calls With RETURN:RUN</h2>
 <p>There are two forms of tail call we can do in a Rebol-like interpreter.  The first style can call any function (not just the one you're returning from).  It avoids a recursion level on the stack, but does <em>not</em> reuse the memory for arguments and locals.</p>
 <p>This is what that looks like:</p>
 <pre><code>foo: func [return: [tag!] n] [
     if n = 1 [
         return &lt;success&gt;
     ]
-    return/run :foo n - 1
+    return:run foo/ n - 1
 ]
 
 &gt;&gt; foo 100
@@ -169,31 +167,59 @@ Ren-C uses continuations to implement stacklessness, based on a trampoline.  Tra
         return &lt;success&gt;
     ]
     n: n - 1
-    return/run @redo
+    return:run 'redo
 ]
 
 &gt;&gt; foo 100
 == &lt;success&gt;
 </code></pre>
 <p>Modifying the variables in place means you're responsible for any dependency issues.  If you overwrite one of your arguments while calculating the next, you wrote the code in sequence and you can see what you did.</p>
-<h2>
-<a name="why-returnrun-foo-vs-return-foo-or-rerun-foo-3" class="anchor" href="2082.html#why-returnrun-foo-vs-return-foo-or-rerun-foo-3"></a>Why RETURN/RUN :FOO vs. RETURN FOO or RERUN FOO</h2>
+<h2><a name="p-6770-why-returnrun-foo-vs-return-foo-or-rerun-foo-3" class="anchor" href="2082.html#p-6770-why-returnrun-foo-vs-return-foo-or-rerun-foo-3"></a>Why RETURN:RUN FOO/ vs. RETURN FOO or RERUN FOO</h2>
 <p>Ren-C's RETURN construct has special knowledge of what function it returns from.  It is a specialization of a generic DEFINITIONAL-RETURN function, which is specialized with the target FRAME!.  It's done in a somewhat optimized way, but still has some cost.</p>
 <p>If tail calls were done with another construct--e.g. something like RERUN--that function would also need to be specialized with this knowledge.  It's cheaper to just piggy back on what RETURN already knows and make it a refinement.</p>
-<p>As for why it has to take a GET-WORD! vs. plain WORD! for the function to invoke...this is due to RETURN not taking its first argument quoted.  So it's too late to intercept the mechanics of the call once an evaluation is run.  RETURN would receive the product of the call.</p>
-<p>It winds up looking fairly natural, because the RUN construct runs a function that gathers its arguments inline:</p>
-<pre><code>&gt;&gt; run :append [a b c] [d e]
+<p>As for why it has to take a trailing-slash PATH! vs. plain WORD! for the function to invoke...this is due to RETURN not taking its first argument literally.  So it's too late to intercept the mechanics of the call once an evaluation is run.  RETURN would receive the product of the call.</p>
+<p>It winds up looking fairly natural, because the RUN construct runs a function that gathers its arguments inline does the same thing:</p>
+<pre><code>&gt;&gt; run (either 1 &lt; 2 [append/] [insert/]) [a b c] [d e]
+== [a b c [d e]]
+</code></pre>
+<p>So if you were to RUN just a function, it would also look like RETURN:RUN...</p>
+<pre><code>&gt;&gt; run append/ [a b c] [d e]
 == [a b c [d e]]
 </code></pre>
 <p><strong>Note that even if we could make tail calls implicit, we probably wouldn't want to.</strong>  Python hasn't added tail calls at all, based on a philosophical objection to the idea of obscuring the call stack.  It also seems like if an algorithm depends on tail calls for some important optimization reason, there should be something to indicate that fact... so that someone reorganizing the code will be sensitive to it.</p>
-<h2>
-<a name="how-important-are-tail-calls-4" class="anchor" href="2082.html#how-important-are-tail-calls-4"></a>How Important Are Tail Calls?</h2>
+<h2><a name="p-6770-how-important-are-tail-calls-4" class="anchor" href="2082.html#p-6770-how-important-are-tail-calls-4"></a>How Important Are Tail Calls?</h2>
 <p>If your language has a very limited amount of stack, being able to formulate your code to use tail calls so it doesn't accrue stack could be very important.</p>
 <p>But if your language has a decent amount of stack (or is completely "stackless") it's not particularly important.</p>
 <p>Where it matters are cases where an algorithm can be cleanly expressed in a recursive way, and you don't want to use an uglier representation that builds data structures which are mimicking what you would be getting naturally from the stack.</p>
-<p>Using them in places that don't matter is likely just going to confuse your stack traces and error messages...like the Python people say.  I'd discourage going around and changing all your RETURN SOMETHING to RETURN/RUN :SOMETHING to try and speed things up.  Only do it if you're writing an algorithm that would have pathological stack use otherwise.</p>
-<h2>
-<a name="returnrun-had-a-precursor-redo-5" class="anchor" href="2082.html#returnrun-had-a-precursor-redo-5"></a>RETURN/RUN Had A Precursor... REDO</h2>
+<p>Using them in places that don't matter is likely just going to confuse your stack traces and error messages...like the Python people say.  I'd discourage going around and changing all your RETURN SOMETHING to RETURN:RUN SOMETHING/ to try and speed things up.  Only do it if you're writing an algorithm that would have pathological stack use otherwise.</p>
+            </div>
+
+            <div itemprop="interactionStatistic" itemscope itemtype="http://schema.org/InteractionCounter">
+              <meta itemprop="interactionType" content="http://schema.org/LikeAction"/>
+              <meta itemprop="userInteractionCount" content="2" />
+              <span class='post-likes'>2 Likes</span>
+            </div>
+
+          </div>
+          <div id='post_2' itemprop='comment' itemscope itemtype='http://schema.org/Comment' class='topic-body crawler-post'>
+            <div class='crawler-post-meta'>
+              <span class="creator" itemprop="author" itemscope itemtype="http://schema.org/Person">
+                <a itemprop="url" href='https://forum.rebol.info/u/hostilefork'><span itemprop='name'>hostilefork</span></a>
+                
+              </span>
+
+
+
+              <span class="crawler-post-infos">
+                  <time itemprop='datePublished' datetime='2024-12-27T06:35:18Z' class='post-time'>
+                    December 27, 2024,  6:35am
+                  </time>
+                  <meta itemprop='dateModified' content='2024-12-27T08:01:39Z'>
+              <span itemprop='position'>2</span>
+              </span>
+            </div>
+            <div class='post' itemprop='text'>
+              <h2><a name="p-7990-returnrun-had-a-precursor-redo-1" class="anchor" href="2082.html#p-7990-returnrun-had-a-precursor-redo-1"></a>RETURN:RUN Had A Precursor... REDO</h2>
 <p>The original formulation of tail calls wasn't built into RETURN, but expected you to work with a more generic tool called REDO.  This is what you had to write for the FOO example:</p>
 <pre><code>foo: func [return: [tag!] n] [
     frame: binding of 'n
@@ -204,103 +230,266 @@ Ren-C uses continuations to implement stacklessness, based on a trampoline.  Tra
     redo frame
 ]
 </code></pre>
-<p>This corresponds to the <strong><code>return/run @redo</code></strong> case, which takes advantage of the fact that RETURN already knows the frame it returns to, and can use that to redo.</p>
-<p>But REDO had a shorthand for this case, which was to accept a word from a frame:</p>
+<p>This corresponds to the <strong><code>return:run 'redo</code></strong> variant, but that version takes advantage of the fact that RETURN already knows the frame it returns to, and can use that to redo.</p>
+<p>REDO tried to have parity with that, by accepting a word from a frame and assuming you wanted to redo whatever that was bound to:</p>
 <pre><code>foo: func [return: [tag!] n] [
     if n = 0 [
         return &lt;success&gt;
     ]
     n: n - 1
-    redo 'n
+    redo $n
 ]
 </code></pre>
-<p>This had led me to say <em>"sure, Ren-C has tail calls"</em>.  But I realized that didn't really look like what people would expect, so I made RETURN/RUN.</p>
-<p>An added benefit of RETURN/RUN is that if you use it with the function call form (instead of <code>@redo</code>) then it offers something that REDO couldn't do, which is reuse an internal level structure for an arbitrary new function call.  It wasn't actually that hard to implement, so I went ahead and did it.</p>
-<p>REDO is still around.  It can restart <em>any</em> frame or phase, and it's actually rather powerful.  I don't really use it, but here's an example of how tricky it can be:</p>
-<pre><code>base: func [return: [text!] n delta /captured-frame [frame!]] [
-    log [{BASE} n delta]
-
-    n: n - delta
-    if n &lt; 0 [return "base less than zero"]
-    if n = 0 [return "base done"]
-    if captured-frame [redo captured-frame]
-    return "base got no frame"
+<p>This had led me to say <em>"sure, Ren-C has tail calls"</em>.  But I realized that didn't really look like what people would expect, so I made RETURN:RUN.</p>
+<p>An added benefit of RETURN:RUN is that if you use it with the function call form then it offers something that REDO couldn't do, which is reuse an internal <code>Level</code> structure for an arbitrary new function call.</p>
+<h2><a name="p-7990-but-ive-realized-redo-was-fundamentally-broken-2" class="anchor" href="2082.html#p-7990-but-ive-realized-redo-was-fundamentally-broken-2"></a>But I've Realized REDO Was Fundamentally Broken...</h2>
+<p>I've mentioned that I've been dotting "i's" and crossing "t's", so assertions are tightening up.  And this idea of generalized REDO--<em>regardless of what kind of action generator is in effect</em>--has a lot of holes in it.</p>
+<p>Basically, your generator has to know it's being REDO'd and it has to come up with a semantically coherent meaning for that.  This is challenging, e.g. if you have a YIELDER.</p>
+<pre><code>/y: yielder [yield: [integer!] x [integer!]] [
+    yield x + 1
+    yield x + 2
+    redo binding of $yield
 ]
 
-c: chain [
-    adapt :base [
-       log [{C} n delta]
+&gt;&gt; y 10
+== 11
 
-       captured-frame: binding of 'n
-       redo/sibling 'n :s
+&gt;&gt; y 20
+== 22
 
-       comment {fall through to base}
+&gt;&gt; y 30
+== 31  ; where's the magic to implement this?
+</code></pre>
+<p>There's a lot that goes into making yielder work, which is tracked in the Details array of the generated function.  That state is sensitive to the question of whether the yielder is "in flight" or not.  You can't just take an in-flight yielder and start running its C dispatcher code as if it's having its first execution, the whole thing dies.</p>
+<h2><a name="p-7990-must-cooperate-with-the-generator-like-returnrun-3" class="anchor" href="2082.html#p-7990-must-cooperate-with-the-generator-like-returnrun-3"></a>Must Cooperate With The Generator, like RETURN:RUN</h2>
+<p>If this kind of feature is going to be offered, it has to be offered with the generator's knowledge, so the right thing can be done.</p>
+<p>If it were important, generalized REDO <em>could</em> be a general feature that is intercepted by function generators.  But designing that generalization does not make a whole lot of sense at this time, and I can't really see any time in the future for it either.</p>
+<p>The formulation as a feature of something like RETURN or YIELD makes much more sense because that cooperative relationship is already established.</p>
+<p>So, I'm killing off the broken REDO.  To the extent this unimportant feature is important at all, use <strong><code>return:run 'redo</code></strong></p>
+<h2><a name="p-7990-old-redo-tests-4" class="anchor" href="2082.html#p-7990-old-redo-tests-4"></a>Old REDO Tests</h2>
+<p>Here's what's going away.  (Analogous tests already exist for RETURN:RUN where applicable)</p>
+<pre><code>; REDO via a direct FRAME! value
+(
+    /foo: func [return: [tag!] n] [
+        let frame: binding of $n
+        if n = 0 [
+            return &lt;success&gt;
+        ]
+        n: n - 1
+        redo frame
     ]
-    lambda [x] [
-        if x = "base done" [
-            &lt;success&gt;
-        ] else [
-            spaced ["base exited with" x]
+
+    &lt;success&gt; = foo 100
+)
+
+; REDO via extraction of FRAME! from an ANY-WORD?
+; (has binding to a FRAME! to lookup variable value)
+(
+    /foo: func [return: [tag!] n] [
+        if n = 0 [
+           return &lt;success&gt;
+        ]
+        n: n - 1
+        redo $n
+    ]
+
+    &lt;success&gt; = foo 100
+)
+
+; REDO locals clearing test
+; (locals should be cleared on each redo)
+(
+    /foo: func [return: [tag!] n &lt;local&gt; unset-me] [
+        if set? $unset-me [
+            return "local not cleared"
+        ]
+        if n = 0 [
+            return &lt;success&gt;
+        ]
+        n: n - 1
+        unset-me: #some-junk
+        redo $return
+    ]
+
+    &lt;success&gt; = foo 100
+)
+
+; REDO type checking test
+; (args and refinements must pass function's type checking)
+;
+~expect-arg~ !! (
+    /foo: func [return: [tag!] n i [integer!]] [
+        if n = 0 [
+            return &lt;success&gt;  ; impossible for this case
+        ]
+        n: n - 1
+        i: #some-junk  ; type check should fail on redo
+        redo $return
+    ]
+
+    foo 100 1020
+)
+
+; REDO phase test
+; (shared frame compositions should redo the appropriate "phase")
+(
+    /inner: func [return: [tag!] n] [
+        if n = 0 [
+            return &lt;success&gt;
+        ]
+        n: 0
+        redo $n  comment "should redo INNER, not outer"
+    ]
+
+    /outer: adapt inner/ [
+        if n = 0 [
+            return "outer phase run by redo"
+        ]
+        ; fall through to inner, using same frame
+    ]
+
+    &lt;success&gt; = outer 1
+)
+
+; !!! This initially seemed to have some broken expectations, that the OUTER
+; would be able to view a variable (f.n) of INNER, when INNER does a redo of
+; OUTER that does not also redo INNER...hence the frame is stale.  Not clear
+; what the point was, but changed to count down a global to at least demo
+; the ability to REDO an ENCLOSE frame.
+(
+    global: 1
+
+    /inner: func [return: [text!] n :captured-frame [frame!]] [
+        if n = 0 [
+           return "inner phase run by redo"
+        ]
+        n: 0
+        redo captured-frame  ; should redo OUTER, not INNER
+    ]
+
+    /outer: enclose inner/ func [return: [tag!] f] [
+        if global = 0 [  ; was F.N, see note about that being wrong
+            return &lt;success&gt;
+        ]
+
+        f.captured-frame: binding of $f
+        global: me - 1
+
+        ; Fall through to inner
+        ; It is running in the same frame's memory, but...
+        ; CAPTURED-FRAME is a FRAME! value that stowed outer's "phase"
+
+        return eval-free f
+    ]
+
+    &lt;success&gt; = outer 1
+)
+
+; "Sibling" tail-call with compatible function
+;
+; (CHAINs are compatible with functions at head of CHAIN
+;  ADAPTs are compatible with functions they adapt
+;  SPECIALIZEs are compatible with functions they specialize...etc.)
+;
+; If LOG is set to DUMP the following will output:
+;
+;     --- C ---
+;     n: =&gt; 11
+;     delta: =&gt; 0
+;     --- S ---
+;     n: =&gt; 11
+;     delta: =&gt; 10
+;     --- BASE ---
+;     n: =&gt; 11
+;     delta: =&gt; 10
+;     --- C ---
+;     n: =&gt; 1
+;     delta: =&gt; 10
+;     --- S ---
+;     n: =&gt; 1
+;     delta: =&gt; 10
+;     --- BASE ---
+;     n: =&gt; 10
+;     delta: =&gt; 10
+;
+; C is called and captures its frame into F.  Then it uses REDO:SIBLING to
+; reuse the frame to call S.  S gets the variables and args that its knows
+; about as C left them--such as N and a captured frame F--but values it takes
+; for granted are reset, which includes specialized delta of 10.
+;
+; (The need to reset specializations for consistency is similar to how locals
+; must be reset--they're not part of the interface of the function, so to
+; reach beneath them does something illegal in terms of parameterization.)
+;
+; S doesn't have any effect besides resetting delta, so it falls through as
+; an adaptation to the base function.  BASE subtracts DELTA from N to get 1,
+; which isn't an exit condition.  The F frame which was set in C and was
+; preserved as an argument to S is then used by BASE to REDO and get back
+; up to the start of C again.
+;
+; Once again C captures its frame and does a REDO to start up S, which now
+; notices that N is 1 so it bumps it up to 10.  (It cannot set DELTA to 1,
+; because as a specialized argument DELTA is not visible to it.)  This time
+; when it falls through to BASE, the subtraction of DELTA from N yields
+; zero so that BASE returns completion.
+;
+; Since the function we originally called and built a frame for was a CHAIN,
+; the REDO is effectively REDO-finishing the frame for the adaptation of
+; BASE that sits at the head of the frame.  That delegation has now finished
+; bouncing around on that single frame and come to a completion, which means
+; the chained functions will get that result.  The string is translated to
+; a tag and signals success.
+(
+    /log: (
+        func ['x] []  comment "no-op"
+        elide dump/  comment "un-elide to get output"
+    )
+
+    /base: func [return: [text!] n delta :captured-frame [frame!]] [
+        log ["BASE" n delta]
+
+        n: n - delta
+        if n &lt; 0 [return "base less than zero"]
+        if n = 0 [return "base done"]
+        if captured-frame [redo captured-frame]
+        return "base got no frame"
+    ]
+
+    /c: cascade [
+        adapt base/ [
+           log ["C" n delta]
+
+           captured-frame: binding of $n
+           redo:sibling $n s/
+
+           comment "fall through to base"
+        ]
+        lambda [x] [
+            if x = "base done" [
+                &lt;success&gt;
+            ] else [
+                spaced ["base exited with" x]
+            ]
         ]
     ]
-]
 
-s: specialize adapt :base [
-    log [{S} n delta]
+    /s: specialize adapt base/ [
+        log ["S" n delta]
 
-    if n = 1 [n: 10]
-][
-    delta: 10
-]
+        if n = 1 [n: 10]
+    ][
+        delta: 10
+    ]
 
-&gt;&gt; c 11 0
-== &lt;success&gt;
+    &lt;success&gt; = c 11 0
+)
 </code></pre>
-<p>With a logging function attached, that gives:</p>
-<pre><code> --- C ---
- n: =&gt; 11
- delta: =&gt; 0
- --- S ---
- n: =&gt; 11
- delta: =&gt; 10
- --- BASE ---
- n: =&gt; 11
- delta: =&gt; 10
- --- C ---
- n: =&gt; 1
- delta: =&gt; 10
- --- S ---
- n: =&gt; 1
- delta: =&gt; 10
- --- BASE ---
- n: =&gt; 10
- delta: =&gt; 10
-</code></pre>
-<ul>
-<li>
-<p>C is called and captures its frame into F.  Then it uses REDO/SIBLING to reuse the frame to call S.  S gets the variables and args that it knows about as C left them--such as N and a captured frame F--but values it takes for granted are reset, which includes specialized delta of 10.</p>
-<p><em>(The need to reset specializations for consistency is similar to how locals must be reset--they're not part of the interface of the function, so to reach beneath them does something illegal in terms of parameterization.)</em></p>
-</li>
-<li>
-<p>S doesn't have any effect besides resetting delta, so it falls through as an adaptation to the base function.  BASE subtracts DELTA from N to get 1, which isn't an exit condition.  The F frame which was set in C and was preserved as an argument to S is then used by BASE to REDO and get back up to the start of C again.</p>
-</li>
-<li>
-<p>Once again C captures its frame and does a REDO to start up S, which now notices that N is 1 so it bumps it up to 10.  (It cannot set DELTA to 1, because as a specialized argument DELTA is not visible to it.)  This time when it falls through to BASE, the subtraction of DELTA from N yields zero so that BASE returns completion.</p>
-</li>
-<li>
-<p>Since the function we originally called and built a frame for was a CHAIN, the REDO is effectively REDO-finishing the frame for the adaptation of BASE that sits at the head of the frame.  That delegation has now finished bouncing around on that single frame and come to a completion, which means the chained functions will get that result.  The string is translated to a tag and signals success.</p>
-</li>
-</ul>
-<h2>
-<a name="all-pretty-crazy-stuff-you-probably-wont-use-6" class="anchor" href="2082.html#all-pretty-crazy-stuff-you-probably-wont-use-6"></a>All Pretty Crazy Stuff You Probably Won't Use</h2>
-<p><img src="../../images/emoji/twitter/crazy_face.png%3Fv=12" title=":crazy_face:" class="emoji only-emoji" alt=":crazy_face:" loading="lazy" width="20" height="20"></p>
-<p>But it's there, to placate people who think a language has to have tail calls to get respect.</p>
             </div>
 
             <div itemprop="interactionStatistic" itemscope itemtype="http://schema.org/InteractionCounter">
               <meta itemprop="interactionType" content="http://schema.org/LikeAction"/>
-              <meta itemprop="userInteractionCount" content="2" />
-              <span class='post-likes'>2 Likes</span>
+              <meta itemprop="userInteractionCount" content="0" />
+              <span class='post-likes'></span>
             </div>
 
           </div>

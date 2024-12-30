@@ -5,8 +5,97 @@
     <link>https://forum.rebol.info/c/development/8</link>
     <description>Topics in the &#39;Development&#39; category Discussion of the development of Rebol itself: language design, implementation and standard library.</description>
     
-      <lastBuildDate>Sun, 22 Dec 2024 16:29:39 +0000</lastBuildDate>
+      <lastBuildDate>Fri, 27 Dec 2024 05:21:14 +0000</lastBuildDate>
       <atom:link href="https://forum.rebol.info/c/development/8.rss" rel="self" type="application/rss+xml" />
+        <item>
+          <title>How Persistent Is Infixedness?</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Functions</category>
+          <description><![CDATA[
+            <p>Infixedness is a property that FRAME! cells can carry.  There are 4 states that consume 2 bits:</p>
+<ul>
+<li>
+<p><strong>"Prefix"</strong> (not infixed at all)</p>
+</li>
+<li>
+<p><strong>"Normal" Infix</strong> <em>(sees exactly one item to the left, processed before the previous expression is allowed to run)</em></p>
+</li>
+<li>
+<p><strong>"Deferred" Infix</strong> <em>(exactly one evaluation is performed to the left, which is needed by ELSE such that cases like <strong><code>if x [y] else [z]</code></strong> can act as <strong><code>(if x [y]) else [z]</code></strong> instead of <strong><code>if x ([y] else [z])</code></strong>)</em></p>
+</li>
+<li>
+<p><strong>"Postponed" Infix"</strong> <em>(all evaluations on the left that can complete are run before running the operation)</em></p>
+</li>
+</ul>
+<p>Antiform FRAME!s can carry these infix states.  And the space is available in plain frames as well, so we could make FRAME!s that are created from antiforms carry it, so that it round-trips:</p>
+<pre><code>&gt;&gt; f: copy unrun +/
+== #[frame! [
+    value1: #[parameter! [char? any-scalar? date!]]
+    value2: #[parameter! [char? any-scalar? date!]]
+]]
+
+&gt;&gt; /plus: anti f
+== ~#[frame! "plus" []]]~  ; anti 
+
+&gt;&gt; 10 plus 20
+== 30
+</code></pre>
+<h2><a name="p-7989-but-what-about-specialization-1" class="anchor" href="https://forum.rebol.info#p-7989-but-what-about-specialization-1"></a>But... What About Specialization?</h2>
+<p>Let's say I'd done this:</p>
+<pre><code>&gt;&gt; f: copy unrun +/
+== #[frame! [
+    value1: #[parameter! [char? any-scalar? date!]]
+    value2: #[parameter! [char? any-scalar? date!]]
+]]
+
+&gt;&gt; value1: 10
+
+&gt;&gt; /plus: anti f
+== ~#[frame! "plus" []]]~  ; anti 
+</code></pre>
+<p>If the FRAME! kept its infixedness, then you'd have <strong><code>(20 plus) = 30</code></strong>.</p>
+<p><em>But I don't think that makes much sense.</em>  <img src="https://forum.rebol.info/images/emoji/twitter/frowning.png?v=12" title=":frowning:" class="emoji" alt=":frowning:" loading="lazy" width="20" height="20"></p>
+<p>Functions that take arguments infix tend to intend that infixness to apply specifically to a parameter.  Like if <strong><code>(x: default [10 + 20])</code></strong> has the variable specialized as <strong>x</strong>, you never intend to see <strong><code>([10 + 20] specialized-default)</code></strong></p>
+<h2><a name="p-7989-so-shouldnt-infixedness-be-a-parameter-property-2" class="anchor" href="https://forum.rebol.info#p-7989-so-shouldnt-infixedness-be-a-parameter-property-2"></a>So Shouldn't Infixedness Be a PARAMETER! Property?</h2>
+<p>You might think that.</p>
+<p>So why is the property carried by the Cell of the overall FRAME! as a whole?</p>
+<p>The idea was to make it cheap to make a function that was defined normally to become infix...without allocating a new list of parameters:</p>
+<pre><code>/+: infix add/  ; no new parameter list made if it's just fiddling cell bits
+</code></pre>
+<p>If + and ADD have the same definition then their PARAMETER! can only have one state, so the bit has to go elsewhere.</p>
+<p>Fundamentally one might reimagine INFIX as an operator that acts on PARAMETER!, and then see turning a function infix as a specialization operation:</p>
+<pre><code>&gt;&gt; add.value1.spec
+== [char? any-scalar? date!]
+
+&gt;&gt; /+: specialize add/ [value1: infix add.value1]
+== ~#[frame! [value1] "add" [value2]]]~  ; anti
+</code></pre>
+<p>More of a pain.  And now we face the question: what happens when a parameter is marked infix but isn't the first unspecialized argument?  There's no way in the mechanics of the system to give that meaning.</p>
+<pre><code>&gt;&gt; /++: specialize add/ [value1: infix add.value1, value2: infix add.value2]
+== ~#[frame! [value1 value2] "add"]]~  ; anti
+
+&gt;&gt; 10 20 ++  ; incoherent, evaluator can't do this
+== 30
+</code></pre>
+<p>So this is why infixedness has persisted as a Cell state, not a PARAMETER! state.  Keeping it off the parameters avoids having to figure out how to handle the meaningless states.  And it's cheaper to not create a new parameter list.</p>
+<h2><a name="p-7989-ok-any-bright-ideas-on-managing-these-bits-3" class="anchor" href="https://forum.rebol.info#p-7989-ok-any-bright-ideas-on-managing-these-bits-3"></a>Ok.  Any Bright Ideas On Managing These Bits?</h2>
+<p>The question is if we know which parameter is the infix one, so that if it's specialized out the infixedness goes away.</p>
+<p>This means somehow the operation of turning a frame infix has to capture a memory of what parameter was infix at that moment.</p>
+<p>That's more than 2 bits of information. <img src="https://forum.rebol.info/images/emoji/twitter/frowning.png?v=12" title=":frowning:" class="emoji" alt=":frowning:" loading="lazy" width="20" height="20"></p>
+<p><strong>I don't have great ideas at this precise moment for how to do this, without making a copy of the parameter list.</strong></p>
+<p>The easiest thing to do is to say the infix state only applies to antiforms, and if you specialize things you have to re-infix them.  Or maybe just refuse to specialize infix things, and say you have to drop the bits consciously to know you're doing that, and then re-infix them.</p>
+<p>(Sometimes I start these posts thinking "I'll have a solution by the end" and then don't.  Anyway, I'm going to stop thinking about this and work on other things for now.)</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/how-persistent-is-infixedness/2359">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/how-persistent-is-infixedness/2359</link>
+          <pubDate>Fri, 27 Dec 2024 05:21:14 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2359</guid>
+          <source url="https://forum.rebol.info/t/how-persistent-is-infixedness/2359.rss">How Persistent Is Infixedness?</source>
+        </item>
         <item>
           <title>Get_Xxx_Flag() vs Has_Xxx_Flag() ?</title>
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
@@ -2266,26 +2355,6 @@ parse compose [
           <discourse:topicArchived>No</discourse:topicArchived>
           <guid isPermaLink="false">forum.rebol.info-topic-2309</guid>
           <source url="https://forum.rebol.info/t/should-sequences-permit-non-head-sigils/2309.rss">Should sequences permit non-head SIGILs?</source>
-        </item>
-        <item>
-          <title>:FOO is now a &quot;Refinement&quot;... so what is /FOO called?</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Naming</category>
-          <description><![CDATA[
-            <p>There are pieces of code that use leading-slash-words as dialect parts, without having anything to do with them being "refinements".</p>
-<p>We might call them <strong><code>RUN-WORD</code></strong>, because that's what <strong><code>/FOO</code></strong> does in the evaluator... runs FOO if it's a function, and errors if not.</p>
-<p>More visually they could be <strong><code>SLASH-WORD</code></strong> with the implied fact the "slash" comes before the word helping to distinguish it from <strong><code>FOO/</code></strong>.  But it seems that they both have equal claim on being slash words to me.</p>
-<p>I'm going to call them RUN-WORD just to keep moving along, but think about it.</p>
-            <p><small>1 post - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/foo-is-now-a-refinement-so-what-is-foo-called/2308">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/foo-is-now-a-refinement-so-what-is-foo-called/2308</link>
-          <pubDate>Mon, 07 Oct 2024 01:46:37 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-2308</guid>
-          <source url="https://forum.rebol.info/t/foo-is-now-a-refinement-so-what-is-foo-called/2308.rss">:FOO is now a &quot;Refinement&quot;... so what is /FOO called?</source>
         </item>
   </channel>
 </rss>

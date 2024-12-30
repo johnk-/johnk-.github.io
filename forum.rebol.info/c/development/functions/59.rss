@@ -5,8 +5,97 @@
     <link>https://forum.rebol.info/c/development/functions/59</link>
     <description>Topics in the &#39;Functions&#39; category Discussions of Functions and Generators, e.g. how things like RETURN work... or the mechanics of generators and composers like ADAPT, SPECIALIZE, ENCLOSE, HIJACK, etc.</description>
     
-      <lastBuildDate>Wed, 11 Dec 2024 12:53:48 +0000</lastBuildDate>
+      <lastBuildDate>Fri, 27 Dec 2024 05:21:14 +0000</lastBuildDate>
       <atom:link href="https://forum.rebol.info/c/development/functions/59.rss" rel="self" type="application/rss+xml" />
+        <item>
+          <title>How Persistent Is Infixedness?</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Functions</category>
+          <description><![CDATA[
+            <p>Infixedness is a property that FRAME! cells can carry.  There are 4 states that consume 2 bits:</p>
+<ul>
+<li>
+<p><strong>"Prefix"</strong> (not infixed at all)</p>
+</li>
+<li>
+<p><strong>"Normal" Infix</strong> <em>(sees exactly one item to the left, processed before the previous expression is allowed to run)</em></p>
+</li>
+<li>
+<p><strong>"Deferred" Infix</strong> <em>(exactly one evaluation is performed to the left, which is needed by ELSE such that cases like <strong><code>if x [y] else [z]</code></strong> can act as <strong><code>(if x [y]) else [z]</code></strong> instead of <strong><code>if x ([y] else [z])</code></strong>)</em></p>
+</li>
+<li>
+<p><strong>"Postponed" Infix"</strong> <em>(all evaluations on the left that can complete are run before running the operation)</em></p>
+</li>
+</ul>
+<p>Antiform FRAME!s can carry these infix states.  And the space is available in plain frames as well, so we could make FRAME!s that are created from antiforms carry it, so that it round-trips:</p>
+<pre><code>&gt;&gt; f: copy unrun +/
+== #[frame! [
+    value1: #[parameter! [char? any-scalar? date!]]
+    value2: #[parameter! [char? any-scalar? date!]]
+]]
+
+&gt;&gt; /plus: anti f
+== ~#[frame! "plus" []]]~  ; anti 
+
+&gt;&gt; 10 plus 20
+== 30
+</code></pre>
+<h2><a name="p-7989-but-what-about-specialization-1" class="anchor" href="https://forum.rebol.info#p-7989-but-what-about-specialization-1"></a>But... What About Specialization?</h2>
+<p>Let's say I'd done this:</p>
+<pre><code>&gt;&gt; f: copy unrun +/
+== #[frame! [
+    value1: #[parameter! [char? any-scalar? date!]]
+    value2: #[parameter! [char? any-scalar? date!]]
+]]
+
+&gt;&gt; value1: 10
+
+&gt;&gt; /plus: anti f
+== ~#[frame! "plus" []]]~  ; anti 
+</code></pre>
+<p>If the FRAME! kept its infixedness, then you'd have <strong><code>(20 plus) = 30</code></strong>.</p>
+<p><em>But I don't think that makes much sense.</em>  <img src="https://forum.rebol.info/images/emoji/twitter/frowning.png?v=12" title=":frowning:" class="emoji" alt=":frowning:" loading="lazy" width="20" height="20"></p>
+<p>Functions that take arguments infix tend to intend that infixness to apply specifically to a parameter.  Like if <strong><code>(x: default [10 + 20])</code></strong> has the variable specialized as <strong>x</strong>, you never intend to see <strong><code>([10 + 20] specialized-default)</code></strong></p>
+<h2><a name="p-7989-so-shouldnt-infixedness-be-a-parameter-property-2" class="anchor" href="https://forum.rebol.info#p-7989-so-shouldnt-infixedness-be-a-parameter-property-2"></a>So Shouldn't Infixedness Be a PARAMETER! Property?</h2>
+<p>You might think that.</p>
+<p>So why is the property carried by the Cell of the overall FRAME! as a whole?</p>
+<p>The idea was to make it cheap to make a function that was defined normally to become infix...without allocating a new list of parameters:</p>
+<pre><code>/+: infix add/  ; no new parameter list made if it's just fiddling cell bits
+</code></pre>
+<p>If + and ADD have the same definition then their PARAMETER! can only have one state, so the bit has to go elsewhere.</p>
+<p>Fundamentally one might reimagine INFIX as an operator that acts on PARAMETER!, and then see turning a function infix as a specialization operation:</p>
+<pre><code>&gt;&gt; add.value1.spec
+== [char? any-scalar? date!]
+
+&gt;&gt; /+: specialize add/ [value1: infix add.value1]
+== ~#[frame! [value1] "add" [value2]]]~  ; anti
+</code></pre>
+<p>More of a pain.  And now we face the question: what happens when a parameter is marked infix but isn't the first unspecialized argument?  There's no way in the mechanics of the system to give that meaning.</p>
+<pre><code>&gt;&gt; /++: specialize add/ [value1: infix add.value1, value2: infix add.value2]
+== ~#[frame! [value1 value2] "add"]]~  ; anti
+
+&gt;&gt; 10 20 ++  ; incoherent, evaluator can't do this
+== 30
+</code></pre>
+<p>So this is why infixedness has persisted as a Cell state, not a PARAMETER! state.  Keeping it off the parameters avoids having to figure out how to handle the meaningless states.  And it's cheaper to not create a new parameter list.</p>
+<h2><a name="p-7989-ok-any-bright-ideas-on-managing-these-bits-3" class="anchor" href="https://forum.rebol.info#p-7989-ok-any-bright-ideas-on-managing-these-bits-3"></a>Ok.  Any Bright Ideas On Managing These Bits?</h2>
+<p>The question is if we know which parameter is the infix one, so that if it's specialized out the infixedness goes away.</p>
+<p>This means somehow the operation of turning a frame infix has to capture a memory of what parameter was infix at that moment.</p>
+<p>That's more than 2 bits of information. <img src="https://forum.rebol.info/images/emoji/twitter/frowning.png?v=12" title=":frowning:" class="emoji" alt=":frowning:" loading="lazy" width="20" height="20"></p>
+<p><strong>I don't have great ideas at this precise moment for how to do this, without making a copy of the parameter list.</strong></p>
+<p>The easiest thing to do is to say the infix state only applies to antiforms, and if you specialize things you have to re-infix them.  Or maybe just refuse to specialize infix things, and say you have to drop the bits consciously to know you're doing that, and then re-infix them.</p>
+<p>(Sometimes I start these posts thinking "I'll have a solution by the end" and then don't.  Anyway, I'm going to stop thinking about this and work on other things for now.)</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://forum.rebol.info/t/how-persistent-is-infixedness/2359">Read full topic</a></p>
+          ]]></description>
+          <link>https://forum.rebol.info/t/how-persistent-is-infixedness/2359</link>
+          <pubDate>Fri, 27 Dec 2024 05:21:14 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">forum.rebol.info-topic-2359</guid>
+          <source url="https://forum.rebol.info/t/how-persistent-is-infixedness/2359.rss">How Persistent Is Infixedness?</source>
+        </item>
         <item>
           <title>HIJACK-protection: Preserve a Weird Feature? :face_with_diagonal_mouth:</title>
           <dc:creator><![CDATA[hostilefork]]></dc:creator>
@@ -1742,21 +1831,19 @@ promise: func [spec body] [
             <p>Looking into some of <a href="https://forum.rebol.info/t/the-sherman-rebol-to-scheme-compiler/2076">Joe Marshall's historical participation in Rebol</a>, he speaks about Rebol 1.0 having "continuations" and "tail calls".</p>
 <p>Ren-C uses continuations to implement <a href="https://forum.rebol.info/t/stackless-is-here-today-now/1844">stacklessness, based on a trampoline</a>.  Trampolines are generally slower than the fiddly technique Joe describes Rebol 1.0 as having used--but such fiddly methods are not standard C, and do not translate well to WebAssembly.  In any case, the outcomes are similar.</p>
 <p>Tail calls are a different feature.  But if you have continuations, then your code is likely structured in such a way that tail calls are not that difficult to add.</p>
-<h2>
-<a name="so-what-is-a-tail-call-1" class="anchor" href="https://forum.rebol.info#so-what-is-a-tail-call-1"></a>So What Is A Tail Call?</h2>
+<h2><a name="p-6770-so-what-is-a-tail-call-1" class="anchor" href="https://forum.rebol.info#p-6770-so-what-is-a-tail-call-1"></a>So What Is A Tail Call?</h2>
 <p>When you invoke a function, the interpreter has to allocate some space for its arguments and locals.  This information is then associated with a stack level structure, which also takes some space... and is put in a chain representing the call stack.</p>
 <p>If that function calls itself recursively, the recursion will also need new stack space for its arguments and locals...and another stack level structure.</p>
 <p>With recursive algorithms where a function calls itself hundreds or thousands of times, you can use up a lot of memory (and/or generate a stack overflow).</p>
 <p>Tail calls are based on the observation that right at the moment a function is about to return, it doesn't need its stack level or arguments/locals anymore.  So if you're willing to have your call stack suffer some amount of "amnesia" about the "real" stack depth, you can reuse the current call's stack level for a recursion.</p>
-<h2>
-<a name="ren-c-supports-explicit-tail-calls-with-returnrun-2" class="anchor" href="https://forum.rebol.info#ren-c-supports-explicit-tail-calls-with-returnrun-2"></a>Ren-C Supports Explicit Tail Calls With RETURN/RUN</h2>
+<h2><a name="p-6770-ren-c-supports-explicit-tail-calls-with-returnrun-2" class="anchor" href="https://forum.rebol.info#p-6770-ren-c-supports-explicit-tail-calls-with-returnrun-2"></a>Ren-C Supports Explicit Tail Calls With RETURN:RUN</h2>
 <p>There are two forms of tail call we can do in a Rebol-like interpreter.  The first style can call any function (not just the one you're returning from).  It avoids a recursion level on the stack, but does <em>not</em> reuse the memory for arguments and locals.</p>
 <p>This is what that looks like:</p>
 <pre><code>foo: func [return: [tag!] n] [
     if n = 1 [
         return &lt;success&gt;
     ]
-    return/run :foo n - 1
+    return:run foo/ n - 1
 ]
 
 &gt;&gt; foo 100
@@ -1771,133 +1858,32 @@ promise: func [spec body] [
         return &lt;success&gt;
     ]
     n: n - 1
-    return/run @redo
+    return:run 'redo
 ]
 
 &gt;&gt; foo 100
 == &lt;success&gt;
 </code></pre>
 <p>Modifying the variables in place means you're responsible for any dependency issues.  If you overwrite one of your arguments while calculating the next, you wrote the code in sequence and you can see what you did.</p>
-<h2>
-<a name="why-returnrun-foo-vs-return-foo-or-rerun-foo-3" class="anchor" href="https://forum.rebol.info#why-returnrun-foo-vs-return-foo-or-rerun-foo-3"></a>Why RETURN/RUN :FOO vs. RETURN FOO or RERUN FOO</h2>
+<h2><a name="p-6770-why-returnrun-foo-vs-return-foo-or-rerun-foo-3" class="anchor" href="https://forum.rebol.info#p-6770-why-returnrun-foo-vs-return-foo-or-rerun-foo-3"></a>Why RETURN:RUN FOO/ vs. RETURN FOO or RERUN FOO</h2>
 <p>Ren-C's RETURN construct has special knowledge of what function it returns from.  It is a specialization of a generic DEFINITIONAL-RETURN function, which is specialized with the target FRAME!.  It's done in a somewhat optimized way, but still has some cost.</p>
 <p>If tail calls were done with another construct--e.g. something like RERUN--that function would also need to be specialized with this knowledge.  It's cheaper to just piggy back on what RETURN already knows and make it a refinement.</p>
-<p>As for why it has to take a GET-WORD! vs. plain WORD! for the function to invoke...this is due to RETURN not taking its first argument quoted.  So it's too late to intercept the mechanics of the call once an evaluation is run.  RETURN would receive the product of the call.</p>
-<p>It winds up looking fairly natural, because the RUN construct runs a function that gathers its arguments inline:</p>
-<pre><code>&gt;&gt; run :append [a b c] [d e]
+<p>As for why it has to take a trailing-slash PATH! vs. plain WORD! for the function to invoke...this is due to RETURN not taking its first argument literally.  So it's too late to intercept the mechanics of the call once an evaluation is run.  RETURN would receive the product of the call.</p>
+<p>It winds up looking fairly natural, because the RUN construct runs a function that gathers its arguments inline does the same thing:</p>
+<pre><code>&gt;&gt; run (either 1 &lt; 2 [append/] [insert/]) [a b c] [d e]
+== [a b c [d e]]
+</code></pre>
+<p>So if you were to RUN just a function, it would also look like RETURN:RUN...</p>
+<pre><code>&gt;&gt; run append/ [a b c] [d e]
 == [a b c [d e]]
 </code></pre>
 <p><strong>Note that even if we could make tail calls implicit, we probably wouldn't want to.</strong>  Python hasn't added tail calls at all, based on a philosophical objection to the idea of obscuring the call stack.  It also seems like if an algorithm depends on tail calls for some important optimization reason, there should be something to indicate that fact... so that someone reorganizing the code will be sensitive to it.</p>
-<h2>
-<a name="how-important-are-tail-calls-4" class="anchor" href="https://forum.rebol.info#how-important-are-tail-calls-4"></a>How Important Are Tail Calls?</h2>
+<h2><a name="p-6770-how-important-are-tail-calls-4" class="anchor" href="https://forum.rebol.info#p-6770-how-important-are-tail-calls-4"></a>How Important Are Tail Calls?</h2>
 <p>If your language has a very limited amount of stack, being able to formulate your code to use tail calls so it doesn't accrue stack could be very important.</p>
 <p>But if your language has a decent amount of stack (or is completely "stackless") it's not particularly important.</p>
 <p>Where it matters are cases where an algorithm can be cleanly expressed in a recursive way, and you don't want to use an uglier representation that builds data structures which are mimicking what you would be getting naturally from the stack.</p>
-<p>Using them in places that don't matter is likely just going to confuse your stack traces and error messages...like the Python people say.  I'd discourage going around and changing all your RETURN SOMETHING to RETURN/RUN :SOMETHING to try and speed things up.  Only do it if you're writing an algorithm that would have pathological stack use otherwise.</p>
-<h2>
-<a name="returnrun-had-a-precursor-redo-5" class="anchor" href="https://forum.rebol.info#returnrun-had-a-precursor-redo-5"></a>RETURN/RUN Had A Precursor... REDO</h2>
-<p>The original formulation of tail calls wasn't built into RETURN, but expected you to work with a more generic tool called REDO.  This is what you had to write for the FOO example:</p>
-<pre><code>foo: func [return: [tag!] n] [
-    frame: binding of 'n
-    if n = 0 [
-        return &lt;success&gt;
-    ]
-    n: n - 1
-    redo frame
-]
-</code></pre>
-<p>This corresponds to the <strong><code>return/run @redo</code></strong> case, which takes advantage of the fact that RETURN already knows the frame it returns to, and can use that to redo.</p>
-<p>But REDO had a shorthand for this case, which was to accept a word from a frame:</p>
-<pre><code>foo: func [return: [tag!] n] [
-    if n = 0 [
-        return &lt;success&gt;
-    ]
-    n: n - 1
-    redo 'n
-]
-</code></pre>
-<p>This had led me to say <em>"sure, Ren-C has tail calls"</em>.  But I realized that didn't really look like what people would expect, so I made RETURN/RUN.</p>
-<p>An added benefit of RETURN/RUN is that if you use it with the function call form (instead of <code>@redo</code>) then it offers something that REDO couldn't do, which is reuse an internal level structure for an arbitrary new function call.  It wasn't actually that hard to implement, so I went ahead and did it.</p>
-<p>REDO is still around.  It can restart <em>any</em> frame or phase, and it's actually rather powerful.  I don't really use it, but here's an example of how tricky it can be:</p>
-<pre><code>base: func [return: [text!] n delta /captured-frame [frame!]] [
-    log [{BASE} n delta]
-
-    n: n - delta
-    if n &lt; 0 [return "base less than zero"]
-    if n = 0 [return "base done"]
-    if captured-frame [redo captured-frame]
-    return "base got no frame"
-]
-
-c: chain [
-    adapt :base [
-       log [{C} n delta]
-
-       captured-frame: binding of 'n
-       redo/sibling 'n :s
-
-       comment {fall through to base}
-    ]
-    lambda [x] [
-        if x = "base done" [
-            &lt;success&gt;
-        ] else [
-            spaced ["base exited with" x]
-        ]
-    ]
-]
-
-s: specialize adapt :base [
-    log [{S} n delta]
-
-    if n = 1 [n: 10]
-][
-    delta: 10
-]
-
-&gt;&gt; c 11 0
-== &lt;success&gt;
-</code></pre>
-<p>With a logging function attached, that gives:</p>
-<pre><code> --- C ---
- n: =&gt; 11
- delta: =&gt; 0
- --- S ---
- n: =&gt; 11
- delta: =&gt; 10
- --- BASE ---
- n: =&gt; 11
- delta: =&gt; 10
- --- C ---
- n: =&gt; 1
- delta: =&gt; 10
- --- S ---
- n: =&gt; 1
- delta: =&gt; 10
- --- BASE ---
- n: =&gt; 10
- delta: =&gt; 10
-</code></pre>
-<ul>
-<li>
-<p>C is called and captures its frame into F.  Then it uses REDO/SIBLING to reuse the frame to call S.  S gets the variables and args that it knows about as C left them--such as N and a captured frame F--but values it takes for granted are reset, which includes specialized delta of 10.</p>
-<p><em>(The need to reset specializations for consistency is similar to how locals must be reset--they're not part of the interface of the function, so to reach beneath them does something illegal in terms of parameterization.)</em></p>
-</li>
-<li>
-<p>S doesn't have any effect besides resetting delta, so it falls through as an adaptation to the base function.  BASE subtracts DELTA from N to get 1, which isn't an exit condition.  The F frame which was set in C and was preserved as an argument to S is then used by BASE to REDO and get back up to the start of C again.</p>
-</li>
-<li>
-<p>Once again C captures its frame and does a REDO to start up S, which now notices that N is 1 so it bumps it up to 10.  (It cannot set DELTA to 1, because as a specialized argument DELTA is not visible to it.)  This time when it falls through to BASE, the subtraction of DELTA from N yields zero so that BASE returns completion.</p>
-</li>
-<li>
-<p>Since the function we originally called and built a frame for was a CHAIN, the REDO is effectively REDO-finishing the frame for the adaptation of BASE that sits at the head of the frame.  That delegation has now finished bouncing around on that single frame and come to a completion, which means the chained functions will get that result.  The string is translated to a tag and signals success.</p>
-</li>
-</ul>
-<h2>
-<a name="all-pretty-crazy-stuff-you-probably-wont-use-6" class="anchor" href="https://forum.rebol.info#all-pretty-crazy-stuff-you-probably-wont-use-6"></a>All Pretty Crazy Stuff You Probably Won't Use</h2>
-<p><img src="https://forum.rebol.info/images/emoji/twitter/crazy_face.png?v=12" title=":crazy_face:" class="emoji only-emoji" alt=":crazy_face:" loading="lazy" width="20" height="20"></p>
-<p>But it's there, to placate people who think a language has to have tail calls to get respect.</p>
-            <p><small>1 post - 1 participant</small></p>
+<p>Using them in places that don't matter is likely just going to confuse your stack traces and error messages...like the Python people say.  I'd discourage going around and changing all your RETURN SOMETHING to RETURN:RUN SOMETHING/ to try and speed things up.  Only do it if you're writing an algorithm that would have pathological stack use otherwise.</p>
+            <p><small>2 posts - 1 participant</small></p>
             <p><a href="https://forum.rebol.info/t/tail-calls-in-ren-c-yes-we-have-them/2082">Read full topic</a></p>
           ]]></description>
           <link>https://forum.rebol.info/t/tail-calls-in-ren-c-yes-we-have-them/2082</link>
@@ -2495,39 +2481,6 @@ s: specialize adapt :base [
           <discourse:topicArchived>No</discourse:topicArchived>
           <guid isPermaLink="false">forum.rebol.info-topic-1474</guid>
           <source url="https://forum.rebol.info/t/resurrecting-redbol-apply-via-type-exposure/1474.rss">Resurrecting REDBOL-APPLY via Type Exposure</source>
-        </item>
-        <item>
-          <title>Chaining Return Types</title>
-          <dc:creator><![CDATA[hostilefork]]></dc:creator>
-          <category>Functions</category>
-          <description><![CDATA[
-            <p>Something that bothers me about C is that it doesn't let you write chaining void returns:</p>
-<pre><code>void my_function() {
-    return some_void_function(...);  /* this is not legal! */
-}
-</code></pre>
-<p>That annoys me, because it makes it hard to write generic code that doesn't want the bad properties of a macro (repeating evaluation of arguments if used multiple times, etc.)...but throws a wrench in being able to abstract across return values.</p>
-<p><strong>But Ren-C has this covered!</strong>  All states can be chained.</p>
-<p>But what if you are writing a wrapped function, and want a type signature on the wrapper that matches what you are wrapping?  I guess we could do this via COMPOSE on the spec of some kind:</p>
-<pre><code>my-function: func compose [
-    return: (return-type-block-of :some-other-function)
-    ...
-][
-    ...
-    return some-other-function ...
-]
-</code></pre>
-<p>Something along these lines, where you could add or remove elements of the type signature.  :-/Anyway, I just wanted to mention that we're not yet at utopia in this medium, even if we're pretty much nailing the chaining part itself!</p>
-            <p><small>1 post - 1 participant</small></p>
-            <p><a href="https://forum.rebol.info/t/chaining-return-types/1467">Read full topic</a></p>
-          ]]></description>
-          <link>https://forum.rebol.info/t/chaining-return-types/1467</link>
-          <pubDate>Mon, 18 Jan 2021 02:04:57 +0000</pubDate>
-          <discourse:topicPinned>No</discourse:topicPinned>
-          <discourse:topicClosed>No</discourse:topicClosed>
-          <discourse:topicArchived>No</discourse:topicArchived>
-          <guid isPermaLink="false">forum.rebol.info-topic-1467</guid>
-          <source url="https://forum.rebol.info/t/chaining-return-types/1467.rss">Chaining Return Types</source>
         </item>
   </channel>
 </rss>
