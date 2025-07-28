@@ -1,0 +1,219 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Special Syntax for FOR-EACH/etc. to receive ACTION!s?</title>
+    <link>https://rebol.metaeducation.com/t/special-syntax-for-for-each-etc-to-receive-action-s/955</link>
+    <description>Here is some pretty innocuous-looking code:
+
+    n: 1
+    for-each item block [
+        print [&quot;the&quot; item &quot;is&quot; n &quot;in the block&quot;]
+        n: n + 1
+    ]
+
+But because Rebol runs ACTION!s when they are bound to WORD!s, and you can put ACTION!s in BLOCK!s, you can get into trouble:
+
+    muhaha: func [&#39;x &#39;y &#39;z] [print [&quot;stealing your args!&quot; x y z]]
+    block: compose [10 (:muhaha) 20]
+
+Enumerating such a thing produces total garbage:
+
+    the 10 is 1 in the block
+    stealing your args! is n in the block
+    the #[void]
+    the 20 is 3 in the block
+    == 4
+
+I&#39;m not concerned about malicious cases--Rebol is fundamentally not secure about this kind of thing (see and discuss at [&quot;The Philosophy of Security in Rebol&quot;](https://rebol.metaeducation.com/t/the-philosophy-of-security-in-rebol/172))  But you want to write code that gives reasonable error messages, especially when writing a mezzanine routine.
+
+Unfortunately, doing this &quot;the right way&quot; is ugly (and it doesn&#39;t actually work in a general sense):
+
+    n: 1
+    for-each item block [
+        print [&quot;the&quot; :item &quot;is&quot; n &quot;in the block&quot;]
+        n: n + 1
+    ]
+
+That only has one reference to the item, but it&#39;s clearly much uglier in real cases.  But beyond being ugly, tacking a `:` onto the front of everything doesn&#39;t have the same semantics.  What if you *think* you&#39;re dealing with a block of objects, and want to call methods on them?  `item/some-method` and `:item/some-method` aren&#39;t the same.  (Note: perhaps (:item)/some-method should work?)
+
+Point being: even if you think adding colons is mitigating the problems, you&#39;re not getting what you really want...which most of the time, is an error.
+
+## Could we make the common case work better?
+
+Something I&#39;ve often wondered is if these enumerators which take words and set them through a loop would only let you get at ACTION!s if you used some other ANY-WORD! type.  This way, they could error otherwise...and common loops could feel safe.
+
+For the sake of example, let&#39;s say it&#39;s a GET-WORD! passed to FOR-EACH if you actually are prepared to work with ACTION!s.  The first example above, by using a plain WORD!, would output a clear error instead of gibberish:
+
+    the 10 is 1 in the block
+    ** Error: Variable `item` must be GET-WORD! to hold ACTION! in FOR-EACH
+
+If GET-WORD! were used, it would make some amount of sense--and line up with the fact that you would be wanting to use GET-WORD! in the body too.  But it sacrifices the current feature for GET-WORD!, which is &quot;soft quoting&quot;...where the word specifies the word to look at to find the word to use:
+
+     &gt;&gt; word: &#39;item
+     &gt;&gt; for-each :word [1 2 3] [print [item]]
+     1
+     2
+     3
+
+However, there&#39;s another way of doing this, with GROUP!:
+
+     &gt;&gt; word: &#39;item
+     &gt;&gt; for-each (word) [1 2 3] [print [item]]
+     1
+     2
+     3
+
+Soft-quoting doesn&#39;t really come up all *that* terribly often.  Still, it&#39;s a little annoying that this would throw a wrench into COMPOSE situations doing simple soft-quotes, but you could attack that multiple ways.
+
+I think it would be much better if you could mark very clearly which enumerations were intentionally working with ACTION!s.  The error messages would be better, and people are savvy enough to know there could be a problem won&#39;t be so paranoid in their basic enumerations--knowing the error will be delivered.
+
+## Should just loops be affected, or all soft quotes?
+
+It could be loops for starters.  They could be switched to hard quotes and do their own logic, only giving soft-quote semantics for GROUP!s.
+
+Or maybe soft-quoting is too sacred as a mechanism in PATH! processing...and you don&#39;t want to have to type **foo/(bar)** instead of **foo/:bar**...so that translates to wanting to keep it in sync.
+
+This might mean using another datatype, e.g. **for-each @item block [...]** to say &quot;ACTION!s are okay&quot;.
+
+Any thoughts?  I know Rebol has some elements of &quot;it&#39;s a fundamentally unsafe language&quot;, but I just feel there need to be *some* limits.  But I don&#39;t want to bulletproof every FOR-EACH in the system against function injections--even if they are all just accidents, you want better feedback than having a mess be made.</description>
+    
+    <lastBuildDate>Sun, 18 May 2025 13:05:04 +0000</lastBuildDate>
+    <category>Loops</category>
+    <atom:link href="https://rebol.metaeducation.com/t/special-syntax-for-for-each-etc-to-receive-action-s/955.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Special Syntax for FOR-EACH/etc. to receive ACTION!s?</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p><strong>This has been on my mind a long time -- this thread began in Dec '18.</strong> (<a href="https://rebol.metaeducation.com/t/get-word-for-loop-vars-function-args-mean-allow-action-s/1303">I've archived the failed attempts at solutions</a>)</p>
+<p>I'm one of those people who tries to write generic code and frets about what would happen on the day that unset variables or ACTION!s come along.  So I'm caught between the balance of feeling negligent by not peppering with checks, or junking up otherwise elegant code for the sake of something that <em>could</em> happen.</p>
+<h2><a name="p-8310-and-its-finally-solved-trophy-1" class="anchor" href="https://rebol.metaeducation.com#p-8310-and-its-finally-solved-trophy-1"></a>And It's Finally Solved!  <img src="https://rebol.metaeducation.com/images/emoji/twitter/trophy.png?v=14" title=":trophy:" class="emoji" alt=":trophy:" loading="lazy" width="20" height="20"></h2>
+<p>It's solved through lifted variables.</p>
+<p>Lifted variables are those which store meta-representations of what they are assigned.  If you do a lifted assignment, and a lifted retrieval, you can round-trip anything:</p>
+<pre><code>&gt;&gt; ^anything: 1020
+== 1020
+
+&gt;&gt; anything
+== '1020
+
+&gt;&gt; ^anything
+== 1020
+
+&gt;&gt; ^anything: ~
+== ~  ; antiform (trash)
+
+&gt;&gt; anything
+== ~
+
+&gt;&gt; ^anything
+== ~  ; antiform (trash)
+</code></pre>
+<p>Given this property, it makes them an ideal insulator against the active dispatch of an action.</p>
+<pre><code>&gt;&gt; ^anything: append/
+== ~#[frame! [series value :part :dup :line]]~  ; anti
+
+&gt;&gt; anything
+== ~#[frame! [series value :part :dup :line]]~
+
+&gt;&gt; ^anything
+== ~#[frame! [series value :part :dup :line]]~  ; anti
+</code></pre>
+<p><strong>So quite simply, a FOR-EACH variable which is not lifted won't accept actions.</strong></p>
+<pre><code>&gt;&gt; obj: make object! [field: does [print "I'm an action"]]
+
+&gt;&gt; for-each [key val] obj [probe val]
+** Error: Can't assign VAL antiform ACTION! in FOR-EACH, use ^VAL
+
+&gt;&gt; obj: make object! [field: does [print "I'm an action"]]
+
+&gt;&gt; for-each [key ^val] obj [probe ^val]
+~#[frame! []]~  ; anti
+</code></pre>
+<p>Lifting lets you receive trash as well.  And what's great here is that if you leave off the lift, it will work fine so long as you don't hit anything that needs to be lifted.  Your default undecorated code is "safe".  It's only when you enumerate actions and trash that you get notified that lifting is needed.</p>
+<p>Quite the perfect solution.  Case closed.  <img src="https://rebol.metaeducation.com/images/emoji/twitter/slight_smile.png?v=14" title=":slight_smile:" class="emoji" alt=":slight_smile:" loading="lazy" width="20" height="20"></p>
+          <p><a href="https://rebol.metaeducation.com/t/special-syntax-for-for-each-etc-to-receive-action-s/955/4">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/special-syntax-for-for-each-etc-to-receive-action-s/955/4</link>
+        <pubDate>Sun, 18 May 2025 13:02:29 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-955-4</guid>
+        <source url="https://rebol.metaeducation.com/t/special-syntax-for-for-each-etc-to-receive-action-s/955.rss">Special Syntax for FOR-EACH/etc. to receive ACTION!s?</source>
+      </item>
+      <item>
+        <title>Special Syntax for FOR-EACH/etc. to receive ACTION!s?</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>3 posts were merged into an existing topic: <a href="https://rebol.metaeducation.com/t/get-word-for-loop-vars-function-args-mean-allow-action-s/1303/5">GET-WORD! for loop vars / function args mean "Allow ACTION!s"?</a></p>
+          <p><a href="https://rebol.metaeducation.com/t/special-syntax-for-for-each-etc-to-receive-action-s/955/3">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/special-syntax-for-for-each-etc-to-receive-action-s/955/3</link>
+        <pubDate>Sun, 18 May 2025 12:52:54 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-955-3</guid>
+        <source url="https://rebol.metaeducation.com/t/special-syntax-for-for-each-etc-to-receive-action-s/955.rss">Special Syntax for FOR-EACH/etc. to receive ACTION!s?</source>
+      </item>
+      <item>
+        <title>Special Syntax for FOR-EACH/etc. to receive ACTION!s?</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>Here is some pretty innocuous-looking code:</p>
+<pre><code>n: 1
+for-each item block [
+    print ["the" item "is" n "in the block"]
+    n: n + 1
+]
+</code></pre>
+<p>But because Rebol runs ACTION!s when they are bound to WORD!s, and you can put ACTION!s in BLOCK!s, you can get into trouble:</p>
+<pre><code>muhaha: func ['x 'y 'z] [print ["stealing your args!" x y z]]
+block: compose [10 (:muhaha) 20]
+</code></pre>
+<p>Enumerating such a thing produces total garbage:</p>
+<pre><code>the 10 is 1 in the block
+stealing your args! is n in the block
+the #[void]
+the 20 is 3 in the block
+== 4
+</code></pre>
+<p>I'm not concerned about malicious cases--Rebol is fundamentally not secure about this kind of thing (see and discuss at <a href="https://rebol.metaeducation.com/t/the-philosophy-of-security-in-rebol/172">"The Philosophy of Security in Rebol"</a>)  But you want to write code that gives reasonable error messages, especially when writing a mezzanine routine.</p>
+<p>Unfortunately, doing this "the right way" is ugly (and it doesn't actually work in a general sense):</p>
+<pre><code>n: 1
+for-each item block [
+    print ["the" :item "is" n "in the block"]
+    n: n + 1
+]
+</code></pre>
+<p>That only has one reference to the item, but it's clearly much uglier in real cases.  But beyond being ugly, tacking a <code>:</code> onto the front of everything doesn't have the same semantics.  What if you <em>think</em> you're dealing with a block of objects, and want to call methods on them?  <code>item/some-method</code> and <code>:item/some-method</code> aren't the same.  (Note: perhaps (:item)/some-method should work?)</p>
+<p>Point being: even if you think adding colons is mitigating the problems, you're not getting what you really want...which most of the time, is an error.</p>
+<h2><a name="p-2805-could-we-make-the-common-case-work-better-1" class="anchor" href="https://rebol.metaeducation.com#p-2805-could-we-make-the-common-case-work-better-1"></a>Could we make the common case work better?</h2>
+<p>Something I've often wondered is if these enumerators which take words and set them through a loop would only let you get at ACTION!s if you used some other ANY-WORD! type.  This way, they could error otherwise...and common loops could feel safe.</p>
+<p>For the sake of example, let's say it's a GET-WORD! passed to FOR-EACH if you actually are prepared to work with ACTION!s.  The first example above, by using a plain WORD!, would output a clear error instead of gibberish:</p>
+<pre><code>the 10 is 1 in the block
+** Error: Variable `item` must be GET-WORD! to hold ACTION! in FOR-EACH
+</code></pre>
+<p>If GET-WORD! were used, it would make some amount of sense--and line up with the fact that you would be wanting to use GET-WORD! in the body too.  But it sacrifices the current feature for GET-WORD!, which is "soft quoting"...where the word specifies the word to look at to find the word to use:</p>
+<pre><code> &gt;&gt; word: 'item
+ &gt;&gt; for-each :word [1 2 3] [print [item]]
+ 1
+ 2
+ 3
+</code></pre>
+<p>However, there's another way of doing this, with GROUP!:</p>
+<pre><code> &gt;&gt; word: 'item
+ &gt;&gt; for-each (word) [1 2 3] [print [item]]
+ 1
+ 2
+ 3
+</code></pre>
+<p>Soft-quoting doesn't really come up all <em>that</em> terribly often.  Still, it's a little annoying that this would throw a wrench into COMPOSE situations doing simple soft-quotes, but you could attack that multiple ways.</p>
+<p>I think it would be much better if you could mark very clearly which enumerations were intentionally working with ACTION!s.  The error messages would be better, and people are savvy enough to know there could be a problem won't be so paranoid in their basic enumerations--knowing the error will be delivered.</p>
+<h2><a name="p-2805-should-just-loops-be-affected-or-all-soft-quotes-2" class="anchor" href="https://rebol.metaeducation.com#p-2805-should-just-loops-be-affected-or-all-soft-quotes-2"></a>Should just loops be affected, or all soft quotes?</h2>
+<p>It could be loops for starters.  They could be switched to hard quotes and do their own logic, only giving soft-quote semantics for GROUP!s.</p>
+<p>Or maybe soft-quoting is too sacred as a mechanism in PATH! processing...and you don't want to have to type <strong>foo/(bar)</strong> instead of <strong>foo/:bar</strong>...so that translates to wanting to keep it in sync.</p>
+<p>This might mean using another datatype, e.g. <strong>for-each <span class="mention">@item</span> block [...]</strong> to say "ACTION!s are okay".</p>
+<p>Any thoughts?  I know Rebol has some elements of "it's a fundamentally unsafe language", but I just feel there need to be <em>some</em> limits.  But I don't want to bulletproof every FOR-EACH in the system against function injections--even if they are all just accidents, you want better feedback than having a mess be made.</p>
+          <p><a href="https://rebol.metaeducation.com/t/special-syntax-for-for-each-etc-to-receive-action-s/955/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/special-syntax-for-for-each-etc-to-receive-action-s/955/1</link>
+        <pubDate>Mon, 10 Dec 2018 18:33:15 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-955-1</guid>
+        <source url="https://rebol.metaeducation.com/t/special-syntax-for-for-each-etc-to-receive-action-s/955.rss">Special Syntax for FOR-EACH/etc. to receive ACTION!s?</source>
+      </item>
+  </channel>
+</rss>

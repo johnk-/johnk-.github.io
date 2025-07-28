@@ -1,0 +1,616 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Introducing The Hackable Usermode PARSE (&quot;UPARSE&quot;)</title>
+    <link>https://rebol.metaeducation.com/t/introducing-the-hackable-usermode-parse-uparse/1529</link>
+    <description># :eyes: :eyes: :eyes: !!! BIG NEWS !!! :eyes: :eyes: :eyes:
+
+I&#39;ve griped about historical PARSE&#39;s weaknesses for some time.  To name a few:
+
+* **Users can&#39;t add new keywords, or tweak existing ones.**  It&#39;s a monolithic chunk of C code that you have to recompile to get any changes to.  And since Rebol2&#39;s heyday, there have arisen a competitive landscape of *&quot;parser combinators&quot;* which allow users to build new parse &quot;keywords&quot; and compose parsers out of each other.
+
+    * [Haskell has several to choose from I&#39;ve written about](https://rebol.metaeducation.com/t/parse-vs-haskells-x-parsec/1321) (Parsec, Attoparsec, Megaparsec).  These offer composability, performance, rigor, and even error messages to guide you to correcting your input where the rule failed.
+
+    * ...but search the web for *&quot;parser combinator [L]&quot;* for any language [L].  You&#39;ll find plenty of other people who have figured out how to break down your parse into components and avoid RegEx... [&quot;nom&quot; for Rust](https://github.com/Geal/nom), [&quot;kern&quot; for Clojure](https://github.com/blancas/kern)
+
+* **Parse rules are very hard to reuse.**  Because executing a rule doesn&#39;t produce a &quot;result value&quot;, any side-effects a rule has wind up being written in some global variable.
+
+    * The finite set of keywords users are given for data capture are limited to capturing data at the level of the input series (or elements of it).
+
+* **The R3-Alpha codebase for PARSE developed organically over a long period of time, and that shows.**  
+
+    * While there&#39;s lip service to the idea that you can write fluid code using delimiters only when you want to, the irregular implementation gives you errors... if you are lucky (if you&#39;re unlucky it just churns along)
+
+          r3-alpha&gt;&gt; parse [&quot;aaaa&quot;] [and any-string! into some 2 &quot;a&quot;]   ; no AHEAD
+           ** Script error: PARSE - invalid rule or usage of rule: into
+
+          r3-alpha&gt;&gt; parse [&quot;aaaa&quot;] [and any-string! into [some 2 &quot;a&quot;]]
+          == false  ; !!! WHAT? (it doesn&#39;t even know what it can&#39;t do) 
+
+          r3-alpha&gt;&gt; parse [&quot;aaaa&quot;] [and any-string! into [some [2 &quot;a&quot;]]]
+          == true
+
+    * Despite being an all new codebase, Red is similarly irregular:
+
+          red&gt;&gt; parse [&quot;aaaa&quot;] [ahead any-string! into some 2 &quot;a&quot;]
+          *** Script Error: PARSE - unexpected end of rule after: into
+
+          red&gt;&gt; parse [&quot;aaaa&quot;] [ahead any-string! into [some 2 &quot;a&quot;]]  ; needs block
+          == true
+
+**The best way to start drafting a new-and-much-needed architecture for PARSE is to write it first as usermode code.**  It will be slow as molasses...but if the design is done right, then it could be gradually optimized.  Those optimizations are more likely to give cross-cutting advantages to other code in the system.
+
+Not only that: if the architecture is good enough, it should be able to create backwards-compatible variations... like PARSE2 for Rebol2 PARSE semantics, PARSE3 for R3-Alpha, REDPARSE for Red...
+
+## Meet the new PARSE! (codenamed UPARSE)
+
+I actually did [write a protozoan *draft* implementation](https://github.com/metaeducation/ren-c/commit/b7870bc103f8a2ca26950fc5d4a0c01d94500478) in a day-ish.  What better way to convince people that they can make powerful dialects than to show them that they--too--could have cooked up PARSE in a day?
+
+But let me be completely clear: the ability to even approach writing such a thing is *fundamentally* built on Ren-C core mechanics.  Most notably FRAME! interchangeability with functions and partial specialization.  You wouldn&#39;t want to try something like this in Rebol2, R3-Alpha, or Red.
+
+Since the original prototype, it has been built up and become a pretty thorough effort!
+
+**[%uparse.r](https://github.com/metaeducation/ren-c/blob/master/src/mezz/uparse.r)**
+
+(UPDATE: While once actually called **uparse**, the function has now taken the name **parse**...with the old parse codebase running as **parse3**.  For performance reasons, some code still uses parse3.)
+
+## Killer Feature: It Can Synthesize ANY-VALUE!
+
+UPARSE isn&#39;t limited to return results of true and false.  It actually [raises an error](https://rebol.metaeducation.com/t/try-parse-parse-except-fail-on-mismatch/1924) if it cannot process its rules completely:
+
+    &gt;&gt; parse &quot;abd&quot; [&quot;a&quot; &quot;b&quot; &quot;c&quot;]
+    ** Error: BLOCK! combinator at tail or not thru
+
+This opens up all normal values as fair game for return!  Every &quot;combinator function&quot; (historically what you might have thought of as &quot;keywords&quot;) has the option of returning a result, and the BLOCK! combinator that succeeds will return its last result.
+
+Literal matches return the rule itself:
+
+    &gt;&gt; parse &quot;abc&quot; [&quot;a&quot; &quot;b&quot; &quot;c&quot;]
+    == &quot;c&quot;
+
+A GROUP! is a combinator that always succeeds, and returns its result:
+
+    &gt;&gt; parse &quot;abc&quot; [&quot;a&quot; &quot;b&quot; &quot;c&quot; (1000 + 20)]
+    == 1020
+
+When you [use a SET-WORD! in a rule](https://rebol.metaeducation.com/t/changing-set-word-and-get-word-in-parse/1139), what you&#39;re actually capturing is the result of the rule on the right.
+
+    &gt;&gt; parse &quot;aaab&quot; [stuff: collect [some keep &quot;a&quot;], &quot;b&quot;]  ; commas optional, but cool!
+    == &quot;b&quot;
+
+    &gt;&gt; stuff
+    == [&quot;a&quot; &quot;a&quot; &quot;a&quot;]
+
+**The sky is the limit with this approach.**  When you consider that things like COLLECT are not &quot;built-in&quot; but the sort of combinator you can create after-the-fact, the true power starts to hit you.  Here&#39;s GATHER, which you can use with EMIT to make objects:
+
+    &gt;&gt; parse [x 10 y 20] [gather [
+           emit reaction: (join &quot;WOW&quot; &quot;!!!&quot;)
+           some [name: word!, emit (name): integer!]
+       ]]
+    == make object! [
+        reaction: &quot;WOW!!!&quot;
+        x: 10
+        y: 20
+    ]
+
+:man_dancing: 
+
+## Customizable, and Easier To Understand Than You&#39;d Think!
+
+UPARSE can take an optional MAP! of &quot;combinators&quot;.  This is a map from keywords to stylized &quot;parser functions&quot;.  These functions take the input and other parsers as parameters...then calculates how much of the input was consumed and returns it.
+
+An easy one to look at would be the TALLY combinator, which just counts up the number of times a rule matches.  This post isn&#39;t intended to be a complete guide to the mechanics, but just to show you the scale of what it takes to add a feature:
+
+    tally: combinator [
+        {Iterate a rule and count the number of times it matches}
+        return: &quot;Number of matches (can be 0)&quot;
+            [&lt;opt&gt; integer!]
+        parser [action!]
+        &lt;local&gt; count pos
+    ][
+        append state.loops binding of &#39;return  ; registration needed so BREAK works
+
+        count: 0
+        cycle [
+            [^ pos]: parser input except e -&gt; [  ; definitional error if parse mismatch
+                take/last state.loops  ; unregister from the BREAK-able stack
+                remainder: input
+                return count
+            ]
+            count: count + 1
+            input: pos
+        ]
+        fail ~unreachable~
+    ]
+
+And voila!
+
+    &gt;&gt; parse &quot;abbcccabb&quot; [tally [&quot;a&quot; repeat 2 &quot;b&quot; | repeat 3 &quot;c&quot;]]
+    == 3
+
+But what is this PARSER function parameter to TALLY?  It&#39;s basically a black box.  The UPARSE engine itself figures out what that parameter should be, just like DO usually figures out expressions.  So a PARSER is what you get when a COMBINATOR *has had its own dependent parser parameters specialized out*, to then only require the input.
+
+(If that sounds brain-bending, the only part you need to know is that TALLY is able to get its work done without knowing anything about how to interpret `[&quot;a&quot; repeat 2 &quot;b&quot; | repeat 3 &quot;c&quot;]`.  UPARSE does the behind-the-scenes work of &quot;fusing&quot; the BLOCK! combinator, TEXT! combinators, and INTEGER! combinator...and passes the implied parser representing that operation.)
+
+## Composable Architecture Avoids Redbol&#39;s Ad-Hoc Pitfalls
+
+Something impressive about UPARSE is that it uses partial specialization via FRAME! to build coherent rules without blocks.  It &quot;just works&quot;.
+
+In the introduction I pointed out Red and R3-Alpha stumbling over INTO usage.  UPARSE&#39;s SUBPARSE (like Topaz&#39;z INTO) is arity-2 so it has an implicit AHEAD as the first parameter, but here we can see it working in the free-form fashion:
+
+    &gt;&gt; parse [&quot;aaaa&quot;] [subparse any-string! some repeat 2 &quot;a&quot;]
+    == &quot;a&quot;  ; Success! (e.g. not an error!)
+
+## DATATYPEs Have Combinators Too!
+
+**The implementation is so modular that every *datatype* is implemented through its own combinator.**  And you can override them when you run UPARSE.
+
+Let&#39;s try doing something totally weird *just to GROUP!*, leaving everything else the same
+
+    weird-combinators: copy default-combinators  ; start with the default list
+
+    weird-combinators.(group!): combinator [
+        {Weird group combinator: test if equal to next input element}
+        return: &quot;Return a block saying whether it matched or not&quot;
+            [block!]
+        value [group!]
+        &lt;local&gt; result block
+    ][
+        result: do value
+        block: if (first input) = :result [
+            compose [match: (value) = (first input)]
+        ] else [
+            compose [mismatch: (value) != (first input)]
+        ] 
+        remainder: next input  ; skip input either way
+        return block 
+    ]
+
+    &gt;&gt; weird-parse: specialize :uparse [combinators: weird-combinators]
+
+    &gt;&gt; weird-parse [10 20 30] [collect [keep (2 + 8) integer! keep (5 + 15)]]
+    == [match: (2 + 8) = 10 mismatch: (5 + 15) != 30]
+
+**Whoa...** that&#39;s wild.  :exploding_head:  I thought I&#39;d demonstrate something radical just to get people thinking, but more obviously useful variants would do things like [hook the WORD! combinator](https://rebol.metaeducation.com/t/getting-hooks-into-events-during-parse/1640/5?u=hostilefork) to get a running log of rules that trigger.
+
+Most interesting is that BLOCK! itself is a combinator.  So you can hijack the parse at its most fundamental level.  *You could dynamically pre-process the block and pass it to the default combinator*.
+
+And in fact, this is already in use to create PARSE2, a Rebol2-compatible PARSE.
+
+## Wild New Combinators Are Finessing Old Problems
+
+UPARSE is providing a playground for attacking classic annoyances.
+
+    r3-alpha&gt;&gt; parse &quot;We all remember &lt;&lt;this problem&gt;&gt; (?) don&#39;t we?&quot; [
+         thru &quot;&lt;&lt;&quot; copy thorn to &quot;&gt;&gt;&quot; skip skip  ; ugh. [to &quot;&gt;&gt;&quot; &quot;&gt;&gt;&quot;] is also ugh
+         space &quot;(?)&quot; to end
+    ]
+    == true
+
+    r3-alpha&gt;&gt; thorn
+    == &quot;this problem&quot;
+
+With value-synthesis, problems like this can be cast in terms of combinators inspired by other languages (and beyond).  Here&#39;s BETWEEN, a 2-argument rule...which I&#39;ll put in brackets even though I don&#39;t need to:
+
+    &gt;&gt; parse &quot;We all remember &lt;&lt;this problem&gt;&gt; (?) don&#39;t we?&quot; [
+         thru &quot;&lt;&lt;&quot; rose: [between &lt;here&gt; &quot;&gt;&gt;&quot;]
+         space &quot;(?)&quot; to &lt;end&gt;
+     ]
+
+    &gt;&gt; rose
+    == &quot;this problem&quot;
+
+&gt; You could have just written that as THRU BETWEEN, but I wanted to show off how it solves the problem from the point of the old understandings.  Now I&#39;ll show off [the ellipsis combinator](https://rebol.metaeducation.com/t/the-yada-yada-yada-operator/1876) too.  :-)
+&gt; 
+&gt;     &gt;&gt; parse &quot;We all remember &lt;&lt;this problem&gt;&gt; (?) don&#39;t we?&quot; [
+&gt;           ...  rose: between &quot;&lt;&lt;&quot; &quot;&gt;&gt;&quot; space &quot;(?)&quot; ...
+&gt;        ]
+&gt;
+&gt;     &gt;&gt; rose
+&gt;     == &quot;this problem&quot;
+
+**@rgchris and I are of the opinion that COLLECT is nigh-useless without backtracking.**  e.g. in Red:
+
+    red&gt;&gt; parse &quot;ac&quot; [collect [
+        &quot;a&quot; keep (&lt;a1&gt;) &quot;b&quot; keep (&lt;b&gt;)
+        | &quot;a&quot; keep (&lt;a2&gt;) &quot;c&quot; keep (&lt;c&gt;)
+    ]]
+    == [&lt;a1&gt; &lt;a2&gt; &lt;c&gt;]  ; Bah.
+
+[So a careful generic design has been made for that](https://rebol.metaeducation.com/t/getting-hooks-into-events-during-parse/1640/8?u=hostilefork), which is extremely clever (if I do say so).  COLLECT is only one of the clients, but an obvious one:
+
+    &gt;&gt; parse &quot;ac&quot; [collect [
+        &quot;a&quot; keep (&lt;a1&gt;) &quot;b&quot; keep (&lt;b&gt;)
+        | &quot;a&quot; keep (&lt;a2&gt;) &quot;c&quot; keep (&lt;c&gt;)
+    ]]
+    == [&lt;a2&gt; &lt;c&gt;]
+     
+## There&#39;s Much, Much More...
+
+...and you are invited to help throw in your ideas, as well as document and test this huge new design.  It&#39;s slow for now, while features like stream parsing continue to be prototyped.  But when it&#39;s ready, combinators will be native and optimizations pursued!</description>
+    
+    <lastBuildDate>Sun, 07 Mar 2021 06:03:29 +0000</lastBuildDate>
+    <category>Parsing</category>
+    <atom:link href="https://rebol.metaeducation.com/t/introducing-the-hackable-usermode-parse-uparse/1529.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Introducing The Hackable Usermode PARSE (&quot;UPARSE&quot;)</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>2 posts were split to a new topic: <a href="https://rebol.metaeducation.com/t/what-were-apropos-and-parsing-at-about/1820">What Were APROPOS and PARSING-AT About?</a></p>
+          <p><a href="https://rebol.metaeducation.com/t/introducing-the-hackable-usermode-parse-uparse/1529/8">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/introducing-the-hackable-usermode-parse-uparse/1529/8</link>
+        <pubDate>Sun, 15 May 2022 19:50:17 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1529-8</guid>
+        <source url="https://rebol.metaeducation.com/t/introducing-the-hackable-usermode-parse-uparse/1529.rss">Introducing The Hackable Usermode PARSE (&quot;UPARSE&quot;)</source>
+      </item>
+      <item>
+        <title>Introducing The Hackable Usermode PARSE (&quot;UPARSE&quot;)</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="Brett" data-post="6" data-topic="1529">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/brett/48/177_2.png" class="avatar"> Brett:</div>
+<blockquote>
+<p>However, you're GATHER and EMIT are really interesting.</p>
+</blockquote>
+</aside>
+<p>I hadn't noticed until just now, but <a href="https://github.com/giesse/red-topaz-parse">topaz.red has an OBJECT keyword in it with similar behavior</a>.  However, it makes all SET-WORD!s into "emits", which seems a bit restrictive.</p>
+<aside class="quote no-group quote-modified" data-username="Brett" data-post="6" data-topic="1529">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/brett/48/177_2.png" class="avatar"> Brett:</div>
+<blockquote>
+<p>An ability to return a parse tree result is demonstrated in Rebol2 here: <a href="http://codeconscious.com/rebol-scripts/load-parse-tree.txt">http://codeconscious.com/rebol-scripts/load-parse-tree.txt</a> (also linked from comment here: <a href="https://trello.com/c/xHClxgzS/39-consider-how-to-make-rules-more-reusable#comment-55d698cd1f98037084a63184">Trello</a>)</p>
+</blockquote>
+</aside>
+<p>Interesting, though the case you give is stylized to give statically known names for all the rules.  If your rules are not provided as a table in this way, then you have nameless rules...and now dynamically generated rules (e.g. by <strong>:(...)</strong>).</p>
+<p>Even for the rules with names, there's currently no hook on rules-fetched-through-WORD!.  This is because that fetching process doesn't use a combinator...it's the process by which combinators are themselves selected.</p>
+<p>Rules that do SEEK or mutations would raise questions in providing this tree product.</p>
+<p>It may be that the form you've done it in is the right one...as a feature that demands some amount of stylization of the input rules, and if you are willing to limit yourself to that style then you can get a meaningful output from it.  But since it requires that stylization, it may not make sense to be a feature in the stock parse...but be built above it as you have done.</p>
+<p>We'd certainly want to do better with TRACE features.  The /VERBOSE option in UPARSE is currently quite pathetic.</p>
+<pre><code>&gt;&gt; uparse/verbose "aaabbb" [some "a", some "b"]
+RULE: [some "a", "some b"]
+INPUT: "aaabbb"
+---
+RULE: [, "some b"]
+INPUT: "bbb"
+---
+RULE: ["some b"]
+INPUT: "bbb"
+---
+== "aaabbb"
+</code></pre>
+<p>Maybe the generic version of your parse tree feature--that would work on any convoluted parse rules that came along--would be more like a trace log?</p>
+          <p><a href="https://rebol.metaeducation.com/t/introducing-the-hackable-usermode-parse-uparse/1529/7">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/introducing-the-hackable-usermode-parse-uparse/1529/7</link>
+        <pubDate>Wed, 03 Mar 2021 14:54:44 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1529-7</guid>
+        <source url="https://rebol.metaeducation.com/t/introducing-the-hackable-usermode-parse-uparse/1529.rss">Introducing The Hackable Usermode PARSE (&quot;UPARSE&quot;)</source>
+      </item>
+      <item>
+        <title>Introducing The Hackable Usermode PARSE (&quot;UPARSE&quot;)</title>
+        <dc:creator><![CDATA[Brett]]></dc:creator>
+        <description><![CDATA[
+            <p>An ability to return a parse tree result is demonstrated in Rebol2 here: <a href="http://codeconscious.com/rebol-scripts/load-parse-tree.txt">http://codeconscious.com/rebol-scripts/load-parse-tree.txt</a> (also linked from comment here: <a href="https://trello.com/c/xHClxgzS/39-consider-how-to-make-rules-more-reusable#comment-55d698cd1f98037084a63184" class="inline-onebox">Trello</a>)</p>
+<p>While the example shown demonstrates a grammar, I've used this structural output a lot with extraction from various text and html documents - very useful, but with much room for improvement.</p>
+<p>However, you're GATHER and EMIT are really interesting.</p>
+<p>The ability to extend parse with better context and flexibility like you're Uparse framework is something I'd wanted for a <em>very</em> long time. I'd made comments to Carl back in the day, but I lacked the language and examples to make a convincing case at the time, and as you have pointed out, changing parse was probably prohibitive for testing these ideas at the time.</p>
+          <p><a href="https://rebol.metaeducation.com/t/introducing-the-hackable-usermode-parse-uparse/1529/6">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/introducing-the-hackable-usermode-parse-uparse/1529/6</link>
+        <pubDate>Wed, 03 Mar 2021 11:16:32 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1529-6</guid>
+        <source url="https://rebol.metaeducation.com/t/introducing-the-hackable-usermode-parse-uparse/1529.rss">Introducing The Hackable Usermode PARSE (&quot;UPARSE&quot;)</source>
+      </item>
+      <item>
+        <title>Introducing The Hackable Usermode PARSE (&quot;UPARSE&quot;)</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>Glad you like it, and hopefully enough that you'd want to come back and work on it...this is the democratization of the design of PARSE, right here!</p>
+<aside class="quote no-group quote-modified" data-username="Brett" data-post="4" data-topic="1529">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/brett/48/177_2.png" class="avatar"> Brett:</div>
+<blockquote>
+<ul>
+<li>An ability to return the furthest input point matched...</li>
+</ul>
+</blockquote>
+</aside>
+<p>I took a crack at it!  See: <strong><a href="https://rebol.metaeducation.com/t/semantics-of-uparses-furthest/1868">Semantics of UPARSE's FURTHEST</a></strong></p>
+<aside class="quote no-group" data-username="Brett" data-post="4" data-topic="1529">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/brett/48/177_2.png" class="avatar"> Brett:</div>
+<blockquote>
+<p>An ability to return a parse tree result (terms matched + segments matched). This is fabulous for data extraction formed into a structured result.</p>
+</blockquote>
+</aside>
+<p>This is something where maybe hacking up a demo example would be useful.  <img src="https://rebol.metaeducation.com/images/emoji/twitter/slight_smile.png?v=14" title=":slight_smile:" class="emoji" alt=":slight_smile:" loading="lazy" width="20" height="20">  I don't really know what you would be looking for with this, but maybe you can discern by looking at the gist of uparse.reb whether it's the sort of thing that would be feasible to mock up.</p>
+<p>I added <a href="https://rebol.metaeducation.com/t/new-uparse-experiment-gather-and-emit/1531">GATHER and EMIT</a> pretty quickly, and I think they might point in the direction of filling in some of the holes in the design.</p>
+          <p><a href="https://rebol.metaeducation.com/t/introducing-the-hackable-usermode-parse-uparse/1529/5">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/introducing-the-hackable-usermode-parse-uparse/1529/5</link>
+        <pubDate>Tue, 02 Mar 2021 08:19:01 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1529-5</guid>
+        <source url="https://rebol.metaeducation.com/t/introducing-the-hackable-usermode-parse-uparse/1529.rss">Introducing The Hackable Usermode PARSE (&quot;UPARSE&quot;)</source>
+      </item>
+      <item>
+        <title>Introducing The Hackable Usermode PARSE (&quot;UPARSE&quot;)</title>
+        <dc:creator><![CDATA[Brett]]></dc:creator>
+        <description><![CDATA[
+            <p>Very nice. This looks to be an excellent direction.</p>
+<p>Things I suggest should be supported if not already:</p>
+<ol>
+<li>
+<p>An ability to return a parse tree result (terms matched + segments matched). This is fabulous for data extraction formed into a structured result.</p>
+</li>
+<li>
+<p>An ability to return the furthest input point matched and the rule that caused rollback from there on parse failure. During development of rules this generally indicates the rule that is not properly specified.</p>
+</li>
+<li>
+<p>Maybe uparse can provide some user evaluation context services passed through to the user actions, so that once parse has finished successfully, your result could be the evaluation of the parse tree whatever that means in your application, without having to code all that context tracking yourself.  I'm unsure about this, because if you have <span class="hashtag-raw">#1</span> in a decent form maybe that's all you need.  Still having access to things uparse keeps track of, like the successful branch of terms you're currently on, maybe useful.</p>
+</li>
+</ol>
+          <p><a href="https://rebol.metaeducation.com/t/introducing-the-hackable-usermode-parse-uparse/1529/4">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/introducing-the-hackable-usermode-parse-uparse/1529/4</link>
+        <pubDate>Tue, 02 Mar 2021 04:40:22 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1529-4</guid>
+        <source url="https://rebol.metaeducation.com/t/introducing-the-hackable-usermode-parse-uparse/1529.rss">Introducing The Hackable Usermode PARSE (&quot;UPARSE&quot;)</source>
+      </item>
+      <item>
+        <title>Introducing The Hackable Usermode PARSE (&quot;UPARSE&quot;)</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="BlackATTR" data-post="2" data-topic="1529">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/blackattr/48/204_2.png" class="avatar"> BlackATTR:</div>
+<blockquote>
+<p>I'm curious to see if this will tie into user-defined datatypes. This opens up doors to interesting new possibilities.</p>
+</blockquote>
+</aside>
+<p>Where I really want to focus here is on making this an <em>exemplary</em> codebase for how someone would build a dialect.</p>
+<p>So that means tackling the details of things like error delivery...and the ever-looming cloud of debugging.</p>
+<p>But also, what role binding plays.  Here I'm breaking up the dialect's behavior into a map of keywords which is supplied to the dialect engine...that maps those keywords into units that the dialect understands (combinators).  Is this concept typical?  <a href="https://rebol.metaeducation.com/t/soliciting-ideas-for-a-bitwise-dialect/1302">Is it how BITWISE should work?</a></p>
+<p>In terms of adding features, I really want to see it work with streaming.  We need some test examples, like a PORT! that just sits there generating random IP addresses...and then run a UPARSE on that which prints them out...where the amount of memory used stabilizes and does not grow without bound.</p>
+<p>So there's a ton to worry over just by making UPARSE a good example without pushing too far into the imaginary...</p>
+          <p><a href="https://rebol.metaeducation.com/t/introducing-the-hackable-usermode-parse-uparse/1529/3">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/introducing-the-hackable-usermode-parse-uparse/1529/3</link>
+        <pubDate>Tue, 02 Mar 2021 04:14:14 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1529-3</guid>
+        <source url="https://rebol.metaeducation.com/t/introducing-the-hackable-usermode-parse-uparse/1529.rss">Introducing The Hackable Usermode PARSE (&quot;UPARSE&quot;)</source>
+      </item>
+      <item>
+        <title>Introducing The Hackable Usermode PARSE (&quot;UPARSE&quot;)</title>
+        <dc:creator><![CDATA[BlackATTR]]></dc:creator>
+        <description><![CDATA[
+            <p>Wow!! This should prove incredibly useful for some kinds of dialects.</p>
+<p>A challenging aspect of dialect design can be interpreting sequences of values into valid expressions. We're not talking about large volumes of input here; this is something which benefits more from flexibility of PARSE than raw speed.</p>
+<p>I'm curious to see if this will tie into user-defined datatypes. This opens up doors to interesting new possibilities. I'm thinking custom interpreters. And maybe something like DELECT could be revisited here?</p>
+          <p><a href="https://rebol.metaeducation.com/t/introducing-the-hackable-usermode-parse-uparse/1529/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/introducing-the-hackable-usermode-parse-uparse/1529/2</link>
+        <pubDate>Sun, 28 Feb 2021 13:35:08 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1529-2</guid>
+        <source url="https://rebol.metaeducation.com/t/introducing-the-hackable-usermode-parse-uparse/1529.rss">Introducing The Hackable Usermode PARSE (&quot;UPARSE&quot;)</source>
+      </item>
+      <item>
+        <title>Introducing The Hackable Usermode PARSE (&quot;UPARSE&quot;)</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <h1><a name="p-4861-eyes-eyes-eyes-big-news-eyes-eyes-eyes-1" class="anchor" href="https://rebol.metaeducation.com#p-4861-eyes-eyes-eyes-big-news-eyes-eyes-eyes-1"></a><img src="https://rebol.metaeducation.com/images/emoji/twitter/eyes.png?v=14" title=":eyes:" class="emoji" alt=":eyes:" loading="lazy" width="20" height="20"> <img src="https://rebol.metaeducation.com/images/emoji/twitter/eyes.png?v=14" title=":eyes:" class="emoji" alt=":eyes:" loading="lazy" width="20" height="20"> <img src="https://rebol.metaeducation.com/images/emoji/twitter/eyes.png?v=14" title=":eyes:" class="emoji" alt=":eyes:" loading="lazy" width="20" height="20"> !!! BIG NEWS !!! <img src="https://rebol.metaeducation.com/images/emoji/twitter/eyes.png?v=14" title=":eyes:" class="emoji" alt=":eyes:" loading="lazy" width="20" height="20"> <img src="https://rebol.metaeducation.com/images/emoji/twitter/eyes.png?v=14" title=":eyes:" class="emoji" alt=":eyes:" loading="lazy" width="20" height="20"> <img src="https://rebol.metaeducation.com/images/emoji/twitter/eyes.png?v=14" title=":eyes:" class="emoji" alt=":eyes:" loading="lazy" width="20" height="20"></h1>
+<p>I've griped about historical PARSE's weaknesses for some time.  To name a few:</p>
+<ul>
+<li>
+<p><strong>Users can't add new keywords, or tweak existing ones.</strong>  It's a monolithic chunk of C code that you have to recompile to get any changes to.  And since Rebol2's heyday, there have arisen a competitive landscape of <em>"parser combinators"</em> which allow users to build new parse "keywords" and compose parsers out of each other.</p>
+<ul>
+<li>
+<p><a href="https://rebol.metaeducation.com/t/parse-vs-haskells-x-parsec/1321">Haskell has several to choose from I've written about</a> (Parsec, Attoparsec, Megaparsec).  These offer composability, performance, rigor, and even error messages to guide you to correcting your input where the rule failed.</p>
+</li>
+<li>
+<p>...but search the web for <em>"parser combinator [L]"</em> for any language [L].  You'll find plenty of other people who have figured out how to break down your parse into components and avoid RegEx... <a href="https://github.com/Geal/nom">"nom" for Rust</a>, <a href="https://github.com/blancas/kern">"kern" for Clojure</a></p>
+</li>
+</ul>
+</li>
+<li>
+<p><strong>Parse rules are very hard to reuse.</strong>  Because executing a rule doesn't produce a "result value", any side-effects a rule has wind up being written in some global variable.</p>
+<ul>
+<li>The finite set of keywords users are given for data capture are limited to capturing data at the level of the input series (or elements of it).</li>
+</ul>
+</li>
+<li>
+<p><strong>The R3-Alpha codebase for PARSE developed organically over a long period of time, and that shows.</strong></p>
+<ul>
+<li>
+<p>While there's lip service to the idea that you can write fluid code using delimiters only when you want to, the irregular implementation gives you errors... if you are lucky (if you're unlucky it just churns along)</p>
+<pre><code>r3-alpha&gt;&gt; parse ["aaaa"] [and any-string! into some 2 "a"]   ; no AHEAD
+ ** Script error: PARSE - invalid rule or usage of rule: into
+
+r3-alpha&gt;&gt; parse ["aaaa"] [and any-string! into [some 2 "a"]]
+== false  ; !!! WHAT? (it doesn't even know what it can't do) 
+
+r3-alpha&gt;&gt; parse ["aaaa"] [and any-string! into [some [2 "a"]]]
+== true
+</code></pre>
+</li>
+<li>
+<p>Despite being an all new codebase, Red is similarly irregular:</p>
+<pre><code>red&gt;&gt; parse ["aaaa"] [ahead any-string! into some 2 "a"]
+*** Script Error: PARSE - unexpected end of rule after: into
+
+red&gt;&gt; parse ["aaaa"] [ahead any-string! into [some 2 "a"]]  ; needs block
+== true
+</code></pre>
+</li>
+</ul>
+</li>
+</ul>
+<p><strong>The best way to start drafting a new-and-much-needed architecture for PARSE is to write it first as usermode code.</strong>  It will be slow as molasses...but if the design is done right, then it could be gradually optimized.  Those optimizations are more likely to give cross-cutting advantages to other code in the system.</p>
+<p>Not only that: if the architecture is good enough, it should be able to create backwards-compatible variations... like PARSE2 for Rebol2 PARSE semantics, PARSE3 for R3-Alpha, REDPARSE for Red...</p>
+<h2><a name="p-4861-meet-the-new-parse-codenamed-uparse-2" class="anchor" href="https://rebol.metaeducation.com#p-4861-meet-the-new-parse-codenamed-uparse-2"></a>Meet the new PARSE! (codenamed UPARSE)</h2>
+<p>I actually did <a href="https://github.com/metaeducation/ren-c/commit/b7870bc103f8a2ca26950fc5d4a0c01d94500478">write a protozoan <em>draft</em> implementation</a> in a day-ish.  What better way to convince people that they can make powerful dialects than to show them that they--too--could have cooked up PARSE in a day?</p>
+<p>But let me be completely clear: the ability to even approach writing such a thing is <em>fundamentally</em> built on Ren-C core mechanics.  Most notably FRAME! interchangeability with functions and partial specialization.  You wouldn't want to try something like this in Rebol2, R3-Alpha, or Red.</p>
+<p>Since the original prototype, it has been built up and become a pretty thorough effort!</p>
+<p><strong><a href="https://github.com/metaeducation/ren-c/blob/master/src/mezz/uparse.r">%uparse.r</a></strong></p>
+<p>(UPDATE: While once actually called <strong>uparse</strong>, the function has now taken the name <strong>parse</strong>...with the old parse codebase running as <strong>parse3</strong>.  For performance reasons, some code still uses parse3.)</p>
+<h2><a name="p-4861-killer-feature-it-can-synthesize-any-value-3" class="anchor" href="https://rebol.metaeducation.com#p-4861-killer-feature-it-can-synthesize-any-value-3"></a>Killer Feature: It Can Synthesize ANY-VALUE!</h2>
+<p>UPARSE isn't limited to return results of true and false.  It actually <a href="https://rebol.metaeducation.com/t/try-parse-parse-except-fail-on-mismatch/1924">raises an error</a> if it cannot process its rules completely:</p>
+<pre><code>&gt;&gt; parse "abd" ["a" "b" "c"]
+** Error: BLOCK! combinator at tail or not thru
+</code></pre>
+<p>This opens up all normal values as fair game for return!  Every "combinator function" (historically what you might have thought of as "keywords") has the option of returning a result, and the BLOCK! combinator that succeeds will return its last result.</p>
+<p>Literal matches return the rule itself:</p>
+<pre><code>&gt;&gt; parse "abc" ["a" "b" "c"]
+== "c"
+</code></pre>
+<p>A GROUP! is a combinator that always succeeds, and returns its result:</p>
+<pre><code>&gt;&gt; parse "abc" ["a" "b" "c" (1000 + 20)]
+== 1020
+</code></pre>
+<p>When you <a href="https://rebol.metaeducation.com/t/changing-set-word-and-get-word-in-parse/1139">use a SET-WORD! in a rule</a>, what you're actually capturing is the result of the rule on the right.</p>
+<pre><code>&gt;&gt; parse "aaab" [stuff: collect [some keep "a"], "b"]  ; commas optional, but cool!
+== "b"
+
+&gt;&gt; stuff
+== ["a" "a" "a"]
+</code></pre>
+<p><strong>The sky is the limit with this approach.</strong>  When you consider that things like COLLECT are not "built-in" but the sort of combinator you can create after-the-fact, the true power starts to hit you.  Here's GATHER, which you can use with EMIT to make objects:</p>
+<pre><code>&gt;&gt; parse [x 10 y 20] [gather [
+       emit reaction: (join "WOW" "!!!")
+       some [name: word!, emit (name): integer!]
+   ]]
+== make object! [
+    reaction: "WOW!!!"
+    x: 10
+    y: 20
+]
+</code></pre>
+<p><img src="https://rebol.metaeducation.com/images/emoji/twitter/man_dancing.png?v=14" title=":man_dancing:" class="emoji only-emoji" alt=":man_dancing:" loading="lazy" width="20" height="20"></p>
+<h2><a name="p-4861-customizable-and-easier-to-understand-than-youd-think-4" class="anchor" href="https://rebol.metaeducation.com#p-4861-customizable-and-easier-to-understand-than-youd-think-4"></a>Customizable, and Easier To Understand Than You'd Think!</h2>
+<p>UPARSE can take an optional MAP! of "combinators".  This is a map from keywords to stylized "parser functions".  These functions take the input and other parsers as parameters...then calculates how much of the input was consumed and returns it.</p>
+<p>An easy one to look at would be the TALLY combinator, which just counts up the number of times a rule matches.  This post isn't intended to be a complete guide to the mechanics, but just to show you the scale of what it takes to add a feature:</p>
+<pre><code>tally: combinator [
+    {Iterate a rule and count the number of times it matches}
+    return: "Number of matches (can be 0)"
+        [&lt;opt&gt; integer!]
+    parser [action!]
+    &lt;local&gt; count pos
+][
+    append state.loops binding of 'return  ; registration needed so BREAK works
+
+    count: 0
+    cycle [
+        [^ pos]: parser input except e -&gt; [  ; definitional error if parse mismatch
+            take/last state.loops  ; unregister from the BREAK-able stack
+            remainder: input
+            return count
+        ]
+        count: count + 1
+        input: pos
+    ]
+    fail ~unreachable~
+]
+</code></pre>
+<p>And voila!</p>
+<pre><code>&gt;&gt; parse "abbcccabb" [tally ["a" repeat 2 "b" | repeat 3 "c"]]
+== 3
+</code></pre>
+<p>But what is this PARSER function parameter to TALLY?  It's basically a black box.  The UPARSE engine itself figures out what that parameter should be, just like DO usually figures out expressions.  So a PARSER is what you get when a COMBINATOR <em>has had its own dependent parser parameters specialized out</em>, to then only require the input.</p>
+<p>(If that sounds brain-bending, the only part you need to know is that TALLY is able to get its work done without knowing anything about how to interpret <code>["a" repeat 2 "b" | repeat 3 "c"]</code>.  UPARSE does the behind-the-scenes work of "fusing" the BLOCK! combinator, TEXT! combinators, and INTEGER! combinator...and passes the implied parser representing that operation.)</p>
+<h2><a name="p-4861-composable-architecture-avoids-redbols-ad-hoc-pitfalls-5" class="anchor" href="https://rebol.metaeducation.com#p-4861-composable-architecture-avoids-redbols-ad-hoc-pitfalls-5"></a>Composable Architecture Avoids Redbol's Ad-Hoc Pitfalls</h2>
+<p>Something impressive about UPARSE is that it uses partial specialization via FRAME! to build coherent rules without blocks.  It "just works".</p>
+<p>In the introduction I pointed out Red and R3-Alpha stumbling over INTO usage.  UPARSE's SUBPARSE (like Topaz'z INTO) is arity-2 so it has an implicit AHEAD as the first parameter, but here we can see it working in the free-form fashion:</p>
+<pre><code>&gt;&gt; parse ["aaaa"] [subparse any-string! some repeat 2 "a"]
+== "a"  ; Success! (e.g. not an error!)
+</code></pre>
+<h2><a name="p-4861-datatypes-have-combinators-too-6" class="anchor" href="https://rebol.metaeducation.com#p-4861-datatypes-have-combinators-too-6"></a>DATATYPEs Have Combinators Too!</h2>
+<p><strong>The implementation is so modular that every <em>datatype</em> is implemented through its own combinator.</strong>  And you can override them when you run UPARSE.</p>
+<p>Let's try doing something totally weird <em>just to GROUP!</em>, leaving everything else the same</p>
+<pre><code>weird-combinators: copy default-combinators  ; start with the default list
+
+weird-combinators.(group!): combinator [
+    {Weird group combinator: test if equal to next input element}
+    return: "Return a block saying whether it matched or not"
+        [block!]
+    value [group!]
+    &lt;local&gt; result block
+][
+    result: do value
+    block: if (first input) = :result [
+        compose [match: (value) = (first input)]
+    ] else [
+        compose [mismatch: (value) != (first input)]
+    ] 
+    remainder: next input  ; skip input either way
+    return block 
+]
+
+&gt;&gt; weird-parse: specialize :uparse [combinators: weird-combinators]
+
+&gt;&gt; weird-parse [10 20 30] [collect [keep (2 + 8) integer! keep (5 + 15)]]
+== [match: (2 + 8) = 10 mismatch: (5 + 15) != 30]
+</code></pre>
+<p><strong>Whoa...</strong> that's wild.  <img src="https://rebol.metaeducation.com/images/emoji/twitter/exploding_head.png?v=14" title=":exploding_head:" class="emoji" alt=":exploding_head:" loading="lazy" width="20" height="20">  I thought I'd demonstrate something radical just to get people thinking, but more obviously useful variants would do things like <a href="https://rebol.metaeducation.com/t/getting-hooks-into-events-during-parse/1640/5">hook the WORD! combinator</a> to get a running log of rules that trigger.</p>
+<p>Most interesting is that BLOCK! itself is a combinator.  So you can hijack the parse at its most fundamental level.  <em>You could dynamically pre-process the block and pass it to the default combinator</em>.</p>
+<p>And in fact, this is already in use to create PARSE2, a Rebol2-compatible PARSE.</p>
+<h2><a name="p-4861-wild-new-combinators-are-finessing-old-problems-7" class="anchor" href="https://rebol.metaeducation.com#p-4861-wild-new-combinators-are-finessing-old-problems-7"></a>Wild New Combinators Are Finessing Old Problems</h2>
+<p>UPARSE is providing a playground for attacking classic annoyances.</p>
+<pre><code>r3-alpha&gt;&gt; parse "We all remember &lt;&lt;this problem&gt;&gt; (?) don't we?" [
+     thru "&lt;&lt;" copy thorn to "&gt;&gt;" skip skip  ; ugh. [to "&gt;&gt;" "&gt;&gt;"] is also ugh
+     space "(?)" to end
+]
+== true
+
+r3-alpha&gt;&gt; thorn
+== "this problem"
+</code></pre>
+<p>With value-synthesis, problems like this can be cast in terms of combinators inspired by other languages (and beyond).  Here's BETWEEN, a 2-argument rule...which I'll put in brackets even though I don't need to:</p>
+<pre><code>&gt;&gt; parse "We all remember &lt;&lt;this problem&gt;&gt; (?) don't we?" [
+     thru "&lt;&lt;" rose: [between &lt;here&gt; "&gt;&gt;"]
+     space "(?)" to &lt;end&gt;
+ ]
+
+&gt;&gt; rose
+== "this problem"
+</code></pre>
+<blockquote>
+<p>You could have just written that as THRU BETWEEN, but I wanted to show off how it solves the problem from the point of the old understandings.  Now I'll show off <a href="https://rebol.metaeducation.com/t/the-yada-yada-yada-operator/1876">the ellipsis combinator</a> too.  <img src="https://rebol.metaeducation.com/images/emoji/twitter/slight_smile.png?v=14" title=":slight_smile:" class="emoji" alt=":slight_smile:" loading="lazy" width="20" height="20"></p>
+<pre><code>&gt;&gt; parse "We all remember &lt;&lt;this problem&gt;&gt; (?) don't we?" [
+      ...  rose: between "&lt;&lt;" "&gt;&gt;" space "(?)" ...
+   ]
+
+&gt;&gt; rose
+== "this problem"
+</code></pre>
+</blockquote>
+<p><strong><a class="mention" href="https://rebol.metaeducation.com/u/rgchris">@rgchris</a> and I are of the opinion that COLLECT is nigh-useless without backtracking.</strong>  e.g. in Red:</p>
+<pre><code>red&gt;&gt; parse "ac" [collect [
+    "a" keep (&lt;a1&gt;) "b" keep (&lt;b&gt;)
+    | "a" keep (&lt;a2&gt;) "c" keep (&lt;c&gt;)
+]]
+== [&lt;a1&gt; &lt;a2&gt; &lt;c&gt;]  ; Bah.
+</code></pre>
+<p><a href="https://rebol.metaeducation.com/t/getting-hooks-into-events-during-parse/1640/8">So a careful generic design has been made for that</a>, which is extremely clever (if I do say so).  COLLECT is only one of the clients, but an obvious one:</p>
+<pre><code>&gt;&gt; parse "ac" [collect [
+    "a" keep (&lt;a1&gt;) "b" keep (&lt;b&gt;)
+    | "a" keep (&lt;a2&gt;) "c" keep (&lt;c&gt;)
+]]
+== [&lt;a2&gt; &lt;c&gt;]
+</code></pre>
+<h2><a name="p-4861-theres-much-much-more-8" class="anchor" href="https://rebol.metaeducation.com#p-4861-theres-much-much-more-8"></a>There's Much, Much More...</h2>
+<p>...and you are invited to help throw in your ideas, as well as document and test this huge new design.  It's slow for now, while features like stream parsing continue to be prototyped.  But when it's ready, combinators will be native and optimizations pursued!</p>
+          <p><a href="https://rebol.metaeducation.com/t/introducing-the-hackable-usermode-parse-uparse/1529/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/introducing-the-hackable-usermode-parse-uparse/1529/1</link>
+        <pubDate>Sun, 28 Feb 2021 11:43:12 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1529-1</guid>
+        <source url="https://rebol.metaeducation.com/t/introducing-the-hackable-usermode-parse-uparse/1529.rss">Introducing The Hackable Usermode PARSE (&quot;UPARSE&quot;)</source>
+      </item>
+  </channel>
+</rss>

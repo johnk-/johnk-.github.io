@@ -1,0 +1,469 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Simplifying Refinement Promotion</title>
+    <link>https://rebol.metaeducation.com/t/simplifying-refinement-promotion/2338</link>
+    <description>There are two modes of partial specialization which Ren-C has supported.
+
+One form would be like if APPEND takes something like :DUP and fixes it to a value:
+
+    &gt;&gt; append2: specialize append/ [dup: 2]
+
+    &gt;&gt; append2 [a b c] &lt;d&gt;
+    == [a b c &lt;d&gt; &lt;d&gt;]
+
+Then there&#39;s a trickier kind of specialization, which is to ask for the parameter but not specify it... thus just increasing the arity:
+
+    &gt;&gt; appenddup: append:dup/
+
+    &gt;&gt; appenddup [a b c] &lt;d&gt; 4
+    == [a b c &lt;d&gt; &lt;d&gt; &lt;d&gt; &lt;d&gt;]
+
+The second form is pretty unusual in the language world.  There doesn&#39;t seem to be much prior art in &quot;the conversion of optional parameters to required parameters&quot; (at least I don&#39;t know any, and the AIs I asked don&#39;t know any).
+
+Since it&#39;s pretty different from what what people think of as partial specialization, let&#39;s call it **&quot;refinement promotion&quot;**.
+
+## Refinement Promotion Is *Tricky*
+
+Something that has been non-negotiable in the design is the straightforward array of parameters and locals that specify a function interface.
+
+Refinements are defined in some order in that array.  But you are not required to use them in that order.
+
+So consider a definition like:
+
+     /foo: func [a [integer!] :b [integer!] :c [integer!]] [...]
+
+Someone might do refinement promotion of this as **`foo:c:b/`** - this makes it seem to the caller a function originally written with spec:
+
+     [a [integer!] c [integer!] b [integer!]]
+
+The techniques so far have tried to mimic the way that refinements work.  So **`get $foo:c:b`** would produce a function that was accompanied by a **`[c b]`** array, that would get pushed when running the promoted function.  The elements in the array would not just have the words, but those words would have binding information to say what index those words were found at in the parameter array.
+
+But since the underlying array is left the same, this means every time you want to know something like &quot;what&#39;s the first unspecialized normal argument&quot; you have to mimic the refinement gathering process.  It convoluted the process quite a lot, and really went against the idea of the implementation being &quot;simple&quot;.
+
+## Q: Is This Really Required To Support?  (A: Yes)
+
+This may not seem like a super-common need.  But if you&#39;re implementing a dialect that wants to support calling functions with refinements, it&#39;s pretty important.
+
+Let&#39;s say you&#39;re implementing something like [the feature in UPARSE that lets you call functions](https://rebol.metaeducation.com/t/if-action-combinators-dont-impress-what-will/1608):
+
+    &gt;&gt; data: copy &quot;&quot;
+
+    &gt;&gt; parse [&quot;a&quot; &quot;b&quot;] [some [/append:dup (data) text! (2)]]
+
+    &gt;&gt; data
+    == &quot;aabb&quot;
+
+Basically, if **`(get $/append:dup)`** can come back with a function that you can query for its parameters and get answers just like it was any other function, then support for refinements comes basically for free.
+
+## Should The VarList Just Be Rewritten?
+
+If you look at what a modern SPECIALIZE followed by AUGMENT can do, they can hide parameters...and then add back parameters with the same name.  Which parameters are visible depend on the &quot;phase&quot; of the frame.
+
+So why couldn&#39;t refinement promotion be done just by making a new function interface that removes the argument as a refinement, and adds it back as a regular argument... then has a dispatch phase that moves the argument data to its old position for the subsequent phases?
+
+It&#39;s not particularly &quot;cheap&quot; to do that, space-wise.  You&#39;d need a new VarList* and a new Phase*, and the Phase would have to remember the new and old positions to do the rewrite.  But it would make parameter enumeration blunt and simple, because you&#39;d really just be enumerating the parameters in order.
+
+There&#39;d be some cases where the position of the refinement would allow it to just be naturally rewritten to be a regular argument, and that could be optimized for.
+
+## What About When You Have Lots of `&lt;local&gt;`?
+
+This is kind of the dark side of the simple FRAME! model, which is that if you use it to create a lot of local variables, then operations like SPECIALIZE and AUGMENT which do VarList manipulation have to make copies of everything for the new VarList...including a bunch of locals that aren&#39;t changing at all in each new form.
+
+    /foo: func [x [text!] y [tag!] &lt;local&gt; a b c d e f g h i j k l m n o p] [
+        ... 19 frame cells (includes RETURN) ...
+    ]
+
+    /bar: augment foo/ [z [integer!]]  ; z is last item in new 20 item frame
+
+Refinement promotion would become another one of these situations that would do seemingly unnecessary duplication.
+
+It would be possible in cases like this to create smaller frames and then proxy the results into larger ones, essentially simulating what a user might do to manually call FOO from a new function BAR which had a frame with 3 elements.
+
+    /bar: lambda [x [text!] y [tag!] z [integer!]] [
+        foo x y  ; imagine doing this, but with faster internal mechanics
+    ]
+
+Some calculation could be done where the size of the frame justified it.  I have a feeling that the frame would have to be reasonably large before a technique like this would be beneficial.
+
+## What About [Refinements At Head](https://rebol.metaeducation.com/t/refinement-arguments-at-head-of-args-list-not-tail/2331)?
+
+Well, in that case, you would *have* to build a new VarList* that extracted the arguments, and then proxy them into position for the new interface.
+
+At least one wouldn&#39;t be worried about the &quot;bloated copies of locals&quot; situation.
+
+## So...Use The Auxiliary Array Simulating Refinements?
+
+The code for simulating refinements when asking simple questions like *&quot;what&#39;s the first unspecialized normal arg&quot;* is unappealingly complex. :nauseated_face:
+
+Making it further unappealing is that when you have this array of refinements &quot;off to the side&quot; but still allow people to fill in slots in frames to specialize out arguments, you end up needing to have &quot;reconciliation&quot;...because those frame slots that are referenced by this out-of-band array are no longer part of the refinement promotion.
+
+    &gt;&gt; f: make frame! append:dup:part/  ; has auxiliary [dup part]
+
+    &gt;&gt; f.dup: 3  ; what cleans up [dup part] to just [part] ?
+
+I&#39;ve talked about not knowing about what &quot;moment&quot; to do these kinds of fixes, and I&#39;m increasingly looking for ways to avoid there being any such moment.  If the physical experience of the frame was that DUP and PART were ordinary parameters and not refinements, then it &quot;just works&quot;.
+
+## The &quot;Dumb&quot; Mechanical Answer Is Likely Best
+
+I sometimes forget just how much I take for granted in Ren-C, regarding the ability to compose functions together.
+
+The &quot;inefficient&quot; idea of making a new parameter list and then proxying the arguments into position would be more efficient than having to create and evaluate an interpreted function that had to manually copy the parameters.
+
+There&#39;s a huge tax created by having to compose an off-to-the-side parameter reordering list in with the frame variables, and that tax is paid by *any code* that wants to interpret the list.  It&#39;s just too big a tax to pay.
+
+It pains me a bit to delete it, because it was hard to write and seemed clever at the time.  But techniques have advanced...and while the auxiliary list may have seemed somewhat optimal for storage, it&#39;s no longer the right choice.</description>
+    
+    <lastBuildDate>Wed, 15 Jan 2025 16:26:57 +0000</lastBuildDate>
+    <category>Functions</category>
+    <atom:link href="https://rebol.metaeducation.com/t/simplifying-refinement-promotion/2338.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Simplifying Refinement Promotion</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="3" data-topic="2338">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>I'm coming to think that the operator is actually:</p>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">&gt;&gt; XXX append/
+== #[frame! [
+    series: ~null~
+    value: ~null~
+    part: ~null~
+    dup: ~null~
+    line: ~null~
+]]
+</code></pre>
+</blockquote>
+</aside>
+<p>Turning my head sideways and looking at the range of uses, I'm wondering if there really is just one MAKE operation for FRAME!, it is just sensitive to whether an argument is mandatory or optional.</p>
+<pre><code>&gt;&gt; make frame! append/
+== #[frame! [
+    series: ~
+    value: ~
+    part: ~null~
+    dup: ~null~
+    line: ~null~
+]]
+
+&gt;&gt; make frame! append:dup/
+== #[frame! [
+    series: ~
+    value: ~
+    dup: ~
+    part: ~null~
+    line: ~null~
+]]
+</code></pre>
+<p>Hence you can still glean from the frame whether a refinement was used or not.  But you're not prohibited from overriding it if you like.</p>
+<p>I'm having a little bit of deja-vu about this, like maybe this is a design point that was passed through at some time.  But I don't actually know if it has been.  This ties in with <a href="https://rebol.metaeducation.com/t/understanding-frame-lensing/1645">"frame lensing"</a> in a sense that if a lens gets applied those refinements will actually vanish... but since COPY FRAME! and MAKE FRAME! have diverged in terms of their intents, you wouldn't be using MAKE FRAME! if your intent is to create a derived function.</p>
+          <p><a href="https://rebol.metaeducation.com/t/simplifying-refinement-promotion/2338/4">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/simplifying-refinement-promotion/2338/4</link>
+        <pubDate>Wed, 15 Jan 2025 16:26:57 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2338-4</guid>
+        <source url="https://rebol.metaeducation.com/t/simplifying-refinement-promotion/2338.rss">Simplifying Refinement Promotion</source>
+      </item>
+      <item>
+        <title>Simplifying Refinement Promotion</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="2" data-topic="2338">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>This has been a bit of an eye-opener. <img src="https://rebol.metaeducation.com/images/emoji/twitter/eyes.png?v=14" title=":eyes:" class="emoji" alt=":eyes:" loading="lazy" width="20" height="20"></p>
+</blockquote>
+</aside>
+<p>So I'm thinking about the guts of the system, for things like:</p>
+<pre><code> &gt;&gt; if (try second ["a" "b" "c"]) (print/)
+ b
+</code></pre>
+<p>What happens in the guts of IF when you use an action as a branch, is that it wants to simulate a call with one argument... but not raise an error if it's arity-0.</p>
+<p>Let's imagine instead of PRINT you had something with a refinement, followed by a normal argument:</p>
+<pre><code>demo: func [:refine [integer!] arg [text!]] [probe arg, probe refine]
+</code></pre>
+<p>So we'd expect this behavior:</p>
+<pre><code>&gt;&gt; if (try second ["a" "b" "c"]) (demo/)
+"b"
+~null~  ; anti
+</code></pre>
+<p>Okay, but... <strong>when did the narrowing happen?</strong></p>
+<p>It didn't happen when you said <strong><code>demo/</code></strong>.  If you use terminal slash to fetch an antiform frame, the recipient expects all of it.</p>
+<p>There's some moment in the branch processing which said "I'm ready to invoke, make me a narrowed frame".</p>
+<p>And the frame it got needed to look like:</p>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">#[frame! 
+    arg: ~
+]]
+</code></pre>
+<p>That frame is what's examined and filled by the branch processing.  If instead you had passed <strong>demo:refine/</strong> it would look like:</p>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">#[frame! 
+    arg: ~
+    refine: ~
+]]
+</code></pre>
+<p>Assuming refine is not "endable" ("unspecifyable"), then filling the first argument but not the second would result in an error when you tried to invoke it.</p>
+<h2><a name="p-8011-so-get-does-not-narrow-1" class="anchor" href="https://rebol.metaeducation.com#p-8011-so-get-does-not-narrow-1"></a>So "GET" Does Not Narrow</h2>
+<p>Let's say I were to write <strong><code>append:line/</code></strong> and pass that somewhere.</p>
+<p>That function has :PART and :DUP still available.</p>
+<p>So you've "made" a frame from a CHAIN!.  But you didn't make a <em>narrowed</em> frame, and you didn't replace the PARAMETER!s with TRASH.</p>
+<p>This is the classic sense of "GET".  Hence there's a difference between:</p>
+<ul>
+<li>
+<p><strong>get $foo:bar</strong> (a.k.a. <strong>foo:bar/</strong>)</p>
+</li>
+<li>
+<p><strong>make frame! foo:bar/</strong> (a.k.a. <strong>make frame! get $foo:bar</strong>)</p>
+</li>
+</ul>
+<p>The former will promote BAR to an ordinary argument, but leave all the other optional parameters alone.</p>
+<p>The latter will promote BAR to an ordinary argument, but null out all the other optional parameters as if they'd been specialized away.</p>
+<h2><a name="p-8011-perhaps-not-profound-but-2" class="anchor" href="https://rebol.metaeducation.com#p-8011-perhaps-not-profound-but-2"></a>Perhaps Not Profound, But...</h2>
+<p>This explains a bit about how it is that a function like IF is able to tell what the first unspecialized argument is.</p>
+<p>The moment it "made a frame", any optional arguments were nulled out.</p>
+<aside class="quote no-group" data-username="hostilefork" data-post="2" data-topic="2338">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>So... uh, name that operator:</p>
+<pre><code>&gt;&gt; XXX append/
+== #[frame! [
+    series: ~
+    value: ~
+    part: ~
+    dup: ~
+    line: ~
+]]
+</code></pre>
+</blockquote>
+</aside>
+<p>I'm coming to think that the operator is actually:</p>
+<pre><code>&gt;&gt; XXX append/
+== #[frame! [
+    series: ~null~
+    value: ~null~
+    part: ~null~
+    dup: ~null~
+    line: ~null~
+]]
+</code></pre>
+<p>If I'm intuiting things correctly, there is no moment at the system in which frames are manufactured with trash (antiform ~) in refinement slots, unless those slots are the result of narrowing.</p>
+<p><strong>Hence the typechecking concept of defaulting trash for refinements to null is unnecessary/incorrect.</strong></p>
+<p>Natural consequence is:</p>
+<pre><code>&gt;&gt; frame: XXX either/
+== #[frame! [
+    condition: ~null~
+    okay-branch: ~null~
+    null-branch: ~null~
+]]
+
+&gt;&gt; frame.okay-branch [print "truthy"]
+&gt;&gt; frame.null-branch [print "falsey"]
+
+&gt;&gt; eval frame
+falsey
+</code></pre>
+<p>This seems a bit unfortunate when we could have caught the failure to assign the condition, but, I think it's the only reasonable answer.</p>
+<p>I guess the next question is if more functions should disallow null.  Should INTEGER? accept null, or should you have to say <strong><code>(integer? maybe null)</code></strong> so you're actually testing VOID?  Starting to look that way, isn't it...</p>
+          <p><a href="https://rebol.metaeducation.com/t/simplifying-refinement-promotion/2338/3">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/simplifying-refinement-promotion/2338/3</link>
+        <pubDate>Tue, 14 Jan 2025 01:30:33 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2338-3</guid>
+        <source url="https://rebol.metaeducation.com/t/simplifying-refinement-promotion/2338.rss">Simplifying Refinement Promotion</source>
+      </item>
+      <item>
+        <title>Simplifying Refinement Promotion</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <h2><a name="p-8008-there-may-be-more-than-one-kind-of-promotion-1" class="anchor" href="https://rebol.metaeducation.com#p-8008-there-may-be-more-than-one-kind-of-promotion-1"></a>There May (?) Be More Than One Kind of Promotion</h2>
+<p>Currently there is some code which lets you "build a frame by example":</p>
+<pre><code>&gt;&gt; make frame! [match integer!]
+== #[frame! [
+    test: &amp;[integer!]
+    value: ~
+]]
+</code></pre>
+<p>Even though MATCH takes two arguments, the evaluator went as far as it could and then stopped, leaving extra arguments unspecified.</p>
+<p><strong>But... what about refinements that take arguments?</strong></p>
+<p>Historically what you would get with refinement promotion would move the DUP to the head of the parameter list and make it not a refinement... leaving :PART and :LINE as refinements:</p>
+<pre><code>&gt;&gt; make frame! [append:dup [a b c] [d e]]
+== #[frame! [
+    series: [a b c]
+    value: [d e]
+    dup: ~  ; now has an associated PARAMETER! that's not a refinement
+    part: ~  ; still a refinement
+    line: ~  ; still a refinement
+]]
+</code></pre>
+<p>But if you're just looking at this as a frame without comparing the parameter list, it doesn't seem different from how it would look if you hadn't specified the :DUP at all.</p>
+<p>In order to not lose information about this specific instantiation, we need what might be called <strong>"narrowing refinement promotion"</strong>:</p>
+<pre><code>&gt;&gt; make frame! [append:dup [a b c] [d e]]
+== #[frame! [
+    series: [a b c]
+    value: [d e]
+    dup: ~
+]]
+</code></pre>
+<p>This means any refinements you didn't specify are gone from the interface.  Because you're trying to encode the intent of an invocation.</p>
+<p><em>"The user has spoken: They want <strong><code>APPEND:DUP</code></strong>"</em></p>
+<h2><a name="p-8008-what-if-this-was-the-only-refinement-promotion-type-2" class="anchor" href="https://rebol.metaeducation.com#p-8008-what-if-this-was-the-only-refinement-promotion-type-2"></a>What If This Was The <em>Only</em> Refinement Promotion Type?</h2>
+<p>From the earliest days of FRAME!, I've been assuming that this is what should happen when you MAKE FRAME! on APPEND:</p>
+<pre><code>&gt;&gt; make frame! append/
+== #[frame! [
+    series: ~
+    value: ~
+    part: ~
+    dup: ~
+    line: ~
+]]
+</code></pre>
+<p>But in an parallel universe, what if I had assumed instead:</p>
+<pre><code>&gt;&gt; make frame! append/
+== #[frame! [
+    series: ~
+    value: ~
+]]
+
+&gt;&gt; make frame! append:part:dup/
+== #[frame! [
+    series: ~
+    value: ~
+    part: ~
+    dup: ~
+]]
+
+&gt;&gt; make frame! append:dup:part/
+== #[frame! [
+    series: ~
+    value: ~
+    dup: ~
+    part: ~
+]]
+</code></pre>
+<h2><a name="p-8008-the-latter-is-the-only-use-for-refinement-promotion-so-far-3" class="anchor" href="https://rebol.metaeducation.com#p-8008-the-latter-is-the-only-use-for-refinement-promotion-so-far-3"></a>The Latter Is The Only Use for Refinement Promotion (So Far)</h2>
+<p>e.g. I've never <em>actually</em> wanted to make a refinement that takes an argument become non-optional, unless the intent was specifically to model an invocation (that wouldn't be using any other optional parameters).</p>
+<p>I do know I still want to be able to get a copy of a frame I can fill in all the fields as I wish.  But if I'm doing that, I'm not passing a refinement chain.  I either fix parameters completely...or not at all.</p>
+<p>Anyway, MAKE FRAME! should be consistent in terms of how it answers.  If it's narrowing when given a variadic example (which it must be), seems it should be narrowing when given a refinement chain.</p>
+<p>MAKE can legally perform evaluations:</p>
+<pre><code>&gt;&gt; make frame! [append reverse [a b c]]
+== #[frame! [
+    series: [c b a]  ; had to evaluate to get that
+    value: ~
+]]
+
+&gt;&gt; make frame! append/
+== #[frame! [  ; should be consistently narrowing
+    series: ~
+    value: ~
+]]
+</code></pre>
+<p>COPY FRAME! doesn't set PARAMETER! fields to <code>~</code> antiforms... and it shouldn't.  And TO FRAME! of a FRAME! has to be a synonym for COPY.</p>
+<p>So... uh, name that operator:</p>
+<pre><code>&gt;&gt; XXX append/
+== #[frame! [
+    series: ~
+    value: ~
+    part: ~
+    dup: ~
+    line: ~
+]]
+</code></pre>
+<p>This has been a bit of an eye-opener.  <img src="https://rebol.metaeducation.com/images/emoji/twitter/eyes.png?v=14" title=":eyes:" class="emoji" alt=":eyes:" loading="lazy" width="20" height="20">  I'm going to have to think about it.</p>
+          <p><a href="https://rebol.metaeducation.com/t/simplifying-refinement-promotion/2338/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/simplifying-refinement-promotion/2338/2</link>
+        <pubDate>Mon, 13 Jan 2025 20:59:22 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2338-2</guid>
+        <source url="https://rebol.metaeducation.com/t/simplifying-refinement-promotion/2338.rss">Simplifying Refinement Promotion</source>
+      </item>
+      <item>
+        <title>Simplifying Refinement Promotion</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>There are two modes of partial specialization which Ren-C has supported.</p>
+<p>One form would be like if APPEND takes something like :DUP and fixes it to a value:</p>
+<pre><code>&gt;&gt; append2: specialize append/ [dup: 2]
+
+&gt;&gt; append2 [a b c] &lt;d&gt;
+== [a b c &lt;d&gt; &lt;d&gt;]
+</code></pre>
+<p>Then there's a trickier kind of specialization, which is to ask for the parameter but not specify it... thus just increasing the arity:</p>
+<pre><code>&gt;&gt; appenddup: append:dup/
+
+&gt;&gt; appenddup [a b c] &lt;d&gt; 4
+== [a b c &lt;d&gt; &lt;d&gt; &lt;d&gt; &lt;d&gt;]
+</code></pre>
+<p>The second form is pretty unusual in the language world.  There doesn't seem to be much prior art in "the conversion of optional parameters to required parameters" (at least I don't know any, and the AIs I asked don't know any).</p>
+<p>Since it's pretty different from what what people think of as partial specialization, let's call it <strong>"refinement promotion"</strong>.</p>
+<h2><a name="p-7935-refinement-promotion-is-tricky-1" class="anchor" href="https://rebol.metaeducation.com#p-7935-refinement-promotion-is-tricky-1"></a>Refinement Promotion Is <em>Tricky</em></h2>
+<p>Something that has been non-negotiable in the design is the straightforward array of parameters and locals that specify a function interface.</p>
+<p>Refinements are defined in some order in that array.  But you are not required to use them in that order.</p>
+<p>So consider a definition like:</p>
+<pre><code> /foo: func [a [integer!] :b [integer!] :c [integer!]] [...]
+</code></pre>
+<p>Someone might do refinement promotion of this as <strong><code>foo:c:b/</code></strong> - this makes it seem to the caller a function originally written with spec:</p>
+<pre><code> [a [integer!] c [integer!] b [integer!]]
+</code></pre>
+<p>The techniques so far have tried to mimic the way that refinements work.  So <strong><code>get $foo:c:b</code></strong> would produce a function that was accompanied by a <strong><code>[c b]</code></strong> array, that would get pushed when running the promoted function.  The elements in the array would not just have the words, but those words would have binding information to say what index those words were found at in the parameter array.</p>
+<p>But since the underlying array is left the same, this means every time you want to know something like "what's the first unspecialized normal argument" you have to mimic the refinement gathering process.  It convoluted the process quite a lot, and really went against the idea of the implementation being "simple".</p>
+<h2><a name="p-7935-q-is-this-really-required-to-support-a-yes-2" class="anchor" href="https://rebol.metaeducation.com#p-7935-q-is-this-really-required-to-support-a-yes-2"></a>Q: Is This Really Required To Support?  (A: Yes)</h2>
+<p>This may not seem like a super-common need.  But if you're implementing a dialect that wants to support calling functions with refinements, it's pretty important.</p>
+<p>Let's say you're implementing something like <a href="https://rebol.metaeducation.com/t/if-action-combinators-dont-impress-what-will/1608">the feature in UPARSE that lets you call functions</a>:</p>
+<pre><code>&gt;&gt; data: copy ""
+
+&gt;&gt; parse ["a" "b"] [some [/append:dup (data) text! (2)]]
+
+&gt;&gt; data
+== "aabb"
+</code></pre>
+<p>Basically, if <strong><code>(get $/append:dup)</code></strong> can come back with a function that you can query for its parameters and get answers just like it was any other function, then support for refinements comes basically for free.</p>
+<h2><a name="p-7935-should-the-varlist-just-be-rewritten-3" class="anchor" href="https://rebol.metaeducation.com#p-7935-should-the-varlist-just-be-rewritten-3"></a>Should The VarList Just Be Rewritten?</h2>
+<p>If you look at what a modern SPECIALIZE followed by AUGMENT can do, they can hide parameters...and then add back parameters with the same name.  Which parameters are visible depend on the "phase" of the frame.</p>
+<p>So why couldn't refinement promotion be done just by making a new function interface that removes the argument as a refinement, and adds it back as a regular argument... then has a dispatch phase that moves the argument data to its old position for the subsequent phases?</p>
+<p>It's not particularly "cheap" to do that, space-wise.  You'd need a new VarList* and a new Phase*, and the Phase would have to remember the new and old positions to do the rewrite.  But it would make parameter enumeration blunt and simple, because you'd really just be enumerating the parameters in order.</p>
+<p>There'd be some cases where the position of the refinement would allow it to just be naturally rewritten to be a regular argument, and that could be optimized for.</p>
+<h2><a name="p-7935-what-about-when-you-have-lots-of-local-4" class="anchor" href="https://rebol.metaeducation.com#p-7935-what-about-when-you-have-lots-of-local-4"></a>What About When You Have Lots of <code>&lt;local&gt;</code>?</h2>
+<p>This is kind of the dark side of the simple FRAME! model, which is that if you use it to create a lot of local variables, then operations like SPECIALIZE and AUGMENT which do VarList manipulation have to make copies of everything for the new VarList...including a bunch of locals that aren't changing at all in each new form.</p>
+<pre><code>/foo: func [x [text!] y [tag!] &lt;local&gt; a b c d e f g h i j k l m n o p] [
+    ... 19 frame cells (includes RETURN) ...
+]
+
+/bar: augment foo/ [z [integer!]]  ; z is last item in new 20 item frame
+</code></pre>
+<p>Refinement promotion would become another one of these situations that would do seemingly unnecessary duplication.</p>
+<p>It would be possible in cases like this to create smaller frames and then proxy the results into larger ones, essentially simulating what a user might do to manually call FOO from a new function BAR which had a frame with 3 elements.</p>
+<pre><code>/bar: lambda [x [text!] y [tag!] z [integer!]] [
+    foo x y  ; imagine doing this, but with faster internal mechanics
+]
+</code></pre>
+<p>Some calculation could be done where the size of the frame justified it.  I have a feeling that the frame would have to be reasonably large before a technique like this would be beneficial.</p>
+<h2><a name="p-7935-what-about-refinements-at-headhttpsrebolmetaeducationcomtrefinement-arguments-at-head-of-args-list-not-tail2331-5" class="anchor" href="https://rebol.metaeducation.com#p-7935-what-about-refinements-at-headhttpsrebolmetaeducationcomtrefinement-arguments-at-head-of-args-list-not-tail2331-5"></a>What About <a href="https://rebol.metaeducation.com/t/refinement-arguments-at-head-of-args-list-not-tail/2331">Refinements At Head</a>?</h2>
+<p>Well, in that case, you would <em>have</em> to build a new VarList* that extracted the arguments, and then proxy them into position for the new interface.</p>
+<p>At least one wouldn't be worried about the "bloated copies of locals" situation.</p>
+<h2><a name="p-7935-souse-the-auxiliary-array-simulating-refinements-6" class="anchor" href="https://rebol.metaeducation.com#p-7935-souse-the-auxiliary-array-simulating-refinements-6"></a>So...Use The Auxiliary Array Simulating Refinements?</h2>
+<p>The code for simulating refinements when asking simple questions like <em>"what's the first unspecialized normal arg"</em> is unappealingly complex. <img src="https://rebol.metaeducation.com/images/emoji/twitter/nauseated_face.png?v=14" title=":nauseated_face:" class="emoji" alt=":nauseated_face:" loading="lazy" width="20" height="20"></p>
+<p>Making it further unappealing is that when you have this array of refinements "off to the side" but still allow people to fill in slots in frames to specialize out arguments, you end up needing to have "reconciliation"...because those frame slots that are referenced by this out-of-band array are no longer part of the refinement promotion.</p>
+<pre><code>&gt;&gt; f: make frame! append:dup:part/  ; has auxiliary [dup part]
+
+&gt;&gt; f.dup: 3  ; what cleans up [dup part] to just [part] ?
+</code></pre>
+<p>I've talked about not knowing about what "moment" to do these kinds of fixes, and I'm increasingly looking for ways to avoid there being any such moment.  If the physical experience of the frame was that DUP and PART were ordinary parameters and not refinements, then it "just works".</p>
+<h2><a name="p-7935-the-dumb-mechanical-answer-is-likely-best-7" class="anchor" href="https://rebol.metaeducation.com#p-7935-the-dumb-mechanical-answer-is-likely-best-7"></a>The "Dumb" Mechanical Answer Is Likely Best</h2>
+<p>I sometimes forget just how much I take for granted in Ren-C, regarding the ability to compose functions together.</p>
+<p>The "inefficient" idea of making a new parameter list and then proxying the arguments into position would be more efficient than having to create and evaluate an interpreted function that had to manually copy the parameters.</p>
+<p>There's a huge tax created by having to compose an off-to-the-side parameter reordering list in with the frame variables, and that tax is paid by <em>any code</em> that wants to interpret the list.  It's just too big a tax to pay.</p>
+<p>It pains me a bit to delete it, because it was hard to write and seemed clever at the time.  But techniques have advanced...and while the auxiliary list may have seemed somewhat optimal for storage, it's no longer the right choice.</p>
+          <p><a href="https://rebol.metaeducation.com/t/simplifying-refinement-promotion/2338/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/simplifying-refinement-promotion/2338/1</link>
+        <pubDate>Sat, 30 Nov 2024 21:20:38 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2338-1</guid>
+        <source url="https://rebol.metaeducation.com/t/simplifying-refinement-promotion/2338.rss">Simplifying Refinement Promotion</source>
+      </item>
+  </channel>
+</rss>

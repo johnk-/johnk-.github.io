@@ -1,0 +1,233 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Should $WORD Capture The Whole Binding Environment?</title>
+    <link>https://rebol.metaeducation.com/t/should-word-capture-the-whole-binding-environment/2494</link>
+    <description>Right now, when you capture a binding to a WORD!, if it&#39;s not bound at that moment, it won&#39;t be found later:
+
+    &gt;&gt; word: $foo  ; imagine foo is not defined anywhere
+    == foo
+
+    &gt;&gt; get word
+    ** Error: foo is not bound
+
+    &gt;&gt; set (extend lib &#39;foo) 1020  ; add a FOO definition to lib module
+    == 1020
+
+    &gt;&gt; get word
+    ** Error: foo is not bound
+
+This is because at the moment you wrote `$foo`, it looked in the current context (which in a case like this in the console includes LIB)... and didn&#39;t find it.
+
+Since it didn&#39;t find it at the `$foo` evaluation moment, the word you got was unbound.  It won&#39;t magically become bound if something comes along later.
+
+## Should Things Like WORD! Store Binding Environments?
+
+It would change things.  Would it change them for good?
+
+### [Function Arg Survival](https://rebol.metaeducation.com/t/what-happens-to-function-args-when-the-call-ends/234/17) Needs It Due To [FRAME! Lensing](https://rebol.metaeducation.com/t/understanding-frame-lensing/1645)
+
+This is what brought the issue to my attention right now (though I&#39;ve been thinking about it a fairly long time).
+
+The model in which WORD! gets bound to a FRAME! only stores the pointer to the frame, not the Lens that&#39;s in effect.
+
+The only way you can know if your &quot;lens&quot; should account for if the function is actually running a body or not is by information carried in the binding chain.  Knowing only the final result--a pointer to the list of variables--is not enough.  You need the specifics of *how* the result was reached--to know which phase should be considered for lookup of the word.
+
+### Implementation Simplification
+
+A win is that there isn&#39;t a distinct &quot;kind&quot; of binding for WORD!s that&#39;s different from BLOCK!s.  Everything that stores binding would do so in a common way.  That simplifies code.
+
+### Optimization Loss Of Multiple Gets
+
+It does mean losing an optimization on if GET of the same bound word is done multiple times.
+
+The ability to leverage that optimization has become punishingly rare.  Basically every WORD! in the &quot;mostly-unbound world&quot; already can&#39;t do much in the way of optimized lookups.
+
+You&#39;d get the benefit that the laziness would help if you didn&#39;t actually need to do the lookup resolution.  The &quot;binding capture&quot; is cheap-as-free (just pokes a pointer into a Cell).
+
+### This Leaks Much More Information... But...
+
+[I&#39;ve written about binding leakage before.](https://rebol.metaeducation.com/t/performance-and-security-implications-of-binding-leakage/2117)  This does make it worse, if you pass someone a WORD! that&#39;s bound you&#39;d be passing a lot more information.
+
+But it&#39;s always been a problem.  Passing someone a WORD! bound into an object has allowed you to get that object and crawl arbitrarily far, if you have a BINDING OF tool to extract it.
+
+I rarely get bent out of shape over the security implications of these things.  But more just the garbage collector implications.
+
+But I can&#39;t get too worked up over if you pass **[a]** instead of just **a** having all the same problems.
+
+## Biggest Potential Complaint: Lost Invariant
+
+I showed a case where how it would work could change:
+
+    &gt;&gt; word: $foo  ; imagine foo is not defined anywhere
+    == foo
+
+    &gt;&gt; get word
+    ** Error: foo is not bound
+
+    &gt;&gt; set (extend lib &#39;foo) 1020  ; add a FOO definition to lib module
+    == 1020
+
+    &gt;&gt; get word
+    == 1020  ; would work if $foo bound to an environment chain
+
+But this has further risks.  Consider this:
+
+    &gt;&gt; lib.foo: 1337
+    == 1337
+
+    &gt;&gt; get word
+    == 1337
+
+    &gt;&gt; foo: 304  ; created in user context (or should be...)
+    == 304
+
+    &gt;&gt; get word
+    == 304
+
+    &gt;&gt; lib.word
+    == 1337
+
+When you wrote `$foo` you caused it to bind into an environment chain that had the USER context first, then USER inherited LIB.  So it searches USER first, then LIB.
+
+When something was added to LIB, it saw it.  But later, something added to USER could override it.
+
+**Bug, or feature?**
+
+It&#39;s a bit hard to tell.  When you said **`$foo`** you effectively said &quot;bind into the current wacky environment, whatever that is&quot;.  Had you said **`bind lib &#39;foo`** you could have asked for something more specific.
+
+## Data Point: TUPLE! Must Capture Environment
+
+When you write **`get $.foo`**, then what happens in that capture of environment has to put something onto `.foo` that&#39;s enough for GET to find what it needs.
+
+And the current thinking is that `.foo` acts like `this.foo` -- looking up whatever THIS is defined to in the environment.
+
+We don&#39;t want to put logic into the code behind `$.foo` that does the capture of THIS and pokes it in some secret location of the tuple binding.  It needs to just associate the whole environment with `.foo`.
+
+This really starts to make it look like WORD! should line up with everything else and capture an environment, not just do a lookup and consider that the final answer.
+
+**If this isn&#39;t what you want, the BIND operator should offer a more specific language for describing the exact bind resolving invariant you need.**
+
+This is casual, cheap (well, it cheapens the definition of what $ does to be basically free), and fixes a problem with function argument indefinite lifetime.
+
+### I&#39;ll Try Changing It And See What Happens...</description>
+    
+    <lastBuildDate>Thu, 19 Jun 2025 04:29:39 +0000</lastBuildDate>
+    <category>Binding</category>
+    <atom:link href="https://rebol.metaeducation.com/t/should-word-capture-the-whole-binding-environment/2494.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Should $WORD Capture The Whole Binding Environment?</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="2494">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>Optimization Loss Of Multiple Gets</p>
+<p>It does mean losing an optimization on if GET of the same bound word is done multiple times.</p>
+</blockquote>
+</aside>
+<p>I just ripped out every optimization to see if I could get it to boot by looking up every time.</p>
+<p>Things are super-deoptimized right now, but my fully destructive demo of storing the environment went from:</p>
+<pre><code>1,123,035,314 IR
+</code></pre>
+<p>...to</p>
+<pre><code>1,049,632,078 IR
+</code></pre>
+<p>That's nothing.  The optimizations can be fully reimagined and be much simpler to read now.</p>
+<p>So basically, the only reason not to do this would be semantics.  I think I'm finding the "you could use a different kind of binding" persuasive... but this means the answer to BINDING OF might be complex if we allow you to ask something besides <em>"what does this resolve to right now"</em>.</p>
+          <p><a href="https://rebol.metaeducation.com/t/should-word-capture-the-whole-binding-environment/2494/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/should-word-capture-the-whole-binding-environment/2494/2</link>
+        <pubDate>Wed, 18 Jun 2025 22:28:03 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2494-2</guid>
+        <source url="https://rebol.metaeducation.com/t/should-word-capture-the-whole-binding-environment/2494.rss">Should $WORD Capture The Whole Binding Environment?</source>
+      </item>
+      <item>
+        <title>Should $WORD Capture The Whole Binding Environment?</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>Right now, when you capture a binding to a WORD!, if it's not bound at that moment, it won't be found later:</p>
+<pre><code>&gt;&gt; word: $foo  ; imagine foo is not defined anywhere
+== foo
+
+&gt;&gt; get word
+** Error: foo is not bound
+
+&gt;&gt; set (extend lib 'foo) 1020  ; add a FOO definition to lib module
+== 1020
+
+&gt;&gt; get word
+** Error: foo is not bound
+</code></pre>
+<p>This is because at the moment you wrote <code>$foo</code>, it looked in the current context (which in a case like this in the console includes LIB)... and didn't find it.</p>
+<p>Since it didn't find it at the <code>$foo</code> evaluation moment, the word you got was unbound.  It won't magically become bound if something comes along later.</p>
+<h2><a name="p-8443-should-things-like-word-store-binding-environments-1" class="anchor" href="https://rebol.metaeducation.com#p-8443-should-things-like-word-store-binding-environments-1"></a>Should Things Like WORD! Store Binding Environments?</h2>
+<p>It would change things.  Would it change them for good?</p>
+<h3><a name="p-8443-function-arg-survivalhttpsrebolmetaeducationcomtwhat-happens-to-function-args-when-the-call-ends23417-needs-it-due-to-frame-lensinghttpsrebolmetaeducationcomtunderstanding-frame-lensing1645-2" class="anchor" href="https://rebol.metaeducation.com#p-8443-function-arg-survivalhttpsrebolmetaeducationcomtwhat-happens-to-function-args-when-the-call-ends23417-needs-it-due-to-frame-lensinghttpsrebolmetaeducationcomtunderstanding-frame-lensing1645-2"></a><a href="https://rebol.metaeducation.com/t/what-happens-to-function-args-when-the-call-ends/234/17">Function Arg Survival</a> Needs It Due To <a href="https://rebol.metaeducation.com/t/understanding-frame-lensing/1645">FRAME! Lensing</a></h3>
+<p>This is what brought the issue to my attention right now (though I've been thinking about it a fairly long time).</p>
+<p>The model in which WORD! gets bound to a FRAME! only stores the pointer to the frame, not the Lens that's in effect.</p>
+<p>The only way you can know if your "lens" should account for if the function is actually running a body or not is by information carried in the binding chain.  Knowing only the final result--a pointer to the list of variables--is not enough.  You need the specifics of <em>how</em> the result was reached--to know which phase should be considered for lookup of the word.</p>
+<h3><a name="p-8443-implementation-simplification-3" class="anchor" href="https://rebol.metaeducation.com#p-8443-implementation-simplification-3"></a>Implementation Simplification</h3>
+<p>A win is that there isn't a distinct "kind" of binding for WORD!s that's different from BLOCK!s.  Everything that stores binding would do so in a common way.  That simplifies code.</p>
+<h3><a name="p-8443-optimization-loss-of-multiple-gets-4" class="anchor" href="https://rebol.metaeducation.com#p-8443-optimization-loss-of-multiple-gets-4"></a>Optimization Loss Of Multiple Gets</h3>
+<p>It does mean losing an optimization on if GET of the same bound word is done multiple times.</p>
+<p>The ability to leverage that optimization has become punishingly rare.  Basically every WORD! in the "mostly-unbound world" already can't do much in the way of optimized lookups.</p>
+<p>You'd get the benefit that the laziness would help if you didn't actually need to do the lookup resolution.  The "binding capture" is cheap-as-free (just pokes a pointer into a Cell).</p>
+<h3><a name="p-8443-this-leaks-much-more-information-but-5" class="anchor" href="https://rebol.metaeducation.com#p-8443-this-leaks-much-more-information-but-5"></a>This Leaks Much More Information... But...</h3>
+<p><a href="https://rebol.metaeducation.com/t/performance-and-security-implications-of-binding-leakage/2117">I've written about binding leakage before.</a>  This does make it worse, if you pass someone a WORD! that's bound you'd be passing a lot more information.</p>
+<p>But it's always been a problem.  Passing someone a WORD! bound into an object has allowed you to get that object and crawl arbitrarily far, if you have a BINDING OF tool to extract it.</p>
+<p>I rarely get bent out of shape over the security implications of these things.  But more just the garbage collector implications.</p>
+<p>But I can't get too worked up over if you pass <strong>[a]</strong> instead of just <strong>a</strong> having all the same problems.</p>
+<h2><a name="p-8443-biggest-potential-complaint-lost-invariant-6" class="anchor" href="https://rebol.metaeducation.com#p-8443-biggest-potential-complaint-lost-invariant-6"></a>Biggest Potential Complaint: Lost Invariant</h2>
+<p>I showed a case where how it would work could change:</p>
+<pre><code>&gt;&gt; word: $foo  ; imagine foo is not defined anywhere
+== foo
+
+&gt;&gt; get word
+** Error: foo is not bound
+
+&gt;&gt; set (extend lib 'foo) 1020  ; add a FOO definition to lib module
+== 1020
+
+&gt;&gt; get word
+== 1020  ; would work if $foo bound to an environment chain
+</code></pre>
+<p>But this has further risks.  Consider this:</p>
+<pre><code>&gt;&gt; lib.foo: 1337
+== 1337
+
+&gt;&gt; get word
+== 1337
+
+&gt;&gt; foo: 304  ; created in user context (or should be...)
+== 304
+
+&gt;&gt; get word
+== 304
+
+&gt;&gt; lib.word
+== 1337
+</code></pre>
+<p>When you wrote <code>$foo</code> you caused it to bind into an environment chain that had the USER context first, then USER inherited LIB.  So it searches USER first, then LIB.</p>
+<p>When something was added to LIB, it saw it.  But later, something added to USER could override it.</p>
+<p><strong>Bug, or feature?</strong></p>
+<p>It's a bit hard to tell.  When you said <strong><code>$foo</code></strong> you effectively said "bind into the current wacky environment, whatever that is".  Had you said <strong><code>bind lib 'foo</code></strong> you could have asked for something more specific.</p>
+<h2><a name="p-8443-data-point-tuple-must-capture-environment-7" class="anchor" href="https://rebol.metaeducation.com#p-8443-data-point-tuple-must-capture-environment-7"></a>Data Point: TUPLE! Must Capture Environment</h2>
+<p>When you write <strong><code>get $.foo</code></strong>, then what happens in that capture of environment has to put something onto <code>.foo</code> that's enough for GET to find what it needs.</p>
+<p>And the current thinking is that <code>.foo</code> acts like <code>this.foo</code> -- looking up whatever THIS is defined to in the environment.</p>
+<p>We don't want to put logic into the code behind <code>$.foo</code> that does the capture of THIS and pokes it in some secret location of the tuple binding.  It needs to just associate the whole environment with <code>.foo</code>.</p>
+<p>This really starts to make it look like WORD! should line up with everything else and capture an environment, not just do a lookup and consider that the final answer.</p>
+<p><strong>If this isn't what you want, the BIND operator should offer a more specific language for describing the exact bind resolving invariant you need.</strong></p>
+<p>This is casual, cheap (well, it cheapens the definition of what $ does to be basically free), and fixes a problem with function argument indefinite lifetime.</p>
+<h3><a name="p-8443-ill-try-changing-it-and-see-what-happens-8" class="anchor" href="https://rebol.metaeducation.com#p-8443-ill-try-changing-it-and-see-what-happens-8"></a>I'll Try Changing It And See What Happens...</h3>
+          <p><a href="https://rebol.metaeducation.com/t/should-word-capture-the-whole-binding-environment/2494/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/should-word-capture-the-whole-binding-environment/2494/1</link>
+        <pubDate>Wed, 18 Jun 2025 18:05:37 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2494-1</guid>
+        <source url="https://rebol.metaeducation.com/t/should-word-capture-the-whole-binding-environment/2494.rss">Should $WORD Capture The Whole Binding Environment?</source>
+      </item>
+  </channel>
+</rss>

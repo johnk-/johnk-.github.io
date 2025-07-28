@@ -1,0 +1,515 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>2024 Recap: With Great Features Come Great Incompatibility</title>
+    <link>https://rebol.metaeducation.com/t/2024-recap-with-great-features-come-great-incompatibility/2362</link>
+    <description>How about that year?  Is everyone looking forward to what the world has in store for 2025?  No?  :roll_eyes:
+
+Well, let&#39;s forget world news for a minute... and just focus on the code.
+
+:building_construction: 
+
+There was significantly more development (and corresponding progress) in 2024 than in 2023.  Most centrally in binding, but many other advances were made as well.
+
+**Good news is that key binding advances have culminated in notable success stories.**  Although it means incompatibility with basically all prior Rebol/Red &quot;Bindology&quot;, that was simply a dead-end. I&#39;ve reached optimism that this method may ultimately *work*.
+
+**Yet optimism about binding led me to bite the bullet and go ahead with other incompatible changes.**  It&#39;s a bit like realizing you aren&#39;t just fixing up a house to sell, but you&#39;re going to live there...so, might as well upgrade stuff while it&#39;s being ripped open.  Of course that digs an even bigger hole: I&#39;ve been working on a side branch for nearly half a year.
+
+**Let me try and quickly show off some good, new things...coming soon to a master branch near you...**
+
+---
+
+# Moving to a Mostly-Unbound World...
+
+2024 [saw a new shift in Ren-C](https://rebol.metaeducation.com/t/rebol-and-scopes-well-why-not/1751/9):
+
+    &gt;&gt; x: 10
+
+    &gt;&gt; get &#39;x
+    ** Error: x is not bound
+
+    &gt;&gt; get first [x + 1]
+    ** Error: x is not bound
+
+At first, that may seem scary. :fearful: 
+
+But getting rid of a-priori deep walks for binding can actually cure your fears of &quot;missing the wave&quot;.  A quick example:
+
+    &gt;&gt; doubler: func [x] [
+          let code: copy [add x]
+          append code to word! &quot;x&quot;
+          print [&quot;Doubled:&quot; eval code]
+       ]
+
+    &gt;&gt; doubler 10
+    Doubled: 20  ; wait... that *worked*?! 😮
+
+That would have previously been a helpless situation--to navigate from the &quot;x&quot; string to the **`X`** word, and bind that word in a way that it could find a local variable.  **But the trick here is that none of the code is bound in advance.**  The `[add x x]` you&#39;re constructing sees no difference between the two Xs, because binding spreads &quot;virtually&quot; (not mutably) via the runtime instantiation of Cells in evaluation, one List at a time...
+
+**[The API Benefits Tremendously From Being Able To Do Such Lookups!](https://rebol.metaeducation.com/t/no-preprocessing-no-ffi-just-awesome-rebfunction/2224)** But so does everything else... whether that&#39;s resolving references between modules that don&#39;t have a specific ordering, constructing code from disparate sources on the fly, or doing **[String Interpolation](https://rebol.metaeducation.com/t/usefulness-of-string-interpolation/2114)**.
+
+It does mean you have to be more *binding conscious*, and learn the new tools.  BIND no longer mutates bindings on lists, but returns a new list with a tweaked binding at its &quot;tip&quot;.  (But note BIND has always done this with WORD!s... giving you a new word with the binding you wanted vs. somehow changing the word you passed in.)
+
+There&#39;s still no shortage of things that need to be figured out.  But when so many features are now *actually working*, it&#39;s strong evidence for the direction.
+
+---
+
+## Hammering Through FRAME! And PARAMETER!
+
+I struggled for some time solving [Critical Design Points of Antiform FRAME!s as Actions](https://rebol.metaeducation.com/t/frame-action-duality-examined/1898/5).  [Mumbo-jumbo aside](https://rebol.metaeducation.com/t/default-values-and-make-frame-2024-edition/2347), neat behaviors that were prophesied are finally reality...
+
+Since &quot;actions&quot; are just antiform frames, you can pick elements out of them as if they were objects.  And any fields exposed on the interface are PARAMETER!, by definition:
+
+    &gt;&gt; get $append
+    == ~#[frame! &quot;append&quot; [series value part dup line]]]~  ; anti
+
+    &gt;&gt; append.dup
+    == #[parameter! :[any-number? pair!]]
+
+    &gt;&gt; append.dup.text
+    == &quot;Duplicates the insert a specified number of times&quot;
+
+    &gt;&gt; append.dup.spec
+    == [any-number? pair!]
+
+    &gt;&gt; append.dup.optional
+    == ~okay~  ; anti
+
+The system isn&#39;t making some artificial object-*like* interface to what it knows.  That object is the in-memory representation of what APPEND *is*.
+
+It means you have everything in your hand to build your own specializations (and specialization tools)... just copy and adjust.  And if you want to run a frame from a WORD!-reference, tweak a byte to make it an antiform:
+
+    &gt;&gt; frame: copy get $append
+    == #[frame! [
+        series: #[parameter! [~void~ any-series? port! map! object! module! bitset!]]
+        value: #[parameter! [~void~ element? splice?]]
+        part: #[parameter! :[any-number? any-series? pair!]]
+        dup: #[parameter! :[any-number? pair!]]
+        line: #[parameter! :[]]
+    ]]
+
+    &gt;&gt; frame.value: 10
+    == 10
+
+    &gt;&gt; append10: anti frame
+    == ~#[frame! &quot;append10&quot; [series part dup line]]]~  ; anti
+
+    &gt;&gt; append10 [a b c]
+    == [a b c 10]
+
+:zap: 
+
+---
+
+# MO/RE:PART.(s) {For {Dialecting}}
+
+It took a while to convince myself that the system was better served if [**{FENCE}** joined **[BLOCK]** and **(GROUP)**](https://rebol.metaeducation.com/t/rethinking-braces-as-an-array-type/1727) as a fundamental list type.  But I was convinced, [though I&#39;m still pondering their precise evaluator behavior...](https://rebol.metaeducation.com/t/make-should-be-using-dialected-constructors/2196)
+
+    &gt;&gt; fence: first [{a {b} (c d)} {e}]
+    == {a {b} (c d)}
+
+    &gt;&gt; length of fence
+    == 3
+
+    &gt;&gt; second fence
+    == {b}
+
+&lt;sub&gt;*(Strings of course had to take another representation, and [`--{dashed strings}--` have worked out much better than I expected](https://rebol.metaeducation.com/t/alternate-string-forms-if-becomes-an-array-type/1743/30), to where they&#39;re superior in very many cases).*&lt;/sub&gt;
+
+I also added a third type to the interstitially-delimited set as well -- [**ch:a:in** joins **pa/th** and **tu.p.le**](https://rebol.metaeducation.com/t/introducingnew-chain-datatype/2226)
+
+    &gt;&gt; path: first [{a}/b:(c d).e f.g]
+    == {a}/b:(c d).e
+
+    &gt;&gt; length of path
+    == 2  ; so path elements are [{a} b:(c d).e]
+
+    &gt;&gt; chain: second path
+    == b:(c d).e
+
+    &gt;&gt; length of chain
+    == 2  ; so chain elements are [b (c d).e]
+
+    &gt;&gt; tuple: second chain
+    == (c d).e
+
+They can be interpreted unambiguously due to hierarchy... paths are outermost, tuples are innermost, and you can&#39;t construct illegal groupings:
+
+    &gt;&gt; join chain! @[a/b c/d]
+    ** Script Error: Value is not a valid &amp;[chain] element: a/b
+
+    &gt;&gt; join path! @[a b:c d]
+    == a/b:c/d  ; three element path, not two element chain
+
+&lt;sub&gt;*(Though this means that **`FOO:`** is now a CHAIN! instead of a fundamental type, the change [builds on existing compression so it doesn&#39;t cost any more than a WORD!](https://rebol.metaeducation.com/t/path-and-tuple-compression-explained/1008).)*&lt;/sub&gt;
+
+---
+
+## Using The Parts: CHAIN! Refinements, PATH!&#39;d Functions
+
+I don&#39;t know what to tell skeptics of the need for the additional parts.  If they say they aren&#39;t interested in having pieces like **`(set group):`**... uh, ok?  :man_shrugging:  
+
+They&#39;re cool, though.  If **var** holds a bound word **x**...
+
+    &gt;&gt; (var): 20
+    == 20
+
+    &gt;&gt; x
+    == 20
+
+    &gt;&gt; compose* [(var): 30]
+    == [x: 30]
+
+But in a previous section I showed how being able to say **`append.dup`** allows a different semantic of picking the PARAMETER! field out of append&#39;s FRAME!.  If you didn&#39;t have generic tuple and only had paths, you couldn&#39;t distinguish wanting that vs. invoking append with a refinement.
+
+Now we have three choices:
+
+* **`append.dup`**
+* **`append:dup`**
+* **`append/dup`**
+
+I believe **`append:dup`** has emerged as a better choice for refinements than slash, [since slash serves its strongest role when it points out functions themselves](https://rebol.metaeducation.com/t/big-alien-proposal-word-runs-functions/1905).  This means  **`a.b.c/d:e:f`** can be read unambiguously... **D** is a function, selected out of **C**...while **E** and **F** are refinements.  And you never have to worry about invoking functions with tuple selections.
+
+In this system you could write **/negate** instead of plain **negate** to call it, though you probably wouldn&#39;t in most code.  But dialect-wise it can help, e.g. with [UPARSE&#39;s &quot;action combinator&quot;](https://rebol.metaeducation.com/t/if-action-combinators-dont-impress-what-will/1608):
+
+    &gt;&gt; parse [1 2 3] [collect some [
+           keep /negate integer!
+       ]]
+     == [-1 -2 -3]
+
+While leading slash kind of pairs a function invocation with what follows it, [trailing slash was chosen for suppressing function application](https://rebol.metaeducation.com/t/trailing-slash-is-a-winner-for-defused-actions/2327), so you (a) know it&#39;s a function and (b) know it&#39;s not taking arguments:
+
+    &gt;&gt; replace [a 1 a &lt;baby&gt;] word?/ &lt;ice&gt;  ; word? doesn&#39;t take &lt;ice&gt; argument
+    == [&lt;ice&gt; 1 &lt;ice&gt; &lt;baby&gt;]
+
+This also gave rise to [double-slash for the APPLY infix operator](https://rebol.metaeducation.com/t/apply-ii-the-revenge/1834/9):
+
+    &gt;&gt; append // [[a b c] &lt;d&gt; :dup 2]
+    == [a b c &lt;d&gt; &lt;d&gt;]
+
+Even more magic is in order, with the ability to use slashes to construct cascaded functions, *one slash per function*:
+
+    &gt;&gt; my-odd?: not/even?/
+    == ~#[frame! &quot;my-odd?&quot; [number]]]~  ; anti
+
+    &gt;&gt; my-odd? 1020
+    == ~null~  ; anti
+
+So when I examine the problems which the evaluator needs to solve...and what dialect authors need to solve...I see the same story play out.  *You need parts*, and the biggest trick is being sure those parts are reliable and coherent.
+
+---
+
+## Tons More I *Could* Discuss...
+
+But that&#39;s the &quot;executive summary&quot; of the biggest thought-pieces that stand out to me from 2024.
+
+There&#39;s also:
+
+* **[Flexible Logic: [true false on off yes no] are *just words*](https://rebol.metaeducation.com/t/flexible-logic-system-terminology/2252)**.  This is the culmination of my longstanding belief that Rebol shouldn&#39;t have a LOGIC! literal type.  Instead, the antiforms of ~null~ and ~okay~ are triaged to and from words on an as-needed basis, and just make that easier and less error-prone.
+
+      &gt;&gt; true
+      ** Script Error: true word is not bound to a context
+
+      &gt;&gt; true? &#39;true
+      == ~okay~  ; anti
+
+      &gt;&gt; true? &#39;potato
+      ** Script Error: true? expects [&#39;true &#39;false] for its word argument
+
+      &gt;&gt; 1 = 2
+      == ~null~  ; anti
+
+      &gt;&gt; boolean 1 = 2
+      == false
+
+* **[Antiform tags became &quot;Tripwires&quot;](https://rebol.metaeducation.com/t/tripwire-in-the-wild/2278)**, an idea which has had a lot of leverage... replacing the mistake-prone idea of &quot;erroring functions&quot; as placeholders.
+
+* **[Intrinsics made certain function calls very fast](https://rebol.metaeducation.com/t/intrinsics-functions-without-frames/2050)**... fast enough that they can be used to do typechecking, instead of limiting typechecking to one of 64-bits in a typeset.  So not only are there now more than 64 fundamental types, you can also check arbitrary things (like if a parameter is EVEN?...)
+
+* **[The null/void/blank/trash model firmed up a bit more](https://rebol.metaeducation.com/t/what-are-null-void-nothing-blank-and-nihil/2283)**, as I let go of the idea that void had to be represented by emptiness (with single tick mark as its quoted form, and a single tilde as its quasiform).  Once I realized the antiform `~void~` was better written out as a word, then antiform BLANK! could take over the role of &quot;nothing&quot; for unsetness, and quasiform blank as the reified role of &quot;trash&quot;.
+
+* **[SIGIL! gave an easier way to talk about &quot;weird words&quot;](https://github.com/metaeducation/ren-c/blob/master/tests/datatypes/sigil.test.reb)**.  These SIGIL!s only have an undecorated form, and have baked in evaluator behavior.  This also solves a problem elegantly, where you can write code like **`(x: &#39;$abc, if &#39;$ = sigil of x [...])`**
+
+* **Definitional RETURN type exposure is function-composition sensitive**.  I haven&#39;t written this up yet, but now even this works.  So it can synthesize the HELP from the arguments of the enclosed function but the return of the encloser:
+ 
+      &gt;&gt; appendcount: enclose append/ (func [return: [integer!] f [frame!]] [
+             eval f
+             return length of f.series
+         ])
+
+      &gt;&gt; appendcount [a b c] spread [d e f]
+      == 6  ; length of series after the append is run
+
+      &gt;&gt; return of appendcount/
+      == #[parameter! [integer!]]
+
+---
+
+# Where To Now...
+
+Going to try to get back on track, and firm everything up enough so it&#39;s solid enough to push to master.
+
+There&#39;s some work on the TO to MAKE matrix that I didn&#39;t cover here that actually turned out to be a pretty big thorn, and I&#39;ve been putting off some decisions pertaining to that... because it&#39;s frustrating work.
+
+Updates as I have them.</description>
+    
+    <lastBuildDate>Sun, 12 Jan 2025 16:16:05 +0000</lastBuildDate>
+    <category>Announcements</category>
+    <atom:link href="https://rebol.metaeducation.com/t/2024-recap-with-great-features-come-great-incompatibility/2362.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>2024 Recap: With Great Features Come Great Incompatibility</title>
+        <dc:creator><![CDATA[bradrn]]></dc:creator>
+        <description><![CDATA[
+            <p>Thanks for this writeup! I haven’t been checking in here as regularly as I used to be (life gets in the way of things…), but it’s great to see how Ren-C continues to evolve and improve.</p>
+          <p><a href="https://rebol.metaeducation.com/t/2024-recap-with-great-features-come-great-incompatibility/2362/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/2024-recap-with-great-features-come-great-incompatibility/2362/2</link>
+        <pubDate>Sun, 12 Jan 2025 12:21:45 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2362-2</guid>
+        <source url="https://rebol.metaeducation.com/t/2024-recap-with-great-features-come-great-incompatibility/2362.rss">2024 Recap: With Great Features Come Great Incompatibility</source>
+      </item>
+      <item>
+        <title>2024 Recap: With Great Features Come Great Incompatibility</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>How about that year?  Is everyone looking forward to what the world has in store for 2025?  No?  <img src="https://rebol.metaeducation.com/images/emoji/twitter/roll_eyes.png?v=14" title=":roll_eyes:" class="emoji" alt=":roll_eyes:" loading="lazy" width="20" height="20"></p>
+<p>Well, let's forget world news for a minute... and just focus on the code.</p>
+<p><img src="https://rebol.metaeducation.com/images/emoji/twitter/building_construction.png?v=14" title=":building_construction:" class="emoji only-emoji" alt=":building_construction:" loading="lazy" width="20" height="20"></p>
+<p>There was significantly more development (and corresponding progress) in 2024 than in 2023.  Most centrally in binding, but many other advances were made as well.</p>
+<p><strong>Good news is that key binding advances have culminated in notable success stories.</strong>  Although it means incompatibility with basically all prior Rebol/Red "Bindology", that was simply a dead-end. I've reached optimism that this method may ultimately <em>work</em>.</p>
+<p><strong>Yet optimism about binding led me to bite the bullet and go ahead with other incompatible changes.</strong>  It's a bit like realizing you aren't just fixing up a house to sell, but you're going to live there...so, might as well upgrade stuff while it's being ripped open.  Of course that digs an even bigger hole: I've been working on a side branch for nearly half a year.</p>
+<p><strong>Let me try and quickly show off some good, new things...coming soon to a master branch near you...</strong></p>
+<hr>
+<h1><a name="p-8003-moving-to-a-mostly-unbound-world-1" class="anchor" href="https://rebol.metaeducation.com#p-8003-moving-to-a-mostly-unbound-world-1"></a>Moving to a Mostly-Unbound World...</h1>
+<p>2024 <a href="https://rebol.metaeducation.com/t/rebol-and-scopes-well-why-not/1751/9">saw a new shift in Ren-C</a>:</p>
+<pre><code>&gt;&gt; x: 10
+
+&gt;&gt; get 'x
+** Error: x is not bound
+
+&gt;&gt; get first [x + 1]
+** Error: x is not bound
+</code></pre>
+<p>At first, that may seem scary. <img src="https://rebol.metaeducation.com/images/emoji/twitter/fearful.png?v=14" title=":fearful:" class="emoji" alt=":fearful:" loading="lazy" width="20" height="20"></p>
+<p>But getting rid of a-priori deep walks for binding can actually cure your fears of "missing the wave".  A quick example:</p>
+<pre><code>&gt;&gt; doubler: func [x] [
+      let code: copy [add x]
+      append code to word! "x"
+      print ["Doubled:" eval code]
+   ]
+
+&gt;&gt; doubler 10
+Doubled: 20  ; wait... that *worked*?! 😮
+</code></pre>
+<p>That would have previously been a helpless situation--to navigate from the "x" string to the <strong><code>X</code></strong> word, and bind that word in a way that it could find a local variable.  <strong>But the trick here is that none of the code is bound in advance.</strong>  The <code>[add x x]</code> you're constructing sees no difference between the two Xs, because binding spreads "virtually" (not mutably) via the runtime instantiation of Cells in evaluation, one List at a time...</p>
+<p><strong><a href="https://rebol.metaeducation.com/t/no-preprocessing-no-ffi-just-awesome-rebfunction/2224">The API Benefits Tremendously From Being Able To Do Such Lookups!</a></strong> But so does everything else... whether that's resolving references between modules that don't have a specific ordering, constructing code from disparate sources on the fly, or doing <strong><a href="https://rebol.metaeducation.com/t/usefulness-of-string-interpolation/2114">String Interpolation</a></strong>.</p>
+<p>It does mean you have to be more <em>binding conscious</em>, and learn the new tools.  BIND no longer mutates bindings on lists, but returns a new list with a tweaked binding at its "tip".  (But note BIND has always done this with WORD!s... giving you a new word with the binding you wanted vs. somehow changing the word you passed in.)</p>
+<p>There's still no shortage of things that need to be figured out.  But when so many features are now <em>actually working</em>, it's strong evidence for the direction.</p>
+<hr>
+<h2><a name="p-8003-hammering-through-frame-and-parameter-2" class="anchor" href="https://rebol.metaeducation.com#p-8003-hammering-through-frame-and-parameter-2"></a>Hammering Through FRAME! And PARAMETER!</h2>
+<p>I struggled for some time solving <a href="https://rebol.metaeducation.com/t/frame-action-duality-examined/1898/5">Critical Design Points of Antiform FRAME!s as Actions</a>.  <a href="https://rebol.metaeducation.com/t/default-values-and-make-frame-2024-edition/2347">Mumbo-jumbo aside</a>, neat behaviors that were prophesied are finally reality...</p>
+<p>Since "actions" are just antiform frames, you can pick elements out of them as if they were objects.  And any fields exposed on the interface are PARAMETER!, by definition:</p>
+<pre><code>&gt;&gt; get $append
+== ~#[frame! "append" [series value part dup line]]]~  ; anti
+
+&gt;&gt; append.dup
+== #[parameter! :[any-number? pair!]]
+
+&gt;&gt; append.dup.text
+== "Duplicates the insert a specified number of times"
+
+&gt;&gt; append.dup.spec
+== [any-number? pair!]
+
+&gt;&gt; append.dup.optional
+== ~okay~  ; anti
+</code></pre>
+<p>The system isn't making some artificial object-<em>like</em> interface to what it knows.  That object is the in-memory representation of what APPEND <em>is</em>.</p>
+<p>It means you have everything in your hand to build your own specializations (and specialization tools)... just copy and adjust.  And if you want to run a frame from a WORD!-reference, tweak a byte to make it an antiform:</p>
+<pre><code>&gt;&gt; frame: copy get $append
+== #[frame! [
+    series: #[parameter! [~void~ any-series? port! map! object! module! bitset!]]
+    value: #[parameter! [~void~ element? splice?]]
+    part: #[parameter! :[any-number? any-series? pair!]]
+    dup: #[parameter! :[any-number? pair!]]
+    line: #[parameter! :[]]
+]]
+
+&gt;&gt; frame.value: 10
+== 10
+
+&gt;&gt; append10: anti frame
+== ~#[frame! "append10" [series part dup line]]]~  ; anti
+
+&gt;&gt; append10 [a b c]
+== [a b c 10]
+</code></pre>
+<p><img src="https://rebol.metaeducation.com/images/emoji/twitter/zap.png?v=14" title=":zap:" class="emoji only-emoji" alt=":zap:" loading="lazy" width="20" height="20"></p>
+<hr>
+<h1><a name="p-8003-moreparts-for-dialecting-3" class="anchor" href="https://rebol.metaeducation.com#p-8003-moreparts-for-dialecting-3"></a>MO/RE:PART.(s) {For {Dialecting}}</h1>
+<p>It took a while to convince myself that the system was better served if <a href="https://rebol.metaeducation.com/t/rethinking-braces-as-an-array-type/1727"><strong>{FENCE}</strong> joined <strong>[BLOCK]</strong> and <strong>(GROUP)</strong></a> as a fundamental list type.  But I was convinced, <a href="https://rebol.metaeducation.com/t/make-should-be-using-dialected-constructors/2196">though I'm still pondering their precise evaluator behavior...</a></p>
+<pre><code>&gt;&gt; fence: first [{a {b} (c d)} {e}]
+== {a {b} (c d)}
+
+&gt;&gt; length of fence
+== 3
+
+&gt;&gt; second fence
+== {b}
+</code></pre>
+<p><sub><em>(Strings of course had to take another representation, and <a href="https://rebol.metaeducation.com/t/alternate-string-forms-if-becomes-an-array-type/1743/30"><code>--{dashed strings}--</code> have worked out much better than I expected</a>, to where they're superior in very many cases).</em></sub></p>
+<p>I also added a third type to the interstitially-delimited set as well -- <a href="https://rebol.metaeducation.com/t/introducingnew-chain-datatype/2226"><strong>ch:a:in</strong> joins <strong>pa/th</strong> and <strong>tu.p.le</strong></a></p>
+<pre><code>&gt;&gt; path: first [{a}/b:(c d).e f.g]
+== {a}/b:(c d).e
+
+&gt;&gt; length of path
+== 2  ; so path elements are [{a} b:(c d).e]
+
+&gt;&gt; chain: second path
+== b:(c d).e
+
+&gt;&gt; length of chain
+== 2  ; so chain elements are [b (c d).e]
+
+&gt;&gt; tuple: second chain
+== (c d).e
+</code></pre>
+<p>They can be interpreted unambiguously due to hierarchy... paths are outermost, tuples are innermost, and you can't construct illegal groupings:</p>
+<pre><code>&gt;&gt; join chain! @[a/b c/d]
+** Script Error: Value is not a valid &amp;[chain] element: a/b
+
+&gt;&gt; join path! @[a b:c d]
+== a/b:c/d  ; three element path, not two element chain
+</code></pre>
+<p><sub><em>(Though this means that <strong><code>FOO:</code></strong> is now a CHAIN! instead of a fundamental type, the change <a href="https://rebol.metaeducation.com/t/path-and-tuple-compression-explained/1008">builds on existing compression so it doesn't cost any more than a WORD!</a>.)</em></sub></p>
+<hr>
+<h2><a name="p-8003-using-the-parts-chain-refinements-pathd-functions-4" class="anchor" href="https://rebol.metaeducation.com#p-8003-using-the-parts-chain-refinements-pathd-functions-4"></a>Using The Parts: CHAIN! Refinements, PATH!'d Functions</h2>
+<p>I don't know what to tell skeptics of the need for the additional parts.  If they say they aren't interested in having pieces like <strong><code>(set group):</code></strong>... uh, ok?  <img src="https://rebol.metaeducation.com/images/emoji/twitter/man_shrugging.png?v=14" title=":man_shrugging:" class="emoji" alt=":man_shrugging:" loading="lazy" width="20" height="20"></p>
+<p>They're cool, though.  If <strong>var</strong> holds a bound word <strong>x</strong>...</p>
+<pre><code>&gt;&gt; (var): 20
+== 20
+
+&gt;&gt; x
+== 20
+
+&gt;&gt; compose* [(var): 30]
+== [x: 30]
+</code></pre>
+<p>But in a previous section I showed how being able to say <strong><code>append.dup</code></strong> allows a different semantic of picking the PARAMETER! field out of append's FRAME!.  If you didn't have generic tuple and only had paths, you couldn't distinguish wanting that vs. invoking append with a refinement.</p>
+<p>Now we have three choices:</p>
+<ul>
+<li><strong><code>append.dup</code></strong></li>
+<li><strong><code>append:dup</code></strong></li>
+<li><strong><code>append/dup</code></strong></li>
+</ul>
+<p>I believe <strong><code>append:dup</code></strong> has emerged as a better choice for refinements than slash, <a href="https://rebol.metaeducation.com/t/big-alien-proposal-word-runs-functions/1905">since slash serves its strongest role when it points out functions themselves</a>.  This means  <strong><code>a.b.c/d:e:f</code></strong> can be read unambiguously... <strong>D</strong> is a function, selected out of <strong>C</strong>...while <strong>E</strong> and <strong>F</strong> are refinements.  And you never have to worry about invoking functions with tuple selections.</p>
+<p>In this system you could write <strong>/negate</strong> instead of plain <strong>negate</strong> to call it, though you probably wouldn't in most code.  But dialect-wise it can help, e.g. with <a href="https://rebol.metaeducation.com/t/if-action-combinators-dont-impress-what-will/1608">UPARSE's "action combinator"</a>:</p>
+<pre><code>&gt;&gt; parse [1 2 3] [collect some [
+       keep /negate integer!
+   ]]
+ == [-1 -2 -3]
+</code></pre>
+<p>While leading slash kind of pairs a function invocation with what follows it, <a href="https://rebol.metaeducation.com/t/trailing-slash-is-a-winner-for-defused-actions/2327">trailing slash was chosen for suppressing function application</a>, so you (a) know it's a function and (b) know it's not taking arguments:</p>
+<pre><code>&gt;&gt; replace [a 1 a &lt;baby&gt;] word?/ &lt;ice&gt;  ; word? doesn't take &lt;ice&gt; argument
+== [&lt;ice&gt; 1 &lt;ice&gt; &lt;baby&gt;]
+</code></pre>
+<p>This also gave rise to <a href="https://rebol.metaeducation.com/t/apply-ii-the-revenge/1834/9">double-slash for the APPLY infix operator</a>:</p>
+<pre><code>&gt;&gt; append // [[a b c] &lt;d&gt; :dup 2]
+== [a b c &lt;d&gt; &lt;d&gt;]
+</code></pre>
+<p>Even more magic is in order, with the ability to use slashes to construct cascaded functions, <em>one slash per function</em>:</p>
+<pre><code>&gt;&gt; my-odd?: not/even?/
+== ~#[frame! "my-odd?" [number]]]~  ; anti
+
+&gt;&gt; my-odd? 1020
+== ~null~  ; anti
+</code></pre>
+<p>So when I examine the problems which the evaluator needs to solve...and what dialect authors need to solve...I see the same story play out.  <em>You need parts</em>, and the biggest trick is being sure those parts are reliable and coherent.</p>
+<hr>
+<h2><a name="p-8003-tons-more-i-could-discuss-5" class="anchor" href="https://rebol.metaeducation.com#p-8003-tons-more-i-could-discuss-5"></a>Tons More I <em>Could</em> Discuss...</h2>
+<p>But that's the "executive summary" of the biggest thought-pieces that stand out to me from 2024.</p>
+<p>There's also:</p>
+<ul>
+<li>
+<p><strong><a href="https://rebol.metaeducation.com/t/flexible-logic-system-terminology/2252">Flexible Logic: [true false on off yes no] are <em>just words</em></a></strong>.  This is the culmination of my longstanding belief that Rebol shouldn't have a LOGIC! literal type.  Instead, the antiforms of ~null~ and ~okay~ are triaged to and from words on an as-needed basis, and just make that easier and less error-prone.</p>
+<pre><code>&gt;&gt; true
+** Script Error: true word is not bound to a context
+
+&gt;&gt; true? 'true
+== ~okay~  ; anti
+
+&gt;&gt; true? 'potato
+** Script Error: true? expects ['true 'false] for its word argument
+
+&gt;&gt; 1 = 2
+== ~null~  ; anti
+
+&gt;&gt; boolean 1 = 2
+== false
+</code></pre>
+</li>
+<li>
+<p><strong><a href="https://rebol.metaeducation.com/t/tripwire-in-the-wild/2278">Antiform tags became "Tripwires"</a></strong>, an idea which has had a lot of leverage... replacing the mistake-prone idea of "erroring functions" as placeholders.</p>
+</li>
+<li>
+<p><strong><a href="https://rebol.metaeducation.com/t/intrinsics-functions-without-frames/2050">Intrinsics made certain function calls very fast</a></strong>... fast enough that they can be used to do typechecking, instead of limiting typechecking to one of 64-bits in a typeset.  So not only are there now more than 64 fundamental types, you can also check arbitrary things (like if a parameter is EVEN?...)</p>
+</li>
+<li>
+<p><strong><a href="https://rebol.metaeducation.com/t/what-are-null-void-nothing-blank-and-nihil/2283">The null/void/blank/trash model firmed up a bit more</a></strong>, as I let go of the idea that void had to be represented by emptiness (with single tick mark as its quoted form, and a single tilde as its quasiform).  Once I realized the antiform <code>~void~</code> was better written out as a word, then antiform BLANK! could take over the role of "nothing" for unsetness, and quasiform blank as the reified role of "trash".</p>
+</li>
+<li>
+<p><strong><a href="https://github.com/metaeducation/ren-c/blob/master/tests/datatypes/sigil.test.reb">SIGIL! gave an easier way to talk about "weird words"</a></strong>.  These SIGIL!s only have an undecorated form, and have baked in evaluator behavior.  This also solves a problem elegantly, where you can write code like <strong><code>(x: '$abc, if '$ = sigil of x [...])</code></strong></p>
+</li>
+<li>
+<p><strong>Definitional RETURN type exposure is function-composition sensitive</strong>.  I haven't written this up yet, but now even this works.  So it can synthesize the HELP from the arguments of the enclosed function but the return of the encloser:</p>
+<pre><code>&gt;&gt; appendcount: enclose append/ (func [return: [integer!] f [frame!]] [
+       eval f
+       return length of f.series
+   ])
+
+&gt;&gt; appendcount [a b c] spread [d e f]
+== 6  ; length of series after the append is run
+
+&gt;&gt; return of appendcount/
+== #[parameter! [integer!]]
+</code></pre>
+</li>
+</ul>
+<hr>
+<h1><a name="p-8003-where-to-now-6" class="anchor" href="https://rebol.metaeducation.com#p-8003-where-to-now-6"></a>Where To Now...</h1>
+<p>Going to try to get back on track, and firm everything up enough so it's solid enough to push to master.</p>
+<p>There's some work on the TO to MAKE matrix that I didn't cover here that actually turned out to be a pretty big thorn, and I've been putting off some decisions pertaining to that... because it's frustrating work.</p>
+<p>Updates as I have them.</p>
+          <p><a href="https://rebol.metaeducation.com/t/2024-recap-with-great-features-come-great-incompatibility/2362/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/2024-recap-with-great-features-come-great-incompatibility/2362/1</link>
+        <pubDate>Sun, 12 Jan 2025 06:37:23 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2362-1</guid>
+        <source url="https://rebol.metaeducation.com/t/2024-recap-with-great-features-come-great-incompatibility/2362.rss">2024 Recap: With Great Features Come Great Incompatibility</source>
+      </item>
+      <item>
+        <title>2024 Recap: With Great Features Come Great Incompatibility</title>
+        <dc:creator><![CDATA[Danny]]></dc:creator>
+        <description><![CDATA[
+            <p>Happy New years. Hoping to see all Rebol associated languages experience some epiphany of Moore's Law and become more invaluable for the <strong>PFOT</strong>, (present future of things).</p>
+          <p><a href="https://rebol.metaeducation.com/t/2024-recap-with-great-features-come-great-incompatibility/2362/4">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/2024-recap-with-great-features-come-great-incompatibility/2362/4</link>
+        <pubDate>Wed, 01 Jan 2025 08:31:48 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2362-4</guid>
+        <source url="https://rebol.metaeducation.com/t/2024-recap-with-great-features-come-great-incompatibility/2362.rss">2024 Recap: With Great Features Come Great Incompatibility</source>
+      </item>
+      <item>
+        <title>2024 Recap: With Great Features Come Great Incompatibility</title>
+        <dc:creator><![CDATA[GiuseppeChillemi]]></dc:creator>
+        <description><![CDATA[
+            <p>Hi everyone, happy new year! Hope the best for this project and all our other communities.</p>
+          <p><a href="https://rebol.metaeducation.com/t/2024-recap-with-great-features-come-great-incompatibility/2362/3">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/2024-recap-with-great-features-come-great-incompatibility/2362/3</link>
+        <pubDate>Wed, 01 Jan 2025 01:10:57 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2362-3</guid>
+        <source url="https://rebol.metaeducation.com/t/2024-recap-with-great-features-come-great-incompatibility/2362.rss">2024 Recap: With Great Features Come Great Incompatibility</source>
+      </item>
+  </channel>
+</rss>

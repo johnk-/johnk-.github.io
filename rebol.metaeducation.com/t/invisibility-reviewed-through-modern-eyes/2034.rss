@@ -1,0 +1,456 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Invisibility Reviewed Through Modern Eyes</title>
+    <link>https://forum.rebol.info/t/invisibility-reviewed-through-modern-eyes/2034</link>
+    <description>The first idea of making constructs that would &quot;vanish completely&quot; leveraged a special kind of enfix function, that would receive the entire evaluated value of the left hand side:
+
+     elide: enfix func [
+         left [&lt;evaluate-all&gt; any-value!]
+         right
+     ][
+         print [&quot;ELIDE got left as&quot; mold left]
+         return left
+     ]
+
+     &gt;&gt; 1 + 2 + 3 comment [magic!]
+     hi
+     ELIDE got left as 6
+     == 6  ; wow!
+
+This was a workaround for the (seeming?) fundamental fact that you can&#39;t have such a thing as &quot;invisible variables&quot; or &quot;invisible values&quot;.  *Certain functions just faked invisibility by repeating the previous value in the evaluator chain.*
+
+The possibilities seemed endless.  For instance, imagine something like this:
+
+    case [
+       conditionA [...code...]
+       elide print &quot;conditionA didn&#39;t succeed but running this&quot;
+       conditionB [...code...]
+       conditionC [...code...]
+    ]
+
+To do that in Rebol2 or Red would be incredibly awkward.  e.g. using a condition that runs code but evaluates to false, and then a throwaway block for the never-executed branch:
+
+    case [
+       conditionA [...code...]
+       (
+           print &quot;conditionA didn&#39;t succeed but running this&quot;
+           false
+       ) [&lt;unreachable&gt;]
+       conditionB [...code...]
+       conditionC [...code...]
+    ]
+
+Similar awkwardness would arise in things like ANY and ALL, where you&#39;d have to switch from using true and false based on which you were using...
+
+    any [conditionA (print &quot;vanish&quot; false) conditionB]
+    all [conditionA (print &quot;vanish&quot; true) conditionB]
+
+Beyond being awkward, it simply can&#39;t work if what you want to vanish is the last expression.  But ELIDE handled all these cases:
+
+    any [conditionA elide print &quot;vanish&quot; conditionB]
+    all [conditionA elide print &quot;vanish&quot; conditionB]
+    any [conditionA conditionB elide print &quot;vanish&quot;]
+    all [conditionA conditionB elide print &quot;vanish&quot;]
+
+## It Was A Neat Trick...But Problems Emerged
+
+The trick of invisibility requiring a function to receive its left hand side meant a GROUP! or COMMA! would break these constructs, as there was no access to a previous value:
+
+     &gt;&gt; 1 + 2 + 3 (elide print &quot;hi&quot;)
+     hi
+     ELIDE got left as null
+     == ~null~  ; not 6, d&#39;oh!
+
+     &gt;&gt; 1 + 2 + 3, elide print &quot;hi&quot;
+     hi
+     ELIDE got left as null
+     == ~null~
+
+Plus being enfix forced the invisible functions to execute in the same step as whatever came before them, causing unsuspected results:
+
+    &gt;&gt; case [
+            1 = 1 [print &quot;branch&quot;]
+            elide print &quot;reached here first :-(&quot;
+            1 = 2 [fail &quot;Unreachable&quot;]
+        ]
+    ELIDE got left as [print &quot;branch&quot;]
+    reached here first :-(
+    branch
+
+There we see that when the evaluator visited the **[print &quot;branch&quot;]** block in the CASE it had to greedily run the ELIDE, which evaluates its argument and then yielded the code block as its result.  CASE ran that code after the elide...out of order from what was desired.
+
+Issues seemed to keep compounding.  These invisible functions couldn&#39;t be reliably used with MAKE FRAME!, and people trying to simulate the evaluator&#39;s logic found it hard to detect and wrap them.  That led to major issues with UPARSE trying to implement combinators that acted like ELIDE.
+
+So the enfix mechanism wasn&#39;t going to cut it.  But it was too late: having been able to try out and develop all kinds of invisible constructs convinced me of their value.  I had to try another way...
+
+## Formalizing a VOID State And Corresponding Meta State
+
+The seeming impossibility of having a &quot;void value&quot; was addressed with the idea of folding special treatment in the evaluator of voids, but offering a meta domain in which they could be handled safely.
+
+    &gt;&gt; var: void
+    ; void
+    
+    &gt;&gt; 1 + 2 var
+    == 3
+
+    &gt;&gt; var: meta void
+    == &#39;
+
+    &gt;&gt; 1 + 2 var
+    == &#39;
+
+    &gt;&gt; 1 + 2 unmeta var
+    == 3
+
+The concept of being able to pipe around and process &quot;slippery&quot; values in this meta domain (including unset states and other isotopes) wound up being very successful.
+
+Evaluators like DO and UPARSE would specially preserve the last evaluative value in order to give the illusion of invisibility when voids were seen on the next step.  Other constructs got to make a choice as to whether they wanted to embrace voids as part of the mechanic, or think of them as errors:
+
+    &gt;&gt; comment &quot;comments returned void&quot;  ; Note: console doesn&#39;t show void results
+
+    &gt;&gt; if comment &quot;hi&quot; [print &quot;not tolerated in conditions&quot;]
+    ** Error: IF doesn&#39;t accept void as its condition argument
+
+    &gt;&gt; all [comment &quot;begin&quot; 1 + 2 10 + 20 comment &quot;end&quot;]
+    == 30
+
+    &gt;&gt; any [comment &quot;begin&quot; 1 + 2 10 + 20 comment &quot;end&quot;]
+    == 3
+
+e.g. for the above to work, ALL has to hang on to the last evaluated result as it goes...in case the next evaluated result is a comment.  This allows the 30 to fall out.
+
+## A Flexible Approach... But... Here Be Dragons
+
+Something that concerned me early on was that what had started as a narrow ability of just a few functions (like COMMENT and ELIDE) was becoming a case where generalized execution could possibly return voids, leading to unexpected results.
+
+    &gt;&gt; code: [comment &quot;some arbitary code block&quot;]
+
+    ; ... then much later ...
+
+    &gt;&gt; result: (mode: &lt;reading&gt; do code)
+    == &lt;reading&gt;
+
+    &gt;&gt; result
+    == &lt;reading&gt;  ; oops
+
+Increasing dependence on void as a &quot;vanishing&quot; alternative to the noisier null also raised the demand for void variables, with them becoming slippery to generate:
+
+    &gt;&gt; parse [x] [rule: [&#39;x (void) | &#39;y ([some &quot;y&quot;])]
+    == x
+
+    &gt;&gt; rule
+    == x  ; wanted void
+
+VOID was becoming a victim of its own popularity.  When it was rare coming from only a few constructs like ELIDE and COMMENT it was rare to see problems.  Yet when every IF/CASE/SWITCH statement that didn&#39;t run a branch started returning voids, things got hairier.
+
+There were also snags when making void isn&#39;t a parameter...but a product of something like the body on a MAP-EACH. At first it looks fine:
+
+    map-each item [1 &lt;one&gt; 2 &lt;two&gt; 3 &lt;three&gt;] [
+        maybe match tag! item  ; leaving it as NULL would be an error
+    ]
+    == [&lt;one&gt; &lt;two&gt; &lt;three&gt;]
+
+But what if you had something else in the loop body?
+
+    map-each item [1 &lt;one&gt; 2 &lt;two&gt; 3 &lt;three&gt;] [
+        append log spaced [&quot;Logging:&quot; item]
+        maybe match tag! item  ; remember, void vanishes
+    ]
+    == [&quot;Logging: 1&quot; &quot;Logging: &lt;one&gt;&quot; &quot;Logging...&quot; ...]
+
+## Once Again: Isotopes To The Rescue
+
+As part of [solving the problem of multi-returns](https://forum.rebol.info/t/the-history-of-multi-return-in-ren-c/1134), parameter pack antiforms were introduced.  These would &quot;decay&quot; to their first item, unless something handled the antiform specially.
+
+    &gt;&gt; pack [1 + 2 10 + 20]
+    == ~[&#39;3 &#39;30]~  ; anti
+
+    &gt;&gt; a: pack [1 + 2 10 + 20]
+    == 3
+
+     &gt;&gt; [a b]: pack [1 + 2 10 + 20]  ; SET-BLOCK! handles PACK! antiform specially
+     == 3
+
+     &gt;&gt; a
+     == 3
+
+     &gt;&gt; b
+     == 30
+
+Unpacking the packs raised a question: ***What if the PACK! is Empty***?  As far as variable assignment goes, it seems it can&#39;t do anything.  So erroring made the most sense:
+
+    &gt;&gt; pack []
+    == ~[]~  ; anti
+
+    &gt;&gt; a: pack []
+    ** Error: No values available in empty parameter pack
+
+Then there was a breakthrough of the next thought: ***Empty antiform packs could be used as the vanishing intent!!***
+
+    &gt;&gt; 1 + 2, pack []
+    == 3
+
+This would mean VOID could be less &quot;slippery&quot; in the evaluator, being treated normally most of the time and falling out of expressions vs. vaporizing:
+
+    &gt;&gt; 1 + 2, if false [&lt;a&gt;]  ; overall result is void
+    == ~void~  ; anti
+    
+    &gt;&gt; 1 + 2, if true [&lt;a&gt;]
+    == &lt;a&gt;
+
+## Empty isotopic packs were then given a name: **&quot;NIHIL&quot;**
+
+The terminology has varied over time.  I accomplished the distinction another way before isotopic packs, and at that time I called the distinction &quot;impure invisibility&quot; (non-vaporizing) vs. &quot;pure invisibility&quot; (vaporizing).
+
+But I think the &quot;impure&quot; vs. &quot;pure&quot; terms just caused confusion.  This is where things stand today, and it seems comfortable:
+
+    &gt;&gt; 1 + 2 void
+    == ~void~  ; anti
+
+    &gt;&gt; 1 + 2 nihil
+    == 3
+
+    &gt;&gt; 1 + 2 null
+    == ~null~   ; anti
+
+## I Think This Is A Comfortable Balance
+
+No matter what way you slice it, an expression that can truly vaporize is something that can make you uneasy.  Look at this CASE statement and imagine if FOO or BAR could vanish:
+
+     case [
+         foo [print &quot;hi&quot;]
+         bar [print &quot;bye&quot;]
+     ]
+
+Sure... we can lament that if FOO comes back as NIHIL, it will wreck the geometry of the CASE completely.  After dropping the FOO it will treat [print &quot;hi&quot;] as a condition and use BAR as a code branch.
+
+*But if FOO is a function that takes a BLOCK! as a parameter, it will also wreck the geometry of the CASE completely!*  This is just the cost of doing business in the Rebol paradigm.
+
+This modern model with NIHIL being an unstable isotope brings us back to where you can only get vanishing function calls--not vanishing variables.  FOO can be a variable holding VOID, but there&#39;s no risk of that wrecking the CASE statement...because CASE is not one of the constructs that willfully erases VOID.  Neither does the foundational evaluator (and nor does UPARSE)
+
+So long as usage of NIHIL is judicious, I think this is about as terra firma as the rest of Rebol is.  And UPARSE stands as a great example of a system that has been able to build on meta-representation in order to be able to pipe around vanishing states using &quot;special gloves&quot; and build upon it to make new invisible behaviors...
+
+    &gt;&gt; parse &quot;aaabbb&quot; [collect some keep &quot;a&quot;, elide some &quot;b&quot;]
+    == [&quot;a&quot; &quot;a&quot; &quot;a&quot;]
+
+It&#39;s rather satisfying.</description>
+    
+    <lastBuildDate>Wed, 04 Sep 2024 11:03:08 +0000</lastBuildDate>
+    <category>Internals</category>
+    <atom:link href="https://forum.rebol.info/t/invisibility-reviewed-through-modern-eyes/2034.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Invisibility Reviewed Through Modern Eyes</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>The first idea of making constructs that would "vanish completely" leveraged a special kind of enfix function, that would receive the entire evaluated value of the left hand side:</p>
+<pre><code> elide: enfix func [
+     left [&lt;evaluate-all&gt; any-value!]
+     right
+ ][
+     print ["ELIDE got left as" mold left]
+     return left
+ ]
+
+ &gt;&gt; 1 + 2 + 3 comment [magic!]
+ hi
+ ELIDE got left as 6
+ == 6  ; wow!
+</code></pre>
+<p>This was a workaround for the (seeming?) fundamental fact that you can't have such a thing as "invisible variables" or "invisible values".  <em>Certain functions just faked invisibility by repeating the previous value in the evaluator chain.</em></p>
+<p>The possibilities seemed endless.  For instance, imagine something like this:</p>
+<pre><code>case [
+   conditionA [...code...]
+   elide print "conditionA didn't succeed but running this"
+   conditionB [...code...]
+   conditionC [...code...]
+]
+</code></pre>
+<p>To do that in Rebol2 or Red would be incredibly awkward.  e.g. using a condition that runs code but evaluates to false, and then a throwaway block for the never-executed branch:</p>
+<pre><code>case [
+   conditionA [...code...]
+   (
+       print "conditionA didn't succeed but running this"
+       false
+   ) [&lt;unreachable&gt;]
+   conditionB [...code...]
+   conditionC [...code...]
+]
+</code></pre>
+<p>Similar awkwardness would arise in things like ANY and ALL, where you'd have to switch from using true and false based on which you were using...</p>
+<pre><code>any [conditionA (print "vanish" false) conditionB]
+all [conditionA (print "vanish" true) conditionB]
+</code></pre>
+<p>Beyond being awkward, it simply can't work if what you want to vanish is the last expression.  But ELIDE handled all these cases:</p>
+<pre><code>any [conditionA elide print "vanish" conditionB]
+all [conditionA elide print "vanish" conditionB]
+any [conditionA conditionB elide print "vanish"]
+all [conditionA conditionB elide print "vanish"]
+</code></pre>
+<h2>
+<a name="it-was-a-neat-trickbut-problems-emerged-1" class="anchor" href="https://forum.rebol.info#it-was-a-neat-trickbut-problems-emerged-1"></a>It Was A Neat Trick...But Problems Emerged</h2>
+<p>The trick of invisibility requiring a function to receive its left hand side meant a GROUP! or COMMA! would break these constructs, as there was no access to a previous value:</p>
+<pre><code> &gt;&gt; 1 + 2 + 3 (elide print "hi")
+ hi
+ ELIDE got left as null
+ == ~null~  ; not 6, d'oh!
+
+ &gt;&gt; 1 + 2 + 3, elide print "hi"
+ hi
+ ELIDE got left as null
+ == ~null~
+</code></pre>
+<p>Plus being enfix forced the invisible functions to execute in the same step as whatever came before them, causing unsuspected results:</p>
+<pre><code>&gt;&gt; case [
+        1 = 1 [print "branch"]
+        elide print "reached here first :-("
+        1 = 2 [fail "Unreachable"]
+    ]
+ELIDE got left as [print "branch"]
+reached here first :-(
+branch
+</code></pre>
+<p>There we see that when the evaluator visited the <strong>[print "branch"]</strong> block in the CASE it had to greedily run the ELIDE, which evaluates its argument and then yielded the code block as its result.  CASE ran that code after the elide...out of order from what was desired.</p>
+<p>Issues seemed to keep compounding.  These invisible functions couldn't be reliably used with MAKE FRAME!, and people trying to simulate the evaluator's logic found it hard to detect and wrap them.  That led to major issues with UPARSE trying to implement combinators that acted like ELIDE.</p>
+<p>So the enfix mechanism wasn't going to cut it.  But it was too late: having been able to try out and develop all kinds of invisible constructs convinced me of their value.  I had to try another way...</p>
+<h2>
+<a name="formalizing-a-void-state-and-corresponding-meta-state-2" class="anchor" href="https://forum.rebol.info#formalizing-a-void-state-and-corresponding-meta-state-2"></a>Formalizing a VOID State And Corresponding Meta State</h2>
+<p>The seeming impossibility of having a "void value" was addressed with the idea of folding special treatment in the evaluator of voids, but offering a meta domain in which they could be handled safely.</p>
+<pre><code>&gt;&gt; var: void
+; void
+
+&gt;&gt; 1 + 2 var
+== 3
+
+&gt;&gt; var: meta void
+== '
+
+&gt;&gt; 1 + 2 var
+== '
+
+&gt;&gt; 1 + 2 unmeta var
+== 3
+</code></pre>
+<p>The concept of being able to pipe around and process "slippery" values in this meta domain (including unset states and other isotopes) wound up being very successful.</p>
+<p>Evaluators like DO and UPARSE would specially preserve the last evaluative value in order to give the illusion of invisibility when voids were seen on the next step.  Other constructs got to make a choice as to whether they wanted to embrace voids as part of the mechanic, or think of them as errors:</p>
+<pre><code>&gt;&gt; comment "comments returned void"  ; Note: console doesn't show void results
+
+&gt;&gt; if comment "hi" [print "not tolerated in conditions"]
+** Error: IF doesn't accept void as its condition argument
+
+&gt;&gt; all [comment "begin" 1 + 2 10 + 20 comment "end"]
+== 30
+
+&gt;&gt; any [comment "begin" 1 + 2 10 + 20 comment "end"]
+== 3
+</code></pre>
+<p>e.g. for the above to work, ALL has to hang on to the last evaluated result as it goes...in case the next evaluated result is a comment.  This allows the 30 to fall out.</p>
+<h2>
+<a name="a-flexible-approach-but-here-be-dragons-3" class="anchor" href="https://forum.rebol.info#a-flexible-approach-but-here-be-dragons-3"></a>A Flexible Approach... But... Here Be Dragons</h2>
+<p>Something that concerned me early on was that what had started as a narrow ability of just a few functions (like COMMENT and ELIDE) was becoming a case where generalized execution could possibly return voids, leading to unexpected results.</p>
+<pre><code>&gt;&gt; code: [comment "some arbitary code block"]
+
+; ... then much later ...
+
+&gt;&gt; result: (mode: &lt;reading&gt; do code)
+== &lt;reading&gt;
+
+&gt;&gt; result
+== &lt;reading&gt;  ; oops
+</code></pre>
+<p>Increasing dependence on void as a "vanishing" alternative to the noisier null also raised the demand for void variables, with them becoming slippery to generate:</p>
+<pre><code>&gt;&gt; parse [x] [rule: ['x (void) | 'y ([some "y"])]
+== x
+
+&gt;&gt; rule
+== x  ; wanted void
+</code></pre>
+<p>VOID was becoming a victim of its own popularity.  When it was rare coming from only a few constructs like ELIDE and COMMENT it was rare to see problems.  Yet when every IF/CASE/SWITCH statement that didn't run a branch started returning voids, things got hairier.</p>
+<p>There were also snags when making void isn't a parameter...but a product of something like the body on a MAP-EACH. At first it looks fine:</p>
+<pre><code>map-each item [1 &lt;one&gt; 2 &lt;two&gt; 3 &lt;three&gt;] [
+    maybe match tag! item  ; leaving it as NULL would be an error
+]
+== [&lt;one&gt; &lt;two&gt; &lt;three&gt;]
+</code></pre>
+<p>But what if you had something else in the loop body?</p>
+<pre><code>map-each item [1 &lt;one&gt; 2 &lt;two&gt; 3 &lt;three&gt;] [
+    append log spaced ["Logging:" item]
+    maybe match tag! item  ; remember, void vanishes
+]
+== ["Logging: 1" "Logging: &lt;one&gt;" "Logging..." ...]
+</code></pre>
+<h2>
+<a name="once-again-isotopes-to-the-rescue-4" class="anchor" href="https://forum.rebol.info#once-again-isotopes-to-the-rescue-4"></a>Once Again: Isotopes To The Rescue</h2>
+<p>As part of <a href="https://forum.rebol.info/t/the-history-of-multi-return-in-ren-c/1134">solving the problem of multi-returns</a>, parameter pack antiforms were introduced.  These would "decay" to their first item, unless something handled the antiform specially.</p>
+<pre><code>&gt;&gt; pack [1 + 2 10 + 20]
+== ~['3 '30]~  ; anti
+
+&gt;&gt; a: pack [1 + 2 10 + 20]
+== 3
+
+ &gt;&gt; [a b]: pack [1 + 2 10 + 20]  ; SET-BLOCK! handles PACK! antiform specially
+ == 3
+
+ &gt;&gt; a
+ == 3
+
+ &gt;&gt; b
+ == 30
+</code></pre>
+<p>Unpacking the packs raised a question: <em><strong>What if the PACK! is Empty</strong></em>?  As far as variable assignment goes, it seems it can't do anything.  So erroring made the most sense:</p>
+<pre><code>&gt;&gt; pack []
+== ~[]~  ; anti
+
+&gt;&gt; a: pack []
+** Error: No values available in empty parameter pack
+</code></pre>
+<p>Then there was a breakthrough of the next thought: <em><strong>Empty antiform packs could be used as the vanishing intent!!</strong></em></p>
+<pre><code>&gt;&gt; 1 + 2, pack []
+== 3
+</code></pre>
+<p>This would mean VOID could be less "slippery" in the evaluator, being treated normally most of the time and falling out of expressions vs. vaporizing:</p>
+<pre><code>&gt;&gt; 1 + 2, if false [&lt;a&gt;]  ; overall result is void
+== ~void~  ; anti
+
+&gt;&gt; 1 + 2, if true [&lt;a&gt;]
+== &lt;a&gt;
+</code></pre>
+<h2>
+<a name="empty-isotopic-packs-were-then-given-a-name-nihil-5" class="anchor" href="https://forum.rebol.info#empty-isotopic-packs-were-then-given-a-name-nihil-5"></a>Empty isotopic packs were then given a name: <strong>"NIHIL"</strong>
+</h2>
+<p>The terminology has varied over time.  I accomplished the distinction another way before isotopic packs, and at that time I called the distinction "impure invisibility" (non-vaporizing) vs. "pure invisibility" (vaporizing).</p>
+<p>But I think the "impure" vs. "pure" terms just caused confusion.  This is where things stand today, and it seems comfortable:</p>
+<pre><code>&gt;&gt; 1 + 2 void
+== ~void~  ; anti
+
+&gt;&gt; 1 + 2 nihil
+== 3
+
+&gt;&gt; 1 + 2 null
+== ~null~   ; anti
+</code></pre>
+<h2>
+<a name="i-think-this-is-a-comfortable-balance-6" class="anchor" href="https://forum.rebol.info#i-think-this-is-a-comfortable-balance-6"></a>I Think This Is A Comfortable Balance</h2>
+<p>No matter what way you slice it, an expression that can truly vaporize is something that can make you uneasy.  Look at this CASE statement and imagine if FOO or BAR could vanish:</p>
+<pre><code> case [
+     foo [print "hi"]
+     bar [print "bye"]
+ ]
+</code></pre>
+<p>Sure... we can lament that if FOO comes back as NIHIL, it will wreck the geometry of the CASE completely.  After dropping the FOO it will treat [print "hi"] as a condition and use BAR as a code branch.</p>
+<p><em>But if FOO is a function that takes a BLOCK! as a parameter, it will also wreck the geometry of the CASE completely!</em>  This is just the cost of doing business in the Rebol paradigm.</p>
+<p>This modern model with NIHIL being an unstable isotope brings us back to where you can only get vanishing function calls--not vanishing variables.  FOO can be a variable holding VOID, but there's no risk of that wrecking the CASE statement...because CASE is not one of the constructs that willfully erases VOID.  Neither does the foundational evaluator (and nor does UPARSE)</p>
+<p>So long as usage of NIHIL is judicious, I think this is about as terra firma as the rest of Rebol is.  And UPARSE stands as a great example of a system that has been able to build on meta-representation in order to be able to pipe around vanishing states using "special gloves" and build upon it to make new invisible behaviors...</p>
+<pre><code>&gt;&gt; parse "aaabbb" [collect some keep "a", elide some "b"]
+== ["a" "a" "a"]
+</code></pre>
+<p>It's rather satisfying.</p>
+          <p><a href="https://forum.rebol.info/t/invisibility-reviewed-through-modern-eyes/2034/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/invisibility-reviewed-through-modern-eyes/2034/1</link>
+        <pubDate>Fri, 23 Jun 2023 17:06:50 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-2034-1</guid>
+        <source url="https://forum.rebol.info/t/invisibility-reviewed-through-modern-eyes/2034.rss">Invisibility Reviewed Through Modern Eyes</source>
+      </item>
+  </channel>
+</rss>

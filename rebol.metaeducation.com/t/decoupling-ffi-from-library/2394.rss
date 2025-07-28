@@ -1,0 +1,195 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Decoupling FFI from LIBRARY!</title>
+    <link>https://rebol.metaeducation.com/t/decoupling-ffi-from-library/2394</link>
+    <description>I&#39;ve been so gung-ho about finally coming up with a good implementation of the [Extension Type Mechanism](https://rebol.metaeducation.com/t/extension-types-implementation/1203/2) that I&#39;ve sort of changed my tune about whether it&#39;s worth it to keep around extensions like IMAGE!, VECTOR!, the FFI, or even GOB! and the serial port extension...
+
+But in any case, LIBRARY! is now the best it&#39;s been:
+
+    &gt;&gt; winsock: make library! %/C/Windows/System32/wsock32.dll
+    == #[library! %/C/Windows/System32/wsock32.dll]
+
+    &gt;&gt; pick winsock &quot;gethostbyname&quot;
+    == #[handle!]
+
+    &gt;&gt; pick winsock &quot;gethostbynickname&quot;
+    ** Error: Couldn&#39;t find &quot;gethostbynickname&quot;
+          in #[library! %/C/Windows/System32/wsock32.dll]
+
+    &gt;&gt; try pick winsock &quot;gethostbynickname&quot;
+    == ~null~  ; anti
+
+    &gt;&gt; close winsock
+    == #[library! {closed} %/C/Windows/System32/wsock32.dll]
+
+## FFI Has A Dependency on LIBRARY!... But...
+
+So the FFI extension is designed to let you interface with C functions from Rebol code.
+
+You&#39;ve got a C function in some DLL, the FFI lets you wrap that up in something you can call as a Rebol function and it translates the Rebol parameters (e.g. TEXT!) into something the C can take (e.g. `char*`).  
+
+The way Shixin did it, you pass the FFI a LIBRARY! and a TEXT! of a function name:
+
+    libgtk: make library! %libgtk-3.so
+
+    gtk-init: make-routine libgtk &quot;gtk_init&quot; [
+        argc [pointer]
+        argv [pointer]
+    ]
+
+But what if MAKE-ROUTINE just took a CFunction HANDLE! ?
+
+    libgtk: make library! %libgtk-3.so
+
+    gtk-init: make-routine (pick libgtk &quot;gtk_init&quot;) [
+        argc [pointer]
+        argv [pointer]
+    ]
+
+We could make this even better, by letting LIBRARY! accept WORD! as well as TEXT!, and using a TUPLE!-based PICK:
+
+    libgtk: make library! %libgtk-3.so
+
+    gtk-init: make-routine libgtk.gtk_init [
+        argc [pointer]
+        argv [pointer]
+    ]
+
+**This makes the FFI generalize, to however you get your CFunction.**
+
+Maybe you compiled a function in-memory with the TCC extension and want to test it from Rebol?
+
+Maybe you are using a different extension than LIBRARY! for getting DLLs.
+
+Anyway, I was working on trying to resolve dependencies between modules when I realized that this particular dependency isn&#39;t necessary!</description>
+    
+    <lastBuildDate>Sat, 05 Apr 2025 06:52:20 +0000</lastBuildDate>
+    <category>FFI</category>
+    <atom:link href="https://rebol.metaeducation.com/t/decoupling-ffi-from-library/2394.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Decoupling FFI from LIBRARY!</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <blockquote>
+<p><strong>Decoupling FFI from LIBRARY!</strong></p>
+</blockquote>
+<p>This raises another question about what should be coupled or uncoupled...</p>
+<p><em>Should FFI depend on the VECTOR! extension?</em></p>
+<p>The original FFI from Rebol2's paid version (Rebol/Command) didn't seem to support arrays at all:</p>
+<p><a href="https://www.rebol.com/docs/library.html" class="inline-onebox">REBOL External Library Interface</a></p>
+<p>When Shixin implemented support for them, the result you get back is a block, e.g. for C if you had:</p>
+<pre><code>struct example {
+    uint8_t some_array[1000];
+};
+</code></pre>
+<p>If you made an instance of that struct, and then picked <strong><code>instance.some_array</code></strong> you'd get back a BLOCK! of 1000 integers.  This would use Cells, so on a 64-bit system:</p>
+<pre><code>1000 * (4 platform pointers per cell) * (8 bytes per platform pointer)
+-&gt; 32,000 bytes to represent an array of 1000 bytes
+</code></pre>
+<p>But it's worse than that...</p>
+<h2><a name="p-8103-dealing-with-sub-cell-addressing-1" class="anchor" href="https://rebol.metaeducation.com#p-8103-dealing-with-sub-cell-addressing-1"></a>Dealing With "Sub-Cell Addressing"</h2>
+<p>I've previously mentioned a nasty property that PICK mechanics have, which is that because it moves in steps...what if you wrote:</p>
+<pre><code>instance.some_array.500  ; pick the 500th byte out of the 1000 byte array
+</code></pre>
+<p>If this goes stepwise and fabricates that block of 1000 INTEGER!, and then picks just the 500th one out of it, then it wastefully created a 32,000 byte BLOCK! for no reason.</p>
+<p>The historical "solution" to this problem was that in such cases, STRUCT! would hijack the path picking process itself.  Instead of the (<code>instance.some_array</code>) step producing something from which the 500th element would be picked, it would actually "look ahead" and see the 500 coming, and take over the processing.</p>
+<p>I've pushed back against that idea, because irregularizing the picking process causes more damage than it is worth.  I'd sooner have you write <strong><code>instance.[some_array 500]</code></strong> or similar.</p>
+<p><strong>BUT</strong> if VECTOR! was willing to act as an interface to in-memory data that it did not own, it could solve this problem.  <strong><code>instance.some_array</code></strong> could fabricate a VECTOR! as a light wrapper over memory that could accept the reads and the writes.</p>
+<h2><a name="p-8103-weak-vector-coupling-only-need-if-you-use-c-arrays-2" class="anchor" href="https://rebol.metaeducation.com#p-8103-weak-vector-coupling-only-need-if-you-use-c-arrays-2"></a>Weak VECTOR! Coupling: Only need if you use C arrays?</h2>
+<p>I think it can be designed in such a way that if you don't have VECTOR! loaded, you can still do basic FFI.  Maybe even be able to represent and proxy data containing arrays.  But if you want to PICK and POKE out of arrays, then you need VECTOR!.</p>
+<p>Or maybe plain old binary values could be used as a last resort, if you don't have vector...and you can mess with the bytes yourself.</p>
+<p>I definitely like the idea of the FFI extension being <em>able</em> to work without VECTOR!.  But the properties of using BLOCK! for arrays are so bad regarding the subcell addressing issues that I think doing that with VECTOR! makes more sense.</p>
+          <p><a href="https://rebol.metaeducation.com/t/decoupling-ffi-from-library/2394/3">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/decoupling-ffi-from-library/2394/3</link>
+        <pubDate>Sat, 05 Apr 2025 06:52:20 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2394-3</guid>
+        <source url="https://rebol.metaeducation.com/t/decoupling-ffi-from-library/2394.rss">Decoupling FFI from LIBRARY!</source>
+      </item>
+      <item>
+        <title>Decoupling FFI from LIBRARY!</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="2394">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>Anyway, I was working on trying to resolve dependencies between modules when I realized that this particular dependency isn't necessary!</p>
+</blockquote>
+</aside>
+<p>Well, I did find one aspect where knowing the library is useful.</p>
+<p>It stored the library from which the function handle originated, and then when went to dispatch the function it checked to see if the library was closed.  It would give you an error then, when you called the function, instead of crashing.</p>
+<p>But this seems to call for a more general mechanic, whereby the pointers themselves handed out by a library maintain a connection to the library, and go bad when the library is unloaded.</p>
+<p>This could be done by having the Cell which a LIBRARY gives back contain a Stub, which is in a linked list with all the stubs that the library hands out.  When the library is unloaded, it walks this list and makes all the Stubs go bad.  This makes pointers handed out by LIBRARY! slightly more expensive, but there was cost to storing the library in the FFI functions as well.</p>
+<p>It would also let you get more information out of a handle if you wanted it, of showing what library it was in.</p>
+          <p><a href="https://rebol.metaeducation.com/t/decoupling-ffi-from-library/2394/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/decoupling-ffi-from-library/2394/2</link>
+        <pubDate>Fri, 04 Apr 2025 19:32:02 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2394-2</guid>
+        <source url="https://rebol.metaeducation.com/t/decoupling-ffi-from-library/2394.rss">Decoupling FFI from LIBRARY!</source>
+      </item>
+      <item>
+        <title>Decoupling FFI from LIBRARY!</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>I've been so gung-ho about finally coming up with a good implementation of the <a href="https://rebol.metaeducation.com/t/extension-types-implementation/1203/2">Extension Type Mechanism</a> that I've sort of changed my tune about whether it's worth it to keep around extensions like IMAGE!, VECTOR!, the FFI, or even GOB! and the serial port extension...</p>
+<p>But in any case, LIBRARY! is now the best it's been:</p>
+<pre><code>&gt;&gt; winsock: make library! %/C/Windows/System32/wsock32.dll
+== #[library! %/C/Windows/System32/wsock32.dll]
+
+&gt;&gt; pick winsock "gethostbyname"
+== #[handle!]
+
+&gt;&gt; pick winsock "gethostbynickname"
+** Error: Couldn't find "gethostbynickname"
+      in #[library! %/C/Windows/System32/wsock32.dll]
+
+&gt;&gt; try pick winsock "gethostbynickname"
+== ~null~  ; anti
+
+&gt;&gt; close winsock
+== #[library! {closed} %/C/Windows/System32/wsock32.dll]
+</code></pre>
+<h2><a name="p-8101-ffi-has-a-dependency-on-library-but-1" class="anchor" href="https://rebol.metaeducation.com#p-8101-ffi-has-a-dependency-on-library-but-1"></a>FFI Has A Dependency on LIBRARY!... But...</h2>
+<p>So the FFI extension is designed to let you interface with C functions from Rebol code.</p>
+<p>You've got a C function in some DLL, the FFI lets you wrap that up in something you can call as a Rebol function and it translates the Rebol parameters (e.g. TEXT!) into something the C can take (e.g. <code>char*</code>).</p>
+<p>The way Shixin did it, you pass the FFI a LIBRARY! and a TEXT! of a function name:</p>
+<pre><code>libgtk: make library! %libgtk-3.so
+
+gtk-init: make-routine libgtk "gtk_init" [
+    argc [pointer]
+    argv [pointer]
+]
+</code></pre>
+<p>But what if MAKE-ROUTINE just took a CFunction HANDLE! ?</p>
+<pre><code>libgtk: make library! %libgtk-3.so
+
+gtk-init: make-routine (pick libgtk "gtk_init") [
+    argc [pointer]
+    argv [pointer]
+]
+</code></pre>
+<p>We could make this even better, by letting LIBRARY! accept WORD! as well as TEXT!, and using a TUPLE!-based PICK:</p>
+<pre><code>libgtk: make library! %libgtk-3.so
+
+gtk-init: make-routine libgtk.gtk_init [
+    argc [pointer]
+    argv [pointer]
+]
+</code></pre>
+<p><strong>This makes the FFI generalize, to however you get your CFunction.</strong></p>
+<p>Maybe you compiled a function in-memory with the TCC extension and want to test it from Rebol?</p>
+<p>Maybe you are using a different extension than LIBRARY! for getting DLLs.</p>
+<p>Anyway, I was working on trying to resolve dependencies between modules when I realized that this particular dependency isn't necessary!</p>
+          <p><a href="https://rebol.metaeducation.com/t/decoupling-ffi-from-library/2394/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/decoupling-ffi-from-library/2394/1</link>
+        <pubDate>Fri, 04 Apr 2025 09:11:33 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2394-1</guid>
+        <source url="https://rebol.metaeducation.com/t/decoupling-ffi-from-library/2394.rss">Decoupling FFI from LIBRARY!</source>
+      </item>
+  </channel>
+</rss>

@@ -1,0 +1,316 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Pushing the Potential of Polyglot Polymorphic DO</title>
+    <link>https://rebol.metaeducation.com/t/pushing-the-potential-of-polyglot-polymorphic-do/1846</link>
+    <description>**The brevity of DO is a strength that makes it seem natural to be polymorphic.**
+
+I thought it was very wasteful that when Rebol2 and Red&#39;s DO saw something it didn&#39;t recognize, it would just drop out:
+
+    rebol2&gt;&gt; do 1020
+    == 1020
+
+    rebol2&gt;&gt; do &lt;useless&gt;
+    == &lt;useless&gt;
+
+Pinning people&#39;s expections to this behavior--to where they write code that relies on it--is awful.
+
+There are plenty of things we can imagine for this undiscovered space.  (Soon it&#39;s planned that the ReplPad will use shorthands like **do 3** to mean &quot;run the code in editor tab #3&quot;)
+
+## Could We (or Should We?) Take DO&#39;s Polymorphism Further?
+
+I&#39;d been thinking that it might be able to &quot;run&quot; things that are not even Rebol.   This would mean that you could **do %foo.js** and run JavaScript, or **do %bar.css** and import CSS.
+
+*(But then again, JavaScript has modules vs. ordinary code... so maybe **import %foo-module.js** would also be an interesting polymoprhism to have as well?)*
+
+We are getting some experience with this and the ReplPad.  And what experience is telling us is that it&#39;s really ugly to have to use names like JS-DO and CSS-DO.  Plus it puts stress on coming up with and remembering the names (was it JS-DO or DO-JS?)
+
+With FRAME!s we even have the option of building things that defer execution.  Some simple pseudocode using current JS-DO to give the idea.
+
+    load: enclose :lib.load func [frame]
+        uparse try match [url! file!] frame.source then [
+            let result: make frame! :js-do
+            result.source: frame.source
+            return result
+       ]
+       do frame
+    ]
+
+    &gt;&gt; thing: load https://example.com/helloworld.js  ; doesn&#39;t run JS yet
+
+    &gt;&gt; do thing  ; would run it here
+
+In today&#39;s Ren-C, the sky is the limit for many such things. 
+
+## I Think DO of a TEXT! String Should Be Dropped (Reclaimed)
+
+When you DO a BLOCK!, you know that block has been incarnated through some series of steps that bound it and brought it to life.
+
+When you DO a TEXT! string, you have nothing to go on but the string itself.  It represents an incomplete thought, and it&#39;s hard to think of a &quot;good&quot; answer for what the semantics of that should be.
+
+One tricky issue we&#39;ve talked about is how module headers in text strings are handled:
+
+    do &quot;Rebol [Type: module] export thing: {This does not work}&quot;
+
+Historically what happens is that Rebol is a synonym for the SYSTEM object, so that evaluates an inert OBJECT! as a first step.  Then it evaluates the inert block [Type: module].  You don&#39;t have any of the LOADer mechanics in there.
+
+So basically, the above is *completely* broken.
+
+We&#39;re facing another problem of being short on strings to say where code should come from.  It&#39;s important to have a way to distinguish running paths relative to `system.script.path` as opposed to WHAT-DIR, and strings seem a reasonable way to encode that intent:
+
+    do %../path/relative/to/what-dir
+    do &quot;../path/relative/to/system.script.path&quot;
+
+    import %../path/relative/to/what-dir
+    import &quot;../path/relative/to/system.script.path&quot;
+
+When you add all this in with the spirit of language agnosticism, that makes interpreting TEXT! as being specifically Rebol language text is presumptuous.
+
+This all makes going through **do load** to use text as source seem like a much more attractive option than trying to figure out how to push all of LOAD&#39;s options onto DO.
+
+    &gt;&gt; do &quot;print {Hello World}&quot;
+    Hello World
+
+    &gt;&gt; do load &quot;print {Is DO LOAD that much worse for Hello World?}&quot;
+    Is DO LOAD that much worse for Hello World?
+
+*Of course, I will make the usual point that you will be able to overload this if you wish.*   Redbol will still DO strings, and you can decide you&#39;re never going to use the script-relative path importing (or do it another way).
+
+But I think DO LOAD is a small price to pay for solving a bunch of irritating problems.
+
+## I Think We Should Drop the /NEXT Option From DO 
+
+Clearly a DO/NEXT of a JavaScript file doesn&#39;t make sense.  But does it make sense for a Rebol file, really?
+
+Rebol2 returns a BLOCK! with a pair of the result and remaining code, which works for blocks:
+
+    rebol2&gt;&gt; foo: [print &quot;Some&quot; print &quot;Block&quot;]
+
+    rebol2&gt;&gt; do/next foo
+    Some
+    == [unset [print &quot;Block&quot;]]
+
+But for functions, it just ignores the /NEXT:
+
+    rebol2&gt;&gt; foo: func [] [print &quot;Some&quot; print &quot;Function&quot;]
+
+    rebol2&gt;&gt; do/next :foo
+    Some
+    Function
+
+Red gives nonsense, as usual...it returns the value of the function back and doesn&#39;t DO it at all
+
+    red&gt;&gt; foo: func [] [print &quot;The usual&quot; print &quot;nonsense&quot;]
+
+    red&gt;&gt; foo
+    The usual
+    nonsense
+
+    red&gt;&gt; do/next :foo &#39;pos
+    == func [][print &quot;The usual&quot; print &quot;nonsense&quot;]
+
+    red&gt;&gt; pos
+    *** Script Error: pos has no value
+
+**So I&#39;m proposing the /NEXT functionality be solely in EVAL, and have EVAL run only on ANY-ARRAY!**
+
+If you DO, that means fire-and-forget.
+
+## Narrowing DO Use Is Good For Security / Avoiding Big Mistakes
+
+DO is pretty powerful.  When you say DO VALUE that could be a URL!...fetching arbitrary code off the internet and running it.
+
+Of course, DO of a BLOCK! can contain code that does arbitrary things.  But if you&#39;re writing code that&#39;s supposed to all run on your machine and be self contained, it would be nice if you could be reasonably sure that you aren&#39;t running code off the internet if you didn&#39;t use DO or IMPORT.
+
+So making it possible to get normal casual work done locally without ever needing to call DO seems desirable.  That is why EVAL has both &quot;do to end&quot; and &quot;do step&quot; semantics:
+
+     &gt;&gt; eval [1 + 1 print &quot;Modes&quot;]
+     Modes
+
+     &gt;&gt; [value pos]: eval [1 + 1 print &quot;Modes&quot;]
+     == 2
+
+    &gt;&gt; pos
+    == [print &quot;Modes&quot;]
+
+So you can use EVAL where you would have used DO of a BLOCK!, and you can use the /NEXT mode as a multi-return (or a refinement, if you choose)
+
+    &gt;&gt; eval/next [1 + 1 print &quot;Modes&quot;] &#39;pos
+    == 2
+
+    &gt;&gt; pos
+    == [print &quot;Modes&quot;]
+
+**This raises into question if DO of a BLOCK! needs to be a way to run code at all.**  It could be dialected, and let you supply arguments:
+
+    do [%script-taking-args.reb 1 2 3]</description>
+    
+    <lastBuildDate>Sat, 25 Jun 2022 15:01:10 +0000</lastBuildDate>
+    <category>Semantics</category>
+    <atom:link href="https://rebol.metaeducation.com/t/pushing-the-potential-of-polyglot-polymorphic-do/1846.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Pushing the Potential of Polyglot Polymorphic DO</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>Delving further in the semantics of DO...there is a question about whether DO should catch QUIT signals or not...</p>
+<ul>
+<li>
+<p>does a QUIT originating from inside the code you pass DO leave the interpreter running, passing back a value to you?</p>
+</li>
+<li>
+<p>or does a QUIT from inside the code you pass DO actually quit the interpreter, passing back an exit code to the shell</p>
+</li>
+</ul>
+<p>As is oft the case, the answer to this question historically is both ugly and inconsistent.  <img src="https://rebol.metaeducation.com/images/emoji/twitter/slight_smile.png?v=14" title=":slight_smile:" class="emoji" alt=":slight_smile:" loading="lazy" width="20" height="20">  It is controlled by the badly-named /ONLY refinement of DO:</p>
+<pre><code>&gt;&gt; do "quit 10"
+== 10
+
+&gt;&gt; do/only "quit 10"  ; exits
+/home/r3$ echo $?  # here's how to print the status code
+10
+</code></pre>
+<p>But regardless of whether you use /ONLY or not, a DO of a BLOCK! won't be able to catch the quit.  It always terminates the interpreter.</p>
+<h2><a name="p-5949-i-think-do-should-work-like-a-function-only-return-value-if-quit-1" class="anchor" href="https://rebol.metaeducation.com#p-5949-i-think-do-should-work-like-a-function-only-return-value-if-quit-1"></a>I Think DO Should Work Like A Function, Only Return Value if QUIT</h2>
+<p>One thing I see here of /ONLY being an epicycle of is a semantic problem...of not knowing whether a script meant to return a value or not.</p>
+<p>When you're running code on the command line with <strong><code>--do</code></strong>, it needs to know whether to return an exit code representing an error or not.  Conservatively it doesn't want to just assume because the last line of the code you gave it gave back an INTEGER! that was an exit code.  So there's a reliance on the idea of a transparency...if something wanted to quit with a value it would have returned it.</p>
+<p><strong>This sorts out a lot when you think of the idea that DO only ever returns a value when there's an explicit QUIT with a parameter passed to it.</strong></p>
+<p>It gets very hard in the internals to try and tell you whether a script ran a code path that had QUIT on it or not. So the best measurement of intent would be to say that all DOs are none unless you QUIT with a value, and QUITs are always caught.</p>
+<p><em>(I know <a class="mention" href="https://rebol.metaeducation.com/u/gchiu">@gchiu</a> will like the less-noisy return result, so that a DO is quiet in the console unless it has a reason to be otherwise.)</em></p>
+<aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="1846">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p><em>This raises into question if DO of a BLOCK! needs to be a way to run code at all.</em></p>
+</blockquote>
+</aside>
+<p>I'm not sure if it needs to or not.  But given that we have EVALUATE, I don't think it needs to be able to catch quits.  This means we can universally say that if you run DO, it will catch any QUITs that occur.</p>
+<p>So moving on these things slowly, which is tidying up some loose ends.</p>
+          <p><a href="https://rebol.metaeducation.com/t/pushing-the-potential-of-polyglot-polymorphic-do/1846/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/pushing-the-potential-of-polyglot-polymorphic-do/1846/2</link>
+        <pubDate>Sat, 25 Jun 2022 14:24:05 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1846-2</guid>
+        <source url="https://rebol.metaeducation.com/t/pushing-the-potential-of-polyglot-polymorphic-do/1846.rss">Pushing the Potential of Polyglot Polymorphic DO</source>
+      </item>
+      <item>
+        <title>Pushing the Potential of Polyglot Polymorphic DO</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p><strong>The brevity of DO is a strength that makes it seem natural to be polymorphic.</strong></p>
+<p>I thought it was very wasteful that when Rebol2 and Red's DO saw something it didn't recognize, it would just drop out:</p>
+<pre><code>rebol2&gt;&gt; do 1020
+== 1020
+
+rebol2&gt;&gt; do &lt;useless&gt;
+== &lt;useless&gt;
+</code></pre>
+<p>Pinning people's expections to this behavior--to where they write code that relies on it--is awful.</p>
+<p>There are plenty of things we can imagine for this undiscovered space.  (Soon it's planned that the ReplPad will use shorthands like <strong>do 3</strong> to mean "run the code in editor tab <span class="hashtag-raw">#3</span>")</p>
+<h2><a name="p-5945-could-we-or-should-we-take-dos-polymorphism-further-1" class="anchor" href="https://rebol.metaeducation.com#p-5945-could-we-or-should-we-take-dos-polymorphism-further-1"></a>Could We (or Should We?) Take DO's Polymorphism Further?</h2>
+<p>I'd been thinking that it might be able to "run" things that are not even Rebol.   This would mean that you could <strong>do %foo.js</strong> and run JavaScript, or <strong>do %bar.css</strong> and import CSS.</p>
+<p><em>(But then again, JavaScript has modules vs. ordinary code... so maybe <strong>import %foo-module.js</strong> would also be an interesting polymoprhism to have as well?)</em></p>
+<p>We are getting some experience with this and the ReplPad.  And what experience is telling us is that it's really ugly to have to use names like JS-DO and CSS-DO.  Plus it puts stress on coming up with and remembering the names (was it JS-DO or DO-JS?)</p>
+<p>With FRAME!s we even have the option of building things that defer execution.  Some simple pseudocode using current JS-DO to give the idea.</p>
+<pre><code>load: enclose :lib.load func [frame]
+    uparse try match [url! file!] frame.source then [
+        let result: make frame! :js-do
+        result.source: frame.source
+        return result
+   ]
+   do frame
+]
+
+&gt;&gt; thing: load https://example.com/helloworld.js  ; doesn't run JS yet
+
+&gt;&gt; do thing  ; would run it here
+</code></pre>
+<p>In today's Ren-C, the sky is the limit for many such things.</p>
+<h2><a name="p-5945-i-think-do-of-a-text-string-should-be-dropped-reclaimed-2" class="anchor" href="https://rebol.metaeducation.com#p-5945-i-think-do-of-a-text-string-should-be-dropped-reclaimed-2"></a>I Think DO of a TEXT! String Should Be Dropped (Reclaimed)</h2>
+<p>When you DO a BLOCK!, you know that block has been incarnated through some series of steps that bound it and brought it to life.</p>
+<p>When you DO a TEXT! string, you have nothing to go on but the string itself.  It represents an incomplete thought, and it's hard to think of a "good" answer for what the semantics of that should be.</p>
+<p>One tricky issue we've talked about is how module headers in text strings are handled:</p>
+<pre><code>do "Rebol [Type: module] export thing: {This does not work}"
+</code></pre>
+<p>Historically what happens is that Rebol is a synonym for the SYSTEM object, so that evaluates an inert OBJECT! as a first step.  Then it evaluates the inert block [Type: module].  You don't have any of the LOADer mechanics in there.</p>
+<p>So basically, the above is <em>completely</em> broken.</p>
+<p>We're facing another problem of being short on strings to say where code should come from.  It's important to have a way to distinguish running paths relative to <code>system.script.path</code> as opposed to WHAT-DIR, and strings seem a reasonable way to encode that intent:</p>
+<pre><code>do %../path/relative/to/what-dir
+do "../path/relative/to/system.script.path"
+
+import %../path/relative/to/what-dir
+import "../path/relative/to/system.script.path"
+</code></pre>
+<p>When you add all this in with the spirit of language agnosticism, that makes interpreting TEXT! as being specifically Rebol language text is presumptuous.</p>
+<p>This all makes going through <strong>do load</strong> to use text as source seem like a much more attractive option than trying to figure out how to push all of LOAD's options onto DO.</p>
+<pre><code>&gt;&gt; do "print {Hello World}"
+Hello World
+
+&gt;&gt; do load "print {Is DO LOAD that much worse for Hello World?}"
+Is DO LOAD that much worse for Hello World?
+</code></pre>
+<p><em>Of course, I will make the usual point that you will be able to overload this if you wish.</em>   Redbol will still DO strings, and you can decide you're never going to use the script-relative path importing (or do it another way).</p>
+<p>But I think DO LOAD is a small price to pay for solving a bunch of irritating problems.</p>
+<h2><a name="p-5945-i-think-we-should-drop-the-next-option-from-do-3" class="anchor" href="https://rebol.metaeducation.com#p-5945-i-think-we-should-drop-the-next-option-from-do-3"></a>I Think We Should Drop the /NEXT Option From DO</h2>
+<p>Clearly a DO/NEXT of a JavaScript file doesn't make sense.  But does it make sense for a Rebol file, really?</p>
+<p>Rebol2 returns a BLOCK! with a pair of the result and remaining code, which works for blocks:</p>
+<pre><code>rebol2&gt;&gt; foo: [print "Some" print "Block"]
+
+rebol2&gt;&gt; do/next foo
+Some
+== [unset [print "Block"]]
+</code></pre>
+<p>But for functions, it just ignores the /NEXT:</p>
+<pre><code>rebol2&gt;&gt; foo: func [] [print "Some" print "Function"]
+
+rebol2&gt;&gt; do/next :foo
+Some
+Function
+</code></pre>
+<p>Red gives nonsense, as usual...it returns the value of the function back and doesn't DO it at all</p>
+<pre><code>red&gt;&gt; foo: func [] [print "The usual" print "nonsense"]
+
+red&gt;&gt; foo
+The usual
+nonsense
+
+red&gt;&gt; do/next :foo 'pos
+== func [][print "The usual" print "nonsense"]
+
+red&gt;&gt; pos
+*** Script Error: pos has no value
+</code></pre>
+<p><strong>So I'm proposing the /NEXT functionality be solely in EVAL, and have EVAL run only on ANY-ARRAY!</strong></p>
+<p>If you DO, that means fire-and-forget.</p>
+<h2><a name="p-5945-narrowing-do-use-is-good-for-security-avoiding-big-mistakes-4" class="anchor" href="https://rebol.metaeducation.com#p-5945-narrowing-do-use-is-good-for-security-avoiding-big-mistakes-4"></a>Narrowing DO Use Is Good For Security / Avoiding Big Mistakes</h2>
+<p>DO is pretty powerful.  When you say DO VALUE that could be a URL!...fetching arbitrary code off the internet and running it.</p>
+<p>Of course, DO of a BLOCK! can contain code that does arbitrary things.  But if you're writing code that's supposed to all run on your machine and be self contained, it would be nice if you could be reasonably sure that you aren't running code off the internet if you didn't use DO or IMPORT.</p>
+<p>So making it possible to get normal casual work done locally without ever needing to call DO seems desirable.  That is why EVAL has both "do to end" and "do step" semantics:</p>
+<pre><code> &gt;&gt; eval [1 + 1 print "Modes"]
+ Modes
+
+ &gt;&gt; [value pos]: eval [1 + 1 print "Modes"]
+ == 2
+
+&gt;&gt; pos
+== [print "Modes"]
+</code></pre>
+<p>So you can use EVAL where you would have used DO of a BLOCK!, and you can use the /NEXT mode as a multi-return (or a refinement, if you choose)</p>
+<pre><code>&gt;&gt; eval/next [1 + 1 print "Modes"] 'pos
+== 2
+
+&gt;&gt; pos
+== [print "Modes"]
+</code></pre>
+<p><strong>This raises into question if DO of a BLOCK! needs to be a way to run code at all.</strong>  It could be dialected, and let you supply arguments:</p>
+<pre><code>do [%script-taking-args.reb 1 2 3]
+</code></pre>
+          <p><a href="https://rebol.metaeducation.com/t/pushing-the-potential-of-polyglot-polymorphic-do/1846/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/pushing-the-potential-of-polyglot-polymorphic-do/1846/1</link>
+        <pubDate>Mon, 20 Jun 2022 10:29:53 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1846-1</guid>
+        <source url="https://rebol.metaeducation.com/t/pushing-the-potential-of-polyglot-polymorphic-do/1846.rss">Pushing the Potential of Polyglot Polymorphic DO</source>
+      </item>
+  </channel>
+</rss>

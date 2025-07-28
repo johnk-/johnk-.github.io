@@ -1,0 +1,386 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>When Should Functions Validate Their Type Specs?</title>
+    <link>https://rebol.metaeducation.com/t/when-should-functions-validate-their-type-specs/2391</link>
+    <description>You&#39;re able to use things in the body of a function that aren&#39;t defined yet:
+
+    &gt;&gt; foo: func [x] [if cool-number? x [print &quot;It&#39;s cool&quot;]]
+
+No error there, until you run the function.
+
+But what if you use a datatype that&#39;s not defined yet?  Here&#39;s Rebol2:
+
+    rebol2&gt;&gt; foo: func [x [cool-number!]] [print &quot;Typechecked as cool!&quot;]]
+    ** Script Error: Invalid argument: cool-number!
+
+    rebol2&gt;&gt; cool-number!: integer!
+
+    rebol2&gt;&gt; foo: func [x [cool-number!]] [print &quot;Typechecked as cool!&quot;]
+    ; no error
+
+Red seems to just do a literal symbolic check, you can&#39;t define types under other words:
+
+    red&gt;&gt; cool-number: integer!
+
+    red&gt;&gt; foo: func [x [cool-number!]] [print &quot;Typechecked as cool!&quot;]
+    *** Script Error: cool-number! has no value
+
+## This Is A Problem For Extension Types
+
+Let&#39;s say you have a collection of routines in a module, and one of them is able to operate on IMAGE!.  But let&#39;s say you don&#39;t load the IMAGE! extension, and you don&#39;t use that routine. 
+
+The aggressive requirement that all types in type specs be resolvable at FUNC declaration time would prevent that module from loading.
+
+It creates ordering problems... where you suddenly have to worry about the order you&#39;re loading extensions in, even when they aren&#39;t dependent on each other in order to load... but just because they can operate on each other&#39;s types.  And it makes it impossible if they refer to each other&#39;s types.
+
+## Is The Answer To Wait Until The Function Is Called?
+
+The historical problem with waiting was that the information in the spec was compacted and thrown away.  But modern PARAMETER! works differently, and could handle it.
+
+There are issues with type constraints changing out from under you, with regards to specialization and such.  See this post, which surveys what happens when you do things like **INTEGER!: TAG!** in the middle of a run:
+
+  https://rebol.metaeducation.com/t/survey-of-redefining-datatype-word-s/1479
+
+The answer there may be that have to lock any variables that are used as type constraints so you can&#39;t change them.  :man_shrugging: 
+
+**I&#39;m not concerned about performance issues...** it can be made to perform as well as it should.
+
+The real question is just what to do about situations like:
+
+    &gt;&gt; foo: func [x [integer! askjdfljaslkdjfkakjsdhf]] [return x]
+
+    &gt;&gt; foo 10
+    == 10
+
+Is that sane?  You might say ***&quot;no, that&#39;s obviously insane&quot;***, but consider you could have just as easily written:
+
+    &gt;&gt; foo: func [x] [if integer? x [return x] askjdfljaslkdjfkakjsdhf]
+
+    &gt;&gt; foo 10
+    == 10
+
+But taken to its logical conclusion, tolerating undefined things in type specs and just skipping them would also permit:
+
+    &gt;&gt; foo: func [x [askjdfljaslkdjfkakjsdhf integer!]] [return x]
+
+    &gt;&gt; foo 10
+    == 10
+
+## Okay, That *Is* Crazy
+
+It seems there needs to be some concept of forward-declaration.  Something that type specs tolerate as a non-match unless the thing loads.
+
+It *may* be (and I&#39;m still working on the finer details of this), that all antiform fences canonize to the same antiform fence for that word, which identifies a datatype.  Meaning you could do a forward-declaration by just saying:
+
+    image!: ~{image!}~
+
+Then when the actual IMAGE! library gets loaded (perhaps through a DLL and LOAD-EXTENSION) it agrees on that.
+
+But even if that were able to work for the narrow case of a DATATYPE!, it doesn&#39;t help so much with functions.  Let&#39;s say the datatypes were RGB-IMAGE! and RGBA-IMAGE! to distinguish having an alpha channel (for instance).  Then there was ANY-IMAGE?.  What if you want to use ANY-IMAGE? as a constraint?
+
+Maybe this calls for a generalized &quot;forward declaration&quot; datatype?  Something that is essentially unset, but tolerated by type specs?
+
+**Hey, Maybe That Already Exists... And It&#39;s Just Tolerance Of A Specific TRIPWIRE?**
+
+    rgb-image!: ~&lt;forward&gt;~  ; hm, forward can mean a lot of things.
+
+    any-image?: ~&lt;pending&gt;~  ; &quot;pending&quot; sounds better.  &quot;I know it&#39;s coming&quot;
+
+    rgba-image!: ~&lt;unavailable&gt;~  ; A &quot;softer&quot; unset state?
+
+Well, it&#39;s one thought.  If tripwires were immutable (they should be, but aren&#39;t today) then checking for a specific word in the tripwire can be made arbitrarily fast.
+
+Setting things to this state might be done with something like:
+
+    extern [rgb-image! any-image? rgba-image!]
+
+## Something Like This Has To Be The Right Direction
+
+I don&#39;t think the arbitrary-garbage-in-typespecs is an idea with a future.
+
+One problem with tripwires, though, is that you get a difference between:
+
+     something?: ~&lt;pending&gt;~
+     foo: func [x [integer! something?]] [...]
+
+and
+
+    something?: ~&lt;pending&gt;~
+    foo: func [x] [any [not integer? x not something? x] [fail &quot;typecheck&quot;] ...]
+
+While the typecheck was willing to overlook `something?` being not defined, the explicit call is not willing to do that.
+
+But you do have control there, to test to make sure the SOMETHING? isn&#39;t a tripwire before calling it.  
+
+    foo: func [x] [
+        any [
+            not integer? x
+            (set? $something?) and (not something? x)
+        ][
+            fail &quot;typecheck&quot;
+        ]
+        ...
+    ]</description>
+    
+    <lastBuildDate>Sat, 05 Apr 2025 11:48:43 +0000</lastBuildDate>
+    <category>Functions</category>
+    <atom:link href="https://rebol.metaeducation.com/t/when-should-functions-validate-their-type-specs/2391.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>When Should Functions Validate Their Type Specs?</title>
+        <dc:creator><![CDATA[bradrn]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="5" data-topic="2391">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>Well I mean there's nothing particular that makes EVEN? a type constraint... other than taking one argument and returning LOGIC!.</p>
+<p>I don't know that it's necessary or desirable to say "everything you put in type specs has to be looked up in this place"... the place seems to be whatever your working context is.</p>
+</blockquote>
+</aside>
+<p>OK, fair enough! But in this case I’d say it ought to work like any other function call, i.e. by disallowing forward declarations. And then the answer to ‘what if a function uses an undefined type’ becomes ‘restructure your code’, which seems reasonable to me.</p>
+          <p><a href="https://rebol.metaeducation.com/t/when-should-functions-validate-their-type-specs/2391/6">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/when-should-functions-validate-their-type-specs/2391/6</link>
+        <pubDate>Sat, 05 Apr 2025 11:48:43 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2391-6</guid>
+        <source url="https://rebol.metaeducation.com/t/when-should-functions-validate-their-type-specs/2391.rss">When Should Functions Validate Their Type Specs?</source>
+      </item>
+      <item>
+        <title>When Should Functions Validate Their Type Specs?</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="bradrn" data-post="4" data-topic="2391">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/bradrn/48/365_2.png" class="avatar"> bradrn:</div>
+<blockquote>
+<p>why can’t type constraints be numerous, and at the same time have a particular environment where they’re resolved?</p>
+</blockquote>
+</aside>
+<p>Well I mean there's nothing particular that makes EVEN? a type constraint... other than taking one argument and returning LOGIC!.</p>
+<p>I don't know that it's necessary or desirable to say "everything you put in type specs has to be looked up in this place"... the place seems to be whatever your working context is.</p>
+          <p><a href="https://rebol.metaeducation.com/t/when-should-functions-validate-their-type-specs/2391/5">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/when-should-functions-validate-their-type-specs/2391/5</link>
+        <pubDate>Sat, 05 Apr 2025 09:58:00 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2391-5</guid>
+        <source url="https://rebol.metaeducation.com/t/when-should-functions-validate-their-type-specs/2391.rss">When Should Functions Validate Their Type Specs?</source>
+      </item>
+      <item>
+        <title>When Should Functions Validate Their Type Specs?</title>
+        <dc:creator><![CDATA[bradrn]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="3" data-topic="2391">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>Working with the FFI right now for instance: I definitely think validating the specs for interfacing with the C functions need to be done at FFI-binding-creation time vs. waiting for the call. And I can't totally articulate why that's different.</p>
+</blockquote>
+</aside>
+<p>I suspect the difference is that C is statically typed, so each function <em>does</em> have a specific type which can be checked in advance.</p>
+<aside class="quote no-group" data-username="hostilefork" data-post="3" data-topic="2391">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>But regardless: I do feel I know that when the evaluation happens, that just ignoring everything that isn't defined is a bad direction. So something has to happen before the call to resolve all the things in the spec in some way, so that you know they're not gibberish.</p>
+</blockquote>
+</aside>
+<p>Oh, I’m not talking about <em>ignoring</em> them! Undefined type names should certainly result in an error at call-time.</p>
+<aside class="quote no-group" data-username="hostilefork" data-post="3" data-topic="2391">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>Because type constraints are so numerous (e.g. EVEN? or ANY-LIST?) then it's hard to say that spec blocks look in a particular place, vs. just using your current binding environment.</p>
+</blockquote>
+</aside>
+<p>I don’t see how this follows… why can’t type constraints be numerous, and at the same time have a particular environment where they’re resolved?</p>
+          <p><a href="https://rebol.metaeducation.com/t/when-should-functions-validate-their-type-specs/2391/4">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/when-should-functions-validate-their-type-specs/2391/4</link>
+        <pubDate>Sat, 05 Apr 2025 09:25:59 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2391-4</guid>
+        <source url="https://rebol.metaeducation.com/t/when-should-functions-validate-their-type-specs/2391.rss">When Should Functions Validate Their Type Specs?</source>
+      </item>
+      <item>
+        <title>When Should Functions Validate Their Type Specs?</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="bradrn" data-post="2" data-topic="2391">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/bradrn/48/365_2.png" class="avatar"> bradrn:</div>
+<blockquote>
+<p>At definition time the type spec is not evaluated at all: all identifiers within it are simply preserved for later evaluation, whether defined in the current environment or not</p>
+</blockquote>
+</aside>
+<p>This part I don't think is that crazy, and it may just wind up being what has to be done to make things work out mechanically.  Don't feel sure yet.</p>
+<p>Working with the FFI right now for instance: I definitely think validating the specs for interfacing with the C functions need to be done at FFI-binding-creation time vs. waiting for the call.  And I can't totally articulate why that's different.</p>
+<p>But regardless: I do feel I know that when the evaluation happens, that just ignoring everything that isn't defined is a bad direction.  So something has to happen before the call to resolve all the things in the spec in some way, so that you know they're not gibberish.</p>
+<aside class="quote no-group" data-username="bradrn" data-post="2" data-topic="2391">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/bradrn/48/365_2.png" class="avatar"> bradrn:</div>
+<blockquote>
+<p>There is a single, dedicated, globally-accessible environment in which all type names are bound</p>
+</blockquote>
+</aside>
+<p>Because type constraints are so numerous (e.g. EVEN? or ANY-LIST?) then it's hard to say that spec blocks look in a particular place, vs. just using your current binding environment.</p>
+<p>Curiously though--for unrelated reasons--there is a module now for the datatypes themselves (builtin plus extension).  It's used as a sparse map from type names (the module keys) to DATATYPE! instances...which has a couple of purposes:</p>
+<ul>
+<li>
+<p>It lets questions like <code>Type_Of(cell)</code> in the internals very quickly return a direct pointer to an existing DATATYPE! cell without having to worry about storage or lifetime of the returned result.</p>
+</li>
+<li>
+<p>The module's "Patch" for the variable provides a canon identity for extension datatypes, so that all Cells that are of an extension type hold that pointer.</p>
+<ul>
+<li><em>(Again, extension type value cells must sacrifice one of their 4 platform pointers to indicate the type, as it doesn't fit in the header's type byte.  And the header's byte is 0 to say that it is such a cell.  So the extension cell has only 2 pointers worth left.)</em></li>
+</ul>
+</li>
+</ul>
+<p>The builtin datatypes used to have entries in the lib module, but I realized that putting them into this datatypes module could be just as optimal... so both the lib and datatypes modules are hybrids which have a certain number of members whose addresses are known at compile-time, and then others that are dynamic.</p>
+          <p><a href="https://rebol.metaeducation.com/t/when-should-functions-validate-their-type-specs/2391/3">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/when-should-functions-validate-their-type-specs/2391/3</link>
+        <pubDate>Sat, 05 Apr 2025 08:55:37 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2391-3</guid>
+        <source url="https://rebol.metaeducation.com/t/when-should-functions-validate-their-type-specs/2391.rss">When Should Functions Validate Their Type Specs?</source>
+      </item>
+      <item>
+        <title>When Should Functions Validate Their Type Specs?</title>
+        <dc:creator><![CDATA[bradrn]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="2391">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>But taken to its logical conclusion, tolerating undefined things in type specs and just skipping them would also permit:</p>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">&gt;&gt; foo: func [x [askjdfljaslkdjfkakjsdhf integer!]] [return x]
+
+&gt;&gt; foo 10
+== 10
+</code></pre>
+<h2>Okay, That <em>Is</em> Crazy</h2>
+</blockquote>
+</aside>
+<p>Honestly… I don’t find it crazy in the least! In fact, this is precisely the behaviour I expect from a dynamically-typed language with runtime type validation on functions.</p>
+<p>Building on this, here’s an idea — though I don’t know whether it’s plausible or not:</p>
+<ul>
+<li>There is a single, dedicated, globally-accessible environment in which all type names are bound</li>
+<li>When the function is run, the type spec is evaluated within the context of this special environment</li>
+<li>At definition time the type spec is not evaluated at all: all identifiers within it are simply preserved for later evaluation, whether defined in the current environment or not</li>
+</ul>
+<p>This would enable using any type name in any function, while still letting Ren-C know where to look when running the function. I also like the idea of separating the As long as the relevant module is imported before the function is run, it all works out.</p>
+          <p><a href="https://rebol.metaeducation.com/t/when-should-functions-validate-their-type-specs/2391/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/when-should-functions-validate-their-type-specs/2391/2</link>
+        <pubDate>Sat, 05 Apr 2025 07:58:49 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2391-2</guid>
+        <source url="https://rebol.metaeducation.com/t/when-should-functions-validate-their-type-specs/2391.rss">When Should Functions Validate Their Type Specs?</source>
+      </item>
+      <item>
+        <title>When Should Functions Validate Their Type Specs?</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>You're able to use things in the body of a function that aren't defined yet:</p>
+<pre><code>&gt;&gt; foo: func [x] [if cool-number? x [print "It's cool"]]
+</code></pre>
+<p>No error there, until you run the function.</p>
+<p>But what if you use a datatype that's not defined yet?  Here's Rebol2:</p>
+<pre><code>rebol2&gt;&gt; foo: func [x [cool-number!]] [print "Typechecked as cool!"]]
+** Script Error: Invalid argument: cool-number!
+
+rebol2&gt;&gt; cool-number!: integer!
+
+rebol2&gt;&gt; foo: func [x [cool-number!]] [print "Typechecked as cool!"]
+; no error
+</code></pre>
+<p>Red seems to just do a literal symbolic check, you can't define types under other words:</p>
+<pre><code>red&gt;&gt; cool-number: integer!
+
+red&gt;&gt; foo: func [x [cool-number!]] [print "Typechecked as cool!"]
+*** Script Error: cool-number! has no value
+</code></pre>
+<h2><a name="p-8096-this-is-a-problem-for-extension-types-1" class="anchor" href="https://rebol.metaeducation.com#p-8096-this-is-a-problem-for-extension-types-1"></a>This Is A Problem For Extension Types</h2>
+<p>Let's say you have a collection of routines in a module, and one of them is able to operate on IMAGE!.  But let's say you don't load the IMAGE! extension, and you don't use that routine.</p>
+<p>The aggressive requirement that all types in type specs be resolvable at FUNC declaration time would prevent that module from loading.</p>
+<p>It creates ordering problems... where you suddenly have to worry about the order you're loading extensions in, even when they aren't dependent on each other in order to load... but just because they can operate on each other's types.  And it makes it impossible if they refer to each other's types.</p>
+<h2><a name="p-8096-is-the-answer-to-wait-until-the-function-is-called-2" class="anchor" href="https://rebol.metaeducation.com#p-8096-is-the-answer-to-wait-until-the-function-is-called-2"></a>Is The Answer To Wait Until The Function Is Called?</h2>
+<p>The historical problem with waiting was that the information in the spec was compacted and thrown away.  But modern PARAMETER! works differently, and could handle it.</p>
+<p>There are issues with type constraints changing out from under you, with regards to specialization and such.  See this post, which surveys what happens when you do things like <strong>INTEGER!: TAG!</strong> in the middle of a run:</p>
+<p><a href="https://rebol.metaeducation.com/t/survey-of-redefining-datatype-word-s/1479" class="inline-onebox">Survey of Redefining Datatype WORD!s</a></p>
+<p>The answer there may be that have to lock any variables that are used as type constraints so you can't change them.  <img src="https://rebol.metaeducation.com/images/emoji/twitter/man_shrugging.png?v=14" title=":man_shrugging:" class="emoji" alt=":man_shrugging:" loading="lazy" width="20" height="20"></p>
+<p><strong>I'm not concerned about performance issues...</strong> it can be made to perform as well as it should.</p>
+<p>The real question is just what to do about situations like:</p>
+<pre><code>&gt;&gt; foo: func [x [integer! askjdfljaslkdjfkakjsdhf]] [return x]
+
+&gt;&gt; foo 10
+== 10
+</code></pre>
+<p>Is that sane?  You might say <em><strong>"no, that's obviously insane"</strong></em>, but consider you could have just as easily written:</p>
+<pre><code>&gt;&gt; foo: func [x] [if integer? x [return x] askjdfljaslkdjfkakjsdhf]
+
+&gt;&gt; foo 10
+== 10
+</code></pre>
+<p>But taken to its logical conclusion, tolerating undefined things in type specs and just skipping them would also permit:</p>
+<pre><code>&gt;&gt; foo: func [x [askjdfljaslkdjfkakjsdhf integer!]] [return x]
+
+&gt;&gt; foo 10
+== 10
+</code></pre>
+<h2><a name="p-8096-okay-that-is-crazy-3" class="anchor" href="https://rebol.metaeducation.com#p-8096-okay-that-is-crazy-3"></a>Okay, That <em>Is</em> Crazy</h2>
+<p>It seems there needs to be some concept of forward-declaration.  Something that type specs tolerate as a non-match unless the thing loads.</p>
+<p>It <em>may</em> be (and I'm still working on the finer details of this), that all antiform fences canonize to the same antiform fence for that word, which identifies a datatype.  Meaning you could do a forward-declaration by just saying:</p>
+<pre><code>image!: ~{image!}~
+</code></pre>
+<p>Then when the actual IMAGE! library gets loaded (perhaps through a DLL and LOAD-EXTENSION) it agrees on that.</p>
+<p>But even if that were able to work for the narrow case of a DATATYPE!, it doesn't help so much with functions.  Let's say the datatypes were RGB-IMAGE! and RGBA-IMAGE! to distinguish having an alpha channel (for instance).  Then there was ANY-IMAGE?.  What if you want to use ANY-IMAGE? as a constraint?</p>
+<p>Maybe this calls for a generalized "forward declaration" datatype?  Something that is essentially unset, but tolerated by type specs?</p>
+<p><strong>Hey, Maybe That Already Exists... And It's Just Tolerance Of A Specific TRIPWIRE?</strong></p>
+<pre><code>rgb-image!: ~&lt;forward&gt;~  ; hm, forward can mean a lot of things.
+
+any-image?: ~&lt;pending&gt;~  ; "pending" sounds better.  "I know it's coming"
+
+rgba-image!: ~&lt;unavailable&gt;~  ; A "softer" unset state?
+</code></pre>
+<p>Well, it's one thought.  If tripwires were immutable (they should be, but aren't today) then checking for a specific word in the tripwire can be made arbitrarily fast.</p>
+<p>Setting things to this state might be done with something like:</p>
+<pre><code>extern [rgb-image! any-image? rgba-image!]
+</code></pre>
+<h2><a name="p-8096-something-like-this-has-to-be-the-right-direction-4" class="anchor" href="https://rebol.metaeducation.com#p-8096-something-like-this-has-to-be-the-right-direction-4"></a>Something Like This Has To Be The Right Direction</h2>
+<p>I don't think the arbitrary-garbage-in-typespecs is an idea with a future.</p>
+<p>One problem with tripwires, though, is that you get a difference between:</p>
+<pre><code> something?: ~&lt;pending&gt;~
+ foo: func [x [integer! something?]] [...]
+</code></pre>
+<p>and</p>
+<pre><code>something?: ~&lt;pending&gt;~
+foo: func [x] [any [not integer? x not something? x] [fail "typecheck"] ...]
+</code></pre>
+<p>While the typecheck was willing to overlook <code>something?</code> being not defined, the explicit call is not willing to do that.</p>
+<p>But you do have control there, to test to make sure the SOMETHING? isn't a tripwire before calling it.</p>
+<pre><code>foo: func [x] [
+    any [
+        not integer? x
+        (set? $something?) and (not something? x)
+    ][
+        fail "typecheck"
+    ]
+    ...
+]
+</code></pre>
+          <p><a href="https://rebol.metaeducation.com/t/when-should-functions-validate-their-type-specs/2391/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/when-should-functions-validate-their-type-specs/2391/1</link>
+        <pubDate>Mon, 31 Mar 2025 05:05:40 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2391-1</guid>
+        <source url="https://rebol.metaeducation.com/t/when-should-functions-validate-their-type-specs/2391.rss">When Should Functions Validate Their Type Specs?</source>
+      </item>
+  </channel>
+</rss>

@@ -1,0 +1,324 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>PANIC vs. RETURN FAIL: The Age of Definitional Errors!</title>
+    <link>https://rebol.metaeducation.com/t/panic-vs-return-fail-the-age-of-definitional-errors/1852</link>
+    <description>The latest groundbreaking isotope-powered concept of Ren-C is... ***the definitional error***
+
+## But First, We Have To Define Failure...
+
+Definitional errors now are an antiform state.  The non-antiform state is currently called a WARNING!.  So ERROR! is what you get if you UNLIFT a QUASI WARNING!
+
+    &gt;&gt; quasi &#39;null
+    == ~null~
+
+    &gt;&gt; unlift quasi &#39;null
+    == \~null~\  ; antiform
+
+    &gt;&gt; unlift quasi make warning! &quot;foo&quot;
+    ** Error: foo
+    ** Near: [*** make warning! &quot;foo&quot; **]
+
+Or just ANTI it, which does the same thing.
+
+Being an *unstable* antiform, you can&#39;t store errors in variables directly.  But if you try to, *it elevates the error state to an exception*, e.g. it &quot;panics&quot;.
+
+    &gt;&gt; var: anti make warning! &quot;foo&quot;
+    !! PANIC: foo
+    ** Near: [*** make warning! &quot;foo&quot; **]
+
+There&#39;s also a special behavior that they cannot occur in generic midstream evaluations, or they&#39;ll also be elevated to an exception:
+
+    &gt;&gt; (1 + 2 anti make warning! &quot;foo&quot; 3 + 4)
+    !! PANIC: foo
+    ** Near: [*** make warning! &quot;foo&quot; ** 3 + 4]
+
+So far this doesn&#39;t seem so profound.  Rebol2 and Red can DO an ERROR! and raise an exception...which you also can&#39;t store in a variable or keep going in the middle of an expression.
+
+BUT here&#39;s the twist:
+
+    &gt;&gt; lift anti make warning! &quot;foo&quot;
+    == ~#[warning! [
+        type: &#39;
+        id: &#39;
+        message: &quot;foo&quot;
+        near: [*** make warning! &quot;foo&quot; **]
+        file: &#39;
+        line: 1
+    ]]~
+
+* The ANTI did not trigger an irrecoverable error.
+
+* It created an antiform warning state, and then waited to see if something would LIFT it or not.
+
+* There was a LIFT and so it gave you back the QUASI WARNING! state
+
+This is a crucial difference, as we will see.  But first...
+
+**NOTE: I will be using the operation FAIL in the remaining text, instead of ANTI on WARNING!**  So approximately this:
+
+    fail: lambda [reason [text! block! error!]] [anti make warning! reason]
+
+## Let&#39;s Address the &quot;Definitional&quot; Part
+
+What I mean when I say &quot;definitional&quot; is that there&#39;s a difference between these two cases:
+
+    bigtest: func [n] [
+       if n &lt; 1020 [fail [n &quot;is not big&quot;]]
+       print [n &quot;sure is a big number&quot;]
+    ] 
+
+    definitional-bigtest: func [n] [
+       if n &lt; 1020 [return fail [n &quot;is not big&quot;]]
+       print [n &quot;sure is a big number&quot;]
+    ] 
+
+You may not appreciate the difference if you call them directly
+
+    &gt;&gt; bigtest 304
+    !! PANIC: 304 is not big
+    ** Where: fail if bigtest args
+    ** Near: [fail [n &quot;is not big&quot;] **]
+
+    &gt;&gt; definitional-bigtest 304
+    ** Error: 304 is not big
+    ** Where: fail if definitional-bigtest args
+    ** Near: [return fail [n &quot;is not big&quot;] **]
+
+But try using LIFT and you&#39;ll see they are different:
+
+    &gt;&gt; lift bigtest 304
+    !! PANIC: 304 is not big
+    ** Where: raise if bigtest args
+    ** Near: [raise [n &quot;is not big&quot;] **]
+
+    &gt;&gt; lift definitional-bigtest 304
+    == ~&amp;[warning! [
+        type: &#39;
+        id: &#39;
+        message: &quot;304 is not big&quot;
+        near: [return raise [n &quot;is not big&quot;] **]
+        where: [raise if definitional-bigtest args]
+        file: &#39;
+        line: 1
+    ]]~
+
+**Functions can now choose to tell us when an error was something *they* knew about and engaged, vs. something incidental that could have come from any call beneath them in the stack.**
+
+Sound important?  *It should.*
+
+## NOW [BLAST SOME MUSIC](https://www.youtube.com/watch?v=YGP0nsnSlg4) FOR THIS WATERSHED MOMENT
+
+I&#39;ve added EXCEPT, which is an infix operation that reacts to failures...while THEN and ELSE just pass them on.
+
+    &gt;&gt; fail &quot;foo&quot; then [print &quot;THEN&quot;] else [print &quot;ELSE&quot;] except [print &quot;EXCEPT&quot;]
+    EXCEPT
+
+As we saw in the beginning, if *someone* doesn&#39;t handle the failure it gets elevated to an exception eventually:
+
+    &gt;&gt; fail &quot;foo&quot; then [print &quot;THEN&quot;] else [print &quot;ELSE&quot;]
+    !! PANIC: foo
+    ** Near: [raise &quot;foo&quot; ** then [print &quot;THEN&quot;] else [print &quot;ELSE&quot;]]
+
+Remember the old, bad ATTEMPT?  It would evaluate a block as usual but return NONE in the event there was an error encountered:
+
+    rebol2&gt;&gt; attempt [print &quot;Attempting to read file&quot; read %nonexistent-file.txt]
+    Attempting to read file
+    == none
+
+    rebol2&gt;&gt; attempt [print &quot;Attempting but made typos&quot; rread %nonexistent-file.txt]
+    == none
+
+**It was too dangerous to use.**  Note that it can&#39;t distinguish an error it could sensibly react to (e.g. an error coming from READ failing) from an error it cannot (in this case a typo of RREAD instead of READ, but it could be anything.)
+
+With READ upgraded to turn its file-not-found error to be definitional, you can use TRY based on definitional errors for safety!  &lt;sub&gt;(**[ATTEMPT is something non-error related, now...](https://rebol.metaeducation.com/t/repeat-1-attempt-not-as-useless-as-it-looks/2480)**)&lt;/sub&gt;
+
+    &gt;&gt; try (print &quot;Attempting to read file&quot; read %nonexistent-file.txt)
+    Attempting to read file
+    == ~null~  ; anti
+
+    &gt;&gt; try (print &quot;Attempting but made typos&quot; rread %nonexistent-file.txt)
+    Attempting but made typos
+    !! PANIC: rread word is attached to a context, but unassigned
+    ** Near: [rread ** %nonexistent-file.txt]
+
+(TRY will give you NULL in the event of an error, and can only react to the last evaluation in the expression.  If you want to protect a series of operations in the style of old-ATTEMPT, you can use RESCUE... but you&#39;ll have to move capture of the return result inside the RESCUE block, since it returns either the un-antiformed error or null.)
+
+It will take time for natives to be audited and have their random PANICs turned to be definitional-FAIL-when-applicable.  Until then, most won&#39;t have errors that can be intercepted like this.
+
+But other than that...
+
+# It&#39;s Here.  It&#39;s Now.  It&#39;s Committed!
+
+:boom:
+
+## Note That Non-Definitional Panic Exists...
+
+If you want a [divergent function](https://en.wikipedia.org/wiki/Divergence_(computer_science)) that immediately go to an exception state, use PANIC.
+
+That&#39;s clearer than calling FAIL with no RETURN, where a reader can&#39;t tell if it&#39;s going to be piped along and eventually RETURN&#39;d or LIFT-ed somewhere.
+
+    return case [
+        ... many pages of code ...
+        ... [fail &quot;Some error&quot;]  ; need to be able to say PANIC here if you meant that
+        ... many pages of code ...
+     ]
+
+When writing a function and deciding if an error should be RETURN FAIL or PANIC, think about the use case.  Do you feel that the call is fundamentally malformed (in the way a type checking error on a parameter would be thought of as a mistake), or did you understand what was asked clearly...but just couldn&#39;t do it?
+
+It&#39;s subtle, but I think the pattern is emerging pretty clearly of when you should PANIC vs. RETURN FAIL.</description>
+    
+    <lastBuildDate>Thu, 10 Jul 2025 07:47:03 +0000</lastBuildDate>
+    <category>Errors</category>
+    <atom:link href="https://rebol.metaeducation.com/t/panic-vs-return-fail-the-age-of-definitional-errors/1852.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>PANIC vs. RETURN FAIL: The Age of Definitional Errors!</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>The latest groundbreaking isotope-powered concept of Ren-C is... <em><strong>the definitional error</strong></em></p>
+<h2><a name="p-5959-but-first-we-have-to-define-failure-1" class="anchor" href="https://rebol.metaeducation.com#p-5959-but-first-we-have-to-define-failure-1"></a>But First, We Have To Define Failure...</h2>
+<p>Definitional errors now are an antiform state.  The non-antiform state is currently called a WARNING!.  So ERROR! is what you get if you UNLIFT a QUASI WARNING!</p>
+<pre><code>&gt;&gt; quasi 'null
+== ~null~
+
+&gt;&gt; unlift quasi 'null
+== \~null~\  ; antiform
+
+&gt;&gt; unlift quasi make warning! "foo"
+** Error: foo
+** Near: [*** make warning! "foo" **]
+</code></pre>
+<p>Or just ANTI it, which does the same thing.</p>
+<p>Being an <em>unstable</em> antiform, you can't store errors in variables directly.  But if you try to, <em>it elevates the error state to an exception</em>, e.g. it "panics".</p>
+<pre><code>&gt;&gt; var: anti make warning! "foo"
+!! PANIC: foo
+** Near: [*** make warning! "foo" **]
+</code></pre>
+<p>There's also a special behavior that they cannot occur in generic midstream evaluations, or they'll also be elevated to an exception:</p>
+<pre><code>&gt;&gt; (1 + 2 anti make warning! "foo" 3 + 4)
+!! PANIC: foo
+** Near: [*** make warning! "foo" ** 3 + 4]
+</code></pre>
+<p>So far this doesn't seem so profound.  Rebol2 and Red can DO an ERROR! and raise an exception...which you also can't store in a variable or keep going in the middle of an expression.</p>
+<p>BUT here's the twist:</p>
+<pre><code>&gt;&gt; lift anti make warning! "foo"
+== ~#[warning! [
+    type: '
+    id: '
+    message: "foo"
+    near: [*** make warning! "foo" **]
+    file: '
+    line: 1
+]]~
+</code></pre>
+<ul>
+<li>
+<p>The ANTI did not trigger an irrecoverable error.</p>
+</li>
+<li>
+<p>It created an antiform warning state, and then waited to see if something would LIFT it or not.</p>
+</li>
+<li>
+<p>There was a LIFT and so it gave you back the QUASI WARNING! state</p>
+</li>
+</ul>
+<p>This is a crucial difference, as we will see.  But first...</p>
+<p><strong>NOTE: I will be using the operation FAIL in the remaining text, instead of ANTI on WARNING!</strong>  So approximately this:</p>
+<pre><code>fail: lambda [reason [text! block! error!]] [anti make warning! reason]
+</code></pre>
+<h2><a name="p-5959-lets-address-the-definitional-part-2" class="anchor" href="https://rebol.metaeducation.com#p-5959-lets-address-the-definitional-part-2"></a>Let's Address the "Definitional" Part</h2>
+<p>What I mean when I say "definitional" is that there's a difference between these two cases:</p>
+<pre><code>bigtest: func [n] [
+   if n &lt; 1020 [fail [n "is not big"]]
+   print [n "sure is a big number"]
+] 
+
+definitional-bigtest: func [n] [
+   if n &lt; 1020 [return fail [n "is not big"]]
+   print [n "sure is a big number"]
+] 
+</code></pre>
+<p>You may not appreciate the difference if you call them directly</p>
+<pre><code>&gt;&gt; bigtest 304
+!! PANIC: 304 is not big
+** Where: fail if bigtest args
+** Near: [fail [n "is not big"] **]
+
+&gt;&gt; definitional-bigtest 304
+** Error: 304 is not big
+** Where: fail if definitional-bigtest args
+** Near: [return fail [n "is not big"] **]
+</code></pre>
+<p>But try using LIFT and you'll see they are different:</p>
+<pre><code>&gt;&gt; lift bigtest 304
+!! PANIC: 304 is not big
+** Where: raise if bigtest args
+** Near: [raise [n "is not big"] **]
+
+&gt;&gt; lift definitional-bigtest 304
+== ~&amp;[warning! [
+    type: '
+    id: '
+    message: "304 is not big"
+    near: [return raise [n "is not big"] **]
+    where: [raise if definitional-bigtest args]
+    file: '
+    line: 1
+]]~
+</code></pre>
+<p><strong>Functions can now choose to tell us when an error was something <em>they</em> knew about and engaged, vs. something incidental that could have come from any call beneath them in the stack.</strong></p>
+<p>Sound important?  <em>It should.</em></p>
+<h2><a name="p-5959-now-blast-some-musichttpswwwyoutubecomwatchvygp0nsnslg4-for-this-watershed-moment-3" class="anchor" href="https://rebol.metaeducation.com#p-5959-now-blast-some-musichttpswwwyoutubecomwatchvygp0nsnslg4-for-this-watershed-moment-3"></a>NOW <a href="https://www.youtube.com/watch?v=YGP0nsnSlg4">BLAST SOME MUSIC</a> FOR THIS WATERSHED MOMENT</h2>
+<p>I've added EXCEPT, which is an infix operation that reacts to failures...while THEN and ELSE just pass them on.</p>
+<pre><code>&gt;&gt; fail "foo" then [print "THEN"] else [print "ELSE"] except [print "EXCEPT"]
+EXCEPT
+</code></pre>
+<p>As we saw in the beginning, if <em>someone</em> doesn't handle the failure it gets elevated to an exception eventually:</p>
+<pre><code>&gt;&gt; fail "foo" then [print "THEN"] else [print "ELSE"]
+!! PANIC: foo
+** Near: [raise "foo" ** then [print "THEN"] else [print "ELSE"]]
+</code></pre>
+<p>Remember the old, bad ATTEMPT?  It would evaluate a block as usual but return NONE in the event there was an error encountered:</p>
+<pre><code>rebol2&gt;&gt; attempt [print "Attempting to read file" read %nonexistent-file.txt]
+Attempting to read file
+== none
+
+rebol2&gt;&gt; attempt [print "Attempting but made typos" rread %nonexistent-file.txt]
+== none
+</code></pre>
+<p><strong>It was too dangerous to use.</strong>  Note that it can't distinguish an error it could sensibly react to (e.g. an error coming from READ failing) from an error it cannot (in this case a typo of RREAD instead of READ, but it could be anything.)</p>
+<p>With READ upgraded to turn its file-not-found error to be definitional, you can use TRY based on definitional errors for safety!  <sub>(<strong><a href="https://rebol.metaeducation.com/t/repeat-1-attempt-not-as-useless-as-it-looks/2480">ATTEMPT is something non-error related, now...</a></strong>)</sub></p>
+<pre><code>&gt;&gt; try (print "Attempting to read file" read %nonexistent-file.txt)
+Attempting to read file
+== ~null~  ; anti
+
+&gt;&gt; try (print "Attempting but made typos" rread %nonexistent-file.txt)
+Attempting but made typos
+!! PANIC: rread word is attached to a context, but unassigned
+** Near: [rread ** %nonexistent-file.txt]
+</code></pre>
+<p>(TRY will give you NULL in the event of an error, and can only react to the last evaluation in the expression.  If you want to protect a series of operations in the style of old-ATTEMPT, you can use RESCUE... but you'll have to move capture of the return result inside the RESCUE block, since it returns either the un-antiformed error or null.)</p>
+<p>It will take time for natives to be audited and have their random PANICs turned to be definitional-FAIL-when-applicable.  Until then, most won't have errors that can be intercepted like this.</p>
+<p>But other than that...</p>
+<h1><a name="p-5959-its-here-its-now-its-committed-4" class="anchor" href="https://rebol.metaeducation.com#p-5959-its-here-its-now-its-committed-4"></a>It's Here.  It's Now.  It's Committed!</h1>
+<p><img src="https://rebol.metaeducation.com/images/emoji/twitter/boom.png?v=14" title=":boom:" class="emoji only-emoji" alt=":boom:" loading="lazy" width="20" height="20"></p>
+<h2><a name="p-5959-note-that-non-definitional-panic-exists-5" class="anchor" href="https://rebol.metaeducation.com#p-5959-note-that-non-definitional-panic-exists-5"></a>Note That Non-Definitional Panic Exists...</h2>
+<p>If you want a <a href="https://en.wikipedia.org/wiki/Divergence_(computer_science)">divergent function</a> that immediately go to an exception state, use PANIC.</p>
+<p>That's clearer than calling FAIL with no RETURN, where a reader can't tell if it's going to be piped along and eventually RETURN'd or LIFT-ed somewhere.</p>
+<pre><code>return case [
+    ... many pages of code ...
+    ... [fail "Some error"]  ; need to be able to say PANIC here if you meant that
+    ... many pages of code ...
+ ]
+</code></pre>
+<p>When writing a function and deciding if an error should be RETURN FAIL or PANIC, think about the use case.  Do you feel that the call is fundamentally malformed (in the way a type checking error on a parameter would be thought of as a mistake), or did you understand what was asked clearly...but just couldn't do it?</p>
+<p>It's subtle, but I think the pattern is emerging pretty clearly of when you should PANIC vs. RETURN FAIL.</p>
+          <p><a href="https://rebol.metaeducation.com/t/panic-vs-return-fail-the-age-of-definitional-errors/1852/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/panic-vs-return-fail-the-age-of-definitional-errors/1852/1</link>
+        <pubDate>Tue, 28 Jun 2022 02:17:23 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1852-1</guid>
+        <source url="https://rebol.metaeducation.com/t/panic-vs-return-fail-the-age-of-definitional-errors/1852.rss">PANIC vs. RETURN FAIL: The Age of Definitional Errors!</source>
+      </item>
+  </channel>
+</rss>

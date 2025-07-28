@@ -1,0 +1,294 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>The Handling of NULL and VOID in UPARSE</title>
+    <link>https://forum.rebol.info/t/the-handling-of-null-and-void-in-uparse/2023</link>
+    <description>By design, nulls are handled noisily--right at the moment of fetching the word!--in UPARSE (and PARSE3):
+
+    &gt;&gt; prefix: null, suffix: &quot;)&quot;
+
+    &gt;&gt; parse &quot;aaa)&quot; [prefix, some &quot;a&quot;, suffix]
+    ** Error: (prefix is null, and we raise errors for that in parse)
+
+If we didn&#39;t raise an error it seems there are only two other options:
+
+1. Make **`null`** always succeed, keeping the parse position where it is (synonym for **`[]`**)
+
+2. Make **`null`** always be an unsuccessful combinator match, but not cause a failure (synonym for **`false`**)
+
+I think (1) feels like a pretty obvious bad idea, because null is supposed to represent a soft failure.  I&#39;ve suggested that this is a better behavior for void, e.g. **`parse &quot;ab&quot; [&quot;a&quot; void &quot;b&quot;]`** would work.
+
+I&#39;m not too pleased with the idea of (2), and prefer the error as the default.
+
+*...that said...* it seems there should be some operators or combinators that let you get the other behaviors.
+
+## What About a &quot;MAYBE&quot; Combinator To Use With Null?
+
+In standard code, the policy of &quot;void-in-null-out&quot; has worked well, with MAYBE transforming soft-failure nulls to voids:
+
+     ; non-PARSE handling of NULL via MAYBE
+
+     &gt;&gt; append [a b c] null
+     ** Error: cannot append ~null~ isotope to a block
+
+     &gt;&gt; append [a b c] maybe null
+     == [a b c]
+
+     &gt;&gt; block: null
+
+     &gt;&gt; append maybe block [d e]
+     == ~null~  ; isotope
+
+So if we imagine applying this to the parse example, it would presumably do this:
+
+    &gt;&gt; prefix: null, suffix: &quot;)&quot;
+
+    &gt;&gt; parse &quot;aaa)&quot; [maybe prefix, some &quot;a&quot;, maybe suffix]
+    == &quot;)&quot;
+
+For the above parse to succeed, the combinator made by **maybe prefix** would have to succeed and not advance the input.
+
+## But It Doesn&#39;t Combine Well In Larger Rules
+
+What if what you intended was *&quot;if there&#39;s a prefix, match some non-zero number of instances, but if prefix is null then don&#39;t worry about matching&quot;*:
+
+You might try doing that by COMPOSE&#39;ing your rules.  But UPARSE actually lets us write that out literally using GET-GROUP! rule synthesis:
+
+    &gt;&gt; parse &quot;aaa)))&quot; [:(if prefix &#39;[some prefix]), some &quot;a&quot;, :(if suffix &#39;[some suffix])]
+    == &quot;)&quot;
+
+But what if we tried to do that with MAYBE...could it work?
+
+    &gt;&gt; parse &quot;aaa)))&quot; [some maybe prefix, some &quot;a&quot;, some maybe suffix]
+    ; infinite loop!
+
+No dice.  We&#39;ve said **maybe prefix** just succeeds and doesn&#39;t advance the input when prefix was null.  But if you combine that with `some` the null case will just match nothing in perpetuity, causing an infinite loop.
+
+This may look familiar, because if you write **some opt [...anything...]** you&#39;ll always get an infinite loop.  But in that case it&#39;s just wrong thinking: you know that the repetitive nature of `some` looking for an eventual non-match meant you must have intended **some [...anything...]** (at least one) or **opt some [...anything...]** (zero or more).
+
+:thinking: 
+
+&gt; ### NOTE THAT HISTORICAL PARSE HAS NO GOOD ANSWER FOR THIS
+&gt; 
+&gt;Rebol2 treats NONE! as a no-op which just succeeds but doesn&#39;t advance the input.  So the following gives you an infinite loop:
+&gt;
+&gt;     rebol2&gt;&gt; prefix: none suffix: &quot;)&quot;
+&gt;
+&gt;     rebol2&gt;&gt; parse &quot;aaa)))&quot; [some prefix some &quot;a&quot; some suffix]   
+&gt;     ; infinite loop
+&gt; 
+&gt; The hackish &quot;must make progress&quot; rules in R3-Alpha actually make the above &quot;work as intended&quot;, because the SOME will bail out after one non-advancing match.  I don&#39;t consider that a &quot;good&quot; answer--more a random effect.
+
+## Another Problem: MAYBE is a very similar word to OPT
+
+Imagine looking at this code:
+
+    &gt;&gt; prefix: &quot;(&quot;, suffix: &quot;)&quot;
+
+    &gt;&gt; parse &quot;aaa)&quot; [maybe prefix, some &quot;a&quot;, maybe suffix]
+    == ~null~  ; isotope
+
+*&quot;But wait&quot;*... I can imagine someone saying... *&quot;doesn&#39;t that mean that if it&#39;s not there, you skip the rule&quot;*?
+
+&gt; I&#39;ve had some mental back-and-forth about the words **`try`**, **`opt`**, and **`maybe`**...with a general dislike of the word OPT.  The current idea is that TRY was intended to defuse harder definitional errors:
+&gt;
+&gt;     &gt;&gt; take []
+&gt;     ** Error: you can&#39;t take from an empty block (stopping further code)
+&gt;
+&gt;     &gt;&gt; try take []
+&gt;     == ~null~  ; isotope
+
+## An extra barrier to creating MAYBE is mechanical
+
+... *because the error that NULL generates is the &quot;null combinator&quot; itself*.  It is *not* a definitional error, because those just represent things like &quot;type didn&#39;t match&quot;.
+
+The only way I can see a null-disabling MAYBE parse combinator working would be by quoting its argument, doing the rule fetch itself, and turning into a failing combinator if it fetched null.  This breaks the model somewhat.  :-(
+
+## Maybe **/prefix** could Mean Optionally-Null variable?
+
+    &gt;&gt; prefix: null, suffix: &quot;)&quot;
+
+    &gt;&gt; parse &quot;aaa)&quot; [/prefix, some &quot;a&quot;, /suffix]
+    == &quot;)&quot;
+
+It&#39;s already the case that paths have to be quoted to match in blocks, but a leading slash could be used to deal with the rules.
+
+It&#39;s a lot to think about on my first day of thinking about Rebol stuff for a while!  But there you go.</description>
+    
+    <lastBuildDate>Fri, 23 Jun 2023 03:52:39 +0000</lastBuildDate>
+    <category>Parsing</category>
+    <atom:link href="https://forum.rebol.info/t/the-handling-of-null-and-void-in-uparse/2023.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>The Handling of NULL and VOID in UPARSE</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <h2>
+<a name="okay-voided-variables-should-be-no-ops-in-uparse-1" class="anchor" href="https://forum.rebol.info#okay-voided-variables-should-be-no-ops-in-uparse-1"></a>Okay, voided variables should be no-ops in UPARSE</h2>
+<p>This is consistent with how quoted voids work:</p>
+<pre><code>&gt;&gt; parse [a b] ['a ' 'b]
+== b
+</code></pre>
+<p>Or how voided expressions work in GET-GROUP! substitution:</p>
+<pre><code>&gt;&gt; parse [a b] ['a 'b :(if false [[some 'c]])]
+== b
+
+&gt;&gt; parse [a b c c c] ['a 'b :(if true [[some 'c]])]
+== c
+</code></pre>
+<p><a href="https://forum.rebol.info/t/shades-of-distinction-in-non-valued-intents/1604/4">And with more liberal policies for void variables via word access in the main evaluator</a>, extending this to WORD! references seems consistent:</p>
+<pre><code>&gt;&gt; c-rule: if false [[some 'c]]
+
+&gt;&gt; parse [a b] ['a 'b c-rule]
+== b
+
+&gt;&gt; c-rule: if true [[some 'c]]
+
+&gt;&gt; parse [a b c c c] ['a 'b c-rule]
+== c
+</code></pre>
+<h2>
+<a name="a-quirky-maybe-combinator-is-probably-bad-news-2" class="anchor" href="https://forum.rebol.info#a-quirky-maybe-combinator-is-probably-bad-news-2"></a>A Quirky MAYBE Combinator Is Probably Bad News</h2>
+<p>Not everything in the evaluator universe is going to have a PARSE parallel.  If you have a null rule, I guess you may just have to use a GET-GROUP! and call the evaluator's MAYBE.</p>
+<pre><code>&gt;&gt; c-rule: null
+
+&gt;&gt; parse [a b] ['a 'b :(maybe c-rule)]
+== b
+</code></pre>
+<p>This will keep you from erroring on the null by turning the null into a void.</p>
+<p>UPARSE has richer mechanisms to help the higher-order rules, to more intentionally express the R3-Alpha progress rule...which you could use:</p>
+<pre><code>&gt;&gt; prefix: null, suffix: ")"
+
+&gt;&gt; parse "aaa)))" [
+        opt some further :(maybe prefix)
+        some "a"
+        opt some further :(maybe suffix)
+     ]
+== ")"
+</code></pre>
+<p>If you don't want PREFIX to be "ornery" when it's used in PARSE, then initialize it to void instead of null and this cleans up a bit:</p>
+<pre><code>&gt;&gt; prefix: void, suffix: ")"
+
+&gt;&gt; parse "aaa)))" [
+        opt some further prefix
+        some "a"
+        opt some further suffix
+     ]
+== ")"
+</code></pre>
+<p>There are a lot of tools at one's disposal, and I don't think we need anything crazier than this.  I'm content enough with it, I think!</p>
+          <p><a href="https://forum.rebol.info/t/the-handling-of-null-and-void-in-uparse/2023/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/the-handling-of-null-and-void-in-uparse/2023/2</link>
+        <pubDate>Fri, 23 Jun 2023 01:00:54 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-2023-2</guid>
+        <source url="https://forum.rebol.info/t/the-handling-of-null-and-void-in-uparse/2023.rss">The Handling of NULL and VOID in UPARSE</source>
+      </item>
+      <item>
+        <title>The Handling of NULL and VOID in UPARSE</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>By design, nulls are handled noisily--right at the moment of fetching the word!--in UPARSE (and PARSE3):</p>
+<pre><code>&gt;&gt; prefix: null, suffix: ")"
+
+&gt;&gt; parse "aaa)" [prefix, some "a", suffix]
+** Error: (prefix is null, and we raise errors for that in parse)
+</code></pre>
+<p>If we didn't raise an error it seems there are only two other options:</p>
+<ol>
+<li>
+<p>Make <strong><code>null</code></strong> always succeed, keeping the parse position where it is (synonym for <strong><code>[]</code></strong>)</p>
+</li>
+<li>
+<p>Make <strong><code>null</code></strong> always be an unsuccessful combinator match, but not cause a failure (synonym for <strong><code>false</code></strong>)</p>
+</li>
+</ol>
+<p>I think (1) feels like a pretty obvious bad idea, because null is supposed to represent a soft failure.  I've suggested that this is a better behavior for void, e.g. <strong><code>parse "ab" ["a" void "b"]</code></strong> would work.</p>
+<p>I'm not too pleased with the idea of (2), and prefer the error as the default.</p>
+<p><em>...that said...</em> it seems there should be some operators or combinators that let you get the other behaviors.</p>
+<h2>
+<a name="what-about-a-maybe-combinator-to-use-with-null-1" class="anchor" href="https://forum.rebol.info#what-about-a-maybe-combinator-to-use-with-null-1"></a>What About a "MAYBE" Combinator To Use With Null?</h2>
+<p>In standard code, the policy of "void-in-null-out" has worked well, with MAYBE transforming soft-failure nulls to voids:</p>
+<pre><code> ; non-PARSE handling of NULL via MAYBE
+
+ &gt;&gt; append [a b c] null
+ ** Error: cannot append ~null~ isotope to a block
+
+ &gt;&gt; append [a b c] maybe null
+ == [a b c]
+
+ &gt;&gt; block: null
+
+ &gt;&gt; append maybe block [d e]
+ == ~null~  ; isotope
+</code></pre>
+<p>So if we imagine applying this to the parse example, it would presumably do this:</p>
+<pre><code>&gt;&gt; prefix: null, suffix: ")"
+
+&gt;&gt; parse "aaa)" [maybe prefix, some "a", maybe suffix]
+== ")"
+</code></pre>
+<p>For the above parse to succeed, the combinator made by <strong>maybe prefix</strong> would have to succeed and not advance the input.</p>
+<h2>
+<a name="but-it-doesnt-combine-well-in-larger-rules-2" class="anchor" href="https://forum.rebol.info#but-it-doesnt-combine-well-in-larger-rules-2"></a>But It Doesn't Combine Well In Larger Rules</h2>
+<p>What if what you intended was <em>"if there's a prefix, match some non-zero number of instances, but if prefix is null then don't worry about matching"</em>:</p>
+<p>You might try doing that by COMPOSE'ing your rules.  But UPARSE actually lets us write that out literally using GET-GROUP! rule synthesis:</p>
+<pre><code>&gt;&gt; parse "aaa)))" [:(if prefix '[some prefix]), some "a", :(if suffix '[some suffix])]
+== ")"
+</code></pre>
+<p>But what if we tried to do that with MAYBE...could it work?</p>
+<pre><code>&gt;&gt; parse "aaa)))" [some maybe prefix, some "a", some maybe suffix]
+; infinite loop!
+</code></pre>
+<p>No dice.  We've said <strong>maybe prefix</strong> just succeeds and doesn't advance the input when prefix was null.  But if you combine that with <code>some</code> the null case will just match nothing in perpetuity, causing an infinite loop.</p>
+<p>This may look familiar, because if you write <strong>some opt [...anything...]</strong> you'll always get an infinite loop.  But in that case it's just wrong thinking: you know that the repetitive nature of <code>some</code> looking for an eventual non-match meant you must have intended <strong>some [...anything...]</strong> (at least one) or <strong>opt some [...anything...]</strong> (zero or more).</p>
+<p><img src="https://forum.rebol.info/images/emoji/twitter/thinking.png?v=12" title=":thinking:" class="emoji only-emoji" alt=":thinking:" loading="lazy" width="20" height="20"></p>
+<blockquote>
+<h3>NOTE THAT HISTORICAL PARSE HAS NO GOOD ANSWER FOR THIS</h3>
+<p>Rebol2 treats NONE! as a no-op which just succeeds but doesn't advance the input.  So the following gives you an infinite loop:</p>
+<pre><code>rebol2&gt;&gt; prefix: none suffix: ")"
+
+rebol2&gt;&gt; parse "aaa)))" [some prefix some "a" some suffix]   
+; infinite loop
+</code></pre>
+<p>The hackish "must make progress" rules in R3-Alpha actually make the above "work as intended", because the SOME will bail out after one non-advancing match.  I don't consider that a "good" answer--more a random effect.</p>
+</blockquote>
+<h2>
+<a name="another-problem-maybe-is-a-very-similar-word-to-opt-3" class="anchor" href="https://forum.rebol.info#another-problem-maybe-is-a-very-similar-word-to-opt-3"></a>Another Problem: MAYBE is a very similar word to OPT</h2>
+<p>Imagine looking at this code:</p>
+<pre><code>&gt;&gt; prefix: "(", suffix: ")"
+
+&gt;&gt; parse "aaa)" [maybe prefix, some "a", maybe suffix]
+== ~null~  ; isotope
+</code></pre>
+<p><em>"But wait"</em>... I can imagine someone saying... <em>"doesn't that mean that if it's not there, you skip the rule"</em>?</p>
+<blockquote>
+<p>I've had some mental back-and-forth about the words <strong><code>try</code></strong>, <strong><code>opt</code></strong>, and <strong><code>maybe</code></strong>...with a general dislike of the word OPT.  The current idea is that TRY was intended to defuse harder definitional errors:</p>
+<pre><code>&gt;&gt; take []
+** Error: you can't take from an empty block (stopping further code)
+
+&gt;&gt; try take []
+== ~null~  ; isotope
+</code></pre>
+</blockquote>
+<h2>
+<a name="an-extra-barrier-to-creating-maybe-is-mechanical-4" class="anchor" href="https://forum.rebol.info#an-extra-barrier-to-creating-maybe-is-mechanical-4"></a>An extra barrier to creating MAYBE is mechanical</h2>
+<p>... <em>because the error that NULL generates is the "null combinator" itself</em>.  It is <em>not</em> a definitional error, because those just represent things like "type didn't match".</p>
+<p>The only way I can see a null-disabling MAYBE parse combinator working would be by quoting its argument, doing the rule fetch itself, and turning into a failing combinator if it fetched null.  This breaks the model somewhat.  <img src="https://forum.rebol.info/images/emoji/twitter/frowning.png?v=12" title=":frowning:" class="emoji" alt=":frowning:" loading="lazy" width="20" height="20"></p>
+<h2>
+<a name="maybe-prefix-could-mean-optionally-null-variable-5" class="anchor" href="https://forum.rebol.info#maybe-prefix-could-mean-optionally-null-variable-5"></a>Maybe <strong>/prefix</strong> could Mean Optionally-Null variable?</h2>
+<pre><code>&gt;&gt; prefix: null, suffix: ")"
+
+&gt;&gt; parse "aaa)" [/prefix, some "a", /suffix]
+== ")"
+</code></pre>
+<p>It's already the case that paths have to be quoted to match in blocks, but a leading slash could be used to deal with the rules.</p>
+<p>It's a lot to think about on my first day of thinking about Rebol stuff for a while!  But there you go.</p>
+          <p><a href="https://forum.rebol.info/t/the-handling-of-null-and-void-in-uparse/2023/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/the-handling-of-null-and-void-in-uparse/2023/1</link>
+        <pubDate>Fri, 07 Apr 2023 00:14:18 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-2023-1</guid>
+        <source url="https://forum.rebol.info/t/the-handling-of-null-and-void-in-uparse/2023.rss">The Handling of NULL and VOID in UPARSE</source>
+      </item>
+  </channel>
+</rss>

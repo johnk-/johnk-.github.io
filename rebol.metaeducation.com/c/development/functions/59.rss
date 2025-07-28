@@ -1,0 +1,2346 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:discourse="http://www.discourse.org/" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Functions - AltRebol</title>
+    <link>https://rebol.metaeducation.com/c/development/functions/59</link>
+    <description>Topics in the &#39;Functions&#39; category Discussions of Functions and Generators, e.g. how things like RETURN work... or the mechanics of generators and composers like ADAPT, SPECIALIZE, ENCLOSE, HIJACK, etc.</description>
+    
+      <lastBuildDate>Mon, 14 Jul 2025 06:23:28 +0000</lastBuildDate>
+      <atom:link href="https://rebol.metaeducation.com/c/development/functions/59.rss" rel="self" type="application/rss+xml" />
+        <item>
+          <title>Picking Function Arguments By Integer</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Functions</category>
+          <description><![CDATA[
+            <p><a href="https://rebol.metaeducation.com/t/introducingnew-chain-datatype/2226">Having concepts like CHAIN!</a> means there are "set integers" now, which has opened up the possibility for things like:</p>
+<pre><code>sub1000: specialize subtract/ [2: 1000]
+</code></pre>
+<p>This would prevent you from having to specifically know the name of the argument you are specializing.  That seems sensible, given that you don't need to know the name to call it.</p>
+<p>It seems you should also be able to do this with frames:</p>
+<pre><code>&gt;&gt; f: make frame! subtract/
+
+&gt;&gt; f.1: 1020
+&gt;&gt; f.2: 1000
+
+&gt;&gt; eval f
+== 20
+</code></pre>
+<p><strong>It should not work with refinements.</strong>  Rebol2/Red/R3-Alpha expose the implementation detail of what position refinement arguments are in, but it was a bad idea for them... and an even worse idea for Ren-C.</p>
+<p>Consider AUGMENT, for example.  Let's make an arity-3 version of APPEND, that takes an argument to add before appending:</p>
+<pre><code>&gt;&gt; apadd: adapt (augment append/ [num [integer!]]) [
+       value: value + num
+   ]
+
+&gt;&gt; apadd [a b c] 1000 20
+== [a b c 1020]
+</code></pre>
+<p>Do take a moment to appreciate how cool that is... AUGMENT creates a function with an expanded specification (but no variation in behavior), and then ADAPT puts in a preamble which uses the added parameter by adding it to the value...before falling through to the ordinary implementation of APPEND.  (ENCLOSE could be used if you had a more complicated idea for what to do that didn't fit as just an adjustment in a preamble.)</p>
+<p>BUT once you're finished appreciating how cool that is, consider what we want if we make a frame for APADD:</p>
+<pre><code>&gt;&gt; f: make frame! apadd/
+
+&gt;&gt; f.1: [a b c]
+&gt;&gt; f.2: 1000
+&gt;&gt; f.3: 20
+
+&gt;&gt; eval f
+== [a b c 1020]
+</code></pre>
+<p>However, consider that it also has refinements available:</p>
+<pre><code>&gt;&gt; apadd:dup [a b c] 1000 20 3
+== [a b c 1020 1020 1020]
+</code></pre>
+<p><strong>So we see that the new non-refinement argument properly indexes as the 3rd argument, and it could not do that if refinements were INTEGER!-indexed.</strong>  Because if :DUP was something like index 3 in the frame for APPEND originally, it wouldn't be out of the way of the augmented form.</p>
+<p>Seems pretty good, but there are some quirks...</p>
+<h2><a name="p-8514-lens-matters-1" class="anchor" href="https://rebol.metaeducation.com#p-8514-lens-matters-1"></a>Lens Matters</h2>
+<p>I've written a bit about <strong><a href="https://rebol.metaeducation.com/t/understanding-frame-lensing/1645">FRAME! Lensing</a></strong>.  It's not just an efficiency trick...because I wouldn't know how to implement function composition otherwise.</p>
+<p>Because of Lenses, a frame built for a function with the same positionality can expose different interfaces.  Consider our APADD above, imagine specializing the thing you append to:</p>
+<pre><code>&gt;&gt; data: [a b c]
+
+&gt;&gt; accrue: specialize apadd/ [data]
+
+&gt;&gt; accrue 1000 20
+== [a b c 1020]
+
+&gt;&gt; accrue 300 4
+== [a b c 1020 304]
+</code></pre>
+<p>So now, we would hope that ACCRUE thinks of its 1 and 2 parameters as being what APADD thought of as 2 and 3.</p>
+<pre><code>&gt;&gt; f: make frame! accrue/
+
+&gt;&gt; f.1: 400
+&gt;&gt; f.2: 21
+
+&gt;&gt; eval f
+== [a b c 1020 304 421]
+</code></pre>
+<p><strong>Satisfying!</strong></p>
+<h2><a name="p-8514-but-what-does-integer-indexing-mean-with-no-lens-2" class="anchor" href="https://rebol.metaeducation.com#p-8514-but-what-does-integer-indexing-mean-with-no-lens-2"></a>But What Does Integer Indexing Mean With <em>No Lens</em> ?  <img src="https://rebol.metaeducation.com/images/emoji/twitter/frowning.png?v=14" title=":frowning:" class="emoji" alt=":frowning:" loading="lazy" width="20" height="20"></h2>
+<p>There's a point where all the Lenses are gone, and you are in the raw function implementation... the FRAME! as the underlying implementation expected to see it.  If you do a FOR-EACH on a frame in this view, you see everything.. refinements, locals, definitional RETURN (if there is one).</p>
+<pre><code>&gt;&gt; foo: func [arg1 :refine1 arg2 :refine2 &lt;local&gt; local1] [
+       let frame: binding of $arg1
+       for-each 'key frame [probe key]
+   ]
+
+&gt;&gt; foo 1020
+return
+arg1
+refine1
+arg2
+refine2
+local1
+</code></pre>
+<p>What (if anything) does indexing mean at this level?  <strong>frame.1</strong> giving you back the definitional RETURN would be barely useful... probably even <em>anti</em>-useful.</p>
+<p><strong>I think it's pretty clear the integer indexing on an unlensed frame should act as if you were seeing the frame from the perspective of a caller with the "default Lens", e.g. what someone who did MAKE FRAME! would see.</strong></p>
+<p>So <strong>frame.1</strong> would give you arg1, and <strong>frame.2</strong> would give you arg2, and that would be it.</p>
+<h2><a name="p-8514-should-object-offer-indexed-access-3" class="anchor" href="https://rebol.metaeducation.com#p-8514-should-object-offer-indexed-access-3"></a>Should OBJECT! Offer Indexed Access?</h2>
+<p>I've settled that FRAME! should offer it.  Here we see it has the interesting consequence that not all frame fields can be accessed with integer indexes, only</p>
+<p>But I don't know what--if anything--this implies for OBJECT!.</p>
+            <p><small>2 posts - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/picking-function-arguments-by-integer/2507">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/picking-function-arguments-by-integer/2507</link>
+          <pubDate>Mon, 14 Jul 2025 06:23:28 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2507</guid>
+          <source url="https://rebol.metaeducation.com/t/picking-function-arguments-by-integer/2507.rss">Picking Function Arguments By Integer</source>
+        </item>
+        <item>
+          <title>When Should Functions Validate Their Type Specs?</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Functions</category>
+          <description><![CDATA[
+            <p>You're able to use things in the body of a function that aren't defined yet:</p>
+<pre><code>&gt;&gt; foo: func [x] [if cool-number? x [print "It's cool"]]
+</code></pre>
+<p>No error there, until you run the function.</p>
+<p>But what if you use a datatype that's not defined yet?  Here's Rebol2:</p>
+<pre><code>rebol2&gt;&gt; foo: func [x [cool-number!]] [print "Typechecked as cool!"]]
+** Script Error: Invalid argument: cool-number!
+
+rebol2&gt;&gt; cool-number!: integer!
+
+rebol2&gt;&gt; foo: func [x [cool-number!]] [print "Typechecked as cool!"]
+; no error
+</code></pre>
+<p>Red seems to just do a literal symbolic check, you can't define types under other words:</p>
+<pre><code>red&gt;&gt; cool-number: integer!
+
+red&gt;&gt; foo: func [x [cool-number!]] [print "Typechecked as cool!"]
+*** Script Error: cool-number! has no value
+</code></pre>
+<h2><a name="p-8096-this-is-a-problem-for-extension-types-1" class="anchor" href="https://rebol.metaeducation.com#p-8096-this-is-a-problem-for-extension-types-1"></a>This Is A Problem For Extension Types</h2>
+<p>Let's say you have a collection of routines in a module, and one of them is able to operate on IMAGE!.  But let's say you don't load the IMAGE! extension, and you don't use that routine.</p>
+<p>The aggressive requirement that all types in type specs be resolvable at FUNC declaration time would prevent that module from loading.</p>
+<p>It creates ordering problems... where you suddenly have to worry about the order you're loading extensions in, even when they aren't dependent on each other in order to load... but just because they can operate on each other's types.  And it makes it impossible if they refer to each other's types.</p>
+<h2><a name="p-8096-is-the-answer-to-wait-until-the-function-is-called-2" class="anchor" href="https://rebol.metaeducation.com#p-8096-is-the-answer-to-wait-until-the-function-is-called-2"></a>Is The Answer To Wait Until The Function Is Called?</h2>
+<p>The historical problem with waiting was that the information in the spec was compacted and thrown away.  But modern PARAMETER! works differently, and could handle it.</p>
+<p>There are issues with type constraints changing out from under you, with regards to specialization and such.  See this post, which surveys what happens when you do things like <strong>INTEGER!: TAG!</strong> in the middle of a run:</p>
+<p><a href="https://rebol.metaeducation.com/t/survey-of-redefining-datatype-word-s/1479" class="inline-onebox">Survey of Redefining Datatype WORD!s</a></p>
+<p>The answer there may be that have to lock any variables that are used as type constraints so you can't change them.  <img src="https://rebol.metaeducation.com/images/emoji/twitter/man_shrugging.png?v=14" title=":man_shrugging:" class="emoji" alt=":man_shrugging:" loading="lazy" width="20" height="20"></p>
+<p><strong>I'm not concerned about performance issues...</strong> it can be made to perform as well as it should.</p>
+<p>The real question is just what to do about situations like:</p>
+<pre><code>&gt;&gt; foo: func [x [integer! askjdfljaslkdjfkakjsdhf]] [return x]
+
+&gt;&gt; foo 10
+== 10
+</code></pre>
+<p>Is that sane?  You might say <em><strong>"no, that's obviously insane"</strong></em>, but consider you could have just as easily written:</p>
+<pre><code>&gt;&gt; foo: func [x] [if integer? x [return x] askjdfljaslkdjfkakjsdhf]
+
+&gt;&gt; foo 10
+== 10
+</code></pre>
+<p>But taken to its logical conclusion, tolerating undefined things in type specs and just skipping them would also permit:</p>
+<pre><code>&gt;&gt; foo: func [x [askjdfljaslkdjfkakjsdhf integer!]] [return x]
+
+&gt;&gt; foo 10
+== 10
+</code></pre>
+<h2><a name="p-8096-okay-that-is-crazy-3" class="anchor" href="https://rebol.metaeducation.com#p-8096-okay-that-is-crazy-3"></a>Okay, That <em>Is</em> Crazy</h2>
+<p>It seems there needs to be some concept of forward-declaration.  Something that type specs tolerate as a non-match unless the thing loads.</p>
+<p>It <em>may</em> be (and I'm still working on the finer details of this), that all antiform fences canonize to the same antiform fence for that word, which identifies a datatype.  Meaning you could do a forward-declaration by just saying:</p>
+<pre><code>image!: ~{image!}~
+</code></pre>
+<p>Then when the actual IMAGE! library gets loaded (perhaps through a DLL and LOAD-EXTENSION) it agrees on that.</p>
+<p>But even if that were able to work for the narrow case of a DATATYPE!, it doesn't help so much with functions.  Let's say the datatypes were RGB-IMAGE! and RGBA-IMAGE! to distinguish having an alpha channel (for instance).  Then there was ANY-IMAGE?.  What if you want to use ANY-IMAGE? as a constraint?</p>
+<p>Maybe this calls for a generalized "forward declaration" datatype?  Something that is essentially unset, but tolerated by type specs?</p>
+<p><strong>Hey, Maybe That Already Exists... And It's Just Tolerance Of A Specific TRIPWIRE?</strong></p>
+<pre><code>rgb-image!: ~&lt;forward&gt;~  ; hm, forward can mean a lot of things.
+
+any-image?: ~&lt;pending&gt;~  ; "pending" sounds better.  "I know it's coming"
+
+rgba-image!: ~&lt;unavailable&gt;~  ; A "softer" unset state?
+</code></pre>
+<p>Well, it's one thought.  If tripwires were immutable (they should be, but aren't today) then checking for a specific word in the tripwire can be made arbitrarily fast.</p>
+<p>Setting things to this state might be done with something like:</p>
+<pre><code>extern [rgb-image! any-image? rgba-image!]
+</code></pre>
+<h2><a name="p-8096-something-like-this-has-to-be-the-right-direction-4" class="anchor" href="https://rebol.metaeducation.com#p-8096-something-like-this-has-to-be-the-right-direction-4"></a>Something Like This Has To Be The Right Direction</h2>
+<p>I don't think the arbitrary-garbage-in-typespecs is an idea with a future.</p>
+<p>One problem with tripwires, though, is that you get a difference between:</p>
+<pre><code> something?: ~&lt;pending&gt;~
+ foo: func [x [integer! something?]] [...]
+</code></pre>
+<p>and</p>
+<pre><code>something?: ~&lt;pending&gt;~
+foo: func [x] [any [not integer? x not something? x] [fail "typecheck"] ...]
+</code></pre>
+<p>While the typecheck was willing to overlook <code>something?</code> being not defined, the explicit call is not willing to do that.</p>
+<p>But you do have control there, to test to make sure the SOMETHING? isn't a tripwire before calling it.</p>
+<pre><code>foo: func [x] [
+    any [
+        not integer? x
+        (set? $something?) and (not something? x)
+    ][
+        fail "typecheck"
+    ]
+    ...
+]
+</code></pre>
+            <p><small>6 posts - 2 participants</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/when-should-functions-validate-their-type-specs/2391">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/when-should-functions-validate-their-type-specs/2391</link>
+          <pubDate>Mon, 31 Mar 2025 05:05:40 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2391</guid>
+          <source url="https://rebol.metaeducation.com/t/when-should-functions-validate-their-type-specs/2391.rss">When Should Functions Validate Their Type Specs?</source>
+        </item>
+        <item>
+          <title>Should Refinement Callsites Use VOID-in-NULL-out?</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Functions</category>
+          <description><![CDATA[
+            <p>The concept behind NULL is that it's a somewhat-ornery state, that most functions don't take by default.  So it helps catch mistakes.</p>
+<p>This makes me feel it's a bit haphazard to accept it at callsites:</p>
+<pre><code>&gt;&gt; count: null  ; remember to assign this later...
+== ~null~  ; anti 
+
+...
+
+&gt;&gt; append:dup [a b c] [d e] count
+== [a b c [d e]]
+</code></pre>
+<p>You got the same behavior as <strong><code>append [a b c] [d e]</code></strong>, e.g. the refinement was "revoked" by being null.</p>
+<p>But you've lost that protection idea.  Would it be safer if VOID were what was used?</p>
+<pre><code>&gt;&gt; append:dup [a b c] [d e] count
+** Error: APPEND expects INTEGER! for its DUP argument, not ~null~
+
+&gt;&gt; append:dup [a b c] [d e] opt count
+== [a b c [d e]]
+</code></pre>
+<p>This strikes me as a bit safer.</p>
+<h2><a name="p-8014-related-issue-nulls-and-normal-arguments-1" class="anchor" href="https://rebol.metaeducation.com#p-8014-related-issue-nulls-and-normal-arguments-1"></a>Related Issue: NULLs and Normal Arguments</h2>
+<p>What's been stopping me from changing this is just a general question regarding argument-tampering, and what the "smooth curve" would be from a normal argument to a refinement.</p>
+<p>If you define a normal argument as accepting <strong><code>[~null~ integer!]</code></strong> then it doesn't seem right to say that a callsite can't take null.  It would have to be another flag, like <strong><code>[&lt;opt&gt; integer!]</code></strong> which would trigger the void-means-null callsite convention... where null would be an error.</p>
+            <p><small>3 posts - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/should-refinement-callsites-use-void-in-null-out/2363">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/should-refinement-callsites-use-void-in-null-out/2363</link>
+          <pubDate>Wed, 15 Jan 2025 21:10:49 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2363</guid>
+          <source url="https://rebol.metaeducation.com/t/should-refinement-callsites-use-void-in-null-out/2363.rss">Should Refinement Callsites Use VOID-in-NULL-out?</source>
+        </item>
+        <item>
+          <title>How Persistent Is Infixedness?</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Functions</category>
+          <description><![CDATA[
+            <p>Infixedness is a property that FRAME! cells can carry.  There are 4 states that consume 2 bits:</p>
+<ul>
+<li>
+<p><strong>"Prefix"</strong> (not infixed at all)</p>
+</li>
+<li>
+<p><strong>"Normal" Infix</strong> <em>(sees exactly one item to the left, processed before the previous expression is allowed to run)</em></p>
+</li>
+<li>
+<p><strong>"Deferred" Infix</strong> <em>(exactly one evaluation is performed to the left, which is needed by ELSE such that cases like <strong><code>if x [y] else [z]</code></strong> can act as <strong><code>(if x [y]) else [z]</code></strong> instead of <strong><code>if x ([y] else [z])</code></strong>)</em></p>
+</li>
+<li>
+<p><strong>"Postponed" Infix"</strong> <em>(all evaluations on the left that can complete are run before running the operation)</em></p>
+</li>
+</ul>
+<p>Antiform FRAME!s can carry these infix states.  And the space is available in plain frames as well, so we could make FRAME!s that are created from antiforms carry it, so that it round-trips:</p>
+<pre><code>&gt;&gt; f: copy unrun +/
+== #[frame! [
+    value1: #[parameter! [char? any-scalar? date!]]
+    value2: #[parameter! [char? any-scalar? date!]]
+]]
+
+&gt;&gt; /plus: anti f
+== ~#[frame! "plus" []]]~  ; anti 
+
+&gt;&gt; 10 plus 20
+== 30
+</code></pre>
+<h2><a name="p-7989-but-what-about-specialization-1" class="anchor" href="https://rebol.metaeducation.com#p-7989-but-what-about-specialization-1"></a>But... What About Specialization?</h2>
+<p>Let's say I'd done this:</p>
+<pre><code>&gt;&gt; f: copy unrun +/
+== #[frame! [
+    value1: #[parameter! [char? any-scalar? date!]]
+    value2: #[parameter! [char? any-scalar? date!]]
+]]
+
+&gt;&gt; value1: 10
+
+&gt;&gt; /plus: anti f
+== ~#[frame! "plus" []]]~  ; anti 
+</code></pre>
+<p>If the FRAME! kept its infixedness, then you'd have <strong><code>(20 plus) = 30</code></strong>.</p>
+<p><em>But I don't think that makes much sense.</em>  <img src="https://rebol.metaeducation.com/images/emoji/twitter/frowning.png?v=14" title=":frowning:" class="emoji" alt=":frowning:" loading="lazy" width="20" height="20"></p>
+<p>Functions that take arguments infix tend to intend that infixness to apply specifically to a parameter.  Like if <strong><code>(x: default [10 + 20])</code></strong> has the variable specialized as <strong>x</strong>, you never intend to see <strong><code>([10 + 20] specialized-default)</code></strong></p>
+<h2><a name="p-7989-so-shouldnt-infixedness-be-a-parameter-property-2" class="anchor" href="https://rebol.metaeducation.com#p-7989-so-shouldnt-infixedness-be-a-parameter-property-2"></a>So Shouldn't Infixedness Be a PARAMETER! Property?</h2>
+<p>You might think that.</p>
+<p>So why is the property carried by the Cell of the overall FRAME! as a whole?</p>
+<p>The idea was to make it cheap to make a function that was defined normally to become infix...without allocating a new list of parameters:</p>
+<pre><code>/+: infix add/  ; no new parameter list made if it's just fiddling cell bits
+</code></pre>
+<p>If + and ADD have the same definition then their PARAMETER! can only have one state, so the bit has to go elsewhere.</p>
+<p>Fundamentally one might reimagine INFIX as an operator that acts on PARAMETER!, and then see turning a function infix as a specialization operation:</p>
+<pre><code>&gt;&gt; add.value1.spec
+== [char? any-scalar? date!]
+
+&gt;&gt; /+: specialize add/ [value1: infix add.value1]
+== ~#[frame! [value1] "add" [value2]]]~  ; anti
+</code></pre>
+<p>More of a pain.  And now we face the question: what happens when a parameter is marked infix but isn't the first unspecialized argument?  There's no way in the mechanics of the system to give that meaning.</p>
+<pre><code>&gt;&gt; /++: specialize add/ [value1: infix add.value1, value2: infix add.value2]
+== ~#[frame! [value1 value2] "add"]]~  ; anti
+
+&gt;&gt; 10 20 ++  ; incoherent, evaluator can't do this
+== 30
+</code></pre>
+<p>So this is why infixedness has persisted as a Cell state, not a PARAMETER! state.  Keeping it off the parameters avoids having to figure out how to handle the meaningless states.  And it's cheaper to not create a new parameter list.</p>
+<h2><a name="p-7989-ok-any-bright-ideas-on-managing-these-bits-3" class="anchor" href="https://rebol.metaeducation.com#p-7989-ok-any-bright-ideas-on-managing-these-bits-3"></a>Ok.  Any Bright Ideas On Managing These Bits?</h2>
+<p>The question is if we know which parameter is the infix one, so that if it's specialized out the infixedness goes away.</p>
+<p>This means somehow the operation of turning a frame infix has to capture a memory of what parameter was infix at that moment.</p>
+<p>That's more than 2 bits of information. <img src="https://rebol.metaeducation.com/images/emoji/twitter/frowning.png?v=14" title=":frowning:" class="emoji" alt=":frowning:" loading="lazy" width="20" height="20"></p>
+<p><strong>I don't have great ideas at this precise moment for how to do this, without making a copy of the parameter list.</strong></p>
+<p>The easiest thing to do is to say the infix state only applies to antiforms, and if you specialize things you have to re-infix them.  Or maybe just refuse to specialize infix things, and say you have to drop the bits consciously to know you're doing that, and then re-infix them.</p>
+<p>(Sometimes I start these posts thinking "I'll have a solution by the end" and then don't.  Anyway, I'm going to stop thinking about this and work on other things for now.)</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/how-persistent-is-infixedness/2359">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/how-persistent-is-infixedness/2359</link>
+          <pubDate>Fri, 27 Dec 2024 05:21:14 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2359</guid>
+          <source url="https://rebol.metaeducation.com/t/how-persistent-is-infixedness/2359.rss">How Persistent Is Infixedness?</source>
+        </item>
+        <item>
+          <title>HIJACK-protection: Preserve a Weird Feature? :face_with_diagonal_mouth:</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Functions</category>
+          <description><![CDATA[
+            <p>The HIJACK functionality was proposed by <a class="mention" href="https://rebol.metaeducation.com/u/gchiu">@gchiu</a>, many years ago:</p>
+<pre><code>&gt;&gt; /foo: func [x] [print ["FOO" (x + 1)]
+&gt;&gt; /foo-reference: foo/
+
+&gt;&gt; foo 20
+FOO 21
+
+&gt;&gt; foo-reference 20
+FOO 21
+
+&gt;&gt; /bar: func [x] [print ["HIJACKED!" (x + 1000)]
+
+&gt;&gt; hijack foo/ bar/
+
+&gt;&gt; foo 20
+HIJACKED! 1020
+
+&gt;&gt; foo-reference 20
+HIJACKED! 1020
+</code></pre>
+<p>And so, way back when... I worked up a mechanic for how to do this.  There's some nuance to how efficient it can be, based on whether the thing you're hijacking uses a parameter list that's in the same "derivation chain".</p>
+<p>While it was originally a somewhat fringe feature, it became central to certain parts of the implementation--including the web ReplPad.</p>
+<h2><a name="p-7968-what-if-you-want-to-use-the-old-implementation-1" class="anchor" href="https://rebol.metaeducation.com#p-7968-what-if-you-want-to-use-the-old-implementation-1"></a>What If You Want To Use The Old Implementation?</h2>
+<p>Note that all references to the old function will run the hijacker.  What if you wanted the old implementation?</p>
+<p>The seemingly simplest answer would be to return the old implementation under a new identity by HIJACK:</p>
+<pre><code>&gt;&gt; /foo: func [x] [print ["FOO" (x + 1)]
+&gt;&gt; /bar: func [x] [print ["HIJACKED!" (x + 1000)]
+
+&gt;&gt; /foo-old: hijack foo/ bar/
+
+&gt;&gt; foo 20
+HIJACKED! 1020
+
+&gt;&gt; foo-old 20
+FOO 21
+</code></pre>
+<h2><a name="p-7968-but-i-did-something-different-2" class="anchor" href="https://rebol.metaeducation.com#p-7968-but-i-did-something-different-2"></a>But I Did Something Different...</h2>
+<p>In that old era of ACTION! and FRAME! as distinct types, I decided to be clever.</p>
+<p>I said that COPY of an ACTION! would create a new action identity that ran the same code... but that wouldn't be affected by a HIJACK of the old action.</p>
+<pre><code>&gt;&gt; /foo: func [x] [print ["FOO" (x + 1)]
+&gt;&gt; /bar: func [x] [print ["HIJACKED!" (x + 1000)]
+
+&gt;&gt; /foo-copy: copy foo/ 
+
+&gt;&gt; hijack foo/ bar/
+
+&gt;&gt; foo 20
+HIJACKED! 1020
+
+&gt;&gt; foo-copy 20
+FOO 21
+</code></pre>
+<p>So HIJACK didn't return anything.</p>
+<p>On the one hand: this is strictly more powerful, it means any code anywhere can make a new identity and ensure it won't be affected by <em>subsequent</em> HIJACKs of the original function.</p>
+<p>It also lets you avoid ordering problems:</p>
+<pre><code> hijack foo/ (adapt copy foo/ [print "Doesn't need an extra step!"])
+</code></pre>
+<p>You'd have to do this in multiple steps otherwise, with some kind of dummy hijacking:</p>
+<pre><code> /old-foo: hijack foo/ noop/
+ hijack foo/ (adapt old-foo/ [print "Without COPY, you have to do this"])
+</code></pre>
+<p>So it seemed superior.</p>
+<p>BUT this turned out to be more complicated to implement, and opens a bit of a can of worms about the meaning of COPY.</p>
+<h2><a name="p-7968-what-should-could-copy-an-action-mean-3" class="anchor" href="https://rebol.metaeducation.com#p-7968-what-should-could-copy-an-action-mean-3"></a>What Should (Could?) "COPY an ACTION" Mean?</h2>
+<p>Let's just simplify matters a little and think about the actions which have an implementation "BLOCK!" behind them...what I've called the "Details Array".</p>
+<p>You might imagine that making a copy that would not be subject to the same HIJACK-ings is as easy as making a copy of that array.  Maybe (?) that sounds a little expensive, but, you'd imagine this isn't done <em>too</em> often.</p>
+<p>However, consider something like this:</p>
+<pre><code>&gt;&gt; /g: generator [yield 1 yield 2 yield 3]
+
+&gt;&gt; g
+== 1
+
+&gt;&gt; /g-copy: copy g/
+
+&gt;&gt; g
+== 2
+
+&gt;&gt; g-copy
+== ???  ; what do you think?
+</code></pre>
+<p>There's actually a huge problem here, in that the Details Array contains delicate state.  You can't just assume duplicating that state is going to lead to a situation that won't be confused or crashy.  It may contain unique pointers that one of the instances assumes it can free because it thinks it is unique.</p>
+<p>Given this reality, the interaction between COPY of ACTION! and HIJACK was very crafty.  The HIJACK only did a <em>minor</em> disruption to the original Details array, basically rewriting a bit of it to say "you've been hijacked" but leaving the contents of the array state in place.  Copies were small stubs that could chain through to the original Details identity--and despite the fact that it had been hijacked, still run it.</p>
+<p>But things got fairly twisted.  This meant HIJACK couldn't be simple, and function copies became strange beasts that had to be conscious of the possibility that they were representations of hijackings and be conditional and that.</p>
+<h2><a name="p-7968-further-copy-of-action-is-now-copy-of-frame-4" class="anchor" href="https://rebol.metaeducation.com#p-7968-further-copy-of-action-is-now-copy-of-frame-4"></a>Further... COPY of "action" is Now COPY of FRAME!</h2>
+<p>The unification of FRAME! and action brought about a bit of a semantics problem.</p>
+<p>COPY of an "action" now is just a mechanism of getting another FRAME! with the same parameters, that you can tweak.  It doesn't imply anything about "protect against hijacking".</p>
+<p>Hence this notion of "make new action identity that can't be hijacked" would have to be some new operator, not COPY.</p>
+<p>We're thus talking about something called <strong><code>make-unhijackable-reference</code></strong>.  <img src="https://rebol.metaeducation.com/images/emoji/twitter/face_with_diagonal_mouth.png?v=14" title=":face_with_diagonal_mouth:" class="emoji" alt=":face_with_diagonal_mouth:" loading="lazy" width="20" height="20"></p>
+<h2><a name="p-7968-or-just-say-screw-it-hijack-returns-new-identity-5" class="anchor" href="https://rebol.metaeducation.com#p-7968-or-just-say-screw-it-hijack-returns-new-identity-5"></a>Or... Just Say "Screw It", HIJACK Returns New Identity?</h2>
+<p>This is almost certainly the best answer.</p>
+<p>Redoing this doesn't necessarily rule out the idea of inventing MAKE-UNHIJACKABLE-REFERENCE some day.  But that would mean a hijacking would have to preserve the old implementation in a more "costly" way than it has historically, and those references would also be more costly.</p>
+<p>Seeing it relatively clearly after having written this post, I think the added cost would be the right way to do it, if this feature were decided to actually matter to anyone.</p>
+<p>So far the only uses of COPY of action to avoid hijackability have been done at the moment of hijacking, to re-use the implementation as part of the hijacking.  The concept of "shielding references from HIJACK" for any other reason is not something that I can think of applications for.</p>
+<p>(If you are the one exporting a function, and you think you someone might hijack it and you don't want to be subject to those hijackings, you can export an ADAPT with an empty block...or something of that sort...and then your implementation is safe, because if someone hijacks that adaptation it won't affect what the adaptation called.)</p>
+            <p><small>3 posts - 2 participants</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/hijack-protection-preserve-a-weird-feature/2348">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/hijack-protection-preserve-a-weird-feature/2348</link>
+          <pubDate>Wed, 11 Dec 2024 12:53:48 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2348</guid>
+          <source url="https://rebol.metaeducation.com/t/hijack-protection-preserve-a-weird-feature/2348.rss">HIJACK-protection: Preserve a Weird Feature? :face_with_diagonal_mouth:</source>
+        </item>
+        <item>
+          <title>Default Values and MAKE FRAME! - 2024 Edition</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Functions</category>
+          <description><![CDATA[
+            <blockquote>
+<p><em><strong>NOTE:</strong> The below summarizes history with some adjustments made for simplification purposes.  See posts in <a href="https://rebol.metaeducation.com/c/archive/61">Archive</a> regarding frames for all the exact detours.</em></p>
+</blockquote>
+<hr>
+<p>Something like this has worked ever since the first FRAME!:</p>
+<pre><code>f: make frame! append/
+f.series: [a b c]
+f.value: 10
+
+&gt;&gt; eval f
+== [a b c 10]
+</code></pre>
+<p>Notice that although APPEND has refinements, you don't have to explicitly go through and set them to NULL.  That was done for you.</p>
+<p>That might make you think the result of <strong>(make frame! append/)</strong> looked like this:</p>
+<pre><code>&gt;&gt; make frame! append/
+== #[frame! [  ; you might think...
+    series: ~null~
+    value: ~null~
+    part: ~null~
+    dup: ~null~
+    line: ~null~
+]]
+</code></pre>
+<p>e.g. all fields defaulting to null, whether they are refinements or not.</p>
+<h2><a name="p-7965-thats-not-what-it-did-here-is-why-1" class="anchor" href="https://rebol.metaeducation.com#p-7965-thats-not-what-it-did-here-is-why-1"></a>That's Not What It Did... Here Is Why</h2>
+<p>Even before the full-on unification of ACTION! and FRAME! into one datatype, there was a concept that you could make an action out of a frame.  This meant some state of the frame variables had to represent the idea that an argument was still to be gathered.</p>
+<p>The goal was something like this:</p>
+<pre><code>f: make frame! append/
+f.value: 10
+; don't assign f.series, leave it however it was
+
+&gt;&gt; run f [a b c]
+== [a b c 10]
+</code></pre>
+<p>If all the argument slots were eagerly set to <strong><code>~null~</code></strong> then you'd get something like:</p>
+<pre><code>&gt;&gt; run f [a b c]
+** Error: APPEND doesn't allow ~null~ for its VALUE argument
+</code></pre>
+<p>So instead, MAKE FRAME! would leave the slots all unset, to indicate they were unspecialized:</p>
+<pre><code>&gt;&gt; make frame! append/
+== #[frame! [
+    series: ~
+    value: ~
+    part: ~
+    dup: ~
+    line: ~
+]]
+</code></pre>
+<p>If it got to the point of execution, optional parameters (e.g. refinements) would be turned from TRASH into NULL implicitly.  But if you didn't set a slot for a required parameter, it would give a helpful error:</p>
+<pre><code>f: make frame! append/
+f.value: 10
+
+&gt;&gt; eval f
+** Error: APPEND's SERIES argument is unspecified
+</code></pre>
+<h2><a name="p-7965-but-what-if-you-want-to-specialize-to-trash-2" class="anchor" href="https://rebol.metaeducation.com#p-7965-but-what-if-you-want-to-specialize-to-trash-2"></a>But What If You Want To Specialize To Trash?</h2>
+<p>It might seem that "trash" is a rare thing to want to specialize to.  But it's a legitimate value, and represents a valid frame state.</p>
+<p>e.g. let's say you wanted to write UNSET as a specialization:</p>
+<pre><code>/unset: specialize set/ [value: ~]
+</code></pre>
+<p>This would wind up making UNSET a synonym for SET.  Because it would think you were saying <em>"specialize SET's value to be unspecialized"</em>...which is what it was by default.</p>
+<p>In this sense, using TRASH as the unspecialized value just pushed the problem around a little bit.  No matter what you pick to represent the unspecialized state, you're going to have a problem.  It just happens that functions which take ~null~ antiforms are relatively common compared to those that take ~ antiforms.</p>
+<h2><a name="p-7965-leveraging-meta-on-a-stable-antiform-3" class="anchor" href="https://rebol.metaeducation.com#p-7965-leveraging-meta-on-a-stable-antiform-3"></a>Leveraging ^META On a Stable Antiform</h2>
+<p>If you start thinking about being sneaky, you might imagine adding extra hidden bits somewhere to say <em>"no, this is a magic kind of specialized TRASH"</em>.  But sneaky hidden bits are a tangled web, adding cost in the routines to manipulate them.</p>
+<p>So the idea was to use a not-so-hidden bit: any function that could legitimately take "trash" as an argument had to take it as a ^META parameter.</p>
+<pre><code>x: 1020
+
+f: make frame! set/
+f.var: $x
+f.value: first [~]  ; ~ is meta-TRASH, aka "quasi-BLANK!", aka "QUASAR"
+
+&gt;&gt; eval f
+== ~  ; anti
+
+&gt;&gt; x
+** Error: X is unset (antiform BLANK!)
+</code></pre>
+<p>This works, but creates an additional burden: functions that truly want to receive a value that can represent any stable form must take their arguments as ^META... which usually you'd think you only need for unstable forms.</p>
+<h2><a name="p-7965-theres-still-an-ambiguity-gather-or-error-4" class="anchor" href="https://rebol.metaeducation.com#p-7965-theres-still-an-ambiguity-gather-or-error-4"></a>There's Still an Ambiguity: Gather, Or Error?</h2>
+<p>The above was the status quo for a couple of years: MAKE FRAME! gave you back a frame whose slots were all unset.  Those unset slots represented arguments that were unspecialized.</p>
+<p>But still you have a question: should an unspecialized argument be gathered from a callsite, or should it trigger an error?</p>
+<p>That decision came from the operation.  If you used EVAL on a FRAME!, it would assume all the frame slots were finalized...and any trash cells would raise errors.  If you used RUN (or converted the FRAME! into an action) then it assumed the unspecialized slots meant you wanted to gather arguments.</p>
+<h2><a name="p-7965-evolution-antiform-parameter-for-unspecialized-slots-5" class="anchor" href="https://rebol.metaeducation.com#p-7965-evolution-antiform-parameter-for-unspecialized-slots-5"></a>Evolution: Antiform PARAMETER! For Unspecialized Slots</h2>
+<p>A big change came through with a user exposure of the PARAMETER! type.  With antiform parameters representing unspecialized slots, you had the signal of "this is unspecialized", but also the information required to gather the parameter: what types it checked, whether it was a refinement or not, whether it should be taken literally from a callsite, etc.</p>
+<p>This heralded even more exposure of the mechanics of function composition to user mode.  Instead of just specializing a function argument to a value, you could do things like "tweak" the argument's accepted types.</p>
+<p>For instance: what if you wanted a version of APPEND that only appended integers?</p>
+<pre><code>&gt;&gt; ap-int: make frame! append/
+
+&gt;&gt; ap-int.value: anti make parameter! [integer!]  ; or whatever syntax
+== ~#[parameter! [integer!]]~  ; anti
+
+&gt;&gt; /ap-int: anti ap-int
+== ~#[frame! ...]~  ; anti
+
+&gt;&gt; ap-int [a b c] 1020
+== [a b c 1020]
+
+&gt;&gt; ap-int [a b c] "illegal"
+** Error: AP-INT requires [integer!] for its value argument
+</code></pre>
+<p>This meant that MAKE FRAME! gave back something that looked rather weird:</p>
+<pre><code>&gt;&gt; make frame! append/
+== #[frame! [
+    series: ~#[parameter! [
+        ~void~ any-series? port! map! object! module! bitset!]
+    ]~
+    value: ~#[parameter! [~void~ element? splice?]]~
+    part: ~#[parameter! :[any-number? any-series? pair!]]~
+    dup: ~#[parameter! :[any-number? pair!]]~
+    line: ~#[parameter! :[]]~
+]]
+</code></pre>
+<p><img src="https://rebol.metaeducation.com/images/emoji/twitter/face_with_diagonal_mouth.png?v=14" title=":face_with_diagonal_mouth:" class="emoji only-emoji" alt=":face_with_diagonal_mouth:" loading="lazy" width="20" height="20"></p>
+<p>Although this gives you a useful and actionable information about the parameters, that's fairly noisy for most purposes.  You haven't done any assignments to the frame, and yet it looks like it's "full".</p>
+<p>Let's put a pin in that.</p>
+<h2><a name="p-7965-are-meta-exceptions-still-needed-6" class="anchor" href="https://rebol.metaeducation.com#p-7965-are-meta-exceptions-still-needed-6"></a>Are ^META Exceptions Still Needed?</h2>
+<p>In this model, there is no way of expressing a specialization of a function to an antiform parameter unless that function defined the parameter as ^META.</p>
+<p>That doesn't <em>necessarily</em> mean we'd have to be prescriptive.  I mentioned that EVAL expects all the arguments to be specified to their final values, while RUN accepts some will be unspecialized.  So EVAL <em>could</em> treat antiform parameters as the actual values to pass, while RUN would gather them from the callsite.</p>
+<p>This would produce a strange conflation.  You couldn't tell by looking at a frame whether or not an antiform parameter was a legitimate argument, or an unspecialized parameter definition.</p>
+<p>As an example, consider the HOLE? function, that tells you whether or not a value is an antiform parameter.  Let's assume it's operating in a world that it doesn't need to take the argument as ^META:</p>
+<pre><code>&gt;&gt; f: make frame! hole/
+== #[frame! [value: ~#[parameter! [any-value?]]~]
+</code></pre>
+<p>The interface says it takes ANY-VALUE? as the first parameter to HOLE?  Yet we don't have any mechanical way of telling that <strong><code>f2</code></strong> isn't a completed frame for calling HOLE?.  So if EVAL accepts this:</p>
+<pre><code>&gt;&gt; eval f
+== ~okay~  ; anti
+</code></pre>
+<p><img src="https://rebol.metaeducation.com/images/emoji/twitter/thinking.png?v=14" title=":thinking:" class="emoji only-emoji" alt=":thinking:" loading="lazy" width="20" height="20"></p>
+<p>It really seems the best plan is to keep erroring when you try to EVAL frames with antiform PARAMETER! in them, when those parameters are required:</p>
+<pre><code>&gt;&gt; eval f2
+** Error: HOLE?'s VALUE parameter is unspecified (antiform PARAMETER!)
+</code></pre>
+<p>It does require the ^META exception: functions which need to accept antiform arguments must take that parameter in a meta form.  A function like HOLE? would fit into this category, and so would SET (which has to take unstable antiforms anyway, e.g. to do SET of a BLOCK! to a PACK)</p>
+<p>Under this design, any function that can accept antiform parameters at all, will also able to be specialized with antiform parameters.</p>
+<h2><a name="p-7965-denoising-make-frame-different-frame-makers-7" class="anchor" href="https://rebol.metaeducation.com#p-7965-denoising-make-frame-different-frame-makers-7"></a>Denoising MAKE FRAME!: Different Frame Makers?</h2>
+<p>I pointed out that having antiform parameters in frame slots is a bit noisy.</p>
+<p>So what if there were two ways of making frames: one that gives you the parameter antiforms (suitable for tweaking and writing your own specialization operations), and another that clears the fields out?</p>
+<p>For instance, keeping the old behavior for MAKE FRAME!:</p>
+<pre><code>&gt;&gt; make frame! append/
+== #[frame! [
+    series: ~
+    value: ~
+    part: ~
+    dup: ~
+    line: ~
+]]
+</code></pre>
+<p>But if you wanted antiform parameters, you could just copy the non-antiform version of the FRAME!:</p>
+<pre><code>&gt;&gt; copy unrun append/
+== #[frame! [
+    series: ~#[parameter! [
+        ~void~ any-series? port! map! object! module! bitset!]
+    ]~
+    value: ~#[parameter! [~void~ element? splice?]]~
+    part: ~#[parameter! :[any-number? any-series? pair!]]~
+    dup: ~#[parameter! :[any-number? pair!]]~
+    line: ~#[parameter! :[]]~
+]]
+</code></pre>
+<p>In this design, you'd have <em>two</em> stable forms which you'd have to use ^META conventions to take as an argument.</p>
+<p>Antiform ~ would still have to turn into ~null~ if EVAL found it in a refinement slot.  But I'm not sure PARAMETER! antiforms would need to do that too.  One could argue that you should never be EVAL'ing a frame with antiform parameters in it, so it could be a sort of safety mechanism (?).  I'm not sure if it's necessary to enable, so I'd probably just raise an error until I saw a compelling case.</p>
+<h2><a name="p-7965-is-the-added-nuance-worth-it-8" class="anchor" href="https://rebol.metaeducation.com#p-7965-is-the-added-nuance-worth-it-8"></a>Is The Added Nuance Worth It?</h2>
+<p>Continuing to handle unset variables as placeholders is not strictly necessary, given that antiform parameters are the more fundamental "unspecialized" slot representation.</p>
+<p>But it's definitely a lot better than something I tried that <em>sucked</em>: which was trying to make variables holding antiform PARAMETER! act like they were unset.  This made manipulating function interfaces programmatically <em>very</em> painful.</p>
+<p>It would mean sacrificing another value to have to be passed ^META.  Though bear in mind, most of the damage is done from having one form: e.g. a function like SET is having to take its value ^META already in order to be able to set things to antiform PARAMETER!.  So it isn't like you'd be able to specialize SET with antiform <code>~</code> to get UNSET if this wasn't done... it would affect the TRASH? function (and probably not a lot else).</p>
+<p><strong>Having used MAKE FRAME! a fair bit, I am inclined to believe it's worth it.</strong>  It's a clear indicator of whether you've assigned fields or not, with some teeth by actually making the variables unset (erroring on use before assignment, and reacting to things like DEFAULT).</p>
+            <p><small>2 posts - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/default-values-and-make-frame-2024-edition/2347">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/default-values-and-make-frame-2024-edition/2347</link>
+          <pubDate>Sat, 07 Dec 2024 20:48:23 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2347</guid>
+          <source url="https://rebol.metaeducation.com/t/default-values-and-make-frame-2024-edition/2347.rss">Default Values and MAKE FRAME! - 2024 Edition</source>
+        </item>
+        <item>
+          <title>Design for Something Like FLIP To Reverse Arguments</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Functions</category>
+          <description><![CDATA[
+            <aside class="quote no-group" data-username="bradrn" data-post="6" data-topic="1238">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/bradrn/48/365_2.png" class="avatar"><a href="https://rebol.metaeducation.com/t/parameter-order-in-rebol/1238/6">Parameter Order in Rebol</a></div>
+<blockquote>
+<p>If someone wants to specify the second parameter first they can always write <code>flip cons</code> or <code>flip snoc</code>.</p>
+</blockquote>
+</aside>
+<p>The design of a FLIP-like operation raises some questions.</p>
+<p>If it were an operator that acted on functions, it wouldn't retrigger them.  You'd have to say:</p>
+<pre><code>&gt;&gt; append 'd [a b c]
+== [a b c d]
+
+&gt;&gt; run flip append/ [a b c] 'd
+== [a b c d]
+</code></pre>
+<p>Alternately, I guess you could use slash to run a GROUP!, but then you'd have a disabling slash and a running slash:</p>
+<pre><code>&gt;&gt; /(flip append/) [a b c] 'd
+== [a b c d]
+</code></pre>
+<p>If it were instead something along the lines of RUN, where applying the flipped function was implicit, you could write:</p>
+<pre><code>&gt;&gt; flip append/ [a b c] 'd
+== [a b c d]
+</code></pre>
+<p>I don't think <strong><code>flip/append</code></strong> being a synonym for <strong><code>/(flip append/)</code></strong> is a generically useful idea, compared to the likes of <strong><code>not/even?/</code></strong> for cascading.</p>
+<p>But if the <a href="https://rebol.metaeducation.com/t/dialecting-function-calls-new-weird-powerful/2310">weird idea of dialected CHAIN!</a> ever came to pass, FLIP could go into a distinct mode based on receiving a function in the place other functions have refinements...</p>
+<pre><code>&gt;&gt; append/
+== ~#[frame! [value series]]~
+
+&gt;&gt; flip append/
+== ~#[frame! [series value]]~
+
+&gt;&gt; flip:append [a b c] 'd
+== [a b c d]
+</code></pre>
+            <p><small>4 posts - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/design-for-something-like-flip-to-reverse-arguments/2345">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/design-for-something-like-flip-to-reverse-arguments/2345</link>
+          <pubDate>Mon, 02 Dec 2024 14:41:21 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2345</guid>
+          <source url="https://rebol.metaeducation.com/t/design-for-something-like-flip-to-reverse-arguments/2345.rss">Design for Something Like FLIP To Reverse Arguments</source>
+        </item>
+        <item>
+          <title>Simplifying Refinement Promotion</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Functions</category>
+          <description><![CDATA[
+            <p>There are two modes of partial specialization which Ren-C has supported.</p>
+<p>One form would be like if APPEND takes something like :DUP and fixes it to a value:</p>
+<pre><code>&gt;&gt; append2: specialize append/ [dup: 2]
+
+&gt;&gt; append2 [a b c] &lt;d&gt;
+== [a b c &lt;d&gt; &lt;d&gt;]
+</code></pre>
+<p>Then there's a trickier kind of specialization, which is to ask for the parameter but not specify it... thus just increasing the arity:</p>
+<pre><code>&gt;&gt; appenddup: append:dup/
+
+&gt;&gt; appenddup [a b c] &lt;d&gt; 4
+== [a b c &lt;d&gt; &lt;d&gt; &lt;d&gt; &lt;d&gt;]
+</code></pre>
+<p>The second form is pretty unusual in the language world.  There doesn't seem to be much prior art in "the conversion of optional parameters to required parameters" (at least I don't know any, and the AIs I asked don't know any).</p>
+<p>Since it's pretty different from what what people think of as partial specialization, let's call it <strong>"refinement promotion"</strong>.</p>
+<h2><a name="p-7935-refinement-promotion-is-tricky-1" class="anchor" href="https://rebol.metaeducation.com#p-7935-refinement-promotion-is-tricky-1"></a>Refinement Promotion Is <em>Tricky</em></h2>
+<p>Something that has been non-negotiable in the design is the straightforward array of parameters and locals that specify a function interface.</p>
+<p>Refinements are defined in some order in that array.  But you are not required to use them in that order.</p>
+<p>So consider a definition like:</p>
+<pre><code> /foo: func [a [integer!] :b [integer!] :c [integer!]] [...]
+</code></pre>
+<p>Someone might do refinement promotion of this as <strong><code>foo:c:b/</code></strong> - this makes it seem to the caller a function originally written with spec:</p>
+<pre><code> [a [integer!] c [integer!] b [integer!]]
+</code></pre>
+<p>The techniques so far have tried to mimic the way that refinements work.  So <strong><code>get $foo:c:b</code></strong> would produce a function that was accompanied by a <strong><code>[c b]</code></strong> array, that would get pushed when running the promoted function.  The elements in the array would not just have the words, but those words would have binding information to say what index those words were found at in the parameter array.</p>
+<p>But since the underlying array is left the same, this means every time you want to know something like "what's the first unspecialized normal argument" you have to mimic the refinement gathering process.  It convoluted the process quite a lot, and really went against the idea of the implementation being "simple".</p>
+<h2><a name="p-7935-q-is-this-really-required-to-support-a-yes-2" class="anchor" href="https://rebol.metaeducation.com#p-7935-q-is-this-really-required-to-support-a-yes-2"></a>Q: Is This Really Required To Support?  (A: Yes)</h2>
+<p>This may not seem like a super-common need.  But if you're implementing a dialect that wants to support calling functions with refinements, it's pretty important.</p>
+<p>Let's say you're implementing something like <a href="https://rebol.metaeducation.com/t/if-action-combinators-dont-impress-what-will/1608">the feature in UPARSE that lets you call functions</a>:</p>
+<pre><code>&gt;&gt; data: copy ""
+
+&gt;&gt; parse ["a" "b"] [some [/append:dup (data) text! (2)]]
+
+&gt;&gt; data
+== "aabb"
+</code></pre>
+<p>Basically, if <strong><code>(get $/append:dup)</code></strong> can come back with a function that you can query for its parameters and get answers just like it was any other function, then support for refinements comes basically for free.</p>
+<h2><a name="p-7935-should-the-varlist-just-be-rewritten-3" class="anchor" href="https://rebol.metaeducation.com#p-7935-should-the-varlist-just-be-rewritten-3"></a>Should The VarList Just Be Rewritten?</h2>
+<p>If you look at what a modern SPECIALIZE followed by AUGMENT can do, they can hide parameters...and then add back parameters with the same name.  Which parameters are visible depend on the "phase" of the frame.</p>
+<p>So why couldn't refinement promotion be done just by making a new function interface that removes the argument as a refinement, and adds it back as a regular argument... then has a dispatch phase that moves the argument data to its old position for the subsequent phases?</p>
+<p>It's not particularly "cheap" to do that, space-wise.  You'd need a new VarList* and a new Phase*, and the Phase would have to remember the new and old positions to do the rewrite.  But it would make parameter enumeration blunt and simple, because you'd really just be enumerating the parameters in order.</p>
+<p>There'd be some cases where the position of the refinement would allow it to just be naturally rewritten to be a regular argument, and that could be optimized for.</p>
+<h2><a name="p-7935-what-about-when-you-have-lots-of-local-4" class="anchor" href="https://rebol.metaeducation.com#p-7935-what-about-when-you-have-lots-of-local-4"></a>What About When You Have Lots of <code>&lt;local&gt;</code>?</h2>
+<p>This is kind of the dark side of the simple FRAME! model, which is that if you use it to create a lot of local variables, then operations like SPECIALIZE and AUGMENT which do VarList manipulation have to make copies of everything for the new VarList...including a bunch of locals that aren't changing at all in each new form.</p>
+<pre><code>/foo: func [x [text!] y [tag!] &lt;local&gt; a b c d e f g h i j k l m n o p] [
+    ... 19 frame cells (includes RETURN) ...
+]
+
+/bar: augment foo/ [z [integer!]]  ; z is last item in new 20 item frame
+</code></pre>
+<p>Refinement promotion would become another one of these situations that would do seemingly unnecessary duplication.</p>
+<p>It would be possible in cases like this to create smaller frames and then proxy the results into larger ones, essentially simulating what a user might do to manually call FOO from a new function BAR which had a frame with 3 elements.</p>
+<pre><code>/bar: lambda [x [text!] y [tag!] z [integer!]] [
+    foo x y  ; imagine doing this, but with faster internal mechanics
+]
+</code></pre>
+<p>Some calculation could be done where the size of the frame justified it.  I have a feeling that the frame would have to be reasonably large before a technique like this would be beneficial.</p>
+<h2><a name="p-7935-what-about-refinements-at-headhttpsrebolmetaeducationcomtrefinement-arguments-at-head-of-args-list-not-tail2331-5" class="anchor" href="https://rebol.metaeducation.com#p-7935-what-about-refinements-at-headhttpsrebolmetaeducationcomtrefinement-arguments-at-head-of-args-list-not-tail2331-5"></a>What About <a href="https://rebol.metaeducation.com/t/refinement-arguments-at-head-of-args-list-not-tail/2331">Refinements At Head</a>?</h2>
+<p>Well, in that case, you would <em>have</em> to build a new VarList* that extracted the arguments, and then proxy them into position for the new interface.</p>
+<p>At least one wouldn't be worried about the "bloated copies of locals" situation.</p>
+<h2><a name="p-7935-souse-the-auxiliary-array-simulating-refinements-6" class="anchor" href="https://rebol.metaeducation.com#p-7935-souse-the-auxiliary-array-simulating-refinements-6"></a>So...Use The Auxiliary Array Simulating Refinements?</h2>
+<p>The code for simulating refinements when asking simple questions like <em>"what's the first unspecialized normal arg"</em> is unappealingly complex. <img src="https://rebol.metaeducation.com/images/emoji/twitter/nauseated_face.png?v=14" title=":nauseated_face:" class="emoji" alt=":nauseated_face:" loading="lazy" width="20" height="20"></p>
+<p>Making it further unappealing is that when you have this array of refinements "off to the side" but still allow people to fill in slots in frames to specialize out arguments, you end up needing to have "reconciliation"...because those frame slots that are referenced by this out-of-band array are no longer part of the refinement promotion.</p>
+<pre><code>&gt;&gt; f: make frame! append:dup:part/  ; has auxiliary [dup part]
+
+&gt;&gt; f.dup: 3  ; what cleans up [dup part] to just [part] ?
+</code></pre>
+<p>I've talked about not knowing about what "moment" to do these kinds of fixes, and I'm increasingly looking for ways to avoid there being any such moment.  If the physical experience of the frame was that DUP and PART were ordinary parameters and not refinements, then it "just works".</p>
+<h2><a name="p-7935-the-dumb-mechanical-answer-is-likely-best-7" class="anchor" href="https://rebol.metaeducation.com#p-7935-the-dumb-mechanical-answer-is-likely-best-7"></a>The "Dumb" Mechanical Answer Is Likely Best</h2>
+<p>I sometimes forget just how much I take for granted in Ren-C, regarding the ability to compose functions together.</p>
+<p>The "inefficient" idea of making a new parameter list and then proxying the arguments into position would be more efficient than having to create and evaluate an interpreted function that had to manually copy the parameters.</p>
+<p>There's a huge tax created by having to compose an off-to-the-side parameter reordering list in with the frame variables, and that tax is paid by <em>any code</em> that wants to interpret the list.  It's just too big a tax to pay.</p>
+<p>It pains me a bit to delete it, because it was hard to write and seemed clever at the time.  But techniques have advanced...and while the auxiliary list may have seemed somewhat optimal for storage, it's no longer the right choice.</p>
+            <p><small>4 posts - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/simplifying-refinement-promotion/2338">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/simplifying-refinement-promotion/2338</link>
+          <pubDate>Sat, 30 Nov 2024 21:20:38 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2338</guid>
+          <source url="https://rebol.metaeducation.com/t/simplifying-refinement-promotion/2338.rss">Simplifying Refinement Promotion</source>
+        </item>
+        <item>
+          <title>Issues With Querying A Function&#39;s &quot;RETURN&quot;</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Functions</category>
+          <description><![CDATA[
+            <p>Each FUNCTION has a local variable named RETURN.  When it's running, the cell for that variable points at an "archetypal return function".  But that cell also holds a reference to that specific function instantiation's frame.  This way it knows how to return specifically from that invocation of that function.</p>
+<p>This "definitional return" concept has worked quite well.  But there are some fiddly issues that arise from trying to make RETURN an ordinary local variable.</p>
+<h2><a name="p-7931-it-was-hoped-return-would-not-be-special-1" class="anchor" href="https://rebol.metaeducation.com#p-7931-it-was-hoped-return-would-not-be-special-1"></a>It Was Hoped RETURN Would Not Be Special</h2>
+<p>The idea is that LAMBDA would be lower-level than FUNCTION, and permit you to have parameters or local variables named RETURN that had nothing to do with returning.</p>
+<pre><code>/demo: lambda [return continue] [
+    return + continue
+]
+
+&gt;&gt; demo 1 2
+== 3
+</code></pre>
+<p>So an aspirational aspect of the design was that a user could create something that operated identically to the FUNCTION abstraction (just a bit slower, due to not being implemented natively).</p>
+<p>It would use something like THROW and CATCH, to implement RETURN (or construct(s) in that family) itself, as LAMBDAs synthesized upon instantiation.</p>
+<h2><a name="p-7931-return-as-local-hides-its-type-information-2" class="anchor" href="https://rebol.metaeducation.com#p-7931-return-as-local-hides-its-type-information-2"></a>RETURN as Local Hides Its Type Information</h2>
+<p>While it's not an argument to the function, RETURN still has associated type information.</p>
+<p>Since RETURN is a local that will be filled with an action when the function runs, it isn't using its frame slot until that invocation happens.  That means it can store a PARAMETER! which says what return types are legal.  (It seems like a good use of an otherwise-unused slot otherwise you'd need a slot in the Phase to hold it.)</p>
+<p>Functions like HELP want to know those types.  Yet locals and specialized arguments are traditionally considered implementation details, hidden from callers.  They're only visible  when frames are captured during the "phase" of being inside the function call:</p>
+<pre><code>&gt;&gt; /foo: function [return: [integer!] x] [
+     print mold words of binding of $x
+]
+
+&gt;&gt; words of foo/
+== [x]
+
+&gt;&gt; foo
+== [return x]
+</code></pre>
+<p>Today's unsatisfying solution is that there's a flag on parameters that represent RETURN.  If you want the type information of that return, you can ask for it:</p>
+<pre><code>&gt;&gt; return of foo/
+== ~#[parameter! [integer!]]~  ; anti
+</code></pre>
+<p>But this flag is only applied by the FUNCTION native when its construction the parameter list.  So you wouldn't (for instance) get this behavior on a usermode re-implementation of FUNCTION based on LAMBDA.</p>
+<h2><a name="p-7931-how-to-change-return-in-composition-3" class="anchor" href="https://rebol.metaeducation.com#p-7931-how-to-change-return-in-composition-3"></a>How To Change RETURN In Composition?</h2>
+<p>Let's say you're going to build a higher-level function with something like ENCLOSE:</p>
+<pre><code>&gt;&gt; /bar: enclose foo/ func [return: [tag!] f [frame!]] [
+       print "I'm an enclosure!"
+       eval f
+       return &lt;tag&gt;
+   ] 
+</code></pre>
+<p>The interface of an enclosed function is the same parameter list as the original, and the same returns as the original.  The enclosure is implemented as a function that takes a frame, and it can be given a new return type.  But today that isn't reported as the return type if you asked for HELP of FOO.  It would look at the original parameter list, which in this case says its RETURN is <strong><code>[integer!]</code></strong>.</p>
+<p><em>This suggests that the answer to the question <strong><code>return of</code></strong> has to be dispatcher-specific.</em></p>
+<p>FUNCTION would say "it's the contents of the RETURN local in the archetype (not overwritten with return function, so still a PARAMETER!)".</p>
+<p>ENCLOSE would say "it's the return type of the enclosure function that takes the frame" but then give back the original parameter list for everything else.  (This raises a question of how you would inherit the original function's return... it might be nice if you used a LAMBDA or something that reported no return constraint, that it would default to the constraints of the function you were enclosing.)</p>
+<p>In any case, if it was answered by the dispatcher... then if LAMBDA says "I don't have a RETURN", you'd not have HELP information on your RETURN if you were trying to build your own FUNCTION on top of LAMBDA.</p>
+<p><strong>The word RETURN may be a distraction, here.</strong>  Because if it's something like a GENERATOR, the products are coming from calls to YIELD.  Maybe <strong><code>(result of ...)</code></strong> or <strong><code>(synthesis of ...)</code></strong> would help stress that this question isn't tied up specifically with RETURN.</p>
+<h2><a name="p-7931-lambda-semantics-may-want-result-specification-4" class="anchor" href="https://rebol.metaeducation.com#p-7931-lambda-semantics-may-want-result-specification-4"></a>LAMBDA Semantics May Want Result Specification</h2>
+<p>The idea of LAMBDA is that the evaluative product just drops out <a href="https://rebol.metaeducation.com/t/implicit-execution-of-return-in-functions-bad/1656">(see various writings on why FUNCTION does not allow that)</a>.</p>
+<p>But just because you want that semantic, doesn't mean you don't want the HELP to not give a return type.</p>
+<p>However, LAMBDA doesn't have anywhere to store the type information the way FUNCTION does.  If it has a RETURN it may be using it for unrelated purposes.</p>
+<p>Given what I've proposed for the dispatcher-specific RETURN, you could accomplish it with an ENCLOSE:</p>
+<pre><code> enclose (lambda [...] [...]) func [return: [&lt;spec&gt;] f] [return eval f]
+</code></pre>
+<p>But it seems clearly better to have something specific to this purpose:</p>
+<pre><code> returns [&lt;spec&gt;] lambda [...] [...]
+</code></pre>
+<p>Then the Returns_Dispatcher() would simply type check what you gave it.</p>
+<p>Perhaps it could even accept a function as a first parameter, and then just say it returns whatever that function returns:</p>
+<pre><code>returns add/ lambda [x] [x + 1]
+</code></pre>
+<p>Though that might be more confusing than writing it out:</p>
+<pre><code>returns (return of add/) lambda [x] [x + 1]
+</code></pre>
+<p>Maybe a refinement should be used to bless that you're doing it on purpose:</p>
+<pre><code>returns:same-as add/ lambda [x] [x + 1]
+</code></pre>
+<p>I guess the big question would be how to get the return's textual description in there.  Maybe it could assume if the format is TEXT! BLOCK! that's what you mean:</p>
+<pre><code>/foo: returns [
+   "The input plus one"
+   [integer!]
+] lambda [x] [
+    x + 1
+]
+</code></pre>
+<h2><a name="p-7931-well-theres-some-ideas-5" class="anchor" href="https://rebol.metaeducation.com#p-7931-well-theres-some-ideas-5"></a>Well, There's Some Ideas</h2>
+<p>I guess the idea here is that mechanics for answering "what do you return" come from the function's dispatcher, and maybe that becomes a chained question where if the dispatcher wraps something else, it has to ask the right parts of that thing.  There may be no user-exposed mechanic for building your own answer to the question beyond something like RETURNS, which is probably good enough.</p>
+            <p><small>2 posts - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/issues-with-querying-a-functions-return/2336">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/issues-with-querying-a-functions-return/2336</link>
+          <pubDate>Thu, 28 Nov 2024 00:00:21 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2336</guid>
+          <source url="https://rebol.metaeducation.com/t/issues-with-querying-a-functions-return/2336.rss">Issues With Querying A Function&#39;s &quot;RETURN&quot;</source>
+        </item>
+        <item>
+          <title>Dropping `&lt;with&gt;`, `&lt;in&gt;`, `&lt;static&gt;`</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Functions</category>
+          <description><![CDATA[
+            <p>In R3-Alpha, there was the idea that FUNC was lower-level, <a href="https://github.com/rebol/rebol/blob/25033f897b2bd466068d7663563cd3ff64740b94/src/mezz/base-funcs.r#L28C1-L56C2">and "FUNCTION" was built on top of it</a>.</p>
+<p>Its principal difference was automatically collecting SET-WORD!s as locals.  But it added two refinements: <strong>/WITH</strong> and <strong>/EXTERN</strong>.</p>
+<p>/EXTERN was a way of saying what shouldn't get collected as a local variable due to being a SET-WORD!:</p>
+<pre><code>global-var: 10
+
+foo: function/extern [arg1 arg2] [
+    local-var: "hi"
+    global-var: 20  ; /EXTERN protected this from being collected local
+    return arg1 + arg2
+] [global-var]
+</code></pre>
+<p>/WITH was a way of making static variables:</p>
+<pre><code>accumulate: function/with [x] [
+   return state: state + x
+] [state: 0]
+</code></pre>
+<h2><a name="p-7923-early-on-ren-c-moved-everything-into-the-spec-1" class="anchor" href="https://rebol.metaeducation.com#p-7923-early-on-ren-c-moved-everything-into-the-spec-1"></a>Early On, Ren-C Moved Everything Into The Spec</h2>
+<p>I didn't like seeing the refinement arguments at the end (of what could be a very long function definition).</p>
+<p>It didn't occur to me to suggest that <a href="https://rebol.metaeducation.com/t/refinement-arguments-at-head-of-args-list-not-tail/2331">refinement arguments be moved to the head</a> (which they probably should).  But what did occur to me was that the function spec could incorporate these properties.</p>
+<p>I actually thought <code>&lt;with&gt;</code> seemed better than extern, as a nicer word for "Use these existing variables".  And <code>&lt;static&gt;</code> seemed like a well-known term for static variables:</p>
+<pre><code>foo: function [arg1 arg2 &lt;with&gt; global-var] [
+    local-var: "hi"
+    global-var: 20
+    return arg1 + arg2
+]
+
+accumulate: function [x &lt;static&gt; state (0)] [
+   return state: state + x
+]
+</code></pre>
+<p>The subtlety of wanting to use an object instance was also added, as <code>&lt;in&gt;</code>:</p>
+<pre><code>obj: make object! [a: 10 b: 20]
+
+bar: function [x &lt;in&gt; obj] [
+   return a + b + x
+]
+</code></pre>
+<p>To my eyes, that all seemed like improvement.</p>
+<p><strong>But it didn't come without cost: The spec had to be transformed into something the lower-level FUNC could understand.</strong></p>
+<p>This meant there was a layer of parsing and production of a new spec that was a tax on every function creation.</p>
+<h2><a name="p-7923-time-passes-set-word-gathering-is-panned-2" class="anchor" href="https://rebol.metaeducation.com#p-7923-time-passes-set-word-gathering-is-panned-2"></a>Time Passes, SET-WORD! Gathering Is Panned</h2>
+<p>It didn't take long for me to decide that <a href="https://rebol.metaeducation.com/t/rethinking-auto-gathered-set-word-locals/1150">SET-WORD! locals-gathering was bad</a>... a gimmick that only made sense in very limited domains (perhaps code-golf)</p>
+<p>This motivated having an answer for how to implement LET, as "virtual binding" became the new plan.</p>
+<p>Once that transition went through, the effect of <strong><code>&lt;with&gt;</code></strong> was to become commentary.  Since all it did was remove SET-WORD!s from the collection list, and there was no collection any longer.</p>
+<p>Though virtual binding did open up a new possibility, that if your block had a different binding than the spec, then the WITH might import visibility of terms to that block:</p>
+<pre><code>global-variable: 10
+
+block: /get-block-from-somewhere ...  ; doesn't know about GLOBAL-VARIABLE
+
+/foo: function [x &lt;with&gt; global-variable] block
+</code></pre>
+<p>But this would be a binding operation, that is better generalized as:</p>
+<pre><code>/foo: function [x] (bind @global-variable block)
+</code></pre>
+<h2><a name="p-7923-pushing-the-features-to-bind-make-the-most-sense-3" class="anchor" href="https://rebol.metaeducation.com#p-7923-pushing-the-features-to-bind-make-the-most-sense-3"></a>Pushing The Features To BIND Make The Most Sense</h2>
+<p>Not just <code>&lt;with&gt;</code>, but the <code>&lt;static&gt;</code> and <code>&lt;in&gt;</code> features seemed to be better as BIND operations as well.</p>
+<p>The static syntax of not using SET-WORD!s was based on the idea that SET-WORD!s were reserved for local variables (and RETURN: syntax).  So it was a WORD! followed by a GROUP! to initialize.</p>
+<p>I think it's better done with just <a href="https://rebol.metaeducation.com/t/rethinking-static-in-the-function-spec-dialect/2139">BIND to a FENCE!</a></p>
+<pre><code>accumulate: function [
+    x
+] bind {state: 0} [
+   return state: state + x
+]
+</code></pre>
+<p><code>&lt;in&gt;</code> is similar.</p>
+<pre><code>obj: make object! [a: 10 b: 20]
+
+bar: function [
+   x
+] bind obj [
+   return a + b + x
+]
+</code></pre>
+<h2><a name="p-7923-uglier-maybe-more-general-yes-faster-definitely-4" class="anchor" href="https://rebol.metaeducation.com#p-7923-uglier-maybe-more-general-yes-faster-definitely-4"></a>Uglier?  Maybe.  More General?  Yes.  Faster?  Definitely.</h2>
+<p>Feature-wise, there's a slight loss of the commentary capacity of <code>&lt;with&gt;</code>.</p>
+<pre><code>global-var: 10
+
+foo: function [arg1 arg2 &lt;with&gt; global-var] [  ; no-op, but useful?
+    global-var: 20
+    return arg1 + arg2
+]
+</code></pre>
+<p>But besides that, there's no loss of features to move everything to a BIND operation on the body.</p>
+<p>Not having to PARSE the spec and generate a whole new one is a big performance win.</p>
+<p>So I'm letting go of those features.</p>
+            <p><small>3 posts - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/dropping-with-in-static/2335">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/dropping-with-in-static/2335</link>
+          <pubDate>Thu, 21 Nov 2024 22:06:22 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2335</guid>
+          <source url="https://rebol.metaeducation.com/t/dropping-with-in-static/2335.rss">Dropping `&lt;with&gt;`, `&lt;in&gt;`, `&lt;static&gt;`</source>
+        </item>
+        <item>
+          <title>Refinement Arguments at Head of Args List, Not Tail</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Functions</category>
+          <description><![CDATA[
+            <p>In the corpus of code we have so far, it seems to me that when a refinement adds an argument to a function that it would be preferable if that argument would become the first parameter... not tacked onto the end.</p>
+<p>Some cases might not be completely obvious one way or another:</p>
+<pre><code>&gt;&gt; append [a b c] [d e]
+== [a b c [d e]]
+
+&gt;&gt; append:dup [a b c] [d e] 2  ; old way
+== [a b c [d e] [d e]] 
+
+&gt;&gt; append:dup 2 [a b c] [d e]  ; new idea
+== [a b c [d e] [d e]]
+</code></pre>
+<p>I think it's better if it's first, but it's not earth-shattering.</p>
+<p>But in other cases it seems very much an improvement.  Consider the positioning of the argument to FAIL:BLAME...</p>
+<pre><code>foo: func [arg thing] [
+    if arg &lt; 0 [
+        fail:blame [
+           "Here is some long error message:" @thing
+           "Whatever..."
+        ] $arg
+    ]
+]
+
+foo: func [arg thing] [
+    if arg &lt; 0 [
+        fail:blame $arg [
+           "Here is some long error message:" @thing
+           "Whatever..."
+        ]
+    ]
+]
+</code></pre>
+<p>Or an argument to COMPOSE giving a pattern to use:</p>
+<pre><code>compose:pattern [
+    some bunch of {{code that}} &lt;spans&gt;
+    #multiple lines
+    [and could go on for pages]
+] ${{}}  ; afterthought...
+
+compose:pattern ${{}} [  ; forethought
+    some bunch of {{code that}} &lt;spans&gt;
+    #multiple {{lines}}
+    [and could go on for pages]
+]
+</code></pre>
+<p>This goes along with some Haskell philosophy I cited in <a href="https://rebol.metaeducation.com/t/parameter-order-in-rebol/1238">Parameter Order in Rebol</a>:</p>
+<blockquote>
+<p><em>"It's common practice in Haskell to order function parameters so that parameters which "configure" an operation come first, and the "main thing being operated on" comes last. This is often counter intuitive coming from other languages, since it tends to mean you end up passing the "least important" information first. It's especially jarring coming from OO where the "main" argument is usually the object on which the method is being invoked, occurring so early in in the call that it's out of the parameter list entirely!"</em></p>
+</blockquote>
+<p>These refinements typically seem to be <em>configuring</em>, as if they are changing the function itself, and belong at the head.</p>
+<p>e.g. above, the function you're conceptually applying is <strong><code>(compose:pattern ${{}})</code></strong></p>
+<h2><a name="p-7889-history-didnt-do-it-this-way-with-some-reasons-1" class="anchor" href="https://rebol.metaeducation.com#p-7889-history-didnt-do-it-this-way-with-some-reasons-1"></a>History Didn't Do It This Way, With Some Reasons</h2>
+<p>Refinements are typically listed at the end of the function spec.</p>
+<p>From an implementation standpoint, that's also where their "slots" are in the argument list.</p>
+<p>This means that as you are walking the argument list and fulfilling arguments from the callsite, if refinements were used you would have to skip over the "normal" arguments in a first pass, and then come back and fill them later.</p>
+<p>Historical Redbols only had to be worried about the order of usage of refinements... if you used them out of order from the declaration, a second pass would be needed.  But using them in order would not require it.</p>
+<p>This isn't a problem for Ren-C...it's designed for generic parameter reordering (refinements or otherwise) and it has an efficient way to beeline back to slots it skipped on a second pass.</p>
+<p>So really the only issue is the mismatch between the visual order in the spec (which may be exposed mechanically by fixed orders of enumeration of FRAME! keys and values), compared with the gathering behavior.  But the disconnect of that order has always been there, with <strong>foo/refine1/refine2</strong> vs. <strong>foo/refine2/refine1</strong> in Redbol... the callsite order may not match the frame order.</p>
+<h2><a name="p-7889-is-it-worth-changing-2" class="anchor" href="https://rebol.metaeducation.com#p-7889-is-it-worth-changing-2"></a>Is It Worth Changing?</h2>
+<p>The competing (complementary) idea of <a href="https://rebol.metaeducation.com/t/dialecting-function-calls-new-weird-powerful/2310">CHAIN! dialecting</a> offers something that's likely even more compelling:</p>
+<pre><code>compose:pattern ${{}} [  ; better than today...
+    some bunch of {{code that}} &lt;spans&gt;
+    #multiple {{lines}}
+    [and could go on for pages]
+]
+
+compose:${{}} [  ; ...but this surpasses even that
+    some bunch of {{code that}} &lt;spans&gt;
+    #multiple {{lines}}
+    [and could go on for pages]
+]
+</code></pre>
+<p>Though it's kind of up in the air if and when that's going to get attacked, and how well it will work (it may run afoul of problems in binding, etc.)</p>
+<p>My instincts tell me that it's worth changing.  In practice, refinements that take arguments are not super common... but when they do happen, being up front seems to make the most sense.</p>
+            <p><small>6 posts - 2 participants</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/refinement-arguments-at-head-of-args-list-not-tail/2331">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/refinement-arguments-at-head-of-args-list-not-tail/2331</link>
+          <pubDate>Tue, 12 Nov 2024 14:16:20 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2331</guid>
+          <source url="https://rebol.metaeducation.com/t/refinement-arguments-at-head-of-args-list-not-tail/2331.rss">Refinement Arguments at Head of Args List, Not Tail</source>
+        </item>
+        <item>
+          <title>Generalized Argument Removal - SPECIALIZE:RELAX</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Functions</category>
+          <description><![CDATA[
+            <p>Let's say you want a version of append that just appends random numbers to things:</p>
+<pre><code>&gt;&gt; append-random: adapt get $append [
+       value: random 10
+   ]
+</code></pre>
+<p>This works, but the function interface still thinks it takes two arguments:</p>
+<pre><code>&gt;&gt; append-random [a b c] [d e]
+== [a b c 10]
+</code></pre>
+<p>So fine, you can just specialize out the argument.  Both ADAPT of a SPECIALIZE and SPECIALIZE of an ADAPT would remove an argument.  But you want the specialize to run first, otherwise it would overwrite the adapted value.  So SPECIALIZE the ADAPT, to put the specialize earlier in the composition process.</p>
+<p><em><strong>But what value do you put in the specialized-out slot if you're just going to overwrite it?</strong></em></p>
+<p>Today we have quite the awesome answer: <strong><a href="https://rebol.metaeducation.com/t/tripwire-in-the-wild/2278">use a TRIPWIRE!</a></strong>  Sounds great!</p>
+<pre><code>&gt;&gt; append-random: specialize (adapt get $append [
+       value: random 10
+   ]) [
+       value: ~&lt;specialized out&gt;~
+   ]
+** Script Error: append expects [~void~ element? splice?] for its value argument
+</code></pre>
+<h2><a name="p-7763-ooops-specialize-typechecked-that-1" class="anchor" href="https://rebol.metaeducation.com#p-7763-ooops-specialize-typechecked-that-1"></a>Ooops.  SPECIALIZE Typechecked That</h2>
+<p>There are two good reasons for specialization to type check:</p>
+<ul>
+<li>
+<p>You find out about bad types at the moment of specialization--instead of having to wait until the function is called to know there are problems.</p>
+</li>
+<li>
+<p>It can speed up the system by not type checking those parameters again <em>(though it occurs to me this may be broken right now, and fixing it sooner than later would probably be smart)</em></p>
+</li>
+</ul>
+<p>Historically what I've done just to get things going is to use some value that typechecks in the argument slot:</p>
+<pre><code>&gt;&gt; append-random: specialize (adapt get $append [
+       value: random 10
+   ]) [
+       value: [something that typechecks]
+   ]
+
+&gt;&gt; append-random [a b c]
+== [a b c 7]
+
+&gt;&gt; append-random [a b c]
+== [a b c 9]
+
+&gt;&gt; append-random [a b c]
+== [a b c 7]
+</code></pre>
+<p>For the sake of education, notice what happens if you did it backwards and ADAPT the SPECIALIZE:</p>
+<pre><code>&gt;&gt; append-random: adapt (specialize get $append [
+       value: [something that typechecks]
+   ]) [
+       value: random 10
+   ]
+
+&gt;&gt; append-random [a b c]
+== [a b c [something that typechecks]]
+</code></pre>
+<h2><a name="p-7763-seems-we-need-specializerelax-2" class="anchor" href="https://rebol.metaeducation.com#p-7763-seems-we-need-specializerelax-2"></a>Seems We Need SPECIALIZE:RELAX</h2>
+<p>Having to pick an arbitrary meaningless value that won't trip up the type checking is bad.</p>
+<p>While we want to type check 99% of the time, this kind of scenario calls for a version of specialize that does not do typechecking.</p>
+<p>Hence I propose <strong><code>SPECIALIZE:RELAX</code></strong>.</p>
+<p>Tripwires seem like the go-to datatype to use for these specialized-out values.  Rather than just say <strong><code>~&lt;specialized out&gt;~</code></strong> you can be as detailed as you like, to help inform on what should happen:</p>
+<pre><code>&gt;&gt; append-random: specialize:relax (adapt get $append [
+       value: random 10
+   ]) [
+       value: ~&lt;ADAPT phase of APPEND-RANDOM puts INTEGER! here&gt;~
+   ]
+</code></pre>
+<p>Tripwires are great!  <img src="https://rebol.metaeducation.com/images/emoji/twitter/boom.png?v=14" title=":boom:" class="emoji" alt=":boom:" loading="lazy" width="20" height="20">  You don't have to stress too much about cost...the string inside the tag only exists as one instance in memory.</p>
+<p>But you could be lazy and/or cheap, and just unset it. <img src="https://rebol.metaeducation.com/images/emoji/twitter/man_shrugging.png?v=14" title=":man_shrugging:" class="emoji" alt=":man_shrugging:" loading="lazy" width="20" height="20"></p>
+<pre><code>&gt;&gt; append-random: specialize:relax (adapt get $append [
+       value: random 10
+   ]) [
+       value: ~
+   ]
+</code></pre>
+<p>There might be other uses for not typechecking at the moment of specialization, but I can't think of what they would be.</p>
+            <p><small>3 posts - 2 participants</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/generalized-argument-removal-specialize-relax/2297">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/generalized-argument-removal-specialize-relax/2297</link>
+          <pubDate>Mon, 23 Sep 2024 17:37:49 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2297</guid>
+          <source url="https://rebol.metaeducation.com/t/generalized-argument-removal-specialize-relax/2297.rss">Generalized Argument Removal - SPECIALIZE:RELAX</source>
+        </item>
+        <item>
+          <title>Implicit Escaping To Tiebreak Literal Arguments</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Functions</category>
+          <description><![CDATA[
+            <p>Imagine a situation where one function takes its right-hand side literally, and another takes its left-hand side literally:</p>
+<pre><code>right-literal: func ['arg] [...]
+left-literal: infix func ['left right] [...]
+</code></pre>
+<p>What happens when I write:</p>
+<pre><code> right-literal X left-literal Y
+</code></pre>
+<p>Seems like an unbreakable tie.  <img src="https://rebol.metaeducation.com/images/emoji/twitter/necktie.png?v=14" title=":necktie:" class="emoji" alt=":necktie:" loading="lazy" width="20" height="20"></p>
+<p>You're going to be lying to someone if you don't trigger an error.  It could be a pretty big lie...e.g. if you let one evaluate and pass their result to the other, then you might be giving an antiform to a function that specifically only expected source-representable things.</p>
+<h2><a name="p-7736-but-what-if-the-situation-was-a-bit-moremalleable-1" class="anchor" href="https://rebol.metaeducation.com#p-7736-but-what-if-the-situation-was-a-bit-moremalleable-1"></a>But what if the situation was a bit more...malleable...</h2>
+<p>Let's say that one of these lets you escape the argument inside a GROUP! (currently thinking the most semiotic way to represent such a property of a parameter is by...putting it in a group).</p>
+<pre><code>right-escapable: func ['(arg)] [...]  ; `right-esc ('X)` acts like `right-esc X` 
+left-literal: infix func ['left right] [...]
+</code></pre>
+<p>So this means that RIGHT-ESCAPABLE is geared up to accept evaluative products.  If that's the case, then we might think of ourselves as having a bit more liberty to tiebreak:</p>
+<pre><code>right-escapable X left-literal Y
+=&gt;
+right-escapable (X left-literal Y)
+</code></pre>
+<p>Whether that seems presumptuous or not to you, it definitely is useful, e.g. with lambdas...where requiring a group would be ugly:</p>
+<pre><code>case [...] then x -&gt; [...]
+</code></pre>
+<p>The interface on the function says it was "willing to accept a group at the callsite".  But it never actually received a group, just the evaluative product, which would then be typechecked.  Given that it's willing to take that evaluative product, why not throw in the group implicitly vs. giving an error?</p>
+<p>You should be convinced.  It's a good thing.</p>
+<h2><a name="p-7736-another-case-study-infix-of-2" class="anchor" href="https://rebol.metaeducation.com#p-7736-another-case-study-infix-of-2"></a>Another Case Study: Infix "OF"</h2>
+<p>First there was <strong><code>(type? x)</code></strong> in Rebol2</p>
+<p>Then <strong><code>(type-of x)</code></strong> emerged, in the attempts to purge the blight of <em>"functions that return a result end in question mark"</em>, reserving it for LOGIC-bearing functions.</p>
+<p>It then became <strong><code>(type of x)</code></strong> to be even more pleasing to the words-separated-by-spaces aesthetic.</p>
+<p>But the infix properties of such a left-literal function can't be the same as ordinary evaluative infix, e.g. math:</p>
+<pre><code>&gt;&gt; 1 + 2 * 3
+== 9  ; e.g. (1 + 2) * 3
+</code></pre>
+<p>Because we used to be able to write:</p>
+<pre><code>&gt;&gt; integer! = type-of 1
+== ~okay~  ; anti
+</code></pre>
+<p>So we'd still like to be able to write:</p>
+<pre><code>&gt;&gt; integer! = type of 1
+== ~okay~  ; anti
+</code></pre>
+<p>Hence that can't be interpreted as <strong><code>(integer! = type) of 1</code></strong></p>
+<p><em>"Easy enough"</em> you say... <em>"make it so literal left infix wins over evaluative right infix."</em></p>
+<p>If you think it's easy, try writing this stuff yourself.  But yes--that is what I did.</p>
+<p>However, OF is one of these "escapable" routines.  We want to be able to do this:</p>
+<pre><code>&gt;&gt; integer! = (first [type length]) of 1
+== ~okay~  ; anti
+</code></pre>
+<p>So how does this work out with our tie-breaking?</p>
+<p><em>It doesn't count.</em>  There's no tie to break.  <strong><code>=</code></strong> isn't inescapably quoting its right.  If it <em>was</em> inescapably quoting its right, then the escapable left would mean the OF would yield to the hard rightward literal.</p>
+<h2><a name="p-7736-its-simpler-than-i-had-it-3" class="anchor" href="https://rebol.metaeducation.com#p-7736-its-simpler-than-i-had-it-3"></a>It's Simpler Than I Had It</h2>
+<p>Due to some accidents of history and not really having clear thinking on this, there were more parameter conventions than were required... with one hacked in to specifically make the <strong>OF</strong> case work.</p>
+<p>It turns out that using the rationale above, the extra parameter convention can be dropped.  It can all be done with just escapability-or-not meeting escapability-or-not.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/implicit-escaping-to-tiebreak-literal-arguments/2290">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/implicit-escaping-to-tiebreak-literal-arguments/2290</link>
+          <pubDate>Fri, 20 Sep 2024 17:17:17 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2290</guid>
+          <source url="https://rebol.metaeducation.com/t/implicit-escaping-to-tiebreak-literal-arguments/2290.rss">Implicit Escaping To Tiebreak Literal Arguments</source>
+        </item>
+        <item>
+          <title>Invariant for PATH! w.r.t. FRAME! vs. antiform FRAME!</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Functions</category>
+          <description><![CDATA[
+            <p>So I sort of feel like it would be a bit of a waste if you couldn't use the slash notation in paths to run a non-antiform FRAME!</p>
+<p>So let's say you wrote:</p>
+<pre><code>&gt;&gt; manipulators: reduce // [
+       [get $append get $insert get $change]
+       /predicate get $noquasi/reify  ; doesn't have a single name, should it?
+   ] 
+== [#[frame! ...] #[frame! ...] #[frame! ...]
+</code></pre>
+<p>We definitely want picking with a TUPLE! to be inert, that's a central point of the good new world:</p>
+<pre><code>&gt;&gt; manipulators.1
+== #[frame! ...]
+</code></pre>
+<p>But should you use a PATH!, I feel like this should work... I think... <img src="https://rebol.metaeducation.com/images/emoji/twitter/thinking.png?v=14" title=":thinking:" class="emoji" alt=":thinking:" loading="lazy" width="20" height="20"></p>
+<pre><code>&gt;&gt; manipulators/1:dup [a b c] [d e] 2
+== [a b c [d e] [d e]]
+</code></pre>
+<p>It's a bit weird to see a number-headed chain used to run a function.  But, y'know, that's consistent with history:</p>
+<pre><code>red&gt;&gt; manipulators: reduce [:append :insert :change]
+== [make action! [...] make action! [...] make action! [...]]
+
+red&gt;&gt; manipulators/1/dup [a b c] [d e] 2
+== [a b c d e d e]
+</code></pre>
+<p>...and since they don't have the alternative of TUPLE!, <a href="https://rebol.tech/gitter.im/red/red/2019/#msg5c782ca0c1cab53d6f53dd6d">they don't have a way to avoid "active accessors"</a>.</p>
+<p><img src="https://rebol.metaeducation.com/images/emoji/twitter/foot.png?v=14" title=":foot:" class="emoji only-emoji" alt=":foot:" loading="lazy" width="20" height="20"> <img src="https://rebol.metaeducation.com/images/emoji/twitter/gun.png?v=14" title=":gun:" class="emoji only-emoji" alt=":gun:" loading="lazy" width="20" height="20"></p>
+<h2><a name="p-7678-more-often-useful-case-would-be-just-frame-1" class="anchor" href="https://rebol.metaeducation.com#p-7678-more-often-useful-case-would-be-just-frame-1"></a>More Often Useful Case Would Be Just <strong>frame/</strong></h2>
+<p>It's actually useful to store inert frames in data structures.  UPARSE does it for the combinator map.  It comes up.</p>
+<p>But I think people will want to do things like:</p>
+<pre><code>&gt;&gt; frame: make frame! get $append
+&gt;&gt; frame.series: [a b c]
+&gt;&gt; frame.value: [d e]
+
+&gt;&gt; frame/  ; using this form of application would COPY the FRAME! before running
+== [a b c [d e]]
+</code></pre>
+<p>On the other hand, I believe that the correct meaning of <strong><code>/frame</code></strong> is that it should <em>not</em> run the inert frame.</p>
+<h2><a name="p-7678-get-of-non-blank-headed-path-should-yield-an-antiform-2" class="anchor" href="https://rebol.metaeducation.com#p-7678-get-of-non-blank-headed-path-should-yield-an-antiform-2"></a>GET of (non-blank-headed) PATH! Should Yield An Antiform</h2>
+<p>We <em>could</em> disable GET of a PATH! when it looks up to a plain frame and not an antiform...and say that paths can only be used with inert frames during EVAL.  But I don't see the point of that (and it breaks the natural layering, where the code interpreting the path is the same for both GET and EVAL).</p>
+<p>So I think you should be able to GET either one.</p>
+<p>But regardless of whether the thing you got to with the PATH! was a plain FRAME! or an antiform FRAME!... if you GET it I think you should receive an antiform frame back.</p>
+<p>As a reader, I don't want to have to puzzle over what the result is going to be.  Seeing GET of a PATH! and knowing that's going to be an antiform frame is more useful than I can imagine preserving the distinction ever being.  Not only are antiform frames what you usually desire, <em>if you'd wanted an inert frame you could have used a TUPLE! to get it instead</em>.</p>
+<p>So this seems pretty well decided to me.</p>
+<h2><a name="p-7678-dont-permit-quasi-frame-or-quoted-frame-to-run-3" class="anchor" href="https://rebol.metaeducation.com#p-7678-dont-permit-quasi-frame-or-quoted-frame-to-run-3"></a>Don't Permit QUASI-FRAME! or QUOTED-FRAME! To Run</h2>
+<p>I've already written up my thoughts on <a href="https://rebol.metaeducation.com/t/quasiforms-arent-super-friendly-and-they-shouldnt-be/2273">avoiding making quasiforms too friendly</a>.  It does make things awkward at times.  But I think that awkwardness is for the best.</p>
+<p>The same applies to quoted frames.  I don't think tolerance of these forms by the core leads to anything good.  It ties into why I don't want <strong>('a = first [''a])</strong> to be true... once you start ignoring things like quote marks and treating it as equivalent, people will get sloppy with their input...which ties your hands later on if you want to give quote levels some dialected meaning (e.g. use them for tunneling values in meta form).</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/invariant-for-path-w-r-t-frame-vs-antiform-frame/2279">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/invariant-for-path-w-r-t-frame-vs-antiform-frame/2279</link>
+          <pubDate>Sun, 15 Sep 2024 11:03:48 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2279</guid>
+          <source url="https://rebol.metaeducation.com/t/invariant-for-path-w-r-t-frame-vs-antiform-frame/2279.rss">Invariant for PATH! w.r.t. FRAME! vs. antiform FRAME!</source>
+        </item>
+        <item>
+          <title>Typechecking For ^META Parameters (incl. ANY-ATOM?)</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Functions</category>
+          <description><![CDATA[
+            <p>I wanted to point out that typechecking a ^META parameter applies to the unescaped form.</p>
+<p>So if you have a ^META argument which says it can accept something unstable like a PACK!, that is written as:</p>
+<pre><code>func [^arg [integer! pack?]] [...]
+</code></pre>
+<p>...not...</p>
+<pre><code>func [^arg [quoted-integer? quasi-pack?]] [...]
+</code></pre>
+<p>So although you are receiving the <strong>arg</strong> value in its quoted or quasi form, the type check is in the language of what it was before it was META'd.</p>
+<p>This raises a question about the meaning of <strong>func [^arg [any-value?]] [...]</strong>.  Does that encompass unstable antiforms as well as stable ones?</p>
+<p>No.  And in fact, if you write that then you're using a meta parameter for no reason, because you're just getting the same thing you would have gotten if you had written:</p>
+<pre><code>foo: func [arg [any-value?]] [
+     arg: meta arg
+     ...
+]
+</code></pre>
+<p>So the parameter convention isn't giving you any special powers if you type check it as ANY-VALUE?.  Error antiforms will become abrupt failures if you try to pass them.  Multi-return packs will decay to their first element.  Etc.</p>
+<p>To get anything special, your ^META parameter's type check has to allow some unstable antiforms.  If you want any and all of them, the term I've been using is ANY-ATOM?</p>
+<p>Alternative names welcome.  But Atom is short, and ties into the whole isotope metaphor.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/typechecking-for-meta-parameters-incl-any-atom/2249">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/typechecking-for-meta-parameters-incl-any-atom/2249</link>
+          <pubDate>Wed, 04 Sep 2024 09:17:28 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2249</guid>
+          <source url="https://rebol.metaeducation.com/t/typechecking-for-meta-parameters-incl-any-atom/2249.rss">Typechecking For ^META Parameters (incl. ANY-ATOM?)</source>
+        </item>
+        <item>
+          <title>Function Composition via PATH!</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Functions</category>
+          <description><![CDATA[
+            <p>Something to consider here is what to do if there's a slash <em>after</em> a function call</p>
+<pre><code>lib/append:dup.2/xxxx
+</code></pre>
+<p>To be coherent with "slash is tied to invokable functions", it seems the thing on the right should be specifying some sort of function invocation, I'd think?</p>
+<p>It may not seem useful to say it was an invocation that would happen on the result:</p>
+<pre><code>append:dup.2/empty? [] if false [&lt;nothing&gt;]
+</code></pre>
+<p>Because you could have written that as:</p>
+<pre><code>empty? append:dup.2 [] if false [&lt;nothing&gt;]
+</code></pre>
+<p><em>BUT</em> if you can do it all in one swoop, you can get a description for a cascade of functions passed as a single value:</p>
+<pre><code>odd?: get $even?/not
+</code></pre>
+<p>Though reading it backwards isn't as useful as reading it forwards:</p>
+<pre><code>odd?: get $not/even?
+</code></pre>
+<p>We wouldn't worry so much that the composition tool that was CHAIN has to be renamed CASCADE if we have another way of saying it that we can use most of the time.</p>
+<p><a href="https://rebol.metaeducation.com/t/the-brave-new-world-of-skippable-predicates/1045/4">I had a similar idea a long time ago</a>.  Anyway, put a <img src="https://rebol.metaeducation.com/images/emoji/twitter/pushpin.png?v=14" title=":pushpin:" class="emoji" alt=":pushpin:" loading="lazy" width="20" height="20"> in that.  There's lots of ground to cover first.</p>
+            <p><small>9 posts - 2 participants</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/function-composition-via-path/2242">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/function-composition-via-path/2242</link>
+          <pubDate>Thu, 29 Aug 2024 03:42:28 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2242</guid>
+          <source url="https://rebol.metaeducation.com/t/function-composition-via-path/2242.rss">Function Composition via PATH!</source>
+        </item>
+        <item>
+          <title>SET-WORD! To Initialize Locals In Function Specs?</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Functions</category>
+          <description><![CDATA[
+            <p><em>(cc: <a class="mention" href="https://rebol.metaeducation.com/u/ingohohmann">@IngoHohmann</a> as you have had opinions on these kinds of things.)</em></p>
+<p>It seems it would be nice if you had the option of setting your locals when you define them.</p>
+<pre><code>foo: func [
+    arg1 [integer!]
+    arg2 [text!]
+    &lt;local&gt;
+    local1 local2
+    local3: 10
+    local4: (20 * 30)
+][
+    ...
+]
+</code></pre>
+<p>As it so happens, there's potential to exploit this for efficiency.  The frame mechanics have a slot for each local in the function archetype that currently just holds trash, and it could hold this default value / expression.  So it wouldn't just save on typing the local name and then later the name again and the expression...but you're avoiding the need to perform the evaluation to do the assignment on each call!</p>
+<p>There's a lot of questions to answer:</p>
+<ul>
+<li>
+<p>What binding rules is it using?  Could you initialize local3 and then say <strong><code>local4: (local2 * arg1)</code></strong>?</p>
+<ul>
+<li>Almost certainly not, and it would just be using the binding of the spec block</li>
+</ul>
+</li>
+<li>
+<p>Does the code run on each invocation, or is it run only once to calculate a fixed value?  e.g. if it was <strong><code>local4: (global-var * 30)</code></strong> would each invocation of FOO recalculate what <strong><code>(global-var * 30)</code></strong> was at that moment?</p>
+<ul>
+<li>Almost certainly would just calculate a fixed value and use that value on each call.</li>
+</ul>
+</li>
+<li>
+<p>Do you need parentheses directly after the SET-WORD!?</p>
+<ul>
+<li>
+<p>If the expression were run on each invocation (which it probably shouldn't be) then it would be a requirement, because there'd be no way to find the start and the end of the right hand expression without evaluating it.</p>
+</li>
+<li>
+<p>If plain words are being picked up as locals there's potential for error if you accidentally wrote an expression that didn't work, like:</p>
+<pre><code>func [
+   arg [integer!]
+   &lt;local&gt;
+   local1 local2
+   local3: arity-2-but-I-think-it's-3 a b c
+   local4: 10
+][
+    ...
+]
+</code></pre>
+<p>That could wind up making a local <strong><code>c</code></strong> that you didn't intend.  But then again, sometimes it would be just a very obvious simple initialization, like <strong><code>local4: 10</code></strong>.  Forcing people to use parentheses could do more harm than good, vs. trusting them to use the parentheses if they feel it's warranted.</p>
+</li>
+</ul>
+</li>
+</ul>
+<h2><a name="p-7367-compare-to-static-not-initialized-with-set-word-atm-1" class="anchor" href="https://rebol.metaeducation.com#p-7367-compare-to-static-not-initialized-with-set-word-atm-1"></a>Compare to <code>&lt;static&gt;</code>: Not Initialized With SET-WORD! ATM</h2>
+<p>Right now the <code>&lt;static&gt;</code> feature lets you assign your variables, but it uses a non-Reboly-notation to do so:</p>
+<pre><code>accumulate: func [
+    item [any-element?]
+    &lt;static&gt;
+    block ([])
+][
+    append block item
+]
+</code></pre>
+<p>The parentheses are optional to hold the initializer.  But  it seems much more normal to say:</p>
+<pre><code>accumulate: func [
+    item [any-element?]
+    &lt;static&gt;
+    block: []
+][
+    append block item
+]
+</code></pre>
+<p>One reason for the parentheses notation was to try and be consistent with the idea of defaulting refinements.</p>
+<pre><code>&gt;&gt; foo: func [/string [text!] ("default")] [print string]
+
+&gt;&gt; foo/string "hello"
+hello
+
+&gt;&gt; foo
+default
+</code></pre>
+<p>But that feature was removed</p>
+<p>There's another reason why just WORD! was used...</p>
+<h2><a name="p-7367-return-has-owned-set-word-in-the-spec-dialect-2" class="anchor" href="https://rebol.metaeducation.com#p-7367-return-has-owned-set-word-in-the-spec-dialect-2"></a>RETURN: Has "Owned" SET-WORD! In The Spec Dialect</h2>
+<p>We have a little bit of friction in that the dialect has been using RETURN: to indicate what a function returns.  The choice has not much to do with what comes after a return being an assignment any more than anything else, it was picked for looks:</p>
+<pre><code>double-multiply: func [
+    return: [integer!]
+    value1 [integer!]
+    value2 [integer!]
+][
+    return 2 * value1 * value2
+]
+</code></pre>
+<p>The issue is that historical Rebol2 (and R3-Alpha, and Red) allow this:</p>
+<pre><code>rebol2&gt;&gt; print-sum: func [return break] [print ["Sum is" return + break]]
+
+rebol2&gt;&gt; print-sum 10 20
+Sum is 30
+</code></pre>
+<p>Ren-C only lets you do that in LAMBDA.  FUNC prohibits it:</p>
+<pre><code>ren-c&gt;&gt; print-sum: func [return break] [print [return + break]]
+** Error: Generator provides RETURN:, use LAMBDA if not desired
+</code></pre>
+<p>I think Red/System decided on RETURN: first.  <a href="https://static.red-lang.org/red-system-specs-light.html#section-3.3">But they put it at the end of the spec.</a>  Red errors if you try to put the return elsewhere:</p>
+<pre><code>red&gt;&gt; stringy: func [a b return: [string!]] [a + b]
+== func [a b return: [string!]][a + b]
+
+red&gt;&gt; stringy: func [return: [string!] a  b] [a + b]
+*** Script Error: invalid function definition: [return: [string!] a b]
+</code></pre>
+<p>But either way, it's not checked.  On the <a href="https://www.red-lang.org/2012/12/red-v031-functions-support-added.html">2012 announcement of function support in Red</a>, DocKimbel says: <em>"Note: argument and return value type checking have not been implemented yet, they need typeset! and error! datatypes to be implemented first."</em>  Parameter type checking works, but I guess return type checking was never added.  It does show up in the HELP though.</p>
+<pre><code>red&gt;&gt; help stringy
+USAGE:
+     STRINGY a b
+
+DESCRIPTION: 
+     STRINGY is a function! value.
+
+ARGUMENTS:
+     a             
+     b             
+
+RETURNS:
+     [string!]
+</code></pre>
+<p>Note that they also put the RETURNS: at the end there, too.  Most people would expect the return value for functions to be the first thing you put down.</p>
+<h2><a name="p-7367-ive-wondered-if-a-leading-block-would-suffice-3" class="anchor" href="https://rebol.metaeducation.com#p-7367-ive-wondered-if-a-leading-block-would-suffice-3"></a>I've Wondered If A Leading Block Would Suffice...</h2>
+<p>Off and on, I've been willing to consider the idea that return typing is just implicitly what you get if you have a leading block:</p>
+<pre><code>double-multiply: func [
+    [integer!]
+    value1 [integer!]
+    value2 [integer!]
+][
+   return 2 * value1 * value2
+]
+</code></pre>
+<p>Yet while it looks clean there, it causes some problems when you are filling in documentation strings.</p>
+<p>I've become a pretty true believer in the idea that documentation strings for arguments come after the argument name (and that we may do a service to the userbase by standardizing this, rather than by letting it be done either way and have people fight about it):</p>
+<pre><code> my-style: func [
+     "Overall function description here"
+     argument "Argument description here"
+         [integer! text!]
+     /refinement "Refinement description here"
+ ][
+    ...
+ ]
+</code></pre>
+<p>The rationale is that any good function will put labels on all its arguments.  But not all arguments are type-constrained, in particular refinements are not.  So you wind up either being inconsistent</p>
+<pre><code> variation1: func [
+     "Overall function description here"
+     argument [integer! text!]
+         "Argument description here"
+     /refinement "Refinement description here"  ; this feels inconsistent
+ ][
+    ...
+ ]
+</code></pre>
+<p>Or you're throwing in newlines for no reason</p>
+<pre><code> variation2: func [
+     "Overall function description here"
+     argument [integer! text!]
+         "Argument description here"
+     /refinement
+         "Refinement description here"  ; consistent, but annoying
+ ][
+    ...
+ ]
+</code></pre>
+<p>This is why I chose "MY-STYLE" above.  But if return becomes implicit on a leading block, you wind up back in inconsistent land:</p>
+<pre><code>my-style-with-leading-block: func [
+     "Overall function description here"
+     [integer!] "Description here"
+     argument "Argument description here"
+         [integer! text!]
+     /refinement "Refinement description here"
+ ][
+    ...
+ ]
+</code></pre>
+<p>So one thing RETURN: has historically bought us is making that look better:</p>
+<pre><code>my-style-with-leading-block: func [
+     "Overall function description here"
+     return: "Description here"
+         [integer!] 
+     argument "Argument description here"
+         [integer! text!]
+     /refinement "Refinement description here"
+ ][
+    ...
+ ]
+</code></pre>
+<p>And I think having the word RETURN in there makes it better.  Note how it's less obvious when the word isn't there what that is.</p>
+<h2><a name="p-7367-but-set-word-is-that-best-4" class="anchor" href="https://rebol.metaeducation.com#p-7367-but-set-word-is-that-best-4"></a>But SET-WORD!... is that best?</h2>
+<p>If we're going to be allowing SET-WORD! for locals and statics, does it make sense to have a stray SET-WORD! for RETURN?</p>
+<p>And one outside-the-box thought... given that modern FUNC doesn't allow you to name parameters RETURN, why not just go with a plain WORD! ?</p>
+<pre><code>what-about-plain-word: func [
+    "Overall function description here"
+    return "Description here"
+        [integer!] 
+    argument "Argument description here"
+        [integer! text!]
+    /refinement "Refinement description here"
+ ][
+    ...
+ ]
+</code></pre>
+<p>If you try that with a LAMBDA you'll not get an error, and maybe suffer some confusion when the lambda gets its first argument as a variable named RETURN.  You'll figure it out pretty quickly, though.</p>
+<p>Though I have wondered about questions like "what if you want the behavior of a lambda with the bottom expression dropping out, and no RETURN declared, but you still want type checking?"</p>
+<p>You might say "just use ENSURE"</p>
+<pre><code> my-lambda: lambda [
+    "Overall function description here"
+    argument "Argument description here"
+        [integer! text!]
+    /refinement "Refinement description here"
+ ][
+    ensure [integer!] [
+        ...
+    ]
+ ]
+</code></pre>
+<p>The problem is that the return type and any description don't make it to the HELP.  This is one reason that I pretty much always use FUNC.</p>
+<p>This makes one want to lean back to the return type being something nameless, like just a leading block.</p>
+<h2><a name="p-7367-not-sure-on-return-but-i-like-set-word-locals-5" class="anchor" href="https://rebol.metaeducation.com#p-7367-not-sure-on-return-but-i-like-set-word-locals-5"></a>Not Sure On RETURN, But I Like SET-WORD! Locals</h2>
+<p>I definitely feel that finding a way to not be using SET-WORD! for RETURN: would be good.  It's not like it has anything to do with assignment.</p>
+<p>Plain word RETURN in FUNC is not an idea that I'm feeling is as crazy as it might sound.</p>
+<p>I do think that I like the idea of SET-WORD! for local initialization... that runs the right hand side without required parentheses, and that only runs the evaluation once in the environment of the spec block... stowing that value in the currently-just-trash slots of the frame archetype for the local.</p>
+<p>And I like the idea of bringing <code>&lt;static&gt;</code> on board with the same rules.</p>
+            <p><small>2 posts - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/set-word-to-initialize-locals-in-function-specs/2210">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/set-word-to-initialize-locals-in-function-specs/2210</link>
+          <pubDate>Sat, 24 Aug 2024 03:00:51 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2210</guid>
+          <source url="https://rebol.metaeducation.com/t/set-word-to-initialize-locals-in-function-specs/2210.rss">SET-WORD! To Initialize Locals In Function Specs?</source>
+        </item>
+        <item>
+          <title>-&gt; for Lightweight Lambda (&quot;Arrow Functions&quot;)</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Functions</category>
+          <description><![CDATA[
+            <p>So I'm still shoring up a new bootstrap executable, patching around in a 6-years-out-of-date codebase.   It's in some ways a cruel and unusual punishment... but in other ways a good trip down memory lane to revisit decisions that were made, and ask "was that the right decision?"</p>
+<p>The 6-year-old EXE defined an infix form of lambda as <strong><code>=&gt;</code></strong>.  I shifted it to the lighter form as <strong><code>-&gt;</code></strong>.  Contrast:</p>
+<pre><code>y: case [
+    1 &gt; 2 [&lt;no&gt;]
+    1 &lt; 2 [&lt;yes&gt;]
+] then (lambda [x] [
+    assert [x = &lt;yes&gt;]
+    1000 + 20
+])
+assert [y = 1020]
+
+y: case [
+    1 &gt; 2 [&lt;no&gt;]
+    1 &lt; 2 [&lt;yes&gt;]
+] then x =&gt; [
+    assert [x = &lt;yes&gt;]
+    1000 + 20
+]
+assert [y = 1020]
+
+y: case [
+    1 &gt; 2 [&lt;no&gt;]
+    1 &lt; 2 [&lt;yes&gt;]
+] then x -&gt; [
+    assert [x = &lt;yes&gt;]
+    1000 + 20
+]
+assert [y = 1020]
+</code></pre>
+<p><em>(Supplemental: Reddit post on <a href="https://www.reddit.com/r/ProgrammingLanguages/comments/shllr3/whats_the_syntax_of_lambda_expressions_in_your/">"What's the syntax of lambda expressions in your language"</a>)</em></p>
+<p><strong>I like the <code>-&gt;</code> and don't think there's a greater purpose for it in the box.</strong>  As with everything else, overriding it is a personal choice.</p>
+<h2><a name="p-7246-a-speaking-with-ticshttpsrebolmetaeducationcomtspeaking-with-tics-should-quoted-arguments-always-be-apostrophed1359-note-1" class="anchor" href="https://rebol.metaeducation.com#p-7246-a-speaking-with-ticshttpsrebolmetaeducationcomtspeaking-with-tics-should-quoted-arguments-always-be-apostrophed1359-note-1"></a>A <a href="https://rebol.metaeducation.com/t/speaking-with-tics-should-quoted-arguments-always-be-apostrophed/1359">Speaking-With-Tics</a> Note</h2>
+<p>Mechanically getting this to work is non-trivial:</p>
+<p><a href="https://rebol.metaeducation.com/t/the-most-vexing-evaluation-lambda-meets-then-else/1361" class="inline-onebox">The Most Vexing Evaluation: -&gt; meets THEN/ELSE</a></p>
+<p>Part of what makes it non-trivial is the "literal lookback" by which <strong><code>-&gt;</code></strong> infixedly snatches the X without letting it evaluate.</p>
+<p><a class="mention" href="https://rebol.metaeducation.com/u/bradrn">@bradrn</a> might argue such mechanics shouldn't be necessary, because source-level non-evaluation should be explicit, e.g. <strong><code>'x -&gt; [...]</code></strong></p>
+<pre><code>y: case [
+    1 &gt; 2 [&lt;no&gt;]
+    1 &lt; 2 [&lt;yes&gt;]
+] then 'x -&gt; [
+    assert [x = &lt;yes&gt;]
+    1000 + 20
+]
+assert [y = 1020]
+</code></pre>
+<p>But that's one more stroke of key than I want, and one more piece of dirt than I want to see.  <em>I know from context that slot is a variable name, in the most common case.</em>  I'm not upset by intricate work to faciliate it, if it actually works (and empowers other creative things).  So I need to see hard disproofs before sacrificing what I consider to be "the point" of the design.</p>
+<p>I'm always ready to look at it from a further perspective to see a "greater point".  But still--from where I stand--that apostrophe sucks relative to not having it.  (And if you read the details of the implementation post, the only reason it's allowed to work in a quoted slot is because of left literalism, so...)</p>
+<h2><a name="p-7246-what-about-multiple-arguments-2" class="anchor" href="https://rebol.metaeducation.com#p-7246-what-about-multiple-arguments-2"></a>What About Multiple Arguments?</h2>
+<p>Notationally there are questions about this form of lambda.  Does it use a block for multiple arguments?</p>
+<pre><code>&gt;&gt; foo: [a b] -&gt; [a + b + 20]
+
+&gt;&gt; foo 400 600
+== 1020
+</code></pre>
+<p>It could, but you could be weirder:</p>
+<pre><code>foo: a.b -&gt; [a + b + 20]
+
+foo: a/b -&gt; [a + b + 20]
+</code></pre>
+<p>This would look a little tighter with branching, I think, since it wouldn't compete with the branches:</p>
+<pre><code>case [
+    ...
+] then [a b] -&gt; [
+    ...
+]
+
+case [
+    ...
+] then a.b -&gt; [
+    ...
+]
+</code></pre>
+<p><em>But wait, you'd never use it with a branch... because a branch only produces one value.</em></p>
+<p>UNLESS... what if what this form of lambda did was unpack packs?</p>
+<pre><code>case [
+    true [pack [10 + 20, 3 + 4]]  ; makes antiform ~['30 '7]~
+    ...
+] then [a b] -&gt; [
+    assert [a = 30, b = 7]
+]
+
+case [
+    true [pack [10 + 20, 3 + 4]]
+    ...
+] then a -&gt; [
+    assert [a = 30]
+]
+</code></pre>
+<p>So I've been thinking this is what it should actually do.  It means -&gt; won't be a good way to define functions or lambdas generally, but you have FUNC(TION) and LAMBDA for that.</p>
+<p>I don't know that enabling a lighter notation like <strong><code>a.b</code></strong> or <strong><code>a/b</code></strong> is worth it.</p>
+<pre><code>case [
+    true [pack [10 + 20, 3 + 4]]
+    ...
+] then a.b -&gt; [
+    assert [a = 30, b = 7]
+]
+
+case [
+    true [pack [10 + 20, 3 + 4]]
+    ...
+] then a/b -&gt; [
+    assert [a = 30, b = 7]
+]
+</code></pre>
+<p>Maybe just confusing, and limits what you can put in the spec.  Easier to add later if it seems useful than put it in now and take out later.</p>
+<h2><a name="p-7246-is-there-a-good-name-for-lambda-lite-3" class="anchor" href="https://rebol.metaeducation.com#p-7246-is-there-a-good-name-for-lambda-lite-3"></a>Is There A Good Name For "Lambda Lite"?</h2>
+<p>We could call it an "unpacking lambda".  Maybe it's controlled with a refinement:</p>
+<pre><code> &gt;&gt; foo: lambda/unpack [a b] [a + b + 20]
+
+ &gt;&gt; foo pack [400 600]
+ == 1020
+</code></pre>
+<p>Then <strong><code>-&gt;: :lambda/unpack</code></strong></p>
+<p>We could just call it <em>"an unpacker"</em>.</p>
+<pre><code> &gt;&gt; foo: unpacker [a b] [a + b + 20]
+
+ &gt;&gt; foo pack [400 600]
+ == 1020
+</code></pre>
+<p>Then <strong><code>-&gt;: :unpacker</code></strong></p>
+<p>The problem with calling it an "unpacker" is that 9 (or more) times out of 10 it will only take a single argument and not unpack anything.  So it seems better to classify it as a shade of distinction on lambda, but still when you point to an <code>-&gt;</code> on the screen say <em>"then it passes the argument to the lambda..."</em></p>
+            <p><small>4 posts - 2 participants</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/for-lightweight-lambda-arrow-functions/2172">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/for-lightweight-lambda-arrow-functions/2172</link>
+          <pubDate>Sun, 10 Mar 2024 15:21:58 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2172</guid>
+          <source url="https://rebol.metaeducation.com/t/for-lightweight-lambda-arrow-functions/2172.rss">-&gt; for Lightweight Lambda (&quot;Arrow Functions&quot;)</source>
+        </item>
+        <item>
+          <title>Rethinking `&lt;static&gt;` in the Function Spec Dialect</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Functions</category>
+          <description><![CDATA[
+            <p>In R3-Alpha, the FUNCTION construct was built on top of FUNC, and added features like statics as a refinement.  It looked pretty awkward, because the static was added at the end of the expression:</p>
+<pre><code> r3-alpha&gt;&gt; foo: function/with [x] [return staticvar: add staticvar x] [staticvar: 0]
+
+ r3-alpha&gt;&gt; foo 10
+ == 10
+
+ r3-alpha&gt;&gt; foo 20
+ == 30
+</code></pre>
+<p>Ren-C tried extending the function spec dialect to support this in a nicer way:</p>
+<pre><code> foo: function [x &lt;static&gt; staticvar (0)] [return staticvar: add staticvar x]
+</code></pre>
+<p>The low-level FUNC implementation doesn't know what <code>&lt;static&gt;</code> is, so it's added by a higher layer, that makes things slower... and since the function spec dialect is kind of foundational it may be the wrong place to be putting this for the core.</p>
+<p><span class="mention">@hiiamboris</span> <a href="https://rebol.metaeducation.com/t/hiiamboriss-with/2138">approaches this differently</a>:</p>
+<aside class="quote no-group">
+<blockquote>
+<h4>create static storage for functions where existing literal forms don't allow you to:</h4>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">factorial: func [x] with [cache: make hash! [0 1]] [
+    any [
+        select/skip cache x 2
+        put cache x x * factorial x - 1
+    ]
+]
+</code></pre>
+</blockquote>
+</aside>
+<p>It's not the first time I've thought it would be a better direction to break it out.  But putting it all as part of the function spec was supposed to have an advantage in that when the body was walked to create the copy, the binding to the static members would be done as well.  This is no longer applicable, because the bodies of functions are largely left unbound...</p>
+<p>We do lose a feature of noticing when you are naming the static the same thing as something in your function frame and you don't get an error in that case, but maybe you don't want an error (perhaps you inherited the frame through an adaptation or something like that, and you don't care about the frame variable).</p>
+<p>Boris's dialect is a bit overloaded, and Ren-C has more parts to help with that...<a href="https://rebol.metaeducation.com/t/rethinking-braces-as-an-array-type/1727">but it would help even more if there were FENCE!</a></p>
+<pre><code>foo: func [x] with [
+    {staticvar: 0}
+][
+    return staticvar: add staticvar x
+]
+
+foo: func [x] with {staticvar: 0} [
+    return staticvar: add staticvar x
+]
+</code></pre>
+<p>So this wouldn't be confused with any other WITH things you were doing, like trying to use objects or words and add them to a block that already had a binding.</p>
+<pre><code>&gt;&gt; body: [keep staticvar: staticvar + x]
+
+&gt;&gt; collect [
+       wrapper: func [x] with ['keep {staticvar: 0}] body
+       wrapper 1
+       wrapper 10
+       wrapper 100
+   ]
+== [1 11 111]
+</code></pre>
+<p>(Just trying to drum up a little excitement for FENCE! there, but I think it's the tip of the iceberg.)</p>
+<p>Anyway, there've been educational lessons from showing that you <em>can</em> extend the FUNC spec dialect and build higher level features... but I think we should probably tear those out of the core and move to something like this.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/rethinking-static-in-the-function-spec-dialect/2139">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/rethinking-static-in-the-function-spec-dialect/2139</link>
+          <pubDate>Tue, 30 Jan 2024 21:48:12 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2139</guid>
+          <source url="https://rebol.metaeducation.com/t/rethinking-static-in-the-function-spec-dialect/2139.rss">Rethinking `&lt;static&gt;` in the Function Spec Dialect</source>
+        </item>
+        <item>
+          <title>Making FUNC Variant That Auto-Returns Last Result</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Functions</category>
+          <description><![CDATA[
+            <p>I had offered that people could use this simple wrapper to get the old behavior of FUNC, to drop out its last result (instead of returning nothing):</p>
+<pre><code>func: adapt lib.func/ [body: compose [return (as group! body)]]
+</code></pre>
+<p>The concept is that if you write:</p>
+<pre><code> foo: func [x] [
+     if x &lt; 0 [return x + 10]
+     x - 10
+ ]
+</code></pre>
+<p>What you'd actually get would be:</p>
+<pre><code> foo: lib/func [x] [
+     return (
+         if x &lt; 0 [return x + 10]
+         x - 10
+     )
+ ]
+</code></pre>
+<h2><a name="p-7001-broken-under-new-binding-model-1" class="anchor" href="https://rebol.metaeducation.com#p-7001-broken-under-new-binding-model-1"></a>Broken Under New Binding Model</h2>
+<p>Under the new binding model, an array which is bound will by default hold onto its binding.</p>
+<ul>
+<li>
+<p>The BODY was a BLOCK! that evaluated at the callsite and captured its environment (e.g. to the user context, module context, outer function context, etc.)</p>
+</li>
+<li>
+<p>When you convert it to a GROUP! it will still have that binding.</p>
+</li>
+<li>
+<p>The surgery which is done to inject the frame containing X into the environment will thus apply only at the outermost level.  So the outer block where the return lives would see it, but never make it to the inner group.</p>
+<pre><code>func: adapt lib.func/ [
+    body: compose [
+        print ["Here would see the X:" x]
+        return (as group! body)  ; &lt;-- inside group will not
+    ]
+]
+</code></pre>
+</li>
+</ul>
+<h2><a name="p-7001-mimicking-funcs-surgery-2" class="anchor" href="https://rebol.metaeducation.com#p-7001-mimicking-funcs-surgery-2"></a>Mimicking FUNC's Surgery</h2>
+<p>One idea would be to use a utility that can do something like what LIB.FUNC did to put the frame onto the proxy body, on the original body.</p>
+<p>But awkwardly, you can't do this surgery inside the COMPOSE, because it has to be done once the function is running.  If we call that surgery OVERBIND, one answer would look something like this:</p>
+<pre><code>func: adapt lib.func/ [
+    body: compose [
+        return eval overbind binding of $return (body)
+    ]
+]
+</code></pre>
+<p><em>(I'll mention that this OVERBIND is not as efficient as what FUNC does, because the frame itself has a pointer to the inherited environment when it's made.  But it only has one slot for that pointer.  So if you try to build a specifier chain with the frame that points to another environment, it has to fabricate a "frame holder" which has its own pointer to put in the chain.)</em></p>
+<p>Notice that we only want the frame, here... which we get from the binding of the RETURN.  We don't want to inject awareness of everything in this FUNC adaptation's scope.  So not <strong><code>overbind here (body)</code></strong>.  If such a thing were even legal to do... body probably has its own copy of lib inherited from another module, and then you've got another module and its lib... we're trying to avoid that kind of conundrum with conservative binding preservation.</p>
+<h2><a name="p-7001-another-approach-steal-the-binding-and-unbind-3" class="anchor" href="https://rebol.metaeducation.com#p-7001-another-approach-steal-the-binding-and-unbind-3"></a>Another Approach: Steal The Binding And Unbind</h2>
+<p>Another approach would be to steal the binding off of the body and put it on the composition, then remove the binding from the body:</p>
+<pre><code>func: adapt lib.func/ [
+    body: in body bindable compose [
+        return (bindable as group! body)
+    ]
+]
+</code></pre>
+<p>You can put the BINDABLE before or after the AS GROUP!.</p>
+<p>I actually think this reads less insanely if we just go with UNBIND as being a "tip-unbinding" operation by default, and then have UNBIND:DEEP.  <em>(Maybe UNBIND:SHALLOW for one level of depth?)</em>:</p>
+<pre><code>func: adapt lib.func/ [
+    body: in body unbind compose [
+        return (as group! unbind body)
+    ]
+]
+</code></pre>
+<p>It's much better to do it this way.  You're doing cheaper operations and doing them at FUNC creation time.</p>
+<h2><a name="p-7001-note-that-i-still-hate-implicit-return-4" class="anchor" href="https://rebol.metaeducation.com#p-7001-note-that-i-still-hate-implicit-return-4"></a>Note That I Still Hate Implicit RETURN</h2>
+<p>There's a reason the default FUNC doesn't do it.  If you start doing cool things with RETURN you'll break things in a way that lurks.</p>
+<p>Sample cool thing that works today:</p>
+<pre><code> foo: func [x y] [
+     return: adapt augment return/ [arg2] [
+         ^value: ^value + arg2  ; ADAPT runs in full meta-protocol
+     ]
+     if x &gt; 10 [
+         return x y  ; arity 2 return, adds args and returns sum!
+    ]
+]
+
+&gt;&gt; foo 20 30
+== 50
+
+&gt;&gt; foo 5 5
+== \~\  ; antiform (trash!) "tripwire"
+</code></pre>
+<p>If anything, I feel like the nothing result isn't going far enough--and it should actually error if you skip out on a return.  Maybe there was some important finalization work to do.</p>
+<p>But my example shows that putting it in implicitly means it doesn't necessarily roll with whatever updated definition you give to return.  You'll just get a confusing error in a bit of hidden code.  Not good for a fundamental part.</p>
+            <p><small>3 posts - 2 participants</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/making-func-variant-that-auto-returns-last-result/2124">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/making-func-variant-that-auto-returns-last-result/2124</link>
+          <pubDate>Thu, 18 Jan 2024 19:23:59 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2124</guid>
+          <source url="https://rebol.metaeducation.com/t/making-func-variant-that-auto-returns-last-result/2124.rss">Making FUNC Variant That Auto-Returns Last Result</source>
+        </item>
+        <item>
+          <title>Custom Function Generator Pitfalls</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Functions</category>
+          <description><![CDATA[
+            <p>I commonly write function generators that put in some boilerplate to make some variables and service routines available to the generated function.  But these frequently have weaknesses, and I thought I'd write up an example to illustrate...and explain some ways to mitigate the problems.</p>
+<h2><a name="p-6825-example-promise-generator-with-resolve-and-reject-1" class="anchor" href="https://rebol.metaeducation.com#p-6825-example-promise-generator-with-resolve-and-reject-1"></a>Example: PROMISE Generator With RESOLVE and REJECT</h2>
+<p>Imagine I want to make a function variation that's like a JavaScript promise, with a RESOLVE and REJECT...which are defined per-promise.</p>
+<p>Let's say the first cut of the new generator looks something like this:</p>
+<pre><code>promise: func [spec body] [
+    body: compose [
+        let resolve: lambda [result] [  ; lambdas lack their own return
+            some code here
+            return whatever  ; intending return of generated FUNC
+        ]
+        let reject: lambda [error] [
+            more code here
+            return whatever
+        ]
+        (spread body)  ; code here should see RESOLVE and REJECT 
+    ]
+    return func spec body
+]
+</code></pre>
+<p>When the frame is created for the new function, it will run this body that's been extended with some boilerplate.  But that frame's arguments could have the name of any of the functions you're using in the bodies of RESOLVE or REJECT.  e.g. what if I said <strong><code>foo: promise [code /more] [...]</code></strong> ... the implementations of RESOLVE and REJECT would be disrupted from what they thought the words they had used meant.</p>
+<p>Once you notice this, you might think the solution is to pre-compute more things:</p>
+<pre><code>promise: func [spec body] [
+    body: compose [
+        let resolve: ^(lambda [result] [
+            some code here
+            return whatever
+        ])
+        let reject: ^(lambda [error] [
+            more code here
+            return whatever
+        ])
+        (spread body)  ; code here should see RESOLVE and REJECT 
+    ]
+    return func spec body
+]
+</code></pre>
+<p><em>(Note use of ^META group in order to turn the isotopic frame produced by FUNC into a quasi frame, so that under evaluation in the function body it becomes isotopic again.  The compose would fail if you tried to compose the isotopic frame in directly.)</em></p>
+<p>That's a bit better in terms of insulating the boilerplate code from stray bindings coming from the user-supplied spec (though there's still the weakness of LET if the user wrote something like <strong>promise [let [integer!]] [...]</strong>, which if you cared you could address by composing :LET in as its literal function value).</p>
+<p>But it does too good a job: the COMPOSE runs during the PROMISE fabrication time, and so the notion of RETURN used by RESOLVE and REJECT are is the return for the PROMISE generator itself... not the produced FUNC as intended.  This is true of anything else you need to have picked up from the instance (let's say REJECT was implemented in terms of RESOLVE, or needed some other local).</p>
+<p>One way of addressing this would be to slip the instance RETURN in as a parameter, e.g. via specialization of the precomputed code:</p>
+<pre><code>promise: func [spec body] [
+    body: compose [
+        let resolve: specialize ^(lambda [result ret] [
+            some code here
+            ret whatever
+        ]) [ret: :return]
+        let reject: specialize ^(lambda [error ret] [
+            more code here
+            ret whatever
+        ]) [ret: :return]
+        (spread body)  ; code here should see RESOLVE and REJECT 
+    ]
+    return func spec body
+]
+</code></pre>
+<p>There you've got an added assumed term which can break things, e.g. <strong><code>promise [let [integer!] specialize [block!]] [...]</code></strong> or similar.  But at least <strong>some code here</strong> and <strong>more code here</strong> are running under the understandings that the PROMISE generator author had of what those implementations meant.</p>
+<p>Once you've separated out that which can be precomputed vs. that which can't, there's no need to make the precomputed part every time:</p>
+<pre><code>promise-resolve*: lambda [result ret] [
+    some code here
+    ret whatever
+]
+
+promise-reject*: lambda [error ret] [
+    more code here
+    ret whatever
+]
+
+promise: func [spec body] [
+    body: compose [
+        let resolve: specialize :promise-resolve* [ret: :return]
+        let reject: specialize :promise-reject* [ret: :return]
+        (spread body) 
+    ]
+    return func spec body
+]
+</code></pre>
+<h2><a name="p-6825-could-some-kind-of-compile-operation-help-2" class="anchor" href="https://rebol.metaeducation.com#p-6825-could-some-kind-of-compile-operation-help-2"></a>Could Some Kind of COMPILE Operation Help?</h2>
+<p>Weaknesses due to redefinitions of things like LET and SPECIALIZE makes me wonder if situations like this could be helped by an operation that would replace words that look up to functions with references to the functions.  <a href="https://rebol.metaeducation.com/t/more-comprehensible-errors-with-per-cell-labeling/1357">The cell can retain the symbol for the word</a>, which can make debugging and errors more tolerable.</p>
+<pre><code>promise: func [spec body] [
+    body: compose (compile [let specialize] [
+        let resolve: specialize :promise-resolve* [ret: :return]
+        let reject: specialize :promise-reject* [ret: :return]
+        (spread body) 
+    ])
+    return func spec body
+]
+</code></pre>
+<p>Merging with COMPOSE would be more efficient, and could help cue that you want to avoid compiling the things in GROUP!s.  Maybe it could assume you wanted to compile references to actions unless you threw in some kind of escaping:</p>
+<pre><code>promise: func [spec body] [
+    body: compile [
+        let resolve: specialize :promise-resolve* [ret: $ :return]
+        let reject: specialize :promise-reject* [ret: $ :return]
+        (spread body) 
+    ]
+    return func spec body
+]
+</code></pre>
+<p>I've thought about this kind of thing for a while, but never got around to writing it.</p>
+<h2><a name="p-6825-paranoia-plus-efficiency-body-as-group-vs-spliced-3" class="anchor" href="https://rebol.metaeducation.com#p-6825-paranoia-plus-efficiency-body-as-group-vs-spliced-3"></a>Paranoia Plus Efficiency: Body As GROUP! vs. Spliced</h2>
+<p>One improvement to this code is to splice the body as a group instead of spreading it itemwise in a block.</p>
+<p>To see why this matters, consider something like:</p>
+<pre><code>func-with-a-as-one: func [spec body] [
+    return func spec compose [
+        let a: 1
+        (spread body)
+    ]
+]
+</code></pre>
+<p>Now let's say someone wrote:</p>
+<pre><code>&gt;&gt; test: func-with-a-as-one [x] [+ 9, return a + x]
+
+&gt;&gt; test 1000
+== 1010  ; not 1001
+</code></pre>
+<p>Accidentally or intentionally, the function was defined as:</p>
+<pre><code>func [x] [
+   let a: 1
+   + 9, return a + x
+]
+</code></pre>
+<p>You can avoid this by quarantining the body, using <strong>(as group! body)</strong> instead of <strong>(spread body)</strong> in the COMPOSE.</p>
+<pre><code>func [x] [
+   let a: 1
+   (+ 9, return a + x)
+]
+</code></pre>
+<p>As an added benefit, the AS alias is cheaper memory-wise than copying the elements in item-wise (though it adds one extra GROUP! evaluation step to the function).</p>
+<h2><a name="p-6825-another-loophole-what-if-resolvereject-are-args-4" class="anchor" href="https://rebol.metaeducation.com#p-6825-another-loophole-what-if-resolvereject-are-args-4"></a>Another Loophole: What If RESOLVE/REJECT Are Args?</h2>
+<p>If you use LET, currently that will override whatever definition is in play.  So if someone were to write <strong>promise [x y reject] [...]</strong> they'd not be able to see the REJECT argument, and wouldn't get an error.</p>
+<p>You can force an error by dropping the LETs, and expanding the specification to include <strong></strong> definitions.</p>
+<pre><code>promise: func [spec body] [
+    body: compile [
+        resolve: specialize :promise-resolve* [ret: $ :return]
+        reject: specialize :promise-reject* [ret: $ :return]
+        (as group! body) 
+    ]
+    return func compose [(spread spec) &lt;local&gt; resolve reject] body
+]
+</code></pre>
+<p>So that's just sort of a peek into the effort it would take to make a relatively hygienic function generator.  Some things like worrying about taking SPECIALIZE as an argument might be beyond the concerns of the average one-off task.  But if you write a bunch of indiscriminate boilerplate using arbitrary words to refer to functions, it's very easy to get bitten when an argument reuses those words.</p>
+            <p><small>15 posts - 2 participants</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/custom-function-generator-pitfalls/2093">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/custom-function-generator-pitfalls/2093</link>
+          <pubDate>Sat, 06 Jan 2024 11:29:08 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2093</guid>
+          <source url="https://rebol.metaeducation.com/t/custom-function-generator-pitfalls/2093.rss">Custom Function Generator Pitfalls</source>
+        </item>
+        <item>
+          <title>Tail Calls in Ren-C...Yes, We Have Them</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Functions</category>
+          <description><![CDATA[
+            <p>Looking into some of <a href="https://rebol.metaeducation.com/t/the-sherman-rebol-to-scheme-compiler/2076">Joe Marshall's historical participation in Rebol</a>, he speaks about Rebol 1.0 having "continuations" and "tail calls".</p>
+<p>Ren-C uses continuations to implement <a href="https://rebol.metaeducation.com/t/stackless-is-here-today-now/1844">stacklessness, based on a trampoline</a>.  Trampolines are generally slower than the fiddly technique Joe describes Rebol 1.0 as having used--but such fiddly methods are not standard C, and do not translate well to WebAssembly.  In any case, the outcomes are similar.</p>
+<p>Tail calls are a different feature.  But if you have continuations, then your code is likely structured in such a way that tail calls are not that difficult to add.</p>
+<h2><a name="p-6770-so-what-is-a-tail-call-1" class="anchor" href="https://rebol.metaeducation.com#p-6770-so-what-is-a-tail-call-1"></a>So What Is A Tail Call?</h2>
+<p>When you invoke a function, the interpreter has to allocate some space for its arguments and locals.  This information is then associated with a stack level structure, which also takes some space... and is put in a chain representing the call stack.</p>
+<p>If that function calls itself recursively, the recursion will also need new stack space for its arguments and locals...and another stack level structure.</p>
+<p>With recursive algorithms where a function calls itself hundreds or thousands of times, you can use up a lot of memory (and/or generate a stack overflow).</p>
+<p>Tail calls are based on the observation that right at the moment a function is about to return, it doesn't need its stack level or arguments/locals anymore.  So if you're willing to have your call stack suffer some amount of "amnesia" about the "real" stack depth, you can reuse the current call's stack level for a recursion.</p>
+<h2><a name="p-6770-ren-c-supports-explicit-tail-calls-with-returnrun-2" class="anchor" href="https://rebol.metaeducation.com#p-6770-ren-c-supports-explicit-tail-calls-with-returnrun-2"></a>Ren-C Supports Explicit Tail Calls With RETURN:RUN</h2>
+<p>There are two forms of tail call we can do in a Rebol-like interpreter.  The first style can call any function (not just the one you're returning from).  It avoids a recursion level on the stack, but does <em>not</em> reuse the memory for arguments and locals.</p>
+<p>This is what that looks like:</p>
+<pre><code>foo: func [return: [tag!] n] [
+    if n = 1 [
+        return &lt;success&gt;
+    ]
+    return:run foo/ n - 1
+]
+
+&gt;&gt; foo 100
+== &lt;success&gt;
+</code></pre>
+<p>That triggers 100 calls to FOO, but only using one level of stack depth.</p>
+<p>There's a fairly obvious technical reason why this variation cannot build the invocation for the recursion's N into the old stack frame's N argument... <em>it uses the old N (as <code>n - 1</code>) to calculate the new N</em>.  You can't calculate new parameters into old parameter slots without winding up referencing your intermediate calculations instead of the old values you wanted.</p>
+<p><em>(A compiled language could notice when old arguments were used to calculate new ones, and if it happened they could make space for temporary copies just for values that would be overwritten before they were seen...but being interpreted, we have to assume the worst and keep all the old values.)</em></p>
+<p>If you really want to avoid making a new stack level <em>and</em> reuse the memory for the args and locals, you need a different approach.  Mutate the variables in-place before jumping to a restart of the function:</p>
+<pre><code>foo: func [return: [tag!] n] [
+    if n = 1 [
+        return &lt;success&gt;
+    ]
+    n: n - 1
+    return:run 'redo
+]
+
+&gt;&gt; foo 100
+== &lt;success&gt;
+</code></pre>
+<p>Modifying the variables in place means you're responsible for any dependency issues.  If you overwrite one of your arguments while calculating the next, you wrote the code in sequence and you can see what you did.</p>
+<h2><a name="p-6770-why-returnrun-foo-vs-return-foo-or-rerun-foo-3" class="anchor" href="https://rebol.metaeducation.com#p-6770-why-returnrun-foo-vs-return-foo-or-rerun-foo-3"></a>Why RETURN:RUN FOO/ vs. RETURN FOO or RERUN FOO</h2>
+<p>Ren-C's RETURN construct has special knowledge of what function it returns from.  It is a specialization of a generic DEFINITIONAL-RETURN function, which is specialized with the target FRAME!.  It's done in a somewhat optimized way, but still has some cost.</p>
+<p>If tail calls were done with another construct--e.g. something like RERUN--that function would also need to be specialized with this knowledge.  It's cheaper to just piggy back on what RETURN already knows and make it a refinement.</p>
+<p>As for why it has to take a trailing-slash PATH! vs. plain WORD! for the function to invoke...this is due to RETURN not taking its first argument literally.  So it's too late to intercept the mechanics of the call once an evaluation is run.  RETURN would receive the product of the call.</p>
+<p>It winds up looking fairly natural, because the RUN construct runs a function that gathers its arguments inline does the same thing:</p>
+<pre><code>&gt;&gt; run (either 1 &lt; 2 [append/] [insert/]) [a b c] [d e]
+== [a b c [d e]]
+</code></pre>
+<p>So if you were to RUN just a function, it would also look like RETURN:RUN...</p>
+<pre><code>&gt;&gt; run append/ [a b c] [d e]
+== [a b c [d e]]
+</code></pre>
+<p><strong>Note that even if we could make tail calls implicit, we probably wouldn't want to.</strong>  Python hasn't added tail calls at all, based on a philosophical objection to the idea of obscuring the call stack.  It also seems like if an algorithm depends on tail calls for some important optimization reason, there should be something to indicate that fact... so that someone reorganizing the code will be sensitive to it.</p>
+<h2><a name="p-6770-how-important-are-tail-calls-4" class="anchor" href="https://rebol.metaeducation.com#p-6770-how-important-are-tail-calls-4"></a>How Important Are Tail Calls?</h2>
+<p>If your language has a very limited amount of stack, being able to formulate your code to use tail calls so it doesn't accrue stack could be very important.</p>
+<p>But if your language has a decent amount of stack (or is completely "stackless") it's not particularly important.</p>
+<p>Where it matters are cases where an algorithm can be cleanly expressed in a recursive way, and you don't want to use an uglier representation that builds data structures which are mimicking what you would be getting naturally from the stack.</p>
+<p>Using them in places that don't matter is likely just going to confuse your stack traces and error messages...like the Python people say.  I'd discourage going around and changing all your RETURN SOMETHING to RETURN:RUN SOMETHING/ to try and speed things up.  Only do it if you're writing an algorithm that would have pathological stack use otherwise.</p>
+            <p><small>2 posts - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/tail-calls-in-ren-c-yes-we-have-them/2082">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/tail-calls-in-ren-c-yes-we-have-them/2082</link>
+          <pubDate>Mon, 18 Dec 2023 03:58:16 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2082</guid>
+          <source url="https://rebol.metaeducation.com/t/tail-calls-in-ren-c-yes-we-have-them/2082.rss">Tail Calls in Ren-C...Yes, We Have Them</source>
+        </item>
+        <item>
+          <title>Non-Words in Function Parameter Spec Dialect</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Functions</category>
+          <description><![CDATA[
+            <p>Historical Redbol only had WORD!s in the BLOCK! that came after a parameter:</p>
+<pre><code>foo: func [
+    arg [block! word! number!]  ;  all words in block
+] ...
+</code></pre>
+<p>But when Ren-C introduced the paradigm-breaking NULL that could not be put in arrays, that meant there was no <code>null!</code> datatype.  To fill the gap, the tag <code>&lt;opt&gt;</code> was chosen to indicate the parameter as optional--hence possibly null:</p>
+<pre><code>foo: func [
+    arg [&lt;opt&gt; block! word! number!]  ;  now it's WORD!s and TAG!s
+] ...
+</code></pre>
+<p>I liked using a TAG! for how it stood out (though in retrospect I'd have probably chosen <code>&lt;null&gt;</code>, but everything was named differently then).  Other quirky ideas were floated, like being able to put a leading slash on the typeset block:</p>
+<pre><code>foo: func [
+    arg /[block! word! number!]  ; like a refinement, but on the types
+] ...
+</code></pre>
+<p>That didn't gain traction, and probably shouldn't have.</p>
+<p>Then when early efforts faced another value state that couldn't be put in a block and didn't have a type, <strong><code>&lt;void&gt;</code></strong> came onto the scene...because as with there being no NULL!, there was no VOID! datatype.</p>
+<h2><a name="p-6733-tag-modifiers-which-werent-type-checkers-showed-up-1" class="anchor" href="https://rebol.metaeducation.com#p-6733-tag-modifiers-which-werent-type-checkers-showed-up-1"></a>Tag Modifiers Which Weren't Type Checkers Showed Up</h2>
+<p>The ability to take a parameter but get an immutable view of it was added as <strong><code>&lt;const&gt;</code></strong>.</p>
+<p>Parameters that would accept being at the end of input and evaluate to null in that case were <strong><code>&lt;end&gt;</code></strong></p>
+<p><strong><code>&lt;variadic&gt;</code></strong> and <strong><code>&lt;skippable&gt;</code></strong> came into existence.</p>
+<p>These "parameter-control tags" seemed to me to be a distinct category from typecheckers like <strong><code>&lt;opt&gt;</code></strong> and <strong><code>&lt;void&gt;</code></strong>.   Having them all use TAG! felt like <em>too many tags.</em></p>
+<p>So I mused about splitting the roles, something like:</p>
+<pre><code>[&lt;const&gt; #null type!]
+-or-
+[#const &lt;null&gt; type!]
+</code></pre>
+<p>But I didn't like the look of it enough to move on it.  So things like <strong><code>[&lt;const&gt; &lt;opt&gt; type!]</code></strong> stuck around while I wondered about it.</p>
+<h2><a name="p-6733-today-you-can-specify-any-type-check-by-function-2" class="anchor" href="https://rebol.metaeducation.com#p-6733-today-you-can-specify-any-type-check-by-function-2"></a>Today, You Can Specify Any Type Check By Function</h2>
+<p>There's still no NULL! or VOID!.  But with the way things work now, you can use functions as "type predicates" to recognize things that aren't datatypes in their own right:</p>
+<pre><code>foo: func [
+    arg [null? block! word! number!]
+] ...
+</code></pre>
+<p>What's good:</p>
+<ul>
+<li>It leaves TAG! for the properties like <strong><code>&lt;const&gt;</code></strong> that don't have to do with type recognition... but rather controlling the parameter in a more special way.</li>
+</ul>
+<p>What's bad:</p>
+<ul>
+<li>It loses that kind of special look that tags gave to arguments that could take null.  It blurs together, especially with things like SPLICE? and LOGIC? and CHAR? for other non-fundamental datatypes (characters are just single-character issues now, and ~true~ and ~false~ isotopes of WORD! implement logic)</li>
+</ul>
+<h2><a name="p-6733-a-modern-option-null-for-taking-null-3" class="anchor" href="https://rebol.metaeducation.com#p-6733-a-modern-option-null-for-taking-null-3"></a>A Modern Option: ~NULL~ for Taking Null</h2>
+<p>I made an experiment so if you used a QUASI-WORD!, then it would match an isotope of that form.</p>
+<p>It's a kind of pleasingly distinct look:</p>
+<pre><code>foo: func [
+    arg [~null~ block! word! number!]
+] ...
+</code></pre>
+<p>And it mixes better with the tags:</p>
+<pre><code>foo: func [
+    arg [~null~ &lt;const&gt; block! word! number!]
+] ...
+</code></pre>
+<p>It also works for "trash" (antiform blank) and looks really good there, e.g. for RETURN:</p>
+<pre><code>foo: func [
+    return: [~]  ; as opposed to `return: [trash?]`
+ ] ...
+</code></pre>
+<h2><a name="p-6733-allowing-null-and-null-as-choices-seems-good-4" class="anchor" href="https://rebol.metaeducation.com#p-6733-allowing-null-and-null-as-choices-seems-good-4"></a>Allowing NULL? and ~NULL~ As Choices Seems Good</h2>
+<p>I like the option of <strong>~null~</strong> instead of <strong>null?</strong> to call out the more rare-and-alarming idea of accepting null parameters.</p>
+<h2><a name="p-6733-what-about-return-ghost-and-return-trash-5" class="anchor" href="https://rebol.metaeducation.com#p-6733-what-about-return-ghost-and-return-trash-5"></a>What about <code>return: &lt;ghost&gt;</code> and <code>return: &lt;trash&gt;</code></h2>
+<p>These two special uses of tag! with no block have been used to say you don't need a RETURN statement at all... the function just gives back trash or ghost respectively when the body completes.</p>
+<p>How necessary is it?  Well, you either write things like:</p>
+<pre><code>comment: func [
+    return: [ghost!]
+    discarded [any-value!]
+][
+    return ghost
+]
+</code></pre>
+<p>Or you have the contraction:</p>
+<pre><code>comment: func [
+    return: &lt;ghost&gt;
+    discarded [any-value!]
+][
+]
+</code></pre>
+<p>This style of "don't even worry about writing a RETURN" has the widest applicability to TRASH and GHOST.  We don't strictly need it, but I've gotten used to it.</p>
+<p>I mention <strong>return: [~]</strong> as a possible alternative for saying trash is a return type using the quasiform-means-antiform idea.  And since trash falls out of function bodies by default with no return, it's not strictly necessary to have <strong><code>return: &lt;trash&gt;</code></strong> as any kind of special operation.</p>
+<p>Again, how does that look?</p>
+<pre><code>foo: func [
+    return: [~]
+ ] ...
+</code></pre>
+<p>A little more symbol-y, but doesn't break the rhythm of type specs being blocks.</p>
+<p>This leaves the ghost case.  We could say <strong>return: [~,~]</strong> and have that mean "I return an antiform comma" but in that case you'd still need an explicit return:</p>
+<pre><code>comment: func [
+    return: [~,~]
+    discarded [any-value!]
+][
+    return ghost
+]
+</code></pre>
+<p>But I like <strong><code>return: [ghost!]</code></strong> a lot more than that.  Compared to <strong><code>return: [~]</code></strong> the <strong><code>[~,~]</code></strong> feels a bit like a bridge too far.</p>
+<p>Anyway, the reason this is a struggle is that <strong><code>return: &lt;trash&gt;</code></strong> has just become so pervasive that it's hard to see that changed to <strong><code>return: [trash!]</code></strong>.  But standardizing on blocks and moving away from the tags for this application may be the best idea.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/non-words-in-function-parameter-spec-dialect/2064">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/non-words-in-function-parameter-spec-dialect/2064</link>
+          <pubDate>Sat, 25 Nov 2023 08:25:56 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2064</guid>
+          <source url="https://rebol.metaeducation.com/t/non-words-in-function-parameter-spec-dialect/2064.rss">Non-Words in Function Parameter Spec Dialect</source>
+        </item>
+        <item>
+          <title>About the Functions category</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Functions</category>
+          <description><![CDATA[
+            <p>Discussions of Functions and Generators, e.g. how things like RETURN work... or the mechanics of generators and composers like ADAPT, SPECIALIZE, ENCLOSE, HIJACK, etc.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/about-the-functions-category/1931">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/about-the-functions-category/1931</link>
+          <pubDate>Sat, 20 Aug 2022 07:39:08 +0000</pubDate>
+          <discourse:topicPinned>Yes</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-1931</guid>
+          <source url="https://rebol.metaeducation.com/t/about-the-functions-category/1931.rss">About the Functions category</source>
+        </item>
+        <item>
+          <title>Why RETURN Is Not Assignable on Function Interfaces</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Functions</category>
+          <description><![CDATA[
+            <p>When implementing multi-returns I had an idea, to think of <strong><code>[x]: negate 10</code></strong> in terms of slipping X into the RETURN: slot of NEGATE as an input.</p>
+<p>On the surface that seems like it might even be useful more generally:</p>
+<pre><code> &gt;&gt; f: make frame! :negate
+
+ &gt;&gt; negate.return: 'x  ; X gets hidden, and RETURN is redefined during the call
+
+ &gt;&gt; negate.value: 10
+
+ &gt;&gt; do f  ; the hidden X is written back automatically
+ == -10
+
+ &gt;&gt; x
+ == -10
+</code></pre>
+<h2><a name="p-6282-but-not-every-action-is-a-funcfunction-1" class="anchor" href="https://rebol.metaeducation.com#p-6282-but-not-every-action-is-a-funcfunction-1"></a>But Not Every Action is a FUNC/FUNCTION</h2>
+<p>Not all functions are guaranteed to have something in their frame called RETURN (e.g. a LAMBDA does not).  And a non-FUNC ACTION! could have something in its frame called RETURN that wasn't used for anything pertaining to the return process.</p>
+<p>This ruled it out from being a mechanic relied on by the multi-return machinery.  Because we want the following to work:</p>
+<pre><code>&gt;&gt; test: lambda [x] [x + 20]
+
+&gt;&gt; [y]: test 1000
+== 1020
+
+&gt;&gt; y
+== 1020
+</code></pre>
+<h2><a name="p-6282-nevertheless-people-can-implement-it-if-they-want-2" class="anchor" href="https://rebol.metaeducation.com#p-6282-nevertheless-people-can-implement-it-if-they-want-2"></a>Nevertheless, People Can Implement It If They Want</h2>
+<p>It's certainly something you could <em>choose</em> to do if you were writing your own function generator.</p>
+<p>In fact, it's trivial to write a wrapper for it!  Just add a /RETURN to the public interface, and write back to it if it's supplied:</p>
+<pre><code>returnproxy: lambda [action [action!]] [
+    enclose (augment :action [/return [word!]]) f -&gt; [
+        (maybe f.return): do f
+    ]
+]
+</code></pre>
+<p>That means you can pass it as a refinement:</p>
+<pre><code>&gt;&gt; test: lambda [x] [x + 1000]
+
+&gt;&gt; wrapper: returnproxy :test
+
+&gt;&gt; wrapper/return 20 'y
+== 1020
+
+&gt;&gt; y
+== 1020
+</code></pre>
+<p>Or you can use it with a frame:</p>
+<pre><code>&gt;&gt; f: make frame! :wrapper
+&gt;&gt; f.x: 20
+&gt;&gt; f.return: 'out
+
+&gt;&gt; do f
+== 1020
+
+&gt;&gt; out
+== 1020
+</code></pre>
+<p><img src="https://rebol.metaeducation.com/images/emoji/twitter/nut_and_bolt.png?v=14" title=":nut_and_bolt:" class="emoji only-emoji" alt=":nut_and_bolt:" loading="lazy" width="20" height="20"></p>
+<p><em>(Seeing superpowers like this work so clearly and obviously is what keeps me invested in this.)</em></p>
+<h2><a name="p-6282-so-anyone-can-do-it-but-should-funcfunction-do-it-3" class="anchor" href="https://rebol.metaeducation.com#p-6282-so-anyone-can-do-it-but-should-funcfunction-do-it-3"></a>So Anyone CAN Do It, But Should FUNC/FUNCTION Do It?</h2>
+<p>I lean toward not doing it with things implemented the way they are right now, because it would add overhead to every function with a RETURN:, due to needing to have a place to store the variable if you gave it one.</p>
+<p>But it might be nice to give people an optimized version of the proxying wrapper above.  You could then convert any function to support it.</p>
+<h2><a name="p-6282-but-today-return-is-on-the-public-interface-of-func-frowning-4" class="anchor" href="https://rebol.metaeducation.com#p-6282-but-today-return-is-on-the-public-interface-of-func-frowning-4"></a>But today RETURN is on the public interface of FUNC <img src="https://rebol.metaeducation.com/images/emoji/twitter/frowning.png?v=14" title=":frowning:" class="emoji" alt=":frowning:" loading="lazy" width="20" height="20"></h2>
+<pre><code>&gt;&gt; f: make frame! func [x] [return x + 1000]
+== make frame! [
+    return: ~
+    x: ~
+]
+</code></pre>
+<p><em>"Errr.  Why's it there?"</em>, you might ask.</p>
+<p>The reason is that the return typeset information currently lives on that field.  So if you're going to ask about it, you get it from there.</p>
+<p><strong>This is one of many good arguments for why this information should <em>not</em> live there.</strong></p>
+<p>There's a long running body of evidence suggesting that the way return types are managed today is probably wrong.</p>
+<ul>
+<li>
+<p><strong>LAMBDA Can't Currently Document Its Result Types</strong>.  There are a lot of actions out there that don't have a RETURN function, but nevertheless have something to say about what types they can produce.</p>
+</li>
+<li>
+<p><strong>ENCLOSE Can't Change The Type Signature</strong>.  If you wrap a function, you're subject to its type checking rules.</p>
+</li>
+<li>
+<p><strong>NATIVE Doesn't Want To Pay For A RETURN Slot</strong>.  The typechecking is only done in the debug build, so why should every native frame require a RETURN function?</p>
+</li>
+</ul>
+<p>I think I've got some ideas coming together--mostly centering on factoring out typechecking to be another one of the little pieces you can build functions out of (like AUGMENT).  So when doing a composition you would just bolt on a typechecker if you wanted one.  Internal efficiencies could fold that in so it actually didn't generate a separate phase and action identity.  Pursing some inspiration on that as we speak...</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/why-return-is-not-assignable-on-function-interfaces/1929">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/why-return-is-not-assignable-on-function-interfaces/1929</link>
+          <pubDate>Sat, 20 Aug 2022 05:32:25 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-1929</guid>
+          <source url="https://rebol.metaeducation.com/t/why-return-is-not-assignable-on-function-interfaces/1929.rss">Why RETURN Is Not Assignable on Function Interfaces</source>
+        </item>
+  </channel>
+</rss>

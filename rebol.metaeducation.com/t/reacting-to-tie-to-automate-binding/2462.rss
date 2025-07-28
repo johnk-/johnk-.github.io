@@ -1,0 +1,407 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Reacting to TIE ($) To Automate Binding</title>
+    <link>https://rebol.metaeducation.com/t/reacting-to-tie-to-automate-binding/2462</link>
+    <description>The biggest realization of &quot;modern Binding&quot; in Ren-C was that working in a *mostly unbound* world needed to be the default.
+
+What had held up early attempts to &quot;virtualize&quot; binding was that I was trying to automatically spread binding information in mechanical operations.  e.g. when you would PICK a word out of a BLOCK!, the picked word would come back suitable to perform a GET on.  It did this by projecting the virtual binding from the block onto the returned Cell.
+
+I gave this as an example of the kind of legacy pattern I was trying to keep working:
+
+    double-assigner: func [block] [
+        for-each [sw i] block [
+            assert [(set-word? sw) (integer? i)]
+            set sw 2 * i  ; historically assumes X: and Y: are bound
+        ]
+    ]
+
+    double-assigner [x: 10 y: 20]
+
+*But this makes an assumption that may not be correct...and in fact, often is not.*  In a world where unbound material is an effective currency, you can&#39;t guess that the user wanted the binding to be propagated.  They may have just been interested in the raw material.
+
+So this spawned the dawn of **&quot;conscious binding&quot;**, where you had to use specific operations at each step:
+
+    double-assigner: func [block] [
+        for-each [sw i] block [
+            assert [(set-word? sw) (integer? i)]  ; both SW and I are *unbound*
+            set (inside block sw) 2 * i  ; &lt;-- INSIDE BLOCK makes all the difference
+       ]
+    ]
+
+    double-assigner [x: 10 y: 20]
+
+We can debate the BIND &quot;dialect&quot;, and whether the INSIDE operator is the right one or not... but this captures the general spirit of things.
+
+## Using Our Dialect Powers...What About the TIE ($)?
+
+So in this FOR-EACH example, we can already imagine a convenience... of being able to annotate variables to say you want to propagate the binding (or &quot;tie&quot; the variables to the binding of the block).  How about this?
+
+    double-assigner: func [block] [
+        for-each [$sw i] block [
+            assert [(set-word? sw) (integer? i)]  ; SW bound into block&#39;s context
+            set sw 2 * i
+       ]
+    ]
+
+    double-assigner [x: 10 y: 20]
+
+That&#39;s convenient!
+
+## What If You Wanted A ^LIFT-ed Bound Variable?
+
+There&#39;s also `@PIN`-ned variables which means &quot;reuse an existing variable, don&#39;t make a new one&quot;.
+
+**This means we need the &quot;Sigil-Composition&quot; that @bradrn has spoken up for.**  But instead of accomplishing it with BLOCK!s the way I&#39;ve been doing, we now have some lighter options...
+
+     for-each [@:$sw i] block [...]  ; reuse and bind
+
+     for-each [$:^sw i] block [...]  ; bind and lift
+
+     for-each [^:$sw i] block [...]  ; lift and bind (synonym, we assume?)
+
+     for-each [^:$:@sw i] block [...]  ; lift and bind and reuse
+
+It&#39;s not the prettiest thing in the world, but I don&#39;t imagine you&#39;d usually need more than one Sigil.
+
+Maybe you could put them in BLOCK!s to help visually:
+
+     for-each [[^:$:@sw] i] block [...]  ; lift and bind and reuse
+
+Did that help?  It kind of did.  CHAIN! seems to make the most sense... visually, and also because it doesn&#39;t really have any semantic baggage outside of trailing and leading colons.  And really only trailing colons have an obvious meaning.
+
+Would it be better if the colons weren&#39;t there?
+
+     for-each [[^ $ @sw] i] block [...]  ; lift and bind and reuse
+
+I dunno.  I almost want to cluster the sigils together separate from the word:
+
+     for-each [[^:$:@ sw] i] block [...]  ; lift and bind and reuse
+
+We can debate this, but somewhere in here there will be a solution.
+
+## What About Sigil Meanings On Lists Themselves?
+
+One of the earliest thoughts I had regarding the applications of @ as a &quot;inert&quot; Sigil was &quot;what if REDUCE took this as a signal that the data was *already reduced*.
+
+    &gt;&gt; reduce [1 + 2 10 + 20]
+    == [20 30]
+
+    &gt;&gt; reduce @[1 + 2 10 + 20]
+    == [1 + 2 10 + 20]
+
+That might not seem useful, but it sort of is.  For instance, PACK uses this:
+
+    &gt;&gt; pack [1 + 2 null]
+    == ~[&#39;3 ~null~]~  ; anti
+
+    &gt;&gt; pack @[1 + 2 null]
+    == ~[&#39;1 &#39;+ &#39;2 &#39;null]~  ; anti
+
+This comes up, when you&#39;ve got a branching structure and you have some branches that want to return evaluative products and others that you want to return a pack of literals. 
+
+So the convention spread other places, e.g. ANY and ALL where you can run predicates on data and either reduce it or not.
+
+**Could this same idea of pushing the convention onto the lists be useful... e.g. to make BLOCK!s that you &quot;auto-bind&quot; out of when you pick?**
+
+    &gt;&gt; x: 10
+
+    &gt;&gt; tieblock: @ $[x y]
+    == $[x y]  ; bound by the lone PIN operator (a.k.a THE)
+
+    &gt;&gt; tieblock: the $[x y]
+    == $[x y]  ; bound - if you prefer words vs. symbols
+
+    &gt;&gt; tieblock: $ &#39;$[x y]
+    == $[x y]  ; bound - if you want another way to say the same thing
+
+    &gt;&gt; tieblock: bind here &#39;$[x y]
+    == $[x y]  ; bound - just for the sake of completeness...
+
+Okay, you get the idea on the binding.  But my question is: would there be operators that upon seeing a TIED! list, would automatically bind when you picked things out of them?
+
+So instead of the binding behavior coming from the variable you were using in a FOR-EACH, it would come from the data.  Or maybe even just a PICK would work:
+
+    &gt;&gt; pick tieblock 1
+    == x  ; bound
+
+    &gt;&gt; get pick tieblock 1
+    == 10
+
+So if it was an ordinary block..
+
+    &gt;&gt; x: 10
+
+    &gt;&gt; block: [x y]
+
+    &gt;&gt; get pick block 1
+    ** Error: X not bound...
+
+    &gt;&gt; get pick tie block 1
+    == 10
+
+This definitely turns Sigil-carrying entities into beasts-with-behaviors.  But since the common currency in the system is normal BLOCK!/GROUP!/FENCE!, it may be that most of the creations of these beasts would be transient... existing only long enough to cue the PICK or FOR-EACH or whatever to do its behavior.
+
+## You Don&#39;t Know Until You Try... :man_shrugging: 
+
+I&#39;m worried about there not being some mechanical terra-firma.  PICK seems foundational.  So perhaps there&#39;s some difference here, e.g. between PICK and another operator like SELECT could heed the sigils on the target data (?)  And FOR-EACH seems foundational too, but I think decorating the variable is fair game.
+
+Anyway, it&#39;s an area I&#39;ll start experimenting with and report on whether any of the experiments turn out to make things clearer/better or worse.  (!)</description>
+    
+    <lastBuildDate>Mon, 16 Jun 2025 20:23:33 +0000</lastBuildDate>
+    <category>Binding</category>
+    <atom:link href="https://rebol.metaeducation.com/t/reacting-to-tie-to-automate-binding/2462.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Reacting to TIE ($) To Automate Binding</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>A post was split to a new topic: <a href="https://rebol.metaeducation.com/t/literal-arguments-as-proxies-for-dialects/2489">Literal Arguments As Proxies For Dialects</a></p>
+          <p><a href="https://rebol.metaeducation.com/t/reacting-to-tie-to-automate-binding/2462/4">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/reacting-to-tie-to-automate-binding/2462/4</link>
+        <pubDate>Mon, 16 Jun 2025 20:32:20 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2462-4</guid>
+        <source url="https://rebol.metaeducation.com/t/reacting-to-tie-to-automate-binding/2462.rss">Reacting to TIE ($) To Automate Binding</source>
+      </item>
+      <item>
+        <title>Reacting to TIE ($) To Automate Binding</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group quote-modified" data-username="hostilefork" data-post="2" data-topic="2462">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">&gt;&gt; x: 10
+
+&gt;&gt; block: [x y]
+
+&gt;&gt; get block.$(2 - 1)
+== 10
+</code></pre>
+</blockquote>
+</aside>
+<p>Note what <em>wouldn't</em> be the same here:</p>
+<pre><code>&gt;&gt; get block.($1)
+** Error: can't PICK $1 in block
+</code></pre>
+<p>We don't know what $1 does.  Most likely errors (bound INTEGER! are not likely to be a good idea, but, who knows).  Even if bound integers were decided to be okay, $1 would produce 1.</p>
+<p>This also would not be the same:</p>
+<pre><code>&gt;&gt; get block.('$1)
+** Error: can't PICK $1 in block
+</code></pre>
+<p>That's trying to use $1 directly as the "picker" and is a completely different thing.  That would be for like if $1 was a key in a MAP!.  It has nothing to do with binding.</p>
+<p>When you aren't using a GROUP! like that, and things are just appearing literally in the tuple, they are dialected.</p>
+<p>That means this also would not work:</p>
+<pre><code>&gt;&gt; get pick block '$1
+== 10
+</code></pre>
+<p>There'd have to be a separate out-of-band parameter to PICK to do this, like a :BIND refinement or  something.</p>
+<pre><code>&gt;&gt; get pick:bind block 1
+== 10
+</code></pre>
+<h2><a name="p-8431-chain-based-compound-sigil-wont-work-here-1" class="anchor" href="https://rebol.metaeducation.com#p-8431-chain-based-compound-sigil-wont-work-here-1"></a>CHAIN!-based compound SIGIL! won't work here</h2>
+<p>Let's say you're indirecting through a variable:</p>
+<pre><code>&gt;&gt; n: 1
+
+&gt;&gt; block.(n)
+== x
+</code></pre>
+<p>That has a shorthand (not just shorter in terms of one character, but more efficient as it can bypass the evaluator, and doesn't use a list type which makes a separate allocation):</p>
+<pre><code>&gt;&gt; block.@n
+== x
+</code></pre>
+<p>If you want to ask for binding, then this is no good:</p>
+<pre><code>&gt;&gt; get block.$:@n
+== 10
+</code></pre>
+<p>That's seen as a 2-element CHAIN! of  <code>[block.$ @n]</code>, not a 2-element TUPLE! of <code>[block $:@n]</code>, due to the hierarchy of sequences.</p>
+<p><em>"And nothing of value was lost"</em>, that looks much better as:</p>
+<pre><code>&gt;&gt; get block.$(n)
+== 10
+</code></pre>
+<p>I've proposed that the sequence mechanics might optimize this pattern so that <code>(n)</code> in a sequence doesn't actually cost more than <code>@n</code>, and this is another motivator for that optimization.</p>
+          <p><a href="https://rebol.metaeducation.com/t/reacting-to-tie-to-automate-binding/2462/3">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/reacting-to-tie-to-automate-binding/2462/3</link>
+        <pubDate>Mon, 16 Jun 2025 20:00:02 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2462-3</guid>
+        <source url="https://rebol.metaeducation.com/t/reacting-to-tie-to-automate-binding/2462.rss">Reacting to TIE ($) To Automate Binding</source>
+      </item>
+      <item>
+        <title>Reacting to TIE ($) To Automate Binding</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group quote-modified" data-username="hostilefork" data-post="1" data-topic="2462">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p><em>Could this same idea of pushing the convention onto the lists be useful... e.g. to make BLOCK!s that you "auto-bind" out of when you pick?</em></p>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">&gt;&gt; x: 10
+
+&gt;&gt; block: [x y]
+
+&gt;&gt; get pick block 1
+** Error: X not bound...
+
+&gt;&gt; get pick tie block 1
+== 10
+</code></pre>
+</blockquote>
+</aside>
+<p>So that's a pretty terrible idea, and I knew it was crappy when I wrote it down.</p>
+<p>To recap: the fundamental operations like PICK operate in the "mostly unbound world"... and mechanically pick things without having them bridge the binding from the container onto the thing you picked.  I was looking for some other place to put the cue--so your PICK product could have a binding, without needing to do further operations on it.</p>
+<p>Treating <code>$[...]</code> and <code>[...]</code> differently as the thing you are <em>PICK-ing out of</em> is bad, they're conceptually just lists and you shouldn't worry that your code is going to act differently on basic operations like PICK on them.</p>
+<p>But the good thing about writing down terrible ideas is helping you see where the modification needs to be made to make it non-terrible.</p>
+<p>When that post was written, $1 was a MONEY! and there wasn't a generalized Sigil system.  BUT NOW... that idea of MONEY! is dead, and <a href="https://rebol.metaeducation.com/t/new-names-for-foo-foo-and-foo/2447">we can put <code>[$ ^ @]</code> Sigils on anything and everything</a>... e.g. $1 is a "TIED! INTEGER!"</p>
+<p><strong>How about THIS:</strong></p>
+<pre><code>&gt;&gt; x: 10
+
+&gt;&gt; block: [x y]
+
+&gt;&gt; get block.1
+** Error: X not bound...
+
+&gt;&gt; get block.$1
+== 10
+
+&gt;&gt; get block.$(2 - 1)
+== 10
+</code></pre>
+<h2><a name="p-8430-bullseye-1" class="anchor" href="https://rebol.metaeducation.com#p-8430-bullseye-1"></a><img src="https://rebol.metaeducation.com/images/emoji/twitter/bullseye.png?v=14" title=":bullseye:" class="emoji only-emoji" alt=":bullseye:" loading="lazy" width="20" height="20"></h2>
+<p>cc: <a class="mention" href="https://rebol.metaeducation.com/u/bradrn">@bradrn</a></p>
+          <p><a href="https://rebol.metaeducation.com/t/reacting-to-tie-to-automate-binding/2462/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/reacting-to-tie-to-automate-binding/2462/2</link>
+        <pubDate>Mon, 16 Jun 2025 19:51:16 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2462-2</guid>
+        <source url="https://rebol.metaeducation.com/t/reacting-to-tie-to-automate-binding/2462.rss">Reacting to TIE ($) To Automate Binding</source>
+      </item>
+      <item>
+        <title>Reacting to TIE ($) To Automate Binding</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>The biggest realization of "modern Binding" in Ren-C was that working in a <em>mostly unbound</em> world needed to be the default.</p>
+<p>What had held up early attempts to "virtualize" binding was that I was trying to automatically spread binding information in mechanical operations.  e.g. when you would PICK a word out of a BLOCK!, the picked word would come back suitable to perform a GET on.  It did this by projecting the virtual binding from the block onto the returned Cell.</p>
+<p>I gave this as an example of the kind of legacy pattern I was trying to keep working:</p>
+<pre><code>double-assigner: func [block] [
+    for-each [sw i] block [
+        assert [(set-word? sw) (integer? i)]
+        set sw 2 * i  ; historically assumes X: and Y: are bound
+    ]
+]
+
+double-assigner [x: 10 y: 20]
+</code></pre>
+<p><em>But this makes an assumption that may not be correct...and in fact, often is not.</em>  In a world where unbound material is an effective currency, you can't guess that the user wanted the binding to be propagated.  They may have just been interested in the raw material.</p>
+<p>So this spawned the dawn of <strong>"conscious binding"</strong>, where you had to use specific operations at each step:</p>
+<pre><code>double-assigner: func [block] [
+    for-each [sw i] block [
+        assert [(set-word? sw) (integer? i)]  ; both SW and I are *unbound*
+        set (inside block sw) 2 * i  ; &lt;-- INSIDE BLOCK makes all the difference
+   ]
+]
+
+double-assigner [x: 10 y: 20]
+</code></pre>
+<p>We can debate the BIND "dialect", and whether the INSIDE operator is the right one or not... but this captures the general spirit of things.</p>
+<h2><a name="p-8318-using-our-dialect-powerswhat-about-the-tie-1" class="anchor" href="https://rebol.metaeducation.com#p-8318-using-our-dialect-powerswhat-about-the-tie-1"></a>Using Our Dialect Powers...What About the TIE ($)?</h2>
+<p>So in this FOR-EACH example, we can already imagine a convenience... of being able to annotate variables to say you want to propagate the binding (or "tie" the variables to the binding of the block).  How about this?</p>
+<pre><code>double-assigner: func [block] [
+    for-each [$sw i] block [
+        assert [(set-word? sw) (integer? i)]  ; SW bound into block's context
+        set sw 2 * i
+   ]
+]
+
+double-assigner [x: 10 y: 20]
+</code></pre>
+<p>That's convenient!</p>
+<h2><a name="p-8318-what-if-you-wanted-a-lift-ed-bound-variable-2" class="anchor" href="https://rebol.metaeducation.com#p-8318-what-if-you-wanted-a-lift-ed-bound-variable-2"></a>What If You Wanted A ^LIFT-ed Bound Variable?</h2>
+<p>There's also <code>@PIN</code>-ned variables which means "reuse an existing variable, don't make a new one".</p>
+<p><strong>This means we need the "Sigil-Composition" that <a class="mention" href="https://rebol.metaeducation.com/u/bradrn">@bradrn</a> has spoken up for.</strong>  But instead of accomplishing it with BLOCK!s the way I've been doing, we now have some lighter options...</p>
+<pre><code> for-each [@:$sw i] block [...]  ; reuse and bind
+
+ for-each [$:^sw i] block [...]  ; bind and lift
+
+ for-each [^:$sw i] block [...]  ; lift and bind (synonym, we assume?)
+
+ for-each [^:$:@sw i] block [...]  ; lift and bind and reuse
+</code></pre>
+<p>It's not the prettiest thing in the world, but I don't imagine you'd usually need more than one Sigil.</p>
+<p>Maybe you could put them in BLOCK!s to help visually:</p>
+<pre><code> for-each [[^:$:@sw] i] block [...]  ; lift and bind and reuse
+</code></pre>
+<p>Did that help?  It kind of did.  CHAIN! seems to make the most sense... visually, and also because it doesn't really have any semantic baggage outside of trailing and leading colons.  And really only trailing colons have an obvious meaning.</p>
+<p>Would it be better if the colons weren't there?</p>
+<pre><code> for-each [[^ $ @sw] i] block [...]  ; lift and bind and reuse
+</code></pre>
+<p>I dunno.  I almost want to cluster the sigils together separate from the word:</p>
+<pre><code> for-each [[^:$:@ sw] i] block [...]  ; lift and bind and reuse
+</code></pre>
+<p>We can debate this, but somewhere in here there will be a solution.</p>
+<h2><a name="p-8318-what-about-sigil-meanings-on-lists-themselves-3" class="anchor" href="https://rebol.metaeducation.com#p-8318-what-about-sigil-meanings-on-lists-themselves-3"></a>What About Sigil Meanings On Lists Themselves?</h2>
+<p>One of the earliest thoughts I had regarding the applications of @ as a "inert" Sigil was "what if REDUCE took this as a signal that the data was <em>already reduced</em>.</p>
+<pre><code>&gt;&gt; reduce [1 + 2 10 + 20]
+== [20 30]
+
+&gt;&gt; reduce @[1 + 2 10 + 20]
+== [1 + 2 10 + 20]
+</code></pre>
+<p>That might not seem useful, but it sort of is.  For instance, PACK uses this:</p>
+<pre><code>&gt;&gt; pack [1 + 2 null]
+== ~['3 ~null~]~  ; anti
+
+&gt;&gt; pack @[1 + 2 null]
+== ~['1 '+ '2 'null]~  ; anti
+</code></pre>
+<p>This comes up, when you've got a branching structure and you have some branches that want to return evaluative products and others that you want to return a pack of literals.</p>
+<p>So the convention spread other places, e.g. ANY and ALL where you can run predicates on data and either reduce it or not.</p>
+<p><strong>Could this same idea of pushing the convention onto the lists be useful... e.g. to make BLOCK!s that you "auto-bind" out of when you pick?</strong></p>
+<pre><code>&gt;&gt; x: 10
+
+&gt;&gt; tieblock: @ $[x y]
+== $[x y]  ; bound by the lone PIN operator (a.k.a THE)
+
+&gt;&gt; tieblock: the $[x y]
+== $[x y]  ; bound - if you prefer words vs. symbols
+
+&gt;&gt; tieblock: $ '$[x y]
+== $[x y]  ; bound - if you want another way to say the same thing
+
+&gt;&gt; tieblock: bind here '$[x y]
+== $[x y]  ; bound - just for the sake of completeness...
+</code></pre>
+<p>Okay, you get the idea on the binding.  But my question is: would there be operators that upon seeing a TIED! list, would automatically bind when you picked things out of them?</p>
+<p>So instead of the binding behavior coming from the variable you were using in a FOR-EACH, it would come from the data.  Or maybe even just a PICK would work:</p>
+<pre><code>&gt;&gt; pick tieblock 1
+== x  ; bound
+
+&gt;&gt; get pick tieblock 1
+== 10
+</code></pre>
+<p>So if it was an ordinary block..</p>
+<pre><code>&gt;&gt; x: 10
+
+&gt;&gt; block: [x y]
+
+&gt;&gt; get pick block 1
+** Error: X not bound...
+
+&gt;&gt; get pick tie block 1
+== 10
+</code></pre>
+<p>This definitely turns Sigil-carrying entities into beasts-with-behaviors.  But since the common currency in the system is normal BLOCK!/GROUP!/FENCE!, it may be that most of the creations of these beasts would be transient... existing only long enough to cue the PICK or FOR-EACH or whatever to do its behavior.</p>
+<h2><a name="p-8318-you-dont-know-until-you-try-man_shrugging-4" class="anchor" href="https://rebol.metaeducation.com#p-8318-you-dont-know-until-you-try-man_shrugging-4"></a>You Don't Know Until You Try... <img src="https://rebol.metaeducation.com/images/emoji/twitter/man_shrugging.png?v=14" title=":man_shrugging:" class="emoji" alt=":man_shrugging:" loading="lazy" width="20" height="20"></h2>
+<p>I'm worried about there not being some mechanical terra-firma.  PICK seems foundational.  So perhaps there's some difference here, e.g. between PICK and another operator like SELECT could heed the sigils on the target data (?)  And FOR-EACH seems foundational too, but I think decorating the variable is fair game.</p>
+<p>Anyway, it's an area I'll start experimenting with and report on whether any of the experiments turn out to make things clearer/better or worse.  (!)</p>
+          <p><a href="https://rebol.metaeducation.com/t/reacting-to-tie-to-automate-binding/2462/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/reacting-to-tie-to-automate-binding/2462/1</link>
+        <pubDate>Mon, 19 May 2025 15:46:29 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2462-1</guid>
+        <source url="https://rebol.metaeducation.com/t/reacting-to-tie-to-automate-binding/2462.rss">Reacting to TIE ($) To Automate Binding</source>
+      </item>
+  </channel>
+</rss>

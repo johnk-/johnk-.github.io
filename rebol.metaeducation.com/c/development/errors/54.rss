@@ -1,0 +1,1846 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:discourse="http://www.discourse.org/" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Errors - AltRebol</title>
+    <link>https://rebol.metaeducation.com/c/development/errors/54</link>
+    <description>Topics in the &#39;Errors&#39; category For discussion of error handling and error mechanisms.</description>
+    
+      <lastBuildDate>Fri, 25 Jul 2025 04:59:45 +0000</lastBuildDate>
+      <atom:link href="https://rebol.metaeducation.com/c/development/errors/54.rss" rel="self" type="application/rss+xml" />
+        <item>
+          <title>Packs Decaying To First Item When Others are ERROR!</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Errors</category>
+          <description><![CDATA[
+            <p>The concept of an "undecayable PACK!" came up when I was trying to reason about what should happen when you had things like PACK!s of PACK!s...</p>
+<pre><code>&gt;&gt; x: pack [1 2]
+== \~['1 '2]~\  ; antiform
+
+&gt;&gt; x 
+== 1
+
+&gt;&gt; x: pack [pack [1 2] 3]
+== ???
+</code></pre>
+<p><strong>My belief was that this should panic, rather than do the decay.</strong>  If you truly wanted the first element of an unpacked pack to decay, you could write:</p>
+<pre><code>&gt;&gt; [x]: pack [pack [1 2] 3]
+== \~[~[1 2]~ '3]~\  ; antiform
+
+&gt;&gt; x
+== 1
+</code></pre>
+<p><strong>This created the notion of an undecayable pack.</strong>  The first cut of the undecayable rule was that  that any pack with an unstable antiform in the first spot (GHOST!, PACK!, ERROR!) would panic if you tried to decay it (vs unpack it).</p>
+<h2><a name="p-8553-safety-motivation-dont-let-error-disappear-1" class="anchor" href="https://rebol.metaeducation.com#p-8553-safety-motivation-dont-let-error-disappear-1"></a>Safety Motivation: Don't Let ERROR! Disappear</h2>
+<p>Putting ERROR!s in PACK!s isn't the usual way of doing things.  If a function runs and wants to make you aware of an ERROR!, it should typically return that as the main result of a function...not stow it away inside a pack.  Only if it's the main result can it be reacted to by things like EXCEPT.</p>
+<p>But some cases don't allow the error to be the sole return result.  For instance, EVALUATE:STEP</p>
+<pre><code>[pos ^result]: evaluate:step [fail "abc" ...]
+</code></pre>
+<p>We need the updated position of the code, even if the code FAIL'd.  Hence, EVALUATE can't make its main result an ERROR! in the case of an error result, it has to give back a PACK! which encodes both the error and the new position.</p>
+<p><em>("Has to" is a strong statement... it's possible that the next position could be a field of the error, <a href="https://rebol.metaeducation.com/t/should-evaluate-step-bomb-on-an-error/1491/3">I've discussed some of these odd ideas before</a>.  But it's better to allow errors in packs.)</em></p>
+<p>If you don't receive result as ^META, then the ERROR! wouldn't be able to store in the ^result and would panic:</p>
+<pre><code>[code result]: evaluate:step [fail "abc" ...]  ; not ^result, so panic
+</code></pre>
+<p>But what if you didn't store the result at all?</p>
+<pre><code>code: evaluate:step [fail "abc" ...]  ; ???
+</code></pre>
+<p><strong>I feel like that should panic.</strong>  But why should you have to do an assignment to get the panic?</p>
+<pre><code>evaluate:step [fail "abc" ...]  ; same behavior as when assigned to `code:` ?
+</code></pre>
+<p>That would suggest that if a PACK has an ERROR! in <em>any</em> slot, then should the pack decay and not extract that error into a ^META variable, that error becomes a panic.</p>
+<p>But this thought leads to another invasive thought...</p>
+<h2><a name="p-8553-what-about-errors-in-packs-2" class="anchor" href="https://rebol.metaeducation.com#p-8553-what-about-errors-in-packs-2"></a>...What About ERROR!s In PACK!s?</h2>
+<p>I started by talking about undecayability, e.g. you can't put a PACK! in the first position of a PACK! and have it "double decay".  Decaying happens <em>once</em>.</p>
+<p>And then I discussed decaying when there's an ERROR! in the pack... suggesting that an error at <em>any</em> position (not just the first) which is not unpacked into a ^META-variable should panic.</p>
+<p>But what if you have a PACK! that's <em>not</em> in the first position of a PACK!... ?  Should that be willing to decay silently?</p>
+<pre><code>&gt;&gt; x: pack [1 pack [2 3]]
+== 1  ; silently discarded PACK! in second position...
+</code></pre>
+<p>That may seem harmless, BUT, what if that PACK! contained an ERROR! ?</p>
+<p><em>This led me to theorize that packs which contained unstable antiforms at any position would be "undecayable"</em></p>
+<p>However, that started to feel too strict, when we look at:</p>
+<pre><code>[code result]: evaluate:step [pack [1 2] ...]  ; works, result decays to 1
+
+code: evaluate:step [pack [1 2] ...]  ; innocuous, why shouldn't it work?
+</code></pre>
+<p>And even if I'm assigning the result, <a href="https://rebol.metaeducation.com/t/should-set-word-s-propagate-undecayed-packs/2178">PACK!s propagate in assignments now by default</a></p>
+<pre><code>while [[code result]: evaluate:step code] [
+    ...
+]
+</code></pre>
+<p>It would be a shame if this decayed a PACK! for result, and then refused to decay it for the WHILE, making you write:</p>
+<pre><code>while [[{code} result]: evaluate:step code] [
+    ...
+]
+</code></pre>
+<p>So pre-emptively refusing to toss PACK!s just because they <em>might</em> contain an ERROR! doesn't seem very ergonomic.</p>
+<h2><a name="p-8553-non-first-item-recursive-pack-decay-search-for-error-3" class="anchor" href="https://rebol.metaeducation.com#p-8553-non-first-item-recursive-pack-decay-search-for-error-3"></a>Non-First Item Recursive PACK! Decay Search For ERROR!</h2>
+<p>So... what if any PACK!s which aren't in the first position, that you want to discard, will recursively unpack themselves looking for ERROR!, and if they find any then panic?</p>
+<p>(And ERROR!s which aren't in the first position, and aren't in PACK!, are also sources of panic?)</p>
+<p>This would make the system more robust to dropping errors on the floor.  This might make it more reasonable to say that PACK is willing to pack up errors, generally... today you have to use a special operation:</p>
+<pre><code> pack [1020 fail "won't work"]  ; panics 
+
+ pack* [1020 fail "will work"]  ; allows the error
+</code></pre>
+<p>It's a little bit disconcerting, to imagine that instead of erroring at the moment of the PACK you trust that wherever the pack is going will handle the error.  But really, that only becomes a problem when you're dealing with using PACKs in non-multi-return situations, e.g. you make a PACK and then put it in suspended animation somewhere.</p>
+<p>If you're <em>not</em> putting packs in suspended animation, but "packing with the intent of unpacking", then you're leaving it up to the recipient as to whether they want the error or not.</p>
+<p>All things being equal, having just one PACK primitive is preferable.</p>
+<p>Things do seem to be falling into place in other ways, and I'm sensing that maybe the right thing to do is to say that if you're a client with "pack with intent to store", then you bear the burden of the indefinite lifetime you may give errors in that pack...vs. making it harder to put errors in packs.</p>
+<p><img src="https://rebol.metaeducation.com/images/emoji/twitter/thinking.png?v=14" title=":thinking:" class="emoji only-emoji" alt=":thinking:" loading="lazy" width="20" height="20"></p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/packs-decaying-to-first-item-when-others-are-error/2514">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/packs-decaying-to-first-item-when-others-are-error/2514</link>
+          <pubDate>Fri, 25 Jul 2025 04:59:45 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2514</guid>
+          <source url="https://rebol.metaeducation.com/t/packs-decaying-to-first-item-when-others-are-error/2514.rss">Packs Decaying To First Item When Others are ERROR!</source>
+        </item>
+        <item>
+          <title>When Should Evaluative Constructs Return ERROR! ?</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Errors</category>
+          <description><![CDATA[
+            <p><strong><a href="https://rebol.metaeducation.com/t/panic-vs-return-fail-the-age-of-definitional-errors/1852">Definitional failures</a></strong> have been critical in moving to a robust model of error handling.</p>
+<p>They're an ergonomic concept something like Rust's <strong><code>Result&lt;...&gt;</code></strong>, because they effectively multiplex errors onto a function's return value.  You're expected to triage errors at the moment they happen at a callsite or they promote to divergent panics...which are <a href="https://rebol.metaeducation.com/t/discouraging-the-interception-of-abrupt-failures/1871">not generally intended to be reacted to</a>--your program is conceptually terminated.  To make triage easier there is <a href="https://rebol.metaeducation.com/t/virtual-binding-based-error-propagation-operator/2389">TRAP, the error propagator</a>.</p>
+<p><strong>Compared with R3-Alpha and Red's error-handling, this is night and day.</strong>  They are fundamentally broken/useless.  <em>(Curiously: <a href="https://rebol.metaeducation.com/t/rebol2s-hot-errors-abandoned-by-r3-alpha-red/2505">Rebol2 actually had a concept of "hot errors"</a>, that leaned in the direction of definitional errors, but that direction wasn't pushed through.)</em></p>
+<hr>
+<h2><a name="p-8504-non-terminal-eval-steps-that-dont-triage-will-panic-1" class="anchor" href="https://rebol.metaeducation.com#p-8504-non-terminal-eval-steps-that-dont-triage-will-panic-1"></a>Non-Terminal Eval Steps That Don't Triage Will Panic</h2>
+<p>You can triage an ERROR! that's a result of an expression.  But only if it's the final step:</p>
+<pre><code>&gt;&gt; error? (print "Error is last" 1 / 0)
+Error is last
+== \~okay~\  ; antiform
+
+&gt;&gt; error? (1 / 0 print "Error is first")
+** PANIC: attempt to divide by zero
+</code></pre>
+<p>Any evaluation product that comes after an ERROR! will cause a panic.</p>
+<p>GHOST! is not exempt:</p>
+<pre><code>&gt;&gt; error? (1 / 0 comment "no free pass for ghosts")
+** PANIC: attempt to divide by zero
+</code></pre>
+<p>The reasoning is that just because a function returns a ghost, doesn't mean it doesn't have side effects... or doesn't depend in some way on the previous operation.</p>
+<p>Currently, COMMA! isn't exempt, either:</p>
+<pre><code>&gt;&gt; error? (1 / 0,)
+** PANIC: attempt to divide by zero
+</code></pre>
+<p>This is something I might be willing to bend on, if we believe that:</p>
+<pre><code>(
+    some expression,
+    another expression,
+    yet another expression,
+)
+</code></pre>
+<p>Absolutely has to be equivalent to:</p>
+<pre><code>(
+    some expression,
+    another expression,
+    yet another expression
+)
+</code></pre>
+<p>But mechanically you'd have to scan ahead for any number of commas... and make sure you were at the end of the input after consuming all the commas.  <img src="https://rebol.metaeducation.com/images/emoji/twitter/man_shrugging.png?v=14" title=":man_shrugging:" class="emoji" alt=":man_shrugging:" loading="lazy" width="20" height="20"></p>
+<h2><a name="p-8504-plain-eval-would-act-the-same-as-the-group-above-2" class="anchor" href="https://rebol.metaeducation.com#p-8504-plain-eval-would-act-the-same-as-the-group-above-2"></a>Plain EVAL would act the same as the GROUP! above</h2>
+<p>Only the last step can give an ERROR!.  Previous steps will panic.</p>
+<p>And since branching constructs like an IF or a CASE statement uses EVAL to run their branches, they similarly drop the statement out at the last step. So you can synthesize ERROR! out of branches, without causing the branching construct to panic.</p>
+<h2><a name="p-8504-evaltrap-name-pending-gives-error-at-any-step-3" class="anchor" href="https://rebol.metaeducation.com#p-8504-evaltrap-name-pending-gives-error-at-any-step-3"></a>"EVAL:TRAP" (name pending) Gives Error At Any Step</h2>
+<p>I've proposed EVAL:TRAP as a variation which can stop the evaluation at any step that produces an ERROR!:</p>
+<pre><code>&gt;&gt; error? eval:trap [print "Error is last" 1 / 0]
+Error is last
+== \~okay~\  ; antiform
+
+&gt;&gt; error? (1 / 0 print "Error is first")
+== \~okay~\
+</code></pre>
+<p>So the second case didn't make it to the PRINT, but it didn't PANIC.</p>
+<h1><a name="p-8504-but-how-about-any-and-all-roll_eyes-4" class="anchor" href="https://rebol.metaeducation.com#p-8504-but-how-about-any-and-all-roll_eyes-4"></a>But How About ANY and ALL...?  <img src="https://rebol.metaeducation.com/images/emoji/twitter/roll_eyes.png?v=14" title=":roll_eyes:" class="emoji" alt=":roll_eyes:" loading="lazy" width="20" height="20"></h1>
+<p>The answer may be different.</p>
+<p>You're supposed to reasonably be able to rely on the idea that if ALL gives you a result, it's the result of the final expression.  You thus might be thinking that if you get an error, that error is coming by contract from that last expression.  I'd say it seems reasonably clear that anything but the last expression should panic.</p>
+<p>On the other hand...ANY is not expected to necessarily evaluate all of its clauses... it's supposed to return the first thing that passes its constraint (non-null as the default constraint).  So if it hit an ERROR! early, maybe it should return it?</p>
+<p>I'm not sure.  I'll have to look at use cases.</p>
+<h1><a name="p-8504-and-what-about-loops-5" class="anchor" href="https://rebol.metaeducation.com#p-8504-and-what-about-loops-5"></a>And What About Loops?</h1>
+<p>If loops are willing to return definitional errors out of their body, that makes writing loop wrappers a bit trickier.</p>
+<p>First let's ask about MAP-EACH, what should it do?</p>
+<pre><code>map-each 'x [1 2 3] [either x = 2 [fail "some error"] [x * 10]]
+</code></pre>
+<p>You're getting behaviors that are somewhat equivalent to APPEND.  So it's like you wrote:</p>
+<pre><code>list: []
+append list x * 10
+append list fail "some error"
+</code></pre>
+<p>APPEND doesn't propagate a failure like that.  And I don't see any reason why it should.</p>
+<p>Next, let's consider wrapping loops... e.g. <a href="https://rebol.metaeducation.com/t/demonstrating-for-both-loop-composability-for-the-win/1833">the current formulation of FOR-BOTH</a>:</p>
+<pre><code>for-both: func [var blk1 blk2 body] [
+    return unlift:lite all [
+        lift:lite for-each var blk1 body
+        lift:lite for-each var blk2 body
+    ]
+]
+</code></pre>
+<p>At the moment, LIFT does not lift definitional errors by default, but panics on them.</p>
+<p>So if FOR-EACH is willing to return definitional errors, then you won't get an equivalence between:</p>
+<pre><code>for-each 'x [1] [fail "some error"]  ; definitional error result
+
+for-both 'x [1] [] [fail "some error"]  ; panic
+
+for-both 'x [] [1] [fail "some error"]  ; panic
+</code></pre>
+<p>It might seem that given what I say about ALL above, if LIFT:LITE were willing to leave ERROR! as ERROR! (as well as NULL as NULL, and GHOST! as GHOST!) then it would correctly panic on errors that weren't the last step... BUT... consider:</p>
+<pre><code>all [
+    fail "some error"
+    comment "hmmm"
+]
+</code></pre>
+<p>This runs afoul of my concept of not allowing a next step to run... producing a loophole in composition that is trying to leverage things like invisibility.</p>
+<p><strong>This seems to be the crux of a fairly fundamental problem, regarding the need to be psychic in order to know whether an evaluation is going to be a no-op or not.</strong></p>
+<p>If you're not looking at the loop data, but tell from the outside of the FOR-EACH after-the-fact if it had evaluations or not, then there's no way to know if a failure needs to be terminal.</p>
+<p><em>This suggests that loops should probably panic if the body fails.</em>  They'd have to do so for any step except the last step anyway, and loops don't have an interface for psychically exposing if they're at the last step or not prior to execution.  It defeats composition to require otherwise, and the whole model would have to be redesigned to add this "psychic" aspect... which seems less easy than just saying "no, loops panic if the body fails".</p>
+<h2><a name="p-8504-overall-carry-away-theres-subtleties-6" class="anchor" href="https://rebol.metaeducation.com#p-8504-overall-carry-away-theres-subtleties-6"></a>Overall Carry-away: There's Subtleties</h2>
+<p>Decisions about definitional error propagation appear to be non-obvious.</p>
+<p>panic-ing is a conservative default, and then you can get people to explicitly CATCH and THROW the errors if they need to work around it.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/when-should-evaluative-constructs-return-error/2506">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/when-should-evaluative-constructs-return-error/2506</link>
+          <pubDate>Thu, 10 Jul 2025 11:39:05 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2506</guid>
+          <source url="https://rebol.metaeducation.com/t/when-should-evaluative-constructs-return-error/2506.rss">When Should Evaluative Constructs Return ERROR! ?</source>
+        </item>
+        <item>
+          <title>Getting Out Of ENTRAP-ment</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Errors</category>
+          <description><![CDATA[
+            <p>When antiform ERROR! first arrived, there needed to be a way to capture them.</p>
+<p>I was uncomfortable having the LIFT operator blindly turn an antiform ERROR! into a quasi-ERROR!, because that could sweep things under the rug.  You might have been LIFT-ing because you wanted to capture a PACK! (including VOID) or so you could put a NULL or SPLICE! into a BLOCK!.  Why would you conflate that with error suppression?</p>
+<p>So there was LIFT that didn't meta an ERROR! antiform, and LIFT* that would.</p>
+<p>Now you want to capture an error from an operation.  You've got a situation like:</p>
+<pre><code>result': lift* eval code
+
+if error? unlift result' [
+     let warning: unquasi result'
+     ; ... handle disarmed error (warning) ...
+] else [
+    let result: unlift result'
+    ; ... handle result ...
+]
+</code></pre>
+<p>I thought this was a bit more painful than it needed to be, so I created ENTRAP.</p>
+<pre><code>result': entrap code
+
+if warning? result' [
+     ; ... handle disarmed error (warning) in result' ...
+] else [
+    let result: unlift result'
+    ; ... handle result ...
+]
+</code></pre>
+<p>Not a heck of a lot better.  But saved a bit of boilerplate.</p>
+<h2><a name="p-8250-now-we-can-do-better-1" class="anchor" href="https://rebol.metaeducation.com#p-8250-now-we-can-do-better-1"></a>Now We Can Do Better!</h2>
+<p><strong>(^result: ...)</strong> will write the lifted representation of the evaluation into result, <em>but still return the original result</em>.  So if the original result was an ERROR! it will still be an error out.</p>
+<p>But you can suppress that.  So look at this magic:</p>
+<pre><code>try ^result: eval code  ; TRY suppresses, but meta-ERROR! still wrote to result
+
+if error? ^result [
+     ; ... handle error in ^result ...
+] else [
+    ; ... handle original result as ^result ...
+]
+</code></pre>
+<p><img src="https://rebol.metaeducation.com/images/emoji/twitter/bullseye.png?v=14" title=":bullseye:" class="emoji only-emoji" alt=":bullseye:" loading="lazy" width="20" height="20"></p>
+<h2><a name="p-8250-so-what-then-is-trap-now-2" class="anchor" href="https://rebol.metaeducation.com#p-8250-so-what-then-is-trap-now-2"></a>So What, Then, Is TRAP Now?</h2>
+<p>Right now EVAL only lets you bubble out an error if it's the last step.  Interstitial ERROR! will lead to a PANIC if there's no triage:</p>
+<pre><code>&gt;&gt; error? eval [print "step one" 1 / 0]
+step one
+== \~okay~\  ; antiform
+
+&gt;&gt; error? eval [1 / 0 print "step two"]
+!! PANIC: division by zero
+</code></pre>
+<p>That's kind of a non-negotiable default, because when you branch and pipe ERROR! values around you intend for the error to be the product of the last branch step, not some incidental code that ran before that last step.</p>
+<p>So maybe TRAP is a construct that lets you bail early, getting an error from any step:</p>
+<pre><code>&gt;&gt; error? trap [print "step one" 1 / 0]
+step one
+== \~okay~\  ; antiform
+
+&gt;&gt; error? trap [1 / 0 print "step two"]
+== \~okay~\  ; antiform
+</code></pre>
+<p>Or maybe that's a refinement to EVAL.  I dunno.</p>
+<p>Another thing to point out is that ERROR! is not an exception (panic).  It's a FAIL state that can be piped around.  So using EXCEPT as name for the postfix error handler is a little off:</p>
+<pre><code> eval code except ^e -&gt; [
+    ; handle ERROR!
+ ]
+</code></pre>
+<p>Should that be TRAP ?</p>
+<pre><code> eval code trap ^e -&gt; [
+    ; handle ERROR!
+ ]
+</code></pre>
+<p>Food for thought.  In any case, I'm really pleased to see how (^x: ...) vs. (try ^x: ...) offers the choices I was seeking, in so much cleaner a way.</p>
+            <p><small>3 posts - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/getting-out-of-entrap-ment/2444">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/getting-out-of-entrap-ment/2444</link>
+          <pubDate>Sun, 11 May 2025 11:04:52 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2444</guid>
+          <source url="https://rebol.metaeducation.com/t/getting-out-of-entrap-ment/2444.rss">Getting Out Of ENTRAP-ment</source>
+        </item>
+        <item>
+          <title>Designing a Crashing Function: CRASH</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Errors</category>
+          <description><![CDATA[
+            <p>After being encouraged by AI (and my own intuition on the subject), I am making FAIL take over the "lighter" function of non-divergent error production from the <a href="https://rebol.metaeducation.com/t/naming-consideration-raised-vs-warning/2424/3">apparently-more-divergent-sounding RAISE</a>.</p>
+<p>So... yet another naming musical chairs propagates from that.  I guess PANIC is my favorite of the divergent-error-raising options (as opposed to DIE, and of course we have a completely different concept of what THROW is).  So what FAIL used to do, PANIC can do now.</p>
+<p>Yet internally to the system, <code>panic()</code> has been a funcition to call when  it needs the executable to completely shut down.</p>
+<p>Easy fix for this is to just call that function <code>crash()</code>, and then <code>panic()</code> can mean "do a Rebol-panic" e.g. don't take the interpreter down, just return control to the REPL (or whatever RESCUE operation).</p>
+<p>But curiously... there has been a PANIC native for forcing termination of the interpreter.  I could just rename it to CRASH and move along.  But it does bring up some interesting design points for there being such a function in Rebol at all.</p>
+<h2><a name="p-8205-a-crash-native-must-take-no-evaluative-args-1" class="anchor" href="https://rebol.metaeducation.com#p-8205-a-crash-native-must-take-no-evaluative-args-1"></a>A CRASH Native Must Take No Evaluative Args</h2>
+<p>You don't want a situation like having code that is like <strong><code>crash revrese "string"</code></strong> that has a failure on acquiring its arguments, and does not crash the system.</p>
+<p>If you hit the point of running CRASH that's the point of no return--it shouldn't be able to jump back up to the REPL with an error.</p>
+<p>So CRASH needs to be <code>&lt;endable&gt;</code> in case it's found in a situation like <code>(crash)</code> with no args.  If it takes arguments, those arguments should be dialected in such a way that it isn't possible to run usermode code.  Because the intention is to get out of the interpreter without causing more damage... like you've noticed some corrupted log file and you want out.</p>
+<p>A CRASH Dialect might be able to just output some diagnostic information for you, where you give it variables but none of these get evaluated as expressions which can run function calls...at least not usermode functions.</p>
+<pre><code>crash [
+   "You could have some literal messages..."
+   checkpoint: &lt;one&gt;  ; some literals
+   machine-status: @status  ; inert fetch
+]
+</code></pre>
+<p>If you take away the ability to do evaluations, someone is going to try and write:</p>
+<pre><code>crash compose [
+   "This is potentially dangerous, what if the COMPOSE errors?"
+   checkpoint: (...)  ; requesting an evaluation
+   machine-status: (...)
+]
+</code></pre>
+<p>But I'm saying that would exit the intepreter when CRASH saw that you were trying to get it to run more userspace code.</p>
+<p>Wily people can work around it:</p>
+<pre><code>eval compose:deep [crash [
+   "Well, aren't you clever..."
+   checkpoint: (...)  ; requesting an evaluation
+   machine-status: (...)
+]]
+</code></pre>
+<p>But if you do this, then you are undermining the defense that is designed to make sure there isn't a failure before the crash.</p>
+<h2><a name="p-8205-anyway-i-thought-this-was-interesting-2" class="anchor" href="https://rebol.metaeducation.com#p-8205-anyway-i-thought-this-was-interesting-2"></a>Anyway, I Thought This Was Interesting</h2>
+<p>I hadn't really contemplated the importance of designing CRASH to ensure crashing...but that's pretty cool I think.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/designing-a-crashing-function-crash/2434">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/designing-a-crashing-function-crash/2434</link>
+          <pubDate>Mon, 05 May 2025 09:13:50 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2434</guid>
+          <source url="https://rebol.metaeducation.com/t/designing-a-crashing-function-crash/2434.rss">Designing a Crashing Function: CRASH</source>
+        </item>
+        <item>
+          <title>General Pattern of Avoiding longjmp() and Exceptions</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Errors</category>
+          <description><![CDATA[
+            <p>Historical Rebol would just use longjmp() to cause abrupt exceptions when failing conditions happened.  This crossed an arbitrary number of Rebol stacks in an uncooperative fashion.  The only places that would catch it would be specific points that did a setjmp(), e.g. the Rebol2 version of "TRY".</p>
+<p><em><strong>The more I got to know longjmp() the more I didn't like it.</strong></em></p>
+<p>Ren-C's stackless nature makes it possible to use setjmp() once around the trampoline, and then any longjmp()-based abrupt failures will only disrupt the stack of the native from which it jumps.  The trampoline catches it, and then converts it into a cooperative Rebol-throw-style return result, that bubbles up normally through the call stack.</p>
+<p>And also, there's a clever abstraction of the jumping mechanics that allows you to build using C++ exceptions or longjmp()...the code is stylized in a neat way with macros that look natural but can go either way.</p>
+<p>But still: there are even some platforms that don't offer either facility.  <strong>I think in terms of minimal dependencies, being able to perform normal execution even on platforms with no C++ exceptions or longjmp() is an asset.</strong></p>
+<p>So this has continued pushing forward a philosophy point that we shouldn't depend on longjmp()/exceptions for anything that would be "normal" operation.  Any errors occurring from an "abrupt failure" should basically <strong>not be intercepted</strong> by anything but "weird" development tools... e.g. the console.</p>
+<p>This does mean I'm converting a lot of code like:</p>
+<pre><code> void Do_Some_Stuff(...) {
+     if (Something_I_Dont_Like(...))
+        fail ("Something happened I don't like");  // uncooperative longjmp()
+     ...
+     return;
+ }
+
+ DECLARE_NATIVE(...) {
+     Do_Some_Stuff(...);  // may teleport stack to trampoline, not run next line
+     return OUT;
+}
+</code></pre>
+<p>...to look like:</p>
+<pre><code> Option(Error*) Trap_Do_Some_Stuff(...) {
+     if (Something_I_Dont_Like(...))
+        return ERROR("Something happened I don't like");  // returning error
+     ...
+     return nullptr;
+ }
+
+ DECLARE_NATIVE(...) {
+     Option(Error*) e = Trap_Do_Some_Stuff(...);
+     if (e)
+         return FAIL(unwrap e);  // cooperative failure returned to trampoline
+     return OUT;
+}
+</code></pre>
+<p>At some times I'm a little conflicted over this seeming like make-work -BUT- it isn't.  In addition to meaning this code can have error conditions on platforms with no longjmp() or C++ exceptions, you get a clearer picture of which routines think they might fail in normal operations and don't... so as a caller you can act accordingly.</p>
+<p>There are still abrupt failures, but they're basically things you would think of as being okay if it crashed the interpreter completely... it's just a convenience that things like the console don't crash.  But you should never react to those failures as a way of implementing your program logic.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/general-pattern-of-avoiding-longjmp-and-exceptions/2396">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/general-pattern-of-avoiding-longjmp-and-exceptions/2396</link>
+          <pubDate>Sat, 05 Apr 2025 11:12:00 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2396</guid>
+          <source url="https://rebol.metaeducation.com/t/general-pattern-of-avoiding-longjmp-and-exceptions/2396.rss">General Pattern of Avoiding longjmp() and Exceptions</source>
+        </item>
+        <item>
+          <title>Reduce Bloat, Increase Wikification: Web Error Messages</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Errors</category>
+          <description><![CDATA[
+            <p>We have a situation where giving descriptive errors with strings is often very possible.  But each time you write a long string, that's taking up space:</p>
+<pre><code>if (attr == tail or not Is_Integer(attr))
+     return Error_Bad_Value(attr);
+if (*raw_addr != 0)
+    return Error_User("FFI: duplicate raw memory");
+*raw_addr = cast(uint_64_t, Cell_Int64(attr));
+if (*raw_addr == 0)
+    return Error_User("FFI: void pointer illegal for raw memory");
+</code></pre>
+<p>It's also hardcoding the message into the executable.</p>
+<p>I've been leaning toward the idea that instead of strings embedded into the program or scripts, that instead errors are just their symbol IDs.</p>
+<pre><code>if (attr == tail)
+     return ERROR(REACHED_END);
+if (not Is_Integer(attr)
+     return ERROR(EXPECTED, CANON(INTEGER_X));
+if (*raw_addr != 0)
+    return ERROR_FFI(DUPLICATE_RAW_MEMORY);
+*raw_addr = cast(uint_64_t, Cell_Int64(attr));
+if (*raw_addr == 0)
+    return ERROR_FFI(VOID_POINTER_RAW_MEMORY);
+</code></pre>
+<p>Some error IDs would be for built-ins, others would be extension specific.</p>
+<p>But the idea here is that:</p>
+<pre><code> ERROR(REACHED_END);
+ =&gt; Make_Error(Canon_Symbol(SYM_REACHED_END))
+</code></pre>
+<p>The error creation can be variadic, and take parameters, with validation in debug builds as it does today that the parameter count is right for the error.</p>
+<p>So what you'd wind up getting from something like ERROR(EXPECTED, CANON(INTEGER_X)) would be:</p>
+<pre><code>== #[error! [
+    id: 'expected
+    arg1: 'integer!
+    near: '[...code location...]
+    where: '[...call stack...]
+    file: %file-name.r
+    line: 1020
+]]
+</code></pre>
+<p>And if you didn't have an internet connection, the message would be something like:</p>
+<pre><code>** Error: [/expected integer!]
+** Near: ...
+** Where: ...
+** File: %file-name.r
+** Line: 1020
+(i) Connect to the internet for more descriptive error messages
+</code></pre>
+<h2><a name="p-8111-my-theory-is-1" class="anchor" href="https://rebol.metaeducation.com#p-8111-my-theory-is-1"></a>My Theory Is...</h2>
+<ul>
+<li>
+<p>If you have an internet connection, then a message can be pulled from the network on demand for what should be displayed.</p>
+<ul>
+<li>Ideally you should also have an option to go to a wiki page where people write about things that may cause that error, what it means, and what to do about it.</li>
+</ul>
+</li>
+<li>
+<p>If you <em>don't</em> have an internet connection, then you are likely operating in a restricted and spare environment of some kind, in which you won't see the absence of a long and flowery message to be that big a deal.  Having the ID and the error arguments should be enough.</p>
+</li>
+</ul>
+<p>If you wanted to build an executable that pulled all the known error messages off the network (or from the local files that are used to produce answers on the network) and snapshotted them to ship in the EXE, you could do that.  There'd be an option for it.</p>
+<h2><a name="p-8111-how-to-turn-error-ids-into-urls-2" class="anchor" href="https://rebol.metaeducation.com#p-8111-how-to-turn-error-ids-into-urls-2"></a>How To Turn Error IDs Into URLs?</h2>
+<p>This is something that's been nagging me for a while.</p>
+<p>R3-Alpha's error table <strong><a href="https://github.com/rebol/rebol/blob/25033f897b2bd466068d7663563cd3ff64740b94/src/boot/errors.r"><code>%errors.r</code></a></strong> has categories in it:</p>
+<pre><code>Throw: [...]
+Note: [...]
+Syntax: [...]
+Script: [...]
+Math: [...]
+Access: [...]
+Command: [...]
+resv700: [...]
+User: [...]
+Internal: [...]
+</code></pre>
+<p>This was based on the idea that giving errors numbers was meaningful or useful.  I don't think the numbering is meaningful, and the categories may not be either.</p>
+<p>It seems to me that the only thing that would be useful would be some way of grouping errors together so that you'd be able to find them on a server.</p>
+<p>This all requires some more thinking, but it's a direction I've been leaning in.</p>
+            <p><small>3 posts - 2 participants</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/reduce-bloat-increase-wikification-web-error-messages/2395">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/reduce-bloat-increase-wikification-web-error-messages/2395</link>
+          <pubDate>Sat, 05 Apr 2025 10:49:55 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2395</guid>
+          <source url="https://rebol.metaeducation.com/t/reduce-bloat-increase-wikification-web-error-messages/2395.rss">Reduce Bloat, Increase Wikification: Web Error Messages</source>
+        </item>
+        <item>
+          <title>Virtual-Binding-Based &quot;Error Propagation Operator&quot; :exploding_head:</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Errors</category>
+          <description><![CDATA[
+            <p>In Rust, if you define your function interface as possibly returning an Error, then you might find a circumstance where you call a function whose error you wish to propagate up to become your function's error.</p>
+<p>Here's how you'd traditionally write something like that, in a case where it potentially propagates an error from one of two calls:</p>
+<pre><code>fn read_username_from_file_traditional() -&gt; Result&lt;String, io::Error&gt; {
+    let f = match File::open("username.txt") {
+        Ok(file) =&gt; file,
+        Err(e) =&gt; return Err(e),
+    };
+    
+    let mut username = String::new();
+    match f.read_to_string(&amp;mut username) {
+        Ok(_) =&gt; Ok(username),
+        Err(e) =&gt; Err(e),
+    }
+}
+</code></pre>
+<p>But there's an application of <strong>"the <code>?</code> operator"</strong> (which doesn't really have another name) which will do this propagation for you.</p>
+<pre><code>fn read_username_from_file() -&gt; Result&lt;String, io::Error&gt; {
+    let mut username = String::new();
+    File::open("username.txt")?.read_to_string(&amp;mut username)?;
+    Ok(username)
+}
+</code></pre>
+<h2><a name="p-8092-historically-we-couldnt-do-things-like-this-1" class="anchor" href="https://rebol.metaeducation.com#p-8092-historically-we-couldnt-do-things-like-this-1"></a>Historically We Couldn't Do Things Like This</h2>
+<p>There was no way for such an operator to be able to know what the concept of RETURN was.</p>
+<p>Hence you see things like:</p>
+<pre><code>change: combinator [
+    "Substitute a match with new data"
+    return: [~#change~]
+    parser [action!]
+    replacer [action!]  ; !!! How to say result is used here?
+    &lt;local&gt; ^replacement
+][
+    [^ remainder]: parser input except e -&gt; [  ; first find end position
+        return fail e
+    ]
+
+    [^replacement #]: replacer input except e -&gt; [
+        return fail e
+    ]
+
+    ; CHANGE returns tail, use as new remainder
+    ;
+    remainder: change:part input ^replacement remainder
+    return ~#change~
+]
+</code></pre>
+<h2><a name="p-8092-but-virtual-binding-means-we-could-do-it-2" class="anchor" href="https://rebol.metaeducation.com#p-8092-but-virtual-binding-means-we-could-do-it-2"></a>But Virtual Binding Means We <em>COULD</em> Do It</h2>
+<p>I'm pretty dead-set on using <strong>?</strong> for OPT.  But let's say we were using <strong><code>!!</code></strong> for this.</p>
+<p>The behavior would be like writing this at the callsite:</p>
+<pre><code>let ^result: some-call xxx yyy zzz
+if error? ^result [return ^result]
+result: ^result
+</code></pre>
+<p>So you could rewrite the above as:</p>
+<pre><code>change: combinator [
+    "Substitute a match with new data"
+    return: [~#change~]
+    parser [action!]
+    replacer [action!]  ; !!! How to say result is used here?
+    &lt;local&gt; ^replacement
+][
+    [^ remainder]: !! parser input  ; first find end position
+    [^replacement #]: !! replacer input
+
+    ; CHANGE returns tail, use as new remainder
+    ;
+    remainder: change:part input ^replacement remainder
+    return ~#change~
+]
+</code></pre>
+<p><strong>That's awesome.</strong>  I don't know that I love the <strong><code>!!</code></strong> for the name.  As the comment above shows, I use <code>!!!</code> for attention.  One exclamation point?</p>
+<pre><code>    [^ remainder]: ! parser input  ; first find end position
+    [^replacement' #]: ! replacer input
+</code></pre>
+<p>That's too slight.  Something out of left field... maybe a visual indication of "pass this error up?"</p>
+<pre><code>    [^ remainder]: --^ parser input  ; first find end position
+    [^replacement' #]: --^ replacer input
+</code></pre>
+<p>Or something to indicate what you're passing up, like <code>*</code> for "problem"?</p>
+<pre><code>    [^ remainder]: *--^ parser input  ; first find end position
+    [^replacement #]: *--^ replacer input
+</code></pre>
+<p>Interesting looking ideas... but would be a caret-in-word exception.  <img src="https://rebol.metaeducation.com/images/emoji/twitter/frowning.png?v=14" title=":frowning:" class="emoji" alt=":frowning:" loading="lazy" width="20" height="20">  <em>(There's not--I suppose--any particular reason why you can't have carets in words if they're not at the head...we allow it for tick marks.)</em></p>
+<h2><a name="p-8092-nuance-of-slashes-i-realized-3" class="anchor" href="https://rebol.metaeducation.com#p-8092-nuance-of-slashes-i-realized-3"></a>Nuance of Slashes I Realized</h2>
+<p>I've mentioned the goal that if you write something like <strong>not/even?</strong> that would act as if you had written <strong>not even?</strong>.  I presumed that wouldn't be useful typically, but it would be useful if you were using a terminal slash, and trying to pass the cascade of functions as a single value somewhere, e.g.</p>
+<pre><code> &gt;&gt; match not/even?/ 7 
+ == 7
+</code></pre>
+<p><em>BUT</em> there's a rule in infix deferred processing that it runs "one expression evaluation to the left".</p>
+<p>This means <strong><code>!!/foo</code></strong> could be used to <em>not disrupt the infix deferred logic</em>.  It's more general than just this case, which is awesome.  But it definitely helps here.</p>
+<h2><a name="p-8092-ill-write-it-up-but-it-needs-a-name-4" class="anchor" href="https://rebol.metaeducation.com#p-8092-ill-write-it-up-but-it-needs-a-name-4"></a>I'll Write It Up, But It Needs a Name...</h2>
+<p>Suggestions, please!</p>
+            <p><small>8 posts - 2 participants</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/virtual-binding-based-error-propagation-operator/2389">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/virtual-binding-based-error-propagation-operator/2389</link>
+          <pubDate>Fri, 28 Mar 2025 23:29:47 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2389</guid>
+          <source url="https://rebol.metaeducation.com/t/virtual-binding-based-error-propagation-operator/2389.rss">Virtual-Binding-Based &quot;Error Propagation Operator&quot; :exploding_head:</source>
+        </item>
+        <item>
+          <title>Full-Band Return Values from Generators/Yielders</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Errors</category>
+          <description><![CDATA[
+            <p>Definitional Errors came into PARSE as an answer for how to make it possible to return any value... simply make a failed parse a definitional error.  Not only does it mean that NULL can be a legitimate synthesized product that you don't conflate with failure, but it also means that parse failures can give back more information in the error about what went wrong <em>(farthest parse point reached, etc.)</em>...</p>
+<p>Looking at another problem where a sentinel NULL had been used... there's <a href="https://rebol.metaeducation.com/t/yielder-and-generator-and-thinking-about-coroutines/1311">Generators and Yielders</a>:</p>
+<pre><code>&gt;&gt; g: generator [print "A" yield 1, print "B" yield 2, print "C"]
+
+&gt;&gt; g
+A
+== 1
+
+&gt;&gt; g
+B
+== 2
+
+&gt;&gt; g
+C
+== ~null~  ; anti
+
+&gt;&gt; g
+== ~null~  ; anti
+
+&gt;&gt; g
+== ~null~  ; anti
+</code></pre>
+<p>But Generators and Yielders predate antiforms in general... they came at a time where there were just two forms of NULL: "heavy" and "light".  So the thought was that if you wanted to actually yield null, it would be the heavy form.</p>
+<pre><code>&gt;&gt; g: generator ["Start", yield null, print "Done"]
+
+&gt;&gt; g
+Start
+== ~[~null~]~  ; anti
+
+&gt;&gt; g
+Done
+== ~null~  ; anti
+</code></pre>
+<p>But this isn't nearly as good as using a specific raised error.  If NULL is truly out of band, then you could use <strong><code>try g</code></strong> to get null when there are no more values.</p>
+<p>If you try to YIELD or RETURN a raised error, then it would become an abrupt failure.  So you'd be assured that the only time you'd ever get a definitional error back from a generator or yielder would be if it had been exhausted.</p>
+<h2><a name="p-7884-pack-returns-for-things-like-key-and-value-in-objects-1" class="anchor" href="https://rebol.metaeducation.com#p-7884-pack-returns-for-things-like-key-and-value-in-objects-1"></a>PACK returns for things like KEY and VALUE in objects?</h2>
+<p>As the enumeration routines are retooled to be based on generator functions, it struck me as very cool if generators returned packs, which could be decayed:</p>
+<pre><code>&gt;&gt; obj: make object! [a: 10 b: 20 c: 30]
+
+&gt;&gt; g: each obj
+
+&gt;&gt; g
+; first in pack of 2 items
+== a
+
+&gt;&gt; meta g
+== ~['b '20]~
+
+&gt;&gt; [key {val}]: g
+== 30
+
+&gt;&gt; key
+== c
+
+&gt;&gt; g
+** Error: Generator/Yielder exhausted
+
+&gt;&gt; try g
+== ~null~  ; anti
+</code></pre>
+<p>That's really cool, and seems like it would go along with decaying:</p>
+<pre><code>for 'key each obj [...]
+
+for [key val] each obj [...]
+</code></pre>
+<p>This looks pretty nice, however blocks used in FOR-EACH scenarios like this haven't meant "unpack", it has meant keep getting items and assign them to each.</p>
+<p>It seems like it would be unfortunate if you had to write the object unpacking as:</p>
+<pre><code>for [~[key val]~] each obj [...]
+</code></pre>
+<p>But that does seem sort of like what you'd have to do in order to make it generalized.  It doesn't look <em>that</em> bad, and it does have a theory behind it...</p>
+<pre><code>&gt;&gt; obj: make object! [a: 10 b: 20 c: 30]
+
+&gt;&gt; for [~[key val]~ :otherkey] each obj [  ; leading colon for optionality
+       print ["key:" key]
+       print ["val:" val]
+       if otherkey [
+           print ["otherkey:" otherkey]
+       ]
+   ]
+
+key: a
+val: 10
+otherkey: b
+key: c
+val: 30
+</code></pre>
+<p>This assumes that plain blocks might be taken for some other intent in the FOR.  If it were not:</p>
+<pre><code>for [[key val] :otherkey] each obj [...]
+</code></pre>
+<p>But I had been thinking that plain BLOCK! would likely be good for type checking (<span class="mention">@hiiamboris</span> has some experiments in this vein):</p>
+<pre><code>for [x [integer!] y [tag!]] each [1 &lt;a&gt; 2 &lt;b&gt;] [....]
+</code></pre>
+<h2><a name="p-7884-big-design-space-but-full-band-returns-opens-it-up-2" class="anchor" href="https://rebol.metaeducation.com#p-7884-big-design-space-but-full-band-returns-opens-it-up-2"></a>Big Design Space, but Full-Band Returns Opens It Up</h2>
+<p>I'd let the Generator and Yielder experiments atrophy while working on other things.  But I stopped today to try and get the basics working again, and it's interesting to see how isotopes bring a lot to the table...as they seem to have done with nearly everything.</p>
+            <p><small>2 posts - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/full-band-return-values-from-generators-yielders/2329">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/full-band-return-values-from-generators-yielders/2329</link>
+          <pubDate>Sun, 10 Nov 2024 19:25:54 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2329</guid>
+          <source url="https://rebol.metaeducation.com/t/full-band-return-values-from-generators-yielders/2329.rss">Full-Band Return Values from Generators/Yielders</source>
+        </item>
+        <item>
+          <title>Making FAIL Stand Out With Antiform TAG!</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Errors</category>
+          <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="2278">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"><a href="https://rebol.metaeducation.com/t/tripwire-in-the-wild/2278/1">TRIPWIRE in The Wild</a></div>
+<blockquote>
+<p>But with <strong><a href="https://rebol.metaeducation.com/t/antiform-tag-as-triggers-an-error-on-access-type/2170">antiform tags</a></strong>, you can embed a message into the unset variable:</p>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">&gt;&gt; state: ~&lt;INITIALIZE-STATE hasn't been called yet&gt;~
+
+&gt;&gt; state
+** Script Error: state is ~&lt;INITIALIZE-STATE hasn't been called yet&gt;~ antiform
+** See ^(...) and GET/ANY
+</code></pre>
+</blockquote>
+</aside>
+<p>I have another use of TRIPWIRE that I don't know if it's good or bad, but...</p>
+<hr>
+<p>I've always wanted FAIL to stand out more.  When it first was invented (and Ren-C was case-insensitive), I would type FAIL in uppercase to get it:</p>
+<pre><code>foo: func [x [integer! text!]] [
+    switch/type x [
+        integer! [print "It's an integer"]
+        text! [print "It's a text"]
+        FAIL "unreachable"
+    ]
+]
+</code></pre>
+<p>Then I came up with the idea to use QUASI-WORD!s (that would evaluate to antiform words):</p>
+<pre><code>foo: func [x [integer! text!]] [
+    switch/type x [
+        integer! [print "It's an integer"]
+        text! [print "It's a text"]
+        fail ~unreachable~
+    ]
+]
+</code></pre>
+<p>I thought it looked cool and drew attention more than <strong><code>fail "unreachable"</code></strong>, while being the same number of characters.  It acted the same, but cost a bit less due to the interning of the word.</p>
+<p>But now, <a href="https://rebol.metaeducation.com/t/renaming-antiword-time-to-call-it-keyword/2277">"keywords" are restricted to a finite system set</a>.   So by necessity, this has changed to use quasiform/antiform TAG!s:</p>
+<pre><code>foo: func [x [integer! text!]] [
+    switch/type x [
+        integer! [print "It's an integer"]
+        text! [print "It's a text"]
+        fail ~&lt;unreachable&gt;~
+    ]
+]
+</code></pre>
+<p>Now it's two more characters, doesn't cost any less than a string, and at the moment still acts the same as a string.  Is it still a useful thing?  Compared with:</p>
+<pre><code>foo: func [x [integer! text!]] [
+    switch/type x [
+        integer! [print "It's an integer"]
+        text! [print "It's a text"]
+        fail "unreachable"
+    ]
+]
+</code></pre>
+<p>I truly like that you can "see" the error better when it's <strong><code>~&lt;unreachable&gt;~</code></strong>...and go "oh, there's an error there".  I imagine this being particularly cool with syntax highlighting.</p>
+<p>To make that visibility advantage systemic, would it be reasonable to say that all FAILs take antiform tags and not strings?  Then if you have a message in a text string you would have to say <strong><code>fail [msg]</code></strong> instead of just <strong><code>fail msg</code></strong>.  I don't think that's terribly oppressive.</p>
+<p>I don't completely like the idea of it being a choice/synonym, because then people will just stylize their code differently and inconsistently...the same person even making different choices in the same file.  But it could just be a synonym and let you pick what you like for the situation, and maybe that's good.</p>
+<p>Or maybe it's a dumb feature.  I don't know.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/making-fail-stand-out-with-antiform-tag/2282">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/making-fail-stand-out-with-antiform-tag/2282</link>
+          <pubDate>Mon, 16 Sep 2024 13:31:27 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2282</guid>
+          <source url="https://rebol.metaeducation.com/t/making-fail-stand-out-with-antiform-tag/2282.rss">Making FAIL Stand Out With Antiform TAG!</source>
+        </item>
+        <item>
+          <title>Avoid Raised Errors in PACK! (But Feel The Power!)</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Errors</category>
+          <description><![CDATA[
+            <p>I haven't been completely thrilled about being able to put ERROR! antiforms in parameter packs.  But initially, I allowed it:</p>
+<pre><code>&gt;&gt; block: []
+== []
+
+&gt;&gt; pack [take block, 10 + 20]
+; first in pack of length 2
+== \~&amp;[warning! [
+    type: 'Script
+    id: 'nothing-to-take
+    message: "Can't TAKE, no value available (consider TRY TAKE)"
+    near: '[take [] **]
+    where: '[take reduce pack console]
+    file: ~null~
+    line: 1
+]]~\  ; antiform (error!)
+</code></pre>
+<p>Honestly this seems wrong. I allow you to PACK a PACK, and that's okay. But glossing over the error at time of packing I do not like.</p>
+<p>I much prefer:</p>
+<pre><code>&gt;&gt; pack [take block, 10 + 20]
+** Script Error: Can't TAKE, no value available (consider TRY TAKE)
+</code></pre>
+<h2><a name="p-7360-only-one-use-case-maxmatch-d-and-maxmatch-chttpsgithubcommetaeducationren-cblob8516f0fca8ddce40a97e7647a087dc55e065cf3btestsparseexamplesmaxmatchparsetestreb-1" class="anchor" href="https://rebol.metaeducation.com#p-7360-only-one-use-case-maxmatch-d-and-maxmatch-chttpsgithubcommetaeducationren-cblob8516f0fca8ddce40a97e7647a087dc55e065cf3btestsparseexamplesmaxmatchparsetestreb-1"></a>Only One Use Case: <a href="https://github.com/metaeducation/ren-c/blob/8516f0fca8ddce40a97e7647a087dc55e065cf3b/tests/parse/examples/maxmatch.parse.test.reb">MAXMATCH-D (and MAXMATCH-C)</a></h2>
+<p>In practice, only one place was making use of the ability to put raised errors in packs:</p>
+<pre><code>maxmatch-D: combinator [  ; "(D)efault"
+    "Match maximum of two rules, keeping side effects of both if match"
+    return: "Result of the longest match (favors first parser if equal)"
+       [any-value? pack?]
+    parser1 [action?]
+    parser2 [action?]
+    &lt;local&gt; result1' result2' remainder1 remainder2
+][
+    [~^result1'~ remainder1]: parser1 input except e -&gt; [
+        pack [fail e, null]
+    ]
+    [~^result2'~ remainder2]: parser2 input except e -&gt; [
+        pack [fail e, null]
+    ]
+    if error? unlift result2' [  ; parser2 didn't succeed
+        if error? unlift result1' [
+            return unlift result1'  ; neither succeeded
+        ]
+    ] else [  ; parser2 succeeded
+        any [
+            error? unlift result1'
+            (index of remainder1) &lt; (index of remainder2)
+        ] then [
+            remainder: remainder2
+            return unlift result2'
+        ]
+    ]
+    remainder: remainder1
+    return unlift result1'
+]
+</code></pre>
+<p>Two parsers here are called with two results, and this tries to handle the case of when one "result" is a raised error...putting it into the same slot where a result would be.</p>
+<p>The problem is that the EXCEPT statement is producing an expression that is targeting a pack.  And in the first slot of that pack is a potentially-anything-value... anything but a raised error, that is.  If you try to cheat and put a non-raised error in that slot, how would you know the parser you called wasn't just generating an ERROR! value to pass around?  You need another state.</p>
+<h2><a name="p-7360-no-other-choice-or-is-there-2" class="anchor" href="https://rebol.metaeducation.com#p-7360-no-other-choice-or-is-there-2"></a>No Other Choice... Or... Is There?</h2>
+<p>The second slot is a series position.  You could poke a plain error there, and by virtue of seeing the <code>remainder1</code> is an ERROR! and not an ANY-SERIES! you'll know that parser1 raised an error.</p>
+<p>So instead of:</p>
+<pre><code>[~^result1'~ remainder1]: parser1 input except e -&gt; [
+    pack [fail e, null]
+]
+</code></pre>
+<p>You'd do:</p>
+<pre><code>[^result1' remainder1]: parser1 input except e -&gt; [
+    pack [~, e]  ; say result1 is trash, and remainder1 is e
+]
+</code></pre>
+<p>Your variable names are a bit weird here, because it's actually <strong><code>remainder-or-error-1</code></strong>.  But you've built an expression that targets the pack.</p>
+<p><strong>But why are we being so stingy about variables?</strong>  Why not expand the pack to three items?</p>
+<pre><code>[^result1' remainder1 :error1]: parser1 input except e -&gt; [
+     pack [~, ~, e]
+]
+</code></pre>
+<p>(You have to use the <strong><code>:error1</code></strong> syntax if the non-erroring parser case returns a pack with only two items in it.  Leading colon means you're okay with fewer items in the source pack and it will set error1 to null in that case.)</p>
+<p>Or... why are we bothering to make the error case use EXCEPT?  You have TRAP for definitional errors as well.  It returns NULL if no raised error, and the non-raised form of the ERROR! if there was one:</p>
+<pre><code>&gt;&gt; trap [1 + 2]
+== ~null~  ; anti
+
+&gt;&gt; trap [1 / 0]
+== &amp;[warning! [
+    type: 'Math
+    id: 'zero-divide
+    message: "attempt to divide by zero"
+    near: '[1 / 0 **]
+    where: '[/ entrap trap console]
+    file: ~null~
+    line: 1
+]]
+</code></pre>
+<p>Leveraging that gives you basically the cleanest code you could ask for:</p>
+<pre><code>error1: trap [[^result1' remainder1]: parser1 input]
+</code></pre>
+<p><em>(Let me point out that the ability to intercept a definitional error coming from PARSER1 by having it "pass through" a SET-BLOCK! (or a SET-WORD!) is a feature to enable precisely this scenario.  None of the assignments will be performed. And <strong>that is the limit</strong> of how far it will jump and be allowed to TRAP before it will be promoted to a failure.  If you're not up to speed on definitional errors, <a href="https://rebol.metaeducation.com/t/fail-vs-return-raise-the-new-age-of-definitional-errors/1852">read up on them</a>, because they are absolutely critical to coherent error interception.)</em></p>
+<h2><a name="p-7360-so-forget-about-raised-errors-in-pack-3" class="anchor" href="https://rebol.metaeducation.com#p-7360-so-forget-about-raised-errors-in-pack-3"></a>So Forget About Raised Errors in PACK!</h2>
+<p>It's a terrible idea.  I'm making PACK abrupt fail if you try to put a raised error in it.</p>
+<p>Compare the original maxmatch-D to this one using TRAP:</p>
+<pre><code>maxmatch-D: combinator [  ; "(D)efault"
+    "Match maximum of two rules, keeping side effects of both if match"
+    return: "Result of the longest match (favors first parser if equal)"
+       [any-value? pack?]
+    parser1 [action?]
+    parser2 [action?]
+    &lt;local&gt; error1 error2 result1' result2' remainder1 remainder2
+][
+    error1: trap [[^result1' remainder1]: parser1 input]
+    error2: trap [[^result2' remainder2]: parser2 input]
+    if error2 [  ; parser2 didn't succeed
+        if error1 [
+            return fail error1  ; neither succeeded
+        ]
+    ] else [  ; parser2 succeeded
+        any [
+            error1
+            (index of remainder1) &lt; (index of remainder2)
+        ] then [
+            remainder: remainder2
+            return unlift result2'
+        ]
+    ]
+    remainder: remainder1
+    return unlift result1'
+]
+</code></pre>
+<p>Ren-C gives you power and flexibility to solve your problems in better ways... take advantage of that!</p>
+<p><img src="https://rebol.metaeducation.com/images/emoji/twitter/facepunch.png?v=14" title=":facepunch:" class="emoji only-emoji" alt=":facepunch:" loading="lazy" width="20" height="20"></p>
+            <p><small>2 posts - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/avoid-raised-errors-in-pack-but-feel-the-power/2206">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/avoid-raised-errors-in-pack-but-feel-the-power/2206</link>
+          <pubDate>Thu, 22 Aug 2024 19:13:38 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2206</guid>
+          <source url="https://rebol.metaeducation.com/t/avoid-raised-errors-in-pack-but-feel-the-power/2206.rss">Avoid Raised Errors in PACK! (But Feel The Power!)</source>
+        </item>
+        <item>
+          <title>Making CALL Raise a (definitional) Error For Bad Exit Codes</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Errors</category>
+          <description><![CDATA[
+            <p>Before definitional errors existed, I noticed that <a href="https://rebol.metaeducation.com/t/the-need-to-rethink-error/1371/2">@gchiu had some uses of CALL</a> that weren't checking the return code.</p>
+<pre><code>call [
+    gs -sDEVICE=pngmono -o (join root "-%02d.png") -r600 (pdfname)
+]
+
+call [
+    gs -sDEVICE=eps2write -sPAPERSIZE=a4
+        -o (join root "-%02d.eps") (pdfname)
+]
+</code></pre>
+<p>I wanted the default to raise an error if the <strong>gs</strong> (GhostScript) process did not return a 0 exit code.  But I wanted that error to be a result of CALL... so it would be distinct from other errors (like a typo in the code in the groups inside, <code>pfdname</code> instead of <code>pdfname</code> or whatever).</p>
+<p><code>CALL</code> was already a wrapper on top of an internal <code>CALL*</code> function, so I thought "why not expand upon that?"</p>
+<h2><a name="p-6741-a-cool-enclose-of-an-augment-of-a-specialize-1" class="anchor" href="https://rebol.metaeducation.com#p-6741-a-cool-enclose-of-an-augment-of-a-specialize-1"></a>A Cool ENCLOSE of an AUGMENT of a SPECIALIZE!</h2>
+<pre><code>call: enclose (
+    augment (specialize :call* [wait: #]) [
+        :relax "If exit code is non-zero, return the integer vs. raising error"
+    ]
+) func [f [frame!]] [
+    let relax: f.relax
+    let result: eval f
+    if relax or (result = 0) [
+        return result
+    ]
+    return fail make error! compose [
+        message: ["Process returned non-zero exit code:" exit-code]
+        exit-code: (result)
+    ]
+]
+</code></pre>
+<p>I think that's pretty neat.</p>
+<p>It twists the CALL* function so that it always waits (vs. spawn a separate process and return a process ID to wait on).</p>
+<p>Then it offers a :RELAX setting for getting the exit code back, if you don't want the definitional error behavior.</p>
+<p>But then, by default it will RAISE an error.   You can get that error via EXCEPT or you can do TRY CALL if you just want to ignore any errors.</p>
+<h2><a name="p-6741-issue-exposed-whos-actually-to-blame-2" class="anchor" href="https://rebol.metaeducation.com#p-6741-issue-exposed-whos-actually-to-blame-2"></a>Issue Exposed: Who's Actually To Blame?</h2>
+<p>While making this I noticed that there were actually several points of failure:</p>
+<ul>
+<li>
+<p>The guts of CALL might not be able to find the file you're asking to execute</p>
+</li>
+<li>
+<p>The executable may run, but return a non-zero exit code</p>
+</li>
+<li>
+<p>If you're running through CALL:SHELL and delegating to it to call a process, then the shell may have its own exit status distinct from the process you tried to call</p>
+</li>
+</ul>
+<p>It seems there's not really any great way to untangle the return results of a shell from that of a process it executes.  <a href="https://en.wikipedia.org/wiki/Exit_status">Here's some of the informal conventions of UNIX shells</a>:</p>
+<blockquote>
+<p><em>"When a command is terminated by a signal whose number is N, a shell sets the variable $? to a value greater than 128. Most shells use 128+N, while ksh93 uses 256+N."</em></p>
+<p><em>"If a command is not found, the shell should return a status of 127. If a command is found but is not executable, the return status should be 126."</em></p>
+</blockquote>
+<p>So I'm a little shaky on what exactly a TRY CALL should be ignoring.  It's one thing to ignore a program's exit status, and another to ignore whether the program was on disk at all.</p>
+<p>TAKE of a BLOCK only has a definitional failure when the block is empty, so you know what TRY TAKE means.  But it may be that you should more or less never say TRY CALL, and always specifically handle the errors that arise from it.  I think this may be a common theme of definitional errors coming out of complicated functions which have more than a single way to fail.</p>
+<p>But... in any case, it's progress.  Because we're not conflating typos or other incidental errors to those that are coming from CALL.  And I like the default that it has an error on non-zero exit statuses.</p>
+            <p><small>3 posts - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/making-call-raise-a-definitional-error-for-bad-exit-codes/2068">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/making-call-raise-a-definitional-error-for-bad-exit-codes/2068</link>
+          <pubDate>Fri, 08 Dec 2023 02:49:41 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2068</guid>
+          <source url="https://rebol.metaeducation.com/t/making-call-raise-a-definitional-error-for-bad-exit-codes/2068.rss">Making CALL Raise a (definitional) Error For Bad Exit Codes</source>
+        </item>
+        <item>
+          <title>Should SET-WORD!s Have &quot;Raised Error Interception&quot;?</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Errors</category>
+          <description><![CDATA[
+            <p>Division by zero is a simple example of something that produces a "definitional error".  <em>It's considered to be "emitted" by the division</em>, and if you try to "move on" without handling it, the raised error becomes a failure that <a href="https://rebol.metaeducation.com/t/discouraging-use-of-trap/1871">you can only catch at some top level by SYS.UTIL.RECOVER</a>.</p>
+<p>For instance:</p>
+<pre><code>&gt;&gt; 1 / 0, 2 + 0
+** Math Error: attempt to divide by zero
+** Where: / console
+** Near: [1 / 0 **, 2 + ***]
+</code></pre>
+<p>What happened was that <strong>1 / 0</strong> evaluated, but rather than forcing a "hard failure" (e.g. running FAIL) it instead <em>returned a raised error</em>.  There's an opportunity if that raised error were to be intercepted, but in this case it just moseyed along to the next expression... so the raised error was promoted to a failure.</p>
+<p>However a ^META oriented function can trap that, and react to it, allowing you to continue.  EXCEPT is such a function:</p>
+<pre><code>&gt;&gt; 1 / 0 except e -&gt; [print ["The error was" e.id]], 2 + 0
+The error was zero-divide
+== 2
+</code></pre>
+<p>One thing that pretty obviously shouldn't count as "moving on" would be parentheses.  Adding parentheses shouldn't change the situation, they just pass any raised errors through:</p>
+<pre><code>&gt;&gt; (1 / 0) except e -&gt; [print ["The error was" e.id]], 2 + 0
+The error was zero-divide
+== 2
+
+&gt;&gt; ((((1 / 0)))) except e -&gt; [print ["The error was" e.id]], 2 + 0
+The error was zero-divide
+== 2
+</code></pre>
+<p><strong>But what about things like SET-WORD!s?</strong>  Right now, it does not raise an error and just skips the assignment, and lets the code continue:</p>
+<pre><code>&gt;&gt; num: &lt;before&gt;
+
+&gt;&gt; (num: 1 / 0) except e -&gt; [print ["The error was" e.id]], 2 + 0
+The error was zero-divide
+== 2
+
+&gt;&gt; num
+== &lt;before&gt;
+</code></pre>
+<p><strong>This is a useful pattern, but if we do it for SET-WORD!s then we have to ask whether it should be done for SET the function as well...</strong></p>
+<pre><code>&gt;&gt; (set 'num 1 / 0) except e -&gt; [print ["The error was" e.id]], 2 + 0
+The error was zero-divide
+== 2
+</code></pre>
+<p>If we do this then the SET function has to take its argument of the value to assign as a ^META argument.  Because raised errors can't be stored in variables, and function parameters are communicated via variables.</p>
+<p>This does make SET a more complicated function, and any functions like it might also become complicated.  It's a hard decision to condemn all SET-like functions to take their arguments as ^META so they can proxy any errors and not perform the assignment.</p>
+<p>I'll probably have more to say about this, but for the moment both SET and SET-WORD! react to definitional failures by <em>not performing the assignment</em> and <em>propagating the raised error</em>.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/should-set-word-s-have-raised-error-interception/2015">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/should-set-word-s-have-raised-error-interception/2015</link>
+          <pubDate>Tue, 07 Feb 2023 02:52:51 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2015</guid>
+          <source url="https://rebol.metaeducation.com/t/should-set-word-s-have-raised-error-interception/2015.rss">Should SET-WORD!s Have &quot;Raised Error Interception&quot;?</source>
+        </item>
+        <item>
+          <title>The FAIL That Wins Big: Combinator Definitional Errors</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Errors</category>
+          <description><![CDATA[
+            <h2><a name="p-6266-announcing-another-major-step-forward-1" class="anchor" href="https://rebol.metaeducation.com#p-6266-announcing-another-major-step-forward-1"></a>Announcing Another Major Step Forward...</h2>
+<p>As the wheels of thought began to churn around TRY, it came to seem clear that it had a higher purpose in defusing definitional errors.</p>
+<p>This led to a thought about how if UPARSE were to allow calling arbitrary decoders (like DEBIN) that would deliver informative errors when the input wasn't a fit...that those errors would need to be interpreted as "soft" parse match failures...moving on to the next alternate.</p>
+<p>That called back to another musing about why we don't use the readable word TRY instead of OPT in PARSE when we want to say a component of a parse is optional.</p>
+<p>But so long as the combinator-skinned-decoders are communicating in errors, <strong>why not make combinators always indicate failure with definitional errors?</strong></p>
+<ul>
+<li>
+<p>This would free up NULL as a synthesized product to just be an ordinary result, which had been a sticking point trying to wrangle the dual needs of isotopic nulls in a fully generic dialect.</p>
+</li>
+<li>
+<p>The parsers would be able to generate diverse and informative errors, that in debug modes could be tagged with where they came from.  Parsers could distinguish between tunneling an error generated by another parser and emitting their own...providing more information for tracing tools.</p>
+</li>
+</ul>
+<p><strong>It only took a couple of days to do...</strong> most of which was just sorting out a lot of edge cases from being a very thorough client of the relatively untested definitional error infrastructure.</p>
+<p>But expect good things from this!</p>
+<h2><a name="p-6266-a-bit-of-history-how-the-previous-model-came-to-be-2" class="anchor" href="https://rebol.metaeducation.com#p-6266-a-bit-of-history-how-the-previous-model-came-to-be-2"></a>A Bit Of History: How The Previous Model Came To Be</h2>
+<p>When UPARSE was first conceived <em>(a mere year and a half ago)</em>, the combinators were responsible for returning three things:</p>
+<ul>
+<li>
+<p>Whether the parser succeeded or not</p>
+</li>
+<li>
+<p>A synthesized value</p>
+</li>
+<li>
+<p>How much of the input was consumed (represented by a series position of the new "current" parse position, which could potentially be at the tail)</p>
+</li>
+</ul>
+<p><em>(COLLECT and friends necessitated some more nuances, but you only have to worry about it manually if you need fine-grained control.  So most combinators look like these are the only results in play, with the other outputs being "autopiped" around by the machinery.)</em></p>
+<p>The second two results would only be applicable if the parser succeeded.  So rather than return three results, it aimed to return just two... and fold together the success with some invalid state for the other result.</p>
+<p>At first this seemed like it would be best to fold with the series position.  This would mean that the position could be either a series value or NULL.  That way, NULL could be a valid synthesized product.  This came in handy for things like OPT:</p>
+<pre><code>&gt;&gt; x: y: &lt;before&gt;
+
+&gt;&gt; did parse [1020] [x: integer! y: opt integer!]
+== #[true]  ; parse succeeded
+
+&gt;&gt; x
+== 1020
+
+&gt;&gt; y
+; null
+</code></pre>
+<p>The first draft used the fledgling multi-return facility to do this, and it had the nice property of working with ELSE.  So when a combinator called a parser that failed, it was easy to handle that failure, e.g. to propagate that failure along:</p>
+<pre><code>[pos synthesized]: parser input else [return null]
+</code></pre>
+<h2><a name="p-6266-but-this-was-reversed-for-reasons-3" class="anchor" href="https://rebol.metaeducation.com#p-6266-but-this-was-reversed-for-reasons-3"></a>But This Was Reversed... For... Reasons</h2>
+<p>A mechanical issue came up that VOID could only be represented by the primary return result of a function.  If a multi-return argument was going to be returned and convey voids, it would have to use the ^META protocol... and the caller would have to be explicitly aware that the result they got would be pre-quoted by convention.</p>
+<p>But I also noticed that some combinators didn't want to advance the input at all, only operate to transform one synthesized product into another.  Or that they didn't really need to plug into the overall parse architecture.  It seemed like making combinators match as closely to a "normal" function--by putting their synthesized result as the primary result--just made sense.</p>
+<p>NULL isotopes were just coming on the scene, which gave a potential way to get out of this: a successful parser which wanted to return NULL would return the isotope form.  Pure NULL would be reserved as the signal for isotopic failure.  This meant the reversed parameters would be able to work:</p>
+<pre><code>[synthesized pos]: parser input else [return null]
+</code></pre>
+<p>Internally, to OPT something like <strong><code>y: opt integer!</code></strong> would not return NULL, but a ~null~ isotope.</p>
+<h2><a name="p-6266-but-now-its-done-with-definitional-errors-4" class="anchor" href="https://rebol.metaeducation.com#p-6266-but-now-its-done-with-definitional-errors-4"></a>But Now, It's Done With Definitional Errors!</h2>
+<pre><code>[synthesized pos]: parser input except e -&gt; [return raise e]
+</code></pre>
+<p>Here you see the error being intercepted, and then passed on.  NULL is free to be dealt with as a normal product without interference.  And there's a difference between generating a new error (tagging it with the location in the parse rules and the context) vs. just passing on one that was generated by a subparser--you are actually keeping a record of what happened, to show in logs or otherwise.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/the-fail-that-wins-big-combinator-definitional-errors/1922">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/the-fail-that-wins-big-combinator-definitional-errors/1922</link>
+          <pubDate>Fri, 19 Aug 2022 02:27:10 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-1922</guid>
+          <source url="https://rebol.metaeducation.com/t/the-fail-that-wins-big-combinator-definitional-errors/1922.rss">The FAIL That Wins Big: Combinator Definitional Errors</source>
+        </item>
+        <item>
+          <title>Recovering Values From A Raised Definitional Error</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Errors</category>
+          <description><![CDATA[
+            <p>So TRY is a way to convert definitional errors into soft failure, e.g. a NULL</p>
+<pre><code>&gt;&gt; first null
+** Error: FIRST on NULL requires use of TRY
+
+&gt;&gt; try first null
+== ~null~  ; anti
+</code></pre>
+<p>I had a thought that instead of just always returning NULL, there might be a way to have constructs raise errors that carried a payload... which would give a "fallback" value that represented something you might want vs. NULL in the case of acknowledging the error.  <em>(The only rule would be that a function emitting such an error should not have any side effects if it emits one of these errors.)</em></p>
+<p>So various constructs could offer meanings for what the TRY actually does:</p>
+<pre><code>&gt;&gt; unquote first ['abc]
+== abc
+
+&gt;&gt; unquote first [def]
+** Error: Can't Unquote Plain WORD!, use TRY if Intentional
+
+&gt;&gt; try unquote first [def]
+== def
+</code></pre>
+<p>Another application: at one point I suggested it would be nice to be able to have a COLLECT that didn't actually KEEP anything return NULL, so it could be ELSE-reactive.  That meant if you really wanted an empty block, you'd have to do something like <strong><code>any [collect [...], copy []]</code></strong> which was ugly.  But the error could hold a freshly-copied block to be the result of a TRY:</p>
+<pre><code>&gt;&gt; collect [keep if false [&lt;not kept&gt;]]
+** Error: COLLECT didn't KEEP anything, use TRY if intended
+
+&gt;&gt; try collect [keep if false [&lt;not kept&gt;]]
+== []
+</code></pre>
+<p>There are various technical reasons why ELSE can't be reactive to TRY-style errors.  One fairly important one would be that if you used ELSE with a branching construct, it wouldn't be able to tell the difference between a branch that had a TRY-error and no branch taken:</p>
+<pre><code>&gt;&gt; case [true [unquote first [def]]] else [print "Took branch, runs due to UNQUOTE"]
+Took branch, runs due to UNQUOTE  ; this would be bad
+</code></pre>
+<p>But... maybe the trick could be that if you pass ELSE a function that takes an argument, it assumes that means you handle TRY-style errors?  (Because otherwise it could only be void/null... why take an arg?)</p>
+<pre><code>&gt;&gt; (unquote first [def]) else arg -&gt; [print ["TRY error" arg]]
+TRY error def
+</code></pre>
+<p>It's a weird thought.  Anyway, just wanted to write up this parallel-universe TRY concept...</p>
+            <p><small>2 posts - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/recovering-values-from-a-raised-definitional-error/1912">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/recovering-values-from-a-raised-definitional-error/1912</link>
+          <pubDate>Tue, 09 Aug 2022 13:28:03 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-1912</guid>
+          <source url="https://rebol.metaeducation.com/t/recovering-values-from-a-raised-definitional-error/1912.rss">Recovering Values From A Raised Definitional Error</source>
+        </item>
+        <item>
+          <title>The VOID-in-NULL-out Protocol</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Errors</category>
+          <description><![CDATA[
+            <p>In traditional Redbol, if you wrote a random chain like like <strong>first select block second options</strong>, there was the question of how you would manage the situation of any of these things failing.</p>
+<p>People would request lenience... to say more operations should assume that if they got a NONE! input that they should just return a NONE! output.  But this would give those chains no error locality... you'd get a NONE! at the output and not know what failed.  The FIRST?  The SELECT?  The SECOND...?</p>
+<p>You can see <a href="https://github.com/red/red/issues/3144">DocKimbel's response to a request that INDEX? NONE be NONE</a>:</p>
+<blockquote>
+<blockquote>
+<p><strong>meijeru</strong><br>
+<em>"There are precedents for built-in functions on series which yield none for none."</em></p>
+</blockquote>
+<p><strong>DocKimbel</strong><br>
+<em>"Yes, but the less of them we have, the better, as they lower the robustness of user code, by making some error cases passing silently. The goal of such none-transparency is to be able to chain calls and do nothing in case of <code>none</code>, avoiding an extra <code>either</code> construct. In the above case, it still requires an extra conditional construct (<code>any</code>), so that is not the same use-case as for other none-transparent functions (like <code>remove</code>)."</em></p>
+</blockquote>
+<h2><a name="p-6059-but-i-didnt-give-up-so-easily-1" class="anchor" href="https://rebol.metaeducation.com#p-6059-but-i-didnt-give-up-so-easily-1"></a>But I Didn't Give Up So Easily...</h2>
+<p>The strategy cooked up for Ren-C is called "VOID-in-NULL-out".</p>
+<p>There is an asymmetry created, in which certain functions take VOID as input, but then just return NULL out.</p>
+<p>Then OPT can turn nulls into VOID.</p>
+<p>Since (nearly) no function naturally takes NULL as an input, this creates a dynamic where you'd put as many OPT in a chain as you felt was warranted, if you expected any steps could fail.  So perhaps <strong>first opt select block opt second options</strong>.  A reader could tell which operations could potentially fail using this method.</p>
+<p>It has shown systemic success:</p>
+<pre><code>&gt;&gt; case [null [[a [b] c]]]
+== \~null~\  ; antiform
+
+&gt;&gt; second case [null [[a [b] c]]]
+** Error: SECOND doesn't take NULL as input (use OPT to opt-out)
+
+&gt;&gt; opt case [null [[a [b] c]]]
+== \~[]~\  ; antiform "void"
+
+&gt;&gt; second opt case [null [[a [b] c]]]
+== \~null~\  ; antiform
+
+&gt;&gt; first second opt case [null [[a [b] c]]]
+** Error: FIRST doesn't take NULL as input (use OPT to opt-out)
+
+&gt;&gt; first opt second opt case [null [[a [b] c]]]
+== \~null~\  ; antiform
+
+&gt;&gt; first opt second opt case [okay [[a [b] c]]]
+== b
+</code></pre>
+<h2><a name="p-6059-void-is-a-better-choice-than-null-space-etc-2" class="anchor" href="https://rebol.metaeducation.com#p-6059-void-is-a-better-choice-than-null-space-etc-2"></a>VOID is a Better Choice Than NULL, SPACE, etc.</h2>
+<p>Prior to the invention of void, the strategy was tried as "SPACE-in-NULL-out".  But this created problems since sometimes SPACE was meaningful as input.</p>
+<p>VOID has all the properties we're looking for, here.  It's basically about as out-of-band as you can get.</p>
+<ul>
+<li>
+<p>Like NULL, it can't be stored in blocks</p>
+</li>
+<li>
+<p>There's a nice operator for turning NULL into VOID and pass everything else through called OPT.</p>
+</li>
+<li>
+<p>The majority of routines don't have natural meanings for void arguments, so "no op" is <em>usually</em> the best reaction to "hey, you got a void".</p>
+<ul>
+<li>
+<p>There are exceptions, e.g. functions like REPLACE which receive voids can interpret them as a desire to use an empty replacement vs. a no-op:</p>
+<pre><code>&gt;&gt; replace [a b c] 'b void
+== [a c]
+
+&gt;&gt; replace "abc" "b" void
+== "ac"
+</code></pre>
+</li>
+</ul>
+</li>
+<li>
+<p>Void has the appealing character of being able to polymorphically mean nothing regardless of what it's substituting in, so you don't have to switch between <strong><code>spread []</code></strong> and <strong><code>""</code></strong> when working on blocks vs. strings.</p>
+</li>
+</ul>
+            <p><small>2 posts - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/the-void-in-null-out-protocol/1880">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/the-void-in-null-out-protocol/1880</link>
+          <pubDate>Thu, 14 Jul 2022 04:21:12 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-1880</guid>
+          <source url="https://rebol.metaeducation.com/t/the-void-in-null-out-protocol/1880.rss">The VOID-in-NULL-out Protocol</source>
+        </item>
+        <item>
+          <title>Discouraging The Interception of Divergent Panics</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Errors</category>
+          <description><![CDATA[
+            <p>With <a href="https://rebol.metaeducation.com/t/fail-vs-return-fail-the-new-age-of-definitional-failures/1852">definitional errors</a>, the landscape changes considerably for how we think about error handling.</p>
+<p><strong>In this world, there are <em>not a lot of good reasons</em> to use what I call "RECOVER".</strong></p>
+<p>By its design, RECOVER will intercept <em>any</em> error in code at <em>any</em> depth.  This is what Rebol2's ATTEMPT and TRY did as well, <strong>but this made them not the right tool for hardly any code</strong>:</p>
+<pre><code>rebol2&gt;&gt; attempt [print "Attempting to read file" read %nonexistent-file.txt]
+Attempting to read file
+== none
+
+rebol2&gt;&gt; attempt [print "Attempting but made typos" rread %nonexistent-file.txt]
+== none
+</code></pre>
+<p>The problem isn't just about typos.  It's about the illusion that there's something you can do to react to a panic coming form a completely arbitrary stack level beneath you...when the constructs you were using didn't even understand it well enough to pipe it through to their output.</p>
+<p><strong>In almost all cases, an error intercepted by "RECOVER" cannot be reacted to sanely...it has to be reported.  Such use cases should only be things like consoles and test suites.</strong></p>
+<p>It's for this reason that languages like Rust pretty much enforce a panic when a function call produces an error the caller doesn't immediately and explicitly handle.</p>
+<p>And our case is even more compelling.  For example: How many places is it ever a good idea to sweep a typo under the rug, and just run some other code?</p>
+<h2><a name="p-6036-might-we-make-it-look-more-special-to-discourage-use-1" class="anchor" href="https://rebol.metaeducation.com#p-6036-might-we-make-it-look-more-special-to-discourage-use-1"></a>Might We Make It Look More "Special" To Discourage Use?</h2>
+<p>I thought at minimum we should move it to a place that shows it's more of a "system utility" than a "language feature".</p>
+<p>So calling it <strong><code>SYS.UTIL/RECOVER</code></strong> would be a step in that direction.</p>
+<p>Things to think about.  Anyway, I've made some progress on definitional errors in the scanner and with TO and MAKE operations, so some of the things people like to intercept (like conversions) should work correctly with attempt now.</p>
+<p>For instance, in this finite-integer world... an out of range error:</p>
+<pre><code>&gt;&gt; try to integer! "10483143873258978444434343"
+== \~null~\  ; antiform
+
+&gt;&gt; try to intgeer! "10483143873258978444434343"
+** Script Error: intgeer! word is attached to a context, but unassigned
+
+&gt;&gt; to integer! "10483143873258978444434343" except e -&gt; [print ["Error:" mold e]]
+Error: make warning! [
+    type: 'Script
+    id: 'bad-make-arg
+    message: ["cannot MAKE/TO" :arg1 "from:" :arg2]
+    near: [to integer! "10483143873258978444434343" ** except e -&gt; ***]
+    where: [to args]
+    file: '
+    line: 1
+    arg1: #[datatype! integer!]
+    arg2: "10483143873258978444434343"
+]
+</code></pre>
+<p>Should be a more specific error, now that I look at that.  But I guess it just wasn't.</p>
+            <p><small>4 posts - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/discouraging-the-interception-of-divergent-panics/1871">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/discouraging-the-interception-of-divergent-panics/1871</link>
+          <pubDate>Sun, 10 Jul 2022 16:05:31 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-1871</guid>
+          <source url="https://rebol.metaeducation.com/t/discouraging-the-interception-of-divergent-panics/1871.rss">Discouraging The Interception of Divergent Panics</source>
+        </item>
+        <item>
+          <title>PANIC vs. RETURN FAIL: The Age of Definitional Errors!</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Errors</category>
+          <description><![CDATA[
+            <p>The latest groundbreaking isotope-powered concept of Ren-C is... <em><strong>the definitional error</strong></em></p>
+<h2><a name="p-5959-but-first-we-have-to-define-failure-1" class="anchor" href="https://rebol.metaeducation.com#p-5959-but-first-we-have-to-define-failure-1"></a>But First, We Have To Define Failure...</h2>
+<p>Definitional errors now are an antiform state.  The non-antiform state is currently called a WARNING!.  So ERROR! is what you get if you UNLIFT a QUASI WARNING!</p>
+<pre><code>&gt;&gt; quasi 'null
+== ~null~
+
+&gt;&gt; unlift quasi 'null
+== \~null~\  ; antiform
+
+&gt;&gt; unlift quasi make warning! "foo"
+** Error: foo
+** Near: [*** make warning! "foo" **]
+</code></pre>
+<p>Or just ANTI it, which does the same thing.</p>
+<p>Being an <em>unstable</em> antiform, you can't store errors in variables directly.  But if you try to, <em>it elevates the error state to an exception</em>, e.g. it "panics".</p>
+<pre><code>&gt;&gt; var: anti make warning! "foo"
+!! PANIC: foo
+** Near: [*** make warning! "foo" **]
+</code></pre>
+<p>There's also a special behavior that they cannot occur in generic midstream evaluations, or they'll also be elevated to an exception:</p>
+<pre><code>&gt;&gt; (1 + 2 anti make warning! "foo" 3 + 4)
+!! PANIC: foo
+** Near: [*** make warning! "foo" ** 3 + 4]
+</code></pre>
+<p>So far this doesn't seem so profound.  Rebol2 and Red can DO an ERROR! and raise an exception...which you also can't store in a variable or keep going in the middle of an expression.</p>
+<p>BUT here's the twist:</p>
+<pre><code>&gt;&gt; lift anti make warning! "foo"
+== ~#[warning! [
+    type: '
+    id: '
+    message: "foo"
+    near: [*** make warning! "foo" **]
+    file: '
+    line: 1
+]]~
+</code></pre>
+<ul>
+<li>
+<p>The ANTI did not trigger an irrecoverable error.</p>
+</li>
+<li>
+<p>It created an antiform warning state, and then waited to see if something would LIFT it or not.</p>
+</li>
+<li>
+<p>There was a LIFT and so it gave you back the QUASI WARNING! state</p>
+</li>
+</ul>
+<p>This is a crucial difference, as we will see.  But first...</p>
+<p><strong>NOTE: I will be using the operation FAIL in the remaining text, instead of ANTI on WARNING!</strong>  So approximately this:</p>
+<pre><code>fail: lambda [reason [text! block! error!]] [anti make warning! reason]
+</code></pre>
+<h2><a name="p-5959-lets-address-the-definitional-part-2" class="anchor" href="https://rebol.metaeducation.com#p-5959-lets-address-the-definitional-part-2"></a>Let's Address the "Definitional" Part</h2>
+<p>What I mean when I say "definitional" is that there's a difference between these two cases:</p>
+<pre><code>bigtest: func [n] [
+   if n &lt; 1020 [fail [n "is not big"]]
+   print [n "sure is a big number"]
+] 
+
+definitional-bigtest: func [n] [
+   if n &lt; 1020 [return fail [n "is not big"]]
+   print [n "sure is a big number"]
+] 
+</code></pre>
+<p>You may not appreciate the difference if you call them directly</p>
+<pre><code>&gt;&gt; bigtest 304
+!! PANIC: 304 is not big
+** Where: fail if bigtest args
+** Near: [fail [n "is not big"] **]
+
+&gt;&gt; definitional-bigtest 304
+** Error: 304 is not big
+** Where: fail if definitional-bigtest args
+** Near: [return fail [n "is not big"] **]
+</code></pre>
+<p>But try using LIFT and you'll see they are different:</p>
+<pre><code>&gt;&gt; lift bigtest 304
+!! PANIC: 304 is not big
+** Where: raise if bigtest args
+** Near: [raise [n "is not big"] **]
+
+&gt;&gt; lift definitional-bigtest 304
+== ~&amp;[warning! [
+    type: '
+    id: '
+    message: "304 is not big"
+    near: [return raise [n "is not big"] **]
+    where: [raise if definitional-bigtest args]
+    file: '
+    line: 1
+]]~
+</code></pre>
+<p><strong>Functions can now choose to tell us when an error was something <em>they</em> knew about and engaged, vs. something incidental that could have come from any call beneath them in the stack.</strong></p>
+<p>Sound important?  <em>It should.</em></p>
+<h2><a name="p-5959-now-blast-some-musichttpswwwyoutubecomwatchvygp0nsnslg4-for-this-watershed-moment-3" class="anchor" href="https://rebol.metaeducation.com#p-5959-now-blast-some-musichttpswwwyoutubecomwatchvygp0nsnslg4-for-this-watershed-moment-3"></a>NOW <a href="https://www.youtube.com/watch?v=YGP0nsnSlg4">BLAST SOME MUSIC</a> FOR THIS WATERSHED MOMENT</h2>
+<p>I've added EXCEPT, which is an infix operation that reacts to failures...while THEN and ELSE just pass them on.</p>
+<pre><code>&gt;&gt; fail "foo" then [print "THEN"] else [print "ELSE"] except [print "EXCEPT"]
+EXCEPT
+</code></pre>
+<p>As we saw in the beginning, if <em>someone</em> doesn't handle the failure it gets elevated to an exception eventually:</p>
+<pre><code>&gt;&gt; fail "foo" then [print "THEN"] else [print "ELSE"]
+!! PANIC: foo
+** Near: [raise "foo" ** then [print "THEN"] else [print "ELSE"]]
+</code></pre>
+<p>Remember the old, bad ATTEMPT?  It would evaluate a block as usual but return NONE in the event there was an error encountered:</p>
+<pre><code>rebol2&gt;&gt; attempt [print "Attempting to read file" read %nonexistent-file.txt]
+Attempting to read file
+== none
+
+rebol2&gt;&gt; attempt [print "Attempting but made typos" rread %nonexistent-file.txt]
+== none
+</code></pre>
+<p><strong>It was too dangerous to use.</strong>  Note that it can't distinguish an error it could sensibly react to (e.g. an error coming from READ failing) from an error it cannot (in this case a typo of RREAD instead of READ, but it could be anything.)</p>
+<p>With READ upgraded to turn its file-not-found error to be definitional, you can use TRY based on definitional errors for safety!  <sub>(<strong><a href="https://rebol.metaeducation.com/t/repeat-1-attempt-not-as-useless-as-it-looks/2480">ATTEMPT is something non-error related, now...</a></strong>)</sub></p>
+<pre><code>&gt;&gt; try (print "Attempting to read file" read %nonexistent-file.txt)
+Attempting to read file
+== ~null~  ; anti
+
+&gt;&gt; try (print "Attempting but made typos" rread %nonexistent-file.txt)
+Attempting but made typos
+!! PANIC: rread word is attached to a context, but unassigned
+** Near: [rread ** %nonexistent-file.txt]
+</code></pre>
+<p>(TRY will give you NULL in the event of an error, and can only react to the last evaluation in the expression.  If you want to protect a series of operations in the style of old-ATTEMPT, you can use RESCUE... but you'll have to move capture of the return result inside the RESCUE block, since it returns either the un-antiformed error or null.)</p>
+<p>It will take time for natives to be audited and have their random PANICs turned to be definitional-FAIL-when-applicable.  Until then, most won't have errors that can be intercepted like this.</p>
+<p>But other than that...</p>
+<h1><a name="p-5959-its-here-its-now-its-committed-4" class="anchor" href="https://rebol.metaeducation.com#p-5959-its-here-its-now-its-committed-4"></a>It's Here.  It's Now.  It's Committed!</h1>
+<p><img src="https://rebol.metaeducation.com/images/emoji/twitter/boom.png?v=14" title=":boom:" class="emoji only-emoji" alt=":boom:" loading="lazy" width="20" height="20"></p>
+<h2><a name="p-5959-note-that-non-definitional-panic-exists-5" class="anchor" href="https://rebol.metaeducation.com#p-5959-note-that-non-definitional-panic-exists-5"></a>Note That Non-Definitional Panic Exists...</h2>
+<p>If you want a <a href="https://en.wikipedia.org/wiki/Divergence_(computer_science)">divergent function</a> that immediately go to an exception state, use PANIC.</p>
+<p>That's clearer than calling FAIL with no RETURN, where a reader can't tell if it's going to be piped along and eventually RETURN'd or LIFT-ed somewhere.</p>
+<pre><code>return case [
+    ... many pages of code ...
+    ... [fail "Some error"]  ; need to be able to say PANIC here if you meant that
+    ... many pages of code ...
+ ]
+</code></pre>
+<p>When writing a function and deciding if an error should be RETURN FAIL or PANIC, think about the use case.  Do you feel that the call is fundamentally malformed (in the way a type checking error on a parameter would be thought of as a mistake), or did you understand what was asked clearly...but just couldn't do it?</p>
+<p>It's subtle, but I think the pattern is emerging pretty clearly of when you should PANIC vs. RETURN FAIL.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/panic-vs-return-fail-the-age-of-definitional-errors/1852">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/panic-vs-return-fail-the-age-of-definitional-errors/1852</link>
+          <pubDate>Tue, 28 Jun 2022 02:17:23 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-1852</guid>
+          <source url="https://rebol.metaeducation.com/t/panic-vs-return-fail-the-age-of-definitional-errors/1852.rss">PANIC vs. RETURN FAIL: The Age of Definitional Errors!</source>
+        </item>
+        <item>
+          <title>About the Errors category</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Errors</category>
+          <description><![CDATA[
+            <p>For discussion of error handling and error mechanisms.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/about-the-errors-category/1734">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/about-the-errors-category/1734</link>
+          <pubDate>Sat, 02 Oct 2021 19:54:57 +0000</pubDate>
+          <discourse:topicPinned>Yes</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-1734</guid>
+          <source url="https://rebol.metaeducation.com/t/about-the-errors-category/1734.rss">About the Errors category</source>
+        </item>
+        <item>
+          <title>Should EVALUATE:STEP bomb on an error?</title>
+          <dc:creator><![CDATA[rgchris]]></dc:creator>
+          <category>Errors</category>
+          <description><![CDATA[
+            <p>Currently if you try something bad in EVALUATE:STEP, it throws an error:</p>
+<pre><code>&gt;&gt; evaluate:step [unspaced null]
+** Script Error: unspaced requires line argument to not be null
+</code></pre>
+<p>As EVALUATE:STEP is a relatively low-level service, it would seem more likely one would want to handle the error on the same basis as other possible return values:</p>
+<pre><code>&gt;&gt; [position product]: evaluate:step [unspaced null foo bar]
+== [foo bar]
+
+&gt;&gt; product
+== &lt;&lt;unspaced-null&gt;&gt;  ; some error you can handle
+</code></pre>
+<p>In this case, the bomb isn't particularly informative and seems reasonable to say <em>'user beware—assume errors will happen'</em>. It's kind of difficult to work around too.</p>
+<p>This sort of puts it in the same class as TRAP with different semantics:</p>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">trap [ok ok something bad] =&gt; [**something-bad null]
+trap [ok ok] =&gt; [null ok]
+evaluate [something bad ok ok] =&gt; [[ok ok] **something-bad ]
+evaluate [ok ok] =&gt; [ok [ok]]
+</code></pre>
+<p>I guess the wrinkle here is how do you determine where <code>something bad</code> ends and <code>ok ok</code> resumes? That may or may not be obvious.</p>
+            <p><small>4 posts - 2 participants</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/should-evaluate-step-bomb-on-an-error/1491">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/should-evaluate-step-bomb-on-an-error/1491</link>
+          <pubDate>Sat, 06 Feb 2021 06:24:54 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-1491</guid>
+          <source url="https://rebol.metaeducation.com/t/should-evaluate-step-bomb-on-an-error/1491.rss">Should EVALUATE:STEP bomb on an error?</source>
+        </item>
+        <item>
+          <title>The Need To Rethink ERROR!</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Errors</category>
+          <description><![CDATA[
+            <p>Looking around at how people deal with failure conditions, <em>there's a pretty strong trend against exceptions--a trend which has grown stronger in the last batch of popular languages</em>.</p>
+<p>Exceptions operate on a dubious principle: that a trigger condition originating transitively in a deep stack of code can be meaningfully handled when passed up through intermediary stacks.  There's an uncomfortable violation of abstraction: you are no longer dealing with a return result that was clearly formalized in the contract between caller-and-callee.  <em>"The function you called couldn't handle an error... but you're trying to do it without even knowing what that function called that failed...?"</em></p>
+<p>Even exception advocates agree that they should not be used lightly...the name suggests it is only for "exceptional" circumstances.  So things that are very reasonable to expect to occur during operation--like a filesystem API trying to open the file and it not being there--should fit into the normal return results.  This is a slippery slope and subject to what your program considers "normal"...but the intent is that it's supposed to be more for things like "ran out of memory" or "network cable was unplugged during transfer".</p>
+<p>But there are many who are against exceptions.  e.g. Google's is against them: <a href="https://google.github.io/styleguide/cppguide.html#Exceptions"><em>"We do not use C++ exceptions."</em></a>  When the pros and cons are weighed, they think it's just not worth it.</p>
+<p>Rebol code that uses TRAP (old TRY) or ATTEMPT frequently shows that Rebol has an even greater weakness of the approach than usual: any arbitrary typo inside the executing code can be interpreted as the wrong kind of failure.  Conflating a syntax error with something like file-not-found is much too easy.</p>
+<p>Another key contributor to exception unpopularity is <strong>exceptions don't work well with asynchronous programming</strong>.  Code that triggered a request can be off the stack while a handler is running.  So there is nowhere to put a <code>catch {}</code> above the stack for the problem.</p>
+<h2><a name="p-4163-emergent-pattern-branching-returns-1" class="anchor" href="https://rebol.metaeducation.com#p-4163-emergent-pattern-branching-returns-1"></a>Emergent Pattern: Branching Returns</h2>
+<p>Across languages you see a consistent pattern of functions formalizing the return of a branched result: either a "successful" return or an "error" return...and labeling the return value as such.</p>
+<ul>
+<li>
+<p>Haskell has "the <a href="https://wiki.haskell.org/Handling_errors_in_Haskell#Error_using_the_Either_type"><code>Either</code></a> monad"...which bundles a value with a label of "left" and "right".  By convention, if the value is labeled "left" it is an error value...and if it is labeled "right" it is a successful return.  There is no "umbrella" error datatype--so strings labeled "left" or other common tuples are typically used.</p>
+</li>
+<li>
+<p>Haskell-inspired Rust has <a href="https://doc.rust-lang.org/stable/rust-by-example/error/result.html"><code>result</code></a>, which has a similar labeling scheme...though it specializes the purpose and gives the labels the names "Ok" and "Err".  It suggests (but does not enforce) that Err-labeled values be instances of the <a href="https://doc.rust-lang.org/std/error/trait.Error.html"><code>std::error::Error</code></a> datatype...which meets the basic expectations of what an error should be able to do (e.g. print itself out, show a call stack of where it originated).</p>
+</li>
+<li>
+<p>JavaScript ES6 handles asynchronous scenarios by making it so that <code>async</code> functions don't return their result with <code>return</code>, but with either <code>resolve()</code> or <code>reject()</code>.  If resolve is called, then callsites will trigger <code>then()</code> handling, otherwise they will trigger <code>catch()</code> handling.  If <code>await</code> is used vs. then/catch, a failed promise will resort to throwing the error (e.g. an exception).</p>
+</li>
+<li>
+<p>Node.js used the <a href="https://nodejs.org/en/knowledge/errors/what-are-the-error-conventions/">"callback convention"</a> where asynchronous functions return errors as the first parameter to a callback, and if that is null the other arguments are assumed valid...but this is now typically <a href="https://medium.com/better-programming/converting-callbacks-to-promises-like-a-pro-in-node-js-f5d4d466a1a7">converted into ES6 promises</a> where errors produce</p>
+</li>
+<li>
+<p>Go uses <a href="https://www.digitalocean.com/community/tutorials/handling-errors-in-go#:~:text=When%20a%20function%20returns%20multiple,value%20to%20a%20zero%20value.">multiple return values for errors</a>, with a convention that the <em>last</em> value in the return sequence is the error...with all other values being "zero values" of their type.</p>
+</li>
+</ul>
+<p>So if your own unsatisfying experiences with "throw/catch" and "fail/trap" solutions isn't enough to convince you...there's a pretty strong batch of added evidence.</p>
+<h2><a name="p-4163-using-the-parts-in-the-box-effectively-2" class="anchor" href="https://rebol.metaeducation.com#p-4163-using-the-parts-in-the-box-effectively-2"></a>Using The Parts In The Box Effectively</h2>
+<p>Something I had in the back of my mind ever since THEN could conveniently take a parameter value via lambdas, was what if ELSE could too.</p>
+<p>At the moment ELSE only triggers on NULL.  But what might happen if THEN didn't take ERROR!s or nulls, but ELSE did.  Something like:</p>
+<pre><code> (make error! "how about this?") then value -&gt; [
+     print ["This would not run:" value]
+ ] else error -&gt; [
+     print ["This would run:" error]
+ ]
+</code></pre>
+<p>But that crude sketch shows a weak basis for doing error handling:</p>
+<ul>
+<li>
+<p>It operates in the "single return result" realm...so to use it, you'd have to conflate ERROR! values in with a function's ordinary return values.  That would be tricky to avoid including ERROR! itself, if it can return ANY-VALUE! (e.g. you can PICK an ERROR! out of an array)</p>
+</li>
+<li>
+<p>There's nothing guaranteeing you handle an error...you could just forget and leave off the ELSE  (The "good" versions of the branched error approaches make sure you never accidentally ignore them, you have to consciously throw them away.)</p>
+</li>
+<li>
+<p>It may be (probably is?) a bad fit to fold this into ELSE...which isn't really about error handling, but whether branches are taken.</p>
+</li>
+</ul>
+<p>Using SET-BLOCK! for <a href="https://rebol.metaeducation.com/t/forward-to-multiple-return-values-and-return-value-forwarding/1271">multiple return values</a> wedged open the door for being more effective in this space.  But we can think through this some more.</p>
+<p>One thing I notice in JavaScript and Go is that the error result is distinguished, but positioning is set by convention instead of by name.  As a random sample thought, we could syntactically push errors out somehow, e.g. with a TUPLE!</p>
+<pre><code>; function that returns 3 values and a possible error
+;
+[a b c].err: some-func arg1 arg2 arg3
+</code></pre>
+<p>I didn't say it was a great idea--just pointing out a degree of freedom.</p>
+<h2><a name="p-4163-could-we-get-more-mileage-out-of-error-3" class="anchor" href="https://rebol.metaeducation.com#p-4163-could-we-get-more-mileage-out-of-error-3"></a>Could We Get More Mileage Out Of ERROR!</h2>
+<p>Rebol2's ERROR! had an interesting aspect to it, as being an "ornery" value...like a VOID!...that you couldn't inspect normally.  You had to DISARM it and view it as an object in order to pick apart its properties.</p>
+<p>R3-Alpha's ERROR! was neutered and became just another flavor of OBJECT!.  It carries a bit of standardized information about what line and location it originated from...but arguably this could be a useful feature for any value <em>(internally to the system for debugging, I have functions like Touch() which will tag a value with the last place that modified it...and it comes in handy a lot)</em>.</p>
+<p>Maybe it's all right as it is... and what we're missing is more like Rust's <strong><code>result</code></strong>.  But I can't help but feel that in a universe of possible designs...that "OBJECT! that reports a different type" is weak.</p>
+<p>Again: I don't have any great ideas right now.  This is just noticing something and brainstorming.  Having multiple returns in the mix is good, but I'd like to see something that's at least as good as what other languages have.</p>
+            <p><small>3 posts - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/the-need-to-rethink-error/1371">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/the-need-to-rethink-error/1371</link>
+          <pubDate>Fri, 23 Oct 2020 07:48:00 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-1371</guid>
+          <source url="https://rebol.metaeducation.com/t/the-need-to-rethink-error/1371.rss">The Need To Rethink ERROR!</source>
+        </item>
+        <item>
+          <title>More Comprehensible Errors With per-Cell Labeling!</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Errors</category>
+          <description><![CDATA[
+            <p>There's been a long-running complaint in the Redbol world that if you don't run a function directly from a WORD! or PATH!, it doesn't know a name for it:</p>
+<pre><code>r3-alpha&gt;&gt; append 1 &lt;d&gt;  ; dispatched as WORD!
+** Script error: append does not allow integer! for its series argument
+
+r3-alpha&gt;&gt; do compose [(:append) 1 &lt;d&gt;]  ; dispatched as ACTION!
+** Script error: -unnamed- does not allow integer! for its series argument
+</code></pre>
+<p>To try and improve on this, Red climbs the stack a bit to find something with a name...but the resulting error is gibberish:</p>
+<pre><code>red&gt;&gt; do compose [(:append) 1 &lt;d&gt;]
+*** Script Error: do does not allow integer for its series argument
+</code></pre>
+<p>The problem this is showing is that ACTION!s are things that can be known by many names, and when they get "extracted" from a WORD! they lose the label.</p>
+<p>Today I did something that's kind of obvious-seeming: <em>to make it so that GET-WORD! and GET-PATH! evaluations cache the name in the action cell instance</em>.  This isn't doing anything to the shared data for the action, just poking a pointer to the word's spelling data in the cell.</p>
+<p>It's a welcome improvement:</p>
+<pre><code>&gt;&gt; do compose [(:append) 1 &lt;d&gt;]
+** Script Error: append does not allow #[datatype! integer!]
+     for its series argument
+
+&gt;&gt; do compose [(:append/only) 1 &lt;d&gt;]
+** Script Error: append does not allow #[datatype! integer!]
+    for its series argument
+</code></pre>
+<p>The details of why this would be tricky just relate to the fact that bits don't grow on trees...and the "rules of the game" limit cells to 4 platform pointers in size.  To make a long-story-short: while ACTION! "archetypes" can't spare a pointer at this time, ACTION! <em>instances</em> can...and the distinction of whether an action is an archetype or not is made by detecting the properties of the pointed-to-series being a WORD-spelling or action-descriptor-array.</p>
+<p>If you write a function that processes a function to create a derived one, you'll need some tools for working with this cached symbol...otherwise you'd lose it just by storing actions in temporary variables.  Expect to see a few cases of that.  I'll look into it when time permits.  But this is already a <em>lot</em> better.</p>
+            <p><small>3 posts - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/more-comprehensible-errors-with-per-cell-labeling/1357">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/more-comprehensible-errors-with-per-cell-labeling/1357</link>
+          <pubDate>Mon, 05 Oct 2020 22:53:04 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-1357</guid>
+          <source url="https://rebol.metaeducation.com/t/more-comprehensible-errors-with-per-cell-labeling/1357.rss">More Comprehensible Errors With per-Cell Labeling!</source>
+        </item>
+        <item>
+          <title>Safety Concept: Error on discarded plain BLOCK! ?</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Errors</category>
+          <description><![CDATA[
+            <p>I just had a bug that was rather frustrating to find.  I changed:</p>
+<pre><code>foo: func [
+    {Description}
+    param [...]
+    /refine
+][
+    ...
+]
+</code></pre>
+<p>into:</p>
+<pre><code>foo-core: func [
+    {Description}
+    param [...]
+    /refine
+][
+    ...
+]
+
+foo: adapt 'foo-core [
+    {Description}
+][
+    ...
+]
+</code></pre>
+<p><strong>But ADAPT doesn't take two parameters.</strong>  I should have eliminated the "spec" block from the ADAPT entirely, but I only deleted the parameters.  This effectively gave me:</p>
+<pre><code>foo: adapt 'foo-core [
+    {Description}
+]  ; "spec" block treated as the adapt "prelude"
+
+[...]  ; stray random block, thrown out
+</code></pre>
+<p>There's no warning in this case, because a plain BLOCK! evaluates to a plain BLOCK! and gets thrown out.</p>
+<h2><a name="p-3879-theres-nothing-we-can-do-or-is-there-1" class="anchor" href="https://rebol.metaeducation.com#p-3879-theres-nothing-we-can-do-or-is-there-1"></a>There's nothing we can do.  Or... is there?</h2>
+<p>This kind of thing almost always represents an error.  This got me to wondering about generalized quoting.  Might it help us?</p>
+<p><em>What if plain unevaluated BLOCK! was an error in evaluation if it was not a parameter to anything, and not a result of anything</em>...?</p>
+<p>So maybe this would be an error:</p>
+<pre><code>all [
+    a = b
+    c = d
+    [this block does nothing]
+]
+</code></pre>
+<p>But this would not:</p>
+<pre><code>data: all [
+    a = b
+    c = d
+    [assignment target, it's okay]
+]
+</code></pre>
+<p>And this would also be fine:</p>
+<pre><code>foo: func [return: [block!] a b c d] [
+    all [
+        a = b
+        c = d
+        [result of function so it gets used]
+    ]
+]
+</code></pre>
+<p>Maybe quoting could let you subvert the rule:</p>
+<pre><code> all [
+    a = b
+    c = d
+    '[just throw this out, don't complain]
+]
+</code></pre>
+<p>Note COMPOSE has power for this kind of thing built-in:</p>
+<pre><code> block: [thing to throw out]
+ data: all compose [
+    a = b
+    c = d
+    '(block)  ; the tick would also suppress ACTION! evaluation, etc.
+]
+</code></pre>
+<p>I don't know if the QUOTED! exemption is necessary or not, because this could run into problems as well of throwing out a quoted thing.</p>
+<p><strong>Challenge: when is non-evaluation utilized?</strong></p>
+<p>There's been some play with the fact that things don't evaluate to make constructs that have markup in them.  Think of for example a modification of EITHER that lets you label the branches:</p>
+<pre><code> my-either condition [&lt;tag&gt; ...code...] [&lt;tag&gt; ...code...]
+</code></pre>
+<p>Skipping the tag silently might be considered a feature, because the code is looked at.  I don't know, maybe having to skip that tag before executing is better practice.</p>
+<p>Just asking the philosophical question here of "why is throwing away inert interstitial expressions of great value".  We have ELIDE and COMMENT.  Might we do more for the sanity of the language if we noticed and errored if values were being silently discarded?</p>
+<p><em>Usually trying to implement a rule like this shows problematic cases, but I tend to write it up as a way of seeing if I can talk myself out of it by coming up with a disproof before bothering to try writing it...</em></p>
+            <p><small>4 posts - 2 participants</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/safety-concept-error-on-discarded-plain-block/1305">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/safety-concept-error-on-discarded-plain-block/1305</link>
+          <pubDate>Sat, 18 Jul 2020 19:16:03 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-1305</guid>
+          <source url="https://rebol.metaeducation.com/t/safety-concept-error-on-discarded-plain-block/1305.rss">Safety Concept: Error on discarded plain BLOCK! ?</source>
+        </item>
+        <item>
+          <title>Pointing the Blame In FAIL</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Errors</category>
+          <description><![CDATA[
+            <p>If you haven't been using FAIL, you should!  I've pointed out in the past you can just say <strong>case [... fail]</strong> and that's enough to get a failure and point to that location.  But it now lets you just point at any arbitrary value via a quoted word and it will complain about that word and its value:</p>
+<pre><code>&gt;&gt; foo: 10
+
+&gt;&gt; fail 'foo
+** Error: foo is invalid: 10
+** Where: fail console
+** Near: [fail 'foo ~~]
+</code></pre>
+<p>It works for tuples too:</p>
+<pre><code>&gt;&gt; obj: make object! [field: &lt;I've been a bad, bad field...&gt;]
+
+&gt;&gt; fail 'obj.field
+** Error: obj.field is invalid: &lt;I've been a bad, bad field...&gt;
+** Where: fail console
+** Near: [fail 'obj.field ~~]
+</code></pre>
+<p>So this should be your lazy go-to for reporting errors, you get more information and type less than using PRINTs or longer-winded messages.</p>
+<h2><a name="p-2992-but-the-real-strength-is-implicating-callsites-vs-fails-1" class="anchor" href="https://rebol.metaeducation.com#p-2992-but-the-real-strength-is-implicating-callsites-vs-fails-1"></a>But the real strength is implicating callsites, vs FAILs</h2>
+<p>If you don't provide a place to blame, the only thing the evaluator knows is the whole stack and the place the failure was.</p>
+<pre><code> my-api: func [x y z] [
+     if true [
+         if y &lt; 100 [
+              fail "Who's failing?  one of those IFs?  Or MY-API?"
+        ]
+     ]
+ ]
+
+&gt;&gt; my-api 1 2 3
+** Error: Who's failing?  one of those IFs?  Or MY-API?
+** Where: fail if if my-api console
+** Near: [
+    fail "Who's failing?  one of those IFs?  Or MY-API?" ~...
+</code></pre>
+<p>That's not a terribly informative error message, but the evaluator doesn't know any more unless you tell it.</p>
+<p>This is a job for FAIL/BLAME!  Just pass it a WORD! from the frame you wanted to complain about.</p>
+<pre><code>my-api: func [x y z] [
+     if true [
+         if y &lt; 100 [
+              fail/blame ["Value must be &gt;= 100, not" y] 'y
+        ]
+     ]
+ ]
+
+&gt;&gt; my-api 1 2 3
+** Error: Value must be &gt;= 100, not 2
+** Where: my-api console
+** Near: [... 1 2 3 ~~]
+</code></pre>
+<p>Now the IFs are gone from the reporting stack, and you're indicating the callsite but not the FAIL itself.  <em>(Ideally the error message would point to the exact block position where the parameter you are complaining about originated from.  But that information is not preserved at the moment.  In the future it might be kept...maybe in a special slot that would go unused otherwise in 64-bit builds.  So the error report would improve!)</em></p>
+<p>Again, you could be lazy and just say <code>fail 'y</code> and get a fair amount of information.  In this case a bit of better information than in the custom message provided--in terms of the right name of the bad parameter!</p>
+<h2><a name="p-2992-this-isnt-arcane-c-magic-its-usermode-rebol-2" class="anchor" href="https://rebol.metaeducation.com#p-2992-this-isnt-arcane-c-magic-its-usermode-rebol-2"></a>This isn't arcane C magic, it's usermode Rebol!</h2>
+<p>You can read and help improve FAIL any day you feel like it!  Please do!</p>
+            <p><small>5 posts - 2 participants</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/pointing-the-blame-in-fail/1027">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/pointing-the-blame-in-fail/1027</link>
+          <pubDate>Tue, 22 Jan 2019 09:33:21 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-1027</guid>
+          <source url="https://rebol.metaeducation.com/t/pointing-the-blame-in-fail/1027.rss">Pointing the Blame In FAIL</source>
+        </item>
+        <item>
+          <title>WORD!, PATH!, and URL!s as ERROR! ids</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Errors</category>
+          <description><![CDATA[
+            <p>R3-Alpha gave all the built in errors categories and a WORD! for an id.  These were established in the %errors.r file:</p>
+<p><a href="https://github.com/rebol/rebol/blob/master/src/boot/errors.r"><code>https://github.com/rebol/rebol/blob/master/src/boot/errors.r</code></a></p>
+<p>Each category had an integer "base" number, and the errors were numbered according to that.  Adding and removing errors would disrupt these numbers... so the idea was presumably that these would settle over time.  At some point of stability, errors removed from the middle would not have their numbers reused, while new errors would be added at the end of their groups.</p>
+<p>But the usage of integers for error codes isn't very "ecology friendly".  I question the wisdom of even having <em>error numbers</em> in Rebol...IDs may collide, but numbers will do so even quicker.  A lot of places you might imagine they'd be useful they aren't really; for instance, exit status codes for processes on UNIX are <a href="https://en.wikipedia.org/wiki/Exit_status">limited to bytes</a>...and even in that limited range they use conventions other than Rebol's numbers.</p>
+<p>To mitigate collisions, I've wondered if errors might be based on some kind of hierarchy, in which you could choose to refer to errors by WORD!, PATH!, or URL!.</p>
+<pre><code>error.id ~= 'missing-delimiter
+error.id ~= 'syntax/missing-delimiter
+error.id ~= http://rebol.info/e/syntax/missing-delimiter
+</code></pre>
+<p>So the idea being that the error IDs would be fully qualified somehow, but when you trapped them you could use a level of specificity that met your particular desires for rigor.  If you were worried there was some other kind of 'missing-delimiter error that could be thrown affecting your particular code, you might use a full URL.  I made up the <code>~=</code> operator here as something you might use which would gloss this difference.</p>
+<p>This isn't really a concrete proposal...just pointing out that I don't think numbering errors has a lot of point.  While the names have changed here and there, the numbers have thus far had basically no meaning.  It seems to me any future-forward strategy would avoid inventing error numbers entirely (an error of course might include a number as part of its parameterization if it's referring to a non-Rebol system, e.g. HTTP error codes).</p>
+<p>So if we killed the numbering, would anyone notice?</p>
+            <p><small>8 posts - 3 participants</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/word-path-and-url-s-as-error-ids/559">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/word-path-and-url-s-as-error-ids/559</link>
+          <pubDate>Wed, 07 Mar 2018 21:23:41 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-559</guid>
+          <source url="https://rebol.metaeducation.com/t/word-path-and-url-s-as-error-ids/559.rss">WORD!, PATH!, and URL!s as ERROR! ids</source>
+        </item>
+        <item>
+          <title>Hooking FAIL and PANIC...should DO of an ERROR! be &quot;unhookable&quot;?</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Errors</category>
+          <description><![CDATA[
+            <p>One interesting feature that's coming online a bit here and there is the ability to hook <em>some</em> panics and <em>some</em> errors.</p>
+<p>The way the hook is done is that there are native PANIC and FAIL functions which have trivial implementations.  C code calls out to these natives by using the evaluator.  Then, early in the bootstrap process these natives are HIJACK'd with usermode implementations.  If your app then desires, it can further HIJACK those hijackings with adaptations that augment or replace the functionality with additional code.</p>
+<p>In the case of panics, I say only "some" are hookable, because panics originating from the core need to terminate the executable.  <em>(They're a sort of "blue screen of death", implying that continuing to run Rebol code would be unwise due to some fundamental corruption or problem.)</em>  But there are also panics which could be safely recovered from, or have things write to log files before exiting, e.g. direct calls to the PANIC or PANIC-VALUE natives from usermode code.</p>
+<p><em>(It may be that extensions using the rebPanic() API would mean the "softer" form of panic, or maybe they too have some kind of corruption of their state they don't want you to recover from.  Maybe there need to be two different APIs...what's more serious than a failure, but less serious than a panic?  rebProblem()?)</em></p>
+<p>In the case of errors, I say only "some" are hookable because there <strong>must</strong> be a way to invoke an error without it being hooked.  Consider today's implementation of FAIL, which will construct an error object out of whatever you pass it (if it isn't an ERROR! in the first place) and calls DO on it.  If that DO turned around and called into the fail hook again, you'd have an infinite regress.</p>
+<p>One simple answer is to say that DO of an ERROR! is an <em>unhookable failure</em>.  That would mean no longer casually writing <strong>do make error! ...</strong>.  But if we assume those people are willing to change that to <strong>fail make error! ...</strong> then this seems the easiest way to get the baseline unhookable error.  And since there's no appearance of FAIL at the callsite, people wouldn't be too surprised that hijacking FAIL wouldn't find out about these particular errors.</p>
+<p>At one point, I'd made DO not accept ERROR!s, because FAIL seemed much better at the callsite.  But I realized the only thing taking the ERROR! parameter away would be doing would be raising an "invalid type" error, obscuring what the error was.  :-/  So when that was combined ultimately with the idea that FAIL needed some way to invoke the errors that it was building, I put it back.</p>
+<p>So is this a good answer?  That DO of an ERROR! is the low level mechanic for error delivery used in functions like FAIL which you will not get hooked when you HIJACK fail?  It makes some sense to me, but it means that almost no one should be using DO of an ERROR!, unless you are writing a FAIL implementation.</p>
+<p>What worries me is if people don't get on board with this, or find it too hard to understand that DO of an ERROR! is not how you should be error'ing, then someone who wants to hook just FAIL would start hooking DO "just to be sure" in case it was passed an ERROR!.  :-/</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/hooking-fail-and-panic-should-do-of-an-error-be-unhookable/484">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/hooking-fail-and-panic-should-do-of-an-error-be-unhookable/484</link>
+          <pubDate>Sun, 21 Jan 2018 12:53:30 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-484</guid>
+          <source url="https://rebol.metaeducation.com/t/hooking-fail-and-panic-should-do-of-an-error-be-unhookable/484.rss">Hooking FAIL and PANIC...should DO of an ERROR! be &quot;unhookable&quot;?</source>
+        </item>
+  </channel>
+</rss>

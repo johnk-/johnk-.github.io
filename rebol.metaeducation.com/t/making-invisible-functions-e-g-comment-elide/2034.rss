@@ -1,0 +1,331 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Making Invisible Functions (e.g. COMMENT, ELIDE)</title>
+    <link>https://rebol.metaeducation.com/t/making-invisible-functions-e-g-comment-elide/2034</link>
+    <description>The first idea of making constructs that would &quot;vanish completely&quot; leveraged a special kind of infix function, that would receive the entire evaluated value of the left hand side:
+
+     comment: infix func [
+         left [&lt;evaluate-all&gt; any-value!]
+         right
+     ][
+         print [&quot;COMMENT got left as&quot; mold left]
+         return left
+     ]
+
+     &gt;&gt; 1 + 2 + 3 comment [magic!]
+     hi
+     COMMENT got left as 6
+     == 6  ; wow!
+
+This was a workaround for the (seeming?) fundamental fact that you can&#39;t have such a thing as &quot;invisible variables&quot; or &quot;invisible values&quot;.  *Certain functions just faked invisibility by repeating the previous value in the evaluator chain.*
+
+The possibilities seemed endless.  For instance, imagine something like this:
+
+    case [
+       conditionA [...code...]
+       elide print &quot;conditionA didn&#39;t succeed but running this&quot;
+       conditionB [...code...]
+       conditionC [...code...]
+    ]
+
+To do that in Rebol2 or Red would be incredibly awkward.  e.g. using a condition that runs code but evaluates to false, and then a throwaway block for the never-executed branch:
+
+    case [
+       conditionA [...code...]
+       (
+           print &quot;conditionA didn&#39;t succeed but running this&quot;
+           false
+       ) [&lt;unreachable&gt;]
+       conditionB [...code...]
+       conditionC [...code...]
+    ]
+
+Similar awkwardness would arise in things like ANY and ALL, where you&#39;d have to switch from using true and false based on which you were using...
+
+    any [conditionA (print &quot;vanish&quot; false) conditionB]
+    all [conditionA (print &quot;vanish&quot; true) conditionB]
+
+Beyond being awkward, it simply can&#39;t work if what you want to vanish is the last expression.  But ELIDE handled all these cases:
+
+    any [conditionA elide print &quot;vanish&quot; conditionB]
+    all [conditionA elide print &quot;vanish&quot; conditionB]
+    any [conditionA conditionB elide print &quot;vanish&quot;]
+    all [conditionA conditionB elide print &quot;vanish&quot;]
+
+## It Was A Neat Trick...But Problems Emerged
+
+The trick of invisibility requiring a function to receive its left hand side meant a GROUP! or COMMA! would break these constructs, as there was no access to a previous value:
+
+     &gt;&gt; 1 + 2 + 3 (elide print &quot;hi&quot;)
+     hi
+     ELIDE got left as null
+     == \~null~\  ; antiform, not 6, d&#39;oh!
+
+     &gt;&gt; 1 + 2 + 3, elide print &quot;hi&quot;
+     hi
+     ELIDE got left as null
+     == \~null~\  ; antiform, not 6, d&#39;oh
+
+Plus being infix forced the invisible functions to execute in the same step as whatever came before them, causing unsuspected results:
+
+    &gt;&gt; case [
+            1 = 1 [print &quot;branch&quot;]
+            elide print &quot;reached here first :-(&quot;
+            1 = 2 [fail &quot;Unreachable&quot;]
+        ]
+    ELIDE got left as [print &quot;branch&quot;]
+    reached here first :-(
+    branch
+
+There we see that when the evaluator visited the **[print &quot;branch&quot;]** block in the CASE it had to greedily run the ELIDE, which evaluates its argument and then yielded the code block as its result.  CASE ran that code after the elide...out of order from what was desired.
+
+Issues seemed to keep compounding.  These invisible functions couldn&#39;t be reliably used with MAKE FRAME!, and people trying to simulate the evaluator&#39;s logic found it hard to detect and wrap them.  That led to major issues with UPARSE trying to implement combinators that acted like ELIDE.
+
+So the infix mechanism wasn&#39;t going to cut it.  But it was too late: having been able to try out and develop all kinds of invisible constructs convinced me of their value.  I had to try another way...
+
+## Unstable Antiforms To The Rescue! :atom:
+
+The seeming impossibility of having a &quot;ghostly value&quot; was addressed by making them *unstable antiforms*.  They couldn&#39;t be stored in variables, but when returned from functions would have special treatment in the evaluator.  Then there is a ^META domain in which they could be handled safely.
+
+Terminology shuffled as the parts settled--this state was sometimes known as VOID or NIHIL--and for a time it was an empty antiform BLOCK!.
+
+## Ultimately, Antiform COMMA! Became GHOST!
+
+    &gt;&gt; ghost
+    == \~,~\  ; antiform (ghost!)
+
+    &gt;&gt; 1 + 2 ghost
+    == 3
+
+
+![assets_task_01jvp9hzpbfj3rpyyfakebamjg_1747726210_img_0|690x460, 50%](upload://7lx3a9vuLe15fYPyoDYuXC6fNsU.webp)
+
+Since it&#39;s an unstable antiform, the GHOST word! has to refer to a function that produces it...since no variable can hold it:
+
+    &gt;&gt; action? ghost/
+    == \~okay~\  ; antiform
+
+While not storable in variables directly, meta-representations can be used:
+
+    &gt;&gt; var: ghost
+    ** Error: GHOST! is an unstable antiform and can&#39;t be stored in a variable
+    
+    &gt;&gt; var: lift ghost
+    == ~,~
+
+    &gt;&gt; 1 + 2 var
+    == ~,~
+
+    &gt;&gt; 1 + 2 unlift var
+    == 3
+
+The concept of being able to pipe around and process &quot;slippery&quot; values in this meta domain (including unset states and other antiforms) wound up being wildly successful, and is the cornerstone of modern Ren-C.
+
+## Wide Variety Of Handling
+
+Evaluators like EVAL and UPARSE specially preserve the last evaluative value in order to give the illusion of invisibility when ghosts are seen on the next step.  Other constructs got to make a choice as to whether they wanted to embrace ghosts as part of the mechanic, or think of them as errors:
+
+    &gt;&gt; comment &quot;comments return ghost&quot;
+    == \~,~\  ; antiform (ghost!)
+
+    &gt;&gt; if comment &quot;hi&quot; [print &quot;not tolerated in conditions&quot;]
+    ** Error: IF doesn&#39;t accept GHOST! as its condition argument
+
+    &gt;&gt; all [comment &quot;begin&quot; 1 + 2 10 + 20 comment &quot;end&quot;]
+    == 30
+
+    &gt;&gt; any [comment &quot;begin&quot; 1 + 2 10 + 20 comment &quot;end&quot;]
+    == 3
+
+e.g. for the above to work, ALL has to hang on to the last evaluated result as it goes...in case the next evaluated result is a host.  This allows the 30 to fall out.
+
+## A Flexible Approach... But... Here Be Dragons
+
+Something that concerned me early on was that what had started as a narrow ability of just a few functions (like COMMENT and ELIDE) was becoming a case where generalized execution could possibly return ghosts, leading to unexpected results.
+
+    &gt;&gt; code: [comment &quot;some arbitrary code block&quot;]
+
+    ; ... then much later ...
+
+    &gt;&gt; result: (mode: &lt;reading&gt; eval code)
+    == &lt;reading&gt;
+
+    &gt;&gt; result
+    == &lt;reading&gt;  ; oops
+
+No matter what way you slice it, an expression that can truly vaporize is something that can make you uneasy.  Look at this CASE statement and imagine if FOO or BAR could vanish:
+
+     case [
+         foo [print &quot;hi&quot;]
+         bar [print &quot;bye&quot;]
+     ]
+
+Sure... we can lament that if FOO comes back as GHOST, it will wreck the geometry of the CASE completely.  After dropping the FOO it will treat [print &quot;hi&quot;] as a condition and use BAR as a code branch.
+
+***But if FOO is a function that takes a BLOCK! as a parameter, it will also wreck the geometry of the CASE completely!***
+
+**[u]This is just the cost of doing business in the Rebol paradigm[/u]**
+
+This modern model with GHOST being an unstable antiform means you can only get vanishing function calls--not vanishing variables.  So long as usage of GHOST! as a return value is judicious, I think this is about as terra firma as the rest of Rebol is.  And UPARSE stands as a great example of a system that has been able to build on meta-representation in order to be able to pipe around vanishing states using &quot;special gloves&quot; and build upon it to make new invisible behaviors...
+
+    &gt;&gt; parse &quot;aaabbb&quot; [collect some keep &quot;a&quot;, elide some &quot;b&quot;]
+    == [&quot;a&quot; &quot;a&quot; &quot;a&quot;]
+
+It&#39;s rather satisfying.</description>
+    
+    <lastBuildDate>Mon, 02 Jun 2025 15:51:08 +0000</lastBuildDate>
+    <category>Feature Discover</category>
+    <atom:link href="https://rebol.metaeducation.com/t/making-invisible-functions-e-g-comment-elide/2034.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Making Invisible Functions (e.g. COMMENT, ELIDE)</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>The first idea of making constructs that would "vanish completely" leveraged a special kind of infix function, that would receive the entire evaluated value of the left hand side:</p>
+<pre><code> comment: infix func [
+     left [&lt;evaluate-all&gt; any-value!]
+     right
+ ][
+     print ["COMMENT got left as" mold left]
+     return left
+ ]
+
+ &gt;&gt; 1 + 2 + 3 comment [magic!]
+ hi
+ COMMENT got left as 6
+ == 6  ; wow!
+</code></pre>
+<p>This was a workaround for the (seeming?) fundamental fact that you can't have such a thing as "invisible variables" or "invisible values".  <em>Certain functions just faked invisibility by repeating the previous value in the evaluator chain.</em></p>
+<p>The possibilities seemed endless.  For instance, imagine something like this:</p>
+<pre><code>case [
+   conditionA [...code...]
+   elide print "conditionA didn't succeed but running this"
+   conditionB [...code...]
+   conditionC [...code...]
+]
+</code></pre>
+<p>To do that in Rebol2 or Red would be incredibly awkward.  e.g. using a condition that runs code but evaluates to false, and then a throwaway block for the never-executed branch:</p>
+<pre><code>case [
+   conditionA [...code...]
+   (
+       print "conditionA didn't succeed but running this"
+       false
+   ) [&lt;unreachable&gt;]
+   conditionB [...code...]
+   conditionC [...code...]
+]
+</code></pre>
+<p>Similar awkwardness would arise in things like ANY and ALL, where you'd have to switch from using true and false based on which you were using...</p>
+<pre><code>any [conditionA (print "vanish" false) conditionB]
+all [conditionA (print "vanish" true) conditionB]
+</code></pre>
+<p>Beyond being awkward, it simply can't work if what you want to vanish is the last expression.  But ELIDE handled all these cases:</p>
+<pre><code>any [conditionA elide print "vanish" conditionB]
+all [conditionA elide print "vanish" conditionB]
+any [conditionA conditionB elide print "vanish"]
+all [conditionA conditionB elide print "vanish"]
+</code></pre>
+<h2><a name="p-6622-it-was-a-neat-trickbut-problems-emerged-1" class="anchor" href="https://rebol.metaeducation.com#p-6622-it-was-a-neat-trickbut-problems-emerged-1"></a>It Was A Neat Trick...But Problems Emerged</h2>
+<p>The trick of invisibility requiring a function to receive its left hand side meant a GROUP! or COMMA! would break these constructs, as there was no access to a previous value:</p>
+<pre><code> &gt;&gt; 1 + 2 + 3 (elide print "hi")
+ hi
+ ELIDE got left as null
+ == \~null~\  ; antiform, not 6, d'oh!
+
+ &gt;&gt; 1 + 2 + 3, elide print "hi"
+ hi
+ ELIDE got left as null
+ == \~null~\  ; antiform, not 6, d'oh
+</code></pre>
+<p>Plus being infix forced the invisible functions to execute in the same step as whatever came before them, causing unsuspected results:</p>
+<pre><code>&gt;&gt; case [
+        1 = 1 [print "branch"]
+        elide print "reached here first :-("
+        1 = 2 [fail "Unreachable"]
+    ]
+ELIDE got left as [print "branch"]
+reached here first :-(
+branch
+</code></pre>
+<p>There we see that when the evaluator visited the <strong>[print "branch"]</strong> block in the CASE it had to greedily run the ELIDE, which evaluates its argument and then yielded the code block as its result.  CASE ran that code after the elide...out of order from what was desired.</p>
+<p>Issues seemed to keep compounding.  These invisible functions couldn't be reliably used with MAKE FRAME!, and people trying to simulate the evaluator's logic found it hard to detect and wrap them.  That led to major issues with UPARSE trying to implement combinators that acted like ELIDE.</p>
+<p>So the infix mechanism wasn't going to cut it.  But it was too late: having been able to try out and develop all kinds of invisible constructs convinced me of their value.  I had to try another way...</p>
+<h2><a name="p-6622-unstable-antiforms-to-the-rescue-atom-2" class="anchor" href="https://rebol.metaeducation.com#p-6622-unstable-antiforms-to-the-rescue-atom-2"></a>Unstable Antiforms To The Rescue! <img src="https://rebol.metaeducation.com/images/emoji/twitter/atom.png?v=14" title=":atom:" class="emoji" alt=":atom:" loading="lazy" width="20" height="20"></h2>
+<p>The seeming impossibility of having a "ghostly value" was addressed by making them <em>unstable antiforms</em>.  They couldn't be stored in variables, but when returned from functions would have special treatment in the evaluator.  Then there is a ^META domain in which they could be handled safely.</p>
+<p>Terminology shuffled as the parts settled--this state was sometimes known as VOID or NIHIL--and for a time it was an empty antiform BLOCK!.</p>
+<h2><a name="p-6622-ultimately-antiform-comma-became-ghost-3" class="anchor" href="https://rebol.metaeducation.com#p-6622-ultimately-antiform-comma-became-ghost-3"></a>Ultimately, Antiform COMMA! Became GHOST!</h2>
+<pre><code>&gt;&gt; ghost
+== \~,~\  ; antiform (ghost!)
+
+&gt;&gt; 1 + 2 ghost
+== 3
+</code></pre>
+<p></p><div class="lightbox-wrapper"><a class="lightbox" href="https://rebol.metaeducation.com/uploads/default/original/1X/337e592bc1aaf7cd44e892d2068a6b7fc65134ac.webp" data-download-href="https://rebol.metaeducation.com/uploads/default/337e592bc1aaf7cd44e892d2068a6b7fc65134ac" title="assets_task_01jvp9hzpbfj3rpyyfakebamjg_1747726210_img_0"><img src="https://rebol.metaeducation.com/uploads/default/optimized/1X/337e592bc1aaf7cd44e892d2068a6b7fc65134ac_2_345x230.webp" alt="assets_task_01jvp9hzpbfj3rpyyfakebamjg_1747726210_img_0" data-base62-sha1="7lx3a9vuLe15fYPyoDYuXC6fNsU" width="345" height="230" srcset="https://rebol.metaeducation.com/uploads/default/optimized/1X/337e592bc1aaf7cd44e892d2068a6b7fc65134ac_2_345x230.webp, https://rebol.metaeducation.com/uploads/default/optimized/1X/337e592bc1aaf7cd44e892d2068a6b7fc65134ac_2_517x345.webp 1.5x, https://rebol.metaeducation.com/uploads/default/optimized/1X/337e592bc1aaf7cd44e892d2068a6b7fc65134ac_2_690x460.webp 2x" data-dominant-color="1B1B1B"></a></div><p></p>
+<p>Since it's an unstable antiform, the GHOST word! has to refer to a function that produces it...since no variable can hold it:</p>
+<pre><code>&gt;&gt; action? ghost/
+== \~okay~\  ; antiform
+</code></pre>
+<p>While not storable in variables directly, meta-representations can be used:</p>
+<pre><code>&gt;&gt; var: ghost
+** Error: GHOST! is an unstable antiform and can't be stored in a variable
+
+&gt;&gt; var: lift ghost
+== ~,~
+
+&gt;&gt; 1 + 2 var
+== ~,~
+
+&gt;&gt; 1 + 2 unlift var
+== 3
+</code></pre>
+<p>The concept of being able to pipe around and process "slippery" values in this meta domain (including unset states and other antiforms) wound up being wildly successful, and is the cornerstone of modern Ren-C.</p>
+<h2><a name="p-6622-wide-variety-of-handling-4" class="anchor" href="https://rebol.metaeducation.com#p-6622-wide-variety-of-handling-4"></a>Wide Variety Of Handling</h2>
+<p>Evaluators like EVAL and UPARSE specially preserve the last evaluative value in order to give the illusion of invisibility when ghosts are seen on the next step.  Other constructs got to make a choice as to whether they wanted to embrace ghosts as part of the mechanic, or think of them as errors:</p>
+<pre><code>&gt;&gt; comment "comments return ghost"
+== \~,~\  ; antiform (ghost!)
+
+&gt;&gt; if comment "hi" [print "not tolerated in conditions"]
+** Error: IF doesn't accept GHOST! as its condition argument
+
+&gt;&gt; all [comment "begin" 1 + 2 10 + 20 comment "end"]
+== 30
+
+&gt;&gt; any [comment "begin" 1 + 2 10 + 20 comment "end"]
+== 3
+</code></pre>
+<p>e.g. for the above to work, ALL has to hang on to the last evaluated result as it goes...in case the next evaluated result is a host.  This allows the 30 to fall out.</p>
+<h2><a name="p-6622-a-flexible-approach-but-here-be-dragons-5" class="anchor" href="https://rebol.metaeducation.com#p-6622-a-flexible-approach-but-here-be-dragons-5"></a>A Flexible Approach... But... Here Be Dragons</h2>
+<p>Something that concerned me early on was that what had started as a narrow ability of just a few functions (like COMMENT and ELIDE) was becoming a case where generalized execution could possibly return ghosts, leading to unexpected results.</p>
+<pre><code>&gt;&gt; code: [comment "some arbitrary code block"]
+
+; ... then much later ...
+
+&gt;&gt; result: (mode: &lt;reading&gt; eval code)
+== &lt;reading&gt;
+
+&gt;&gt; result
+== &lt;reading&gt;  ; oops
+</code></pre>
+<p>No matter what way you slice it, an expression that can truly vaporize is something that can make you uneasy.  Look at this CASE statement and imagine if FOO or BAR could vanish:</p>
+<pre><code> case [
+     foo [print "hi"]
+     bar [print "bye"]
+ ]
+</code></pre>
+<p>Sure... we can lament that if FOO comes back as GHOST, it will wreck the geometry of the CASE completely.  After dropping the FOO it will treat [print "hi"] as a condition and use BAR as a code branch.</p>
+<p><em><strong>But if FOO is a function that takes a BLOCK! as a parameter, it will also wreck the geometry of the CASE completely!</strong></em></p>
+<p><strong><span class="bbcode-u">This is just the cost of doing business in the Rebol paradigm</span></strong></p>
+<p>This modern model with GHOST being an unstable antiform means you can only get vanishing function calls--not vanishing variables.  So long as usage of GHOST! as a return value is judicious, I think this is about as terra firma as the rest of Rebol is.  And UPARSE stands as a great example of a system that has been able to build on meta-representation in order to be able to pipe around vanishing states using "special gloves" and build upon it to make new invisible behaviors...</p>
+<pre><code>&gt;&gt; parse "aaabbb" [collect some keep "a", elide some "b"]
+== ["a" "a" "a"]
+</code></pre>
+<p>It's rather satisfying.</p>
+          <p><a href="https://rebol.metaeducation.com/t/making-invisible-functions-e-g-comment-elide/2034/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/making-invisible-functions-e-g-comment-elide/2034/1</link>
+        <pubDate>Fri, 23 Jun 2023 17:06:50 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2034-1</guid>
+        <source url="https://rebol.metaeducation.com/t/making-invisible-functions-e-g-comment-elide/2034.rss">Making Invisible Functions (e.g. COMMENT, ELIDE)</source>
+      </item>
+  </channel>
+</rss>

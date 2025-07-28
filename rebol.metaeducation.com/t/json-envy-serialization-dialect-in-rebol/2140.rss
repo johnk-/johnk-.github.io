@@ -1,0 +1,319 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>JSON Envy: Serialization Dialect in Rebol?</title>
+    <link>https://rebol.metaeducation.com/t/json-envy-serialization-dialect-in-rebol/2140</link>
+    <description>&gt; Carl&#39;s thinking about [a successor to Rebol&#39;s notation called ASON](https://rebol.metaeducation.com/t/carls-new-projects-altscript-altos/1571) included the idea that braces would be used for object construction--not strings.
+&gt;
+&gt; I&#39;ve panned the notion of &quot;lexical objects&quot;, and explained why in a thread outlining an alternative of treating braces as **[a new array type called FENCE!](https://rebol.metaeducation.com/t/rethinking-braces-as-an-array-type/1727)**, which I have come to think is likely well worth it.
+&gt;
+&gt; *But assuming we **don&#39;t** have FENCE!*, what might Rebol&#39;s version of JSON look like?  This was a tangent explored in October 2021 on the fence thread that I&#39;ve broken into its own topic.
+
+---
+
+Consider [this example from json.org](https://json.org/example.html)
+
+    {&quot;glossary&quot;: {
+        &quot;title&quot;: &quot;example glossary&quot;,
+        &quot;GlossDiv&quot;: {
+            &quot;title&quot;: &quot;S&quot;,
+            &quot;GlossList&quot;: {
+                &quot;GlossEntry&quot;: {
+                    &quot;ID&quot;: &quot;SGML&quot;,
+                    &quot;SortAs&quot;: &quot;SGML&quot;,
+                    &quot;GlossTerm&quot;: &quot;Standard Generalized Markup Language&quot;,
+                    &quot;Acronym&quot;: &quot;SGML&quot;,
+                    &quot;Abbrev&quot;: &quot;ISO 8879:1986&quot;,
+                    &quot;GlossDef&quot;: {
+                        &quot;para&quot;: &quot;A meta-markup language...&quot;,
+                        &quot;GlossSeeAlso&quot;: [&quot;GML&quot;, &quot;XML&quot;]
+                    },
+                   &quot;GlossSee&quot;: &quot;markup&quot;
+                }
+            }
+        }
+    }}
+
+I think allowing spaces in the keys is a weakness and not a strength.  And Rebol doesn&#39;t have the historical problem of disallowing language &quot;keywords&quot; in the keys, so the quotes wouldn&#39;t be necessary (they&#39;re not in modern JavaScript either for that reason, but they are if your word has dashes or spaces in it).
+
+Let&#39;s drop the quotes and turn *all* the braces into brackets.  Commas can be optional now, but let&#39;s say we don&#39;t care to use them when things are on different lines.
+
+    [glossary: [
+        title: &quot;example glossary&quot;
+        GlossDiv: [
+            title: &quot;S&quot;
+            GlossList: [
+                GlossEntry: [
+                    ID: &quot;SGML&quot;
+                    SortAs: &quot;SGML&quot;
+                    GlossTerm: &quot;Standard Generalized Markup Language&quot;,
+                    Acronym: &quot;SGML&quot;
+                    Abbrev: &quot;ISO 8879:1986&quot;
+                    GlossDef: [
+                        para: &quot;A meta-markup language...&quot;
+                        GlossSeeAlso: [&quot;GML&quot;, &quot;XML&quot;]  ; can use commas if we want?
+                    ]
+                    GlossSee: &quot;markup&quot;
+                ]
+            ]
+        ]
+    ]]
+
+In practice, the serializer/deserializer could say that any block starting with a SET-WORD! is presumed to be an object...and if you have an array that you don&#39;t want to get this treatment you use **&#39;[...]**
+
+    &gt;&gt; deserialize &quot;[[a: 10 b: 20] &#39;[c: 10 &lt;random stuff&gt; d: 20]]&quot;
+    == [
+        #object![a: 10 b: 20]  ; whatever notation
+        [c: 10 &lt;random stuff&gt; d: 20]
+    ]
+
+A simple rule about SET-WORD!s could give us the same object vs. array distinction in what&#39;s being transferred.  It would keep us centered on one nice bracket form to be hitting... allow an escape route for arbitrary BLOCK!s that want SET-WORD!s via quote...and we keep our nice braced strings without the need for nasty escapes.
+
+## What About Evaluative Things In Lists?
+
+The lightness of unadorned WORD! has a big draw in Rebol, and has caused a lot of headaches...for instance in deciding if we should say **Type: &#39;module** or **Type: module**.
+
+While there&#39;s no rule that says module headers have to obey the same rules as whatever this operation is, it feels unwise to have them deviate.  So this implies **Type: &#39;module** or moving to something inert like **Type: #module** or **Type: &quot;module&quot;**
+
+The problem expands to lists, where you have **category: [fun script]** needing to mitigate or avoid evaluation one way or another:
+
+    category: &#39;[fun script]
+
+    category: [&#39;fun &#39;script]
+
+    category: [&quot;fun&quot; &quot;script&quot;]
+
+    category: [#fun #script]
+
+While the first option of putting a quote on the list seems like the cleanest, things trying to generate serializations wouldn&#39;t have that choice if it was mixing words and objects:
+
+    mix: [&#39;word-one [a: 10 b: 20] &#39;word-two]
+
+If the outer block were quoted, then it wouldn&#39;t dig in to make the inner block into an object.
+
+These kinds of odd mixtures of evaluation with objects points out a not-uncommon Rebol problem... if you&#39;re doing a deserialization and descending into a block that isn&#39;t quoted, you might be seeing BLOCK!s that are arguments to functions along with blocks that are meant to act as objects.  Which wins?
+
+Code like PRINT goes step by step, as opposed to gathering all the strings ahead of time and assuming it is for itself:
+
+    &gt;&gt; print [&quot;hello&quot; reverse &quot;dlrow&quot;]
+    hello world
+
+The deserialization operator could work the same way, though it could effectively COMPOSE the BLOCK!s representing objects in so that any functions would be passed the object.  :-/
+
+Certainly raises some questions, but, they are fairly common Rebol questions.
+
+**...or...REDUCE requests could be explicit?**
+
+We don&#39;t have to make &quot;recurses to look for blocks to instantiate objects&quot; also imply that the arrays themselves are evaluative, but I think it would be confusing.  JavaScript programmers expect the arrays inside objects to be evaluated:
+
+     let x = {label: &quot;object&quot;, data: {label: &quot;array&quot;, data: [1 + 2, 10 + 20]}}
+
+This gives you a nested structure with **`data: [3, 30]`**.  So I feel like this operation should follow suit, reducing blocks unless you suppress that.
+
+So if your input is:
+
+    [label: &quot;object&quot;, data: [label: &quot;array&quot;, data: [1 + 2, 10 + 20]]]
+     
+I think data should be **[3 30]**, and if your input is:
+
+    [label: &quot;object&quot;, data: [label: &quot;array&quot;, data: &#39;[1 + 2, 10 + 20]]]
+
+Then data should be **[1 + 2, 10 + 20]**.  The mixing and matching really is where you run into trouble, of an array that contains some blocks and some objects...though everything can be represented thanks to generic quoting, it could get messy.
+
+## What If We Used GROUP!s in Serialization?
+
+    &gt;&gt; stuff: reduce [make object! [a: 10 b: 10 + 10]]
+    == [object!#[a: 10 b: 20]]  ; or whatever internal representation
+
+    &gt;&gt; serialize stuff 
+    == [(a: 10 b: 20)]
+
+    &gt;&gt; deserialize stuff
+    == [object![a: 10 b: 20]]
+
+JSON doesn&#39;t use parentheses in this way because it can&#39;t.  Parentheses are not reified.
+
+But if a Rebol system wants to exchange information with another Rebol system &quot;in the style of JSON&quot;, GROUP! could be used to represent the key/value objects and BLOCK! could represent plain array/lists...with braces being a handy mode of string representation that can get away with less escaping.
+
+And with modern COMPOSE you could deserialize and compose, by labeling the compose sites:
+
+    &gt;&gt; deserialize compose &lt;*&gt; [
+        (a: 10 b: 20)  ; deserialize treats as object
+        (&lt;*&gt; reduce [1 + 2 3 + 4])  ; array before deserialize
+     ]
+
+Whatever you call it, having something like COMPOSE which treats nested levels of GROUP!s as object creation requests isn&#39;t that crazy an idea.  (Perhaps OBJECTIFY ?)</description>
+    
+    <lastBuildDate>Mon, 19 Feb 2024 09:16:57 +0000</lastBuildDate>
+    <category>Dialects/DSLs</category>
+    <atom:link href="https://rebol.metaeducation.com/t/json-envy-serialization-dialect-in-rebol/2140.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>JSON Envy: Serialization Dialect in Rebol?</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="2140">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>In practice, the serializer/deserializer could say that any block starting with a SET-WORD! is presumed to be an object...and if you have an array that you don't want to get this treatment you use <strong>'[...]</strong></p>
+</blockquote>
+</aside>
+<p>When I wrote this "how would you do JSON in Rebol", it was a kind of devil's advocacy...pointing out how to go about it with just blocks and quoted blocks... and, uh, maybe groups?</p>
+<p><strong>Looking back at it a couple of years later, it reads like an advertisement for FENCE!.</strong>  Those ideas suck, and Rebol shouldn't fail this hard in comparison with the notation it inspired.</p>
+<p>We need to introduce the <strong>{...}</strong> array type.  Under evaluation it would create an object, but in dialects (such as a JSON analogue like the above) it would often be used for key/value representations.  However, as a fully general array type, it's up to you what to use {...} for in your own dialects.</p>
+<p>This gives JSON's inspiration a chance to actually be <em>better</em> than JSON.</p>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">{glossary: {
+    title: "example glossary"
+    GlossDiv: {
+        title: "S"
+        GlossList: {
+            GlossEntry: {
+                ID: "SGML"
+                SortAs: "SGML"
+                GlossTerm: "Standard Generalized Markup Language"
+                Acronym: "SGML"
+                Abbrev: "ISO 8879:1986"
+                GlossDef: {
+                    para: "A meta-markup language..."
+                    GlossSeeAlso: ["GML" "XML"]
+                }
+                GlossSee: "markup"
+            }
+        }
+    }
+}}
+</code></pre>
+          <p><a href="https://rebol.metaeducation.com/t/json-envy-serialization-dialect-in-rebol/2140/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/json-envy-serialization-dialect-in-rebol/2140/2</link>
+        <pubDate>Wed, 31 Jan 2024 00:29:25 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2140-2</guid>
+        <source url="https://rebol.metaeducation.com/t/json-envy-serialization-dialect-in-rebol/2140.rss">JSON Envy: Serialization Dialect in Rebol?</source>
+      </item>
+      <item>
+        <title>JSON Envy: Serialization Dialect in Rebol?</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <blockquote>
+<p>Carl's thinking about <a href="https://rebol.metaeducation.com/t/carls-new-projects-altscript-altos/1571">a successor to Rebol's notation called ASON</a> included the idea that braces would be used for object construction--not strings.</p>
+<p>I've panned the notion of "lexical objects", and explained why in a thread outlining an alternative of treating braces as <strong><a href="https://rebol.metaeducation.com/t/rethinking-braces-as-an-array-type/1727">a new array type called FENCE!</a></strong>, which I have come to think is likely well worth it.</p>
+<p><em>But assuming we <strong>don't</strong> have FENCE!</em>, what might Rebol's version of JSON look like?  This was a tangent explored in October 2021 on the fence thread that I've broken into its own topic.</p>
+</blockquote>
+<hr>
+<p>Consider <a href="https://json.org/example.html">this example from json.org</a></p>
+<pre><code>{"glossary": {
+    "title": "example glossary",
+    "GlossDiv": {
+        "title": "S",
+        "GlossList": {
+            "GlossEntry": {
+                "ID": "SGML",
+                "SortAs": "SGML",
+                "GlossTerm": "Standard Generalized Markup Language",
+                "Acronym": "SGML",
+                "Abbrev": "ISO 8879:1986",
+                "GlossDef": {
+                    "para": "A meta-markup language...",
+                    "GlossSeeAlso": ["GML", "XML"]
+                },
+               "GlossSee": "markup"
+            }
+        }
+    }
+}}
+</code></pre>
+<p>I think allowing spaces in the keys is a weakness and not a strength.  And Rebol doesn't have the historical problem of disallowing language "keywords" in the keys, so the quotes wouldn't be necessary (they're not in modern JavaScript either for that reason, but they are if your word has dashes or spaces in it).</p>
+<p>Let's drop the quotes and turn <em>all</em> the braces into brackets.  Commas can be optional now, but let's say we don't care to use them when things are on different lines.</p>
+<pre><code>[glossary: [
+    title: "example glossary"
+    GlossDiv: [
+        title: "S"
+        GlossList: [
+            GlossEntry: [
+                ID: "SGML"
+                SortAs: "SGML"
+                GlossTerm: "Standard Generalized Markup Language",
+                Acronym: "SGML"
+                Abbrev: "ISO 8879:1986"
+                GlossDef: [
+                    para: "A meta-markup language..."
+                    GlossSeeAlso: ["GML", "XML"]  ; can use commas if we want?
+                ]
+                GlossSee: "markup"
+            ]
+        ]
+    ]
+]]
+</code></pre>
+<p>In practice, the serializer/deserializer could say that any block starting with a SET-WORD! is presumed to be an object...and if you have an array that you don't want to get this treatment you use <strong>'[...]</strong></p>
+<pre><code>&gt;&gt; deserialize "[[a: 10 b: 20] '[c: 10 &lt;random stuff&gt; d: 20]]"
+== [
+    #object![a: 10 b: 20]  ; whatever notation
+    [c: 10 &lt;random stuff&gt; d: 20]
+]
+</code></pre>
+<p>A simple rule about SET-WORD!s could give us the same object vs. array distinction in what's being transferred.  It would keep us centered on one nice bracket form to be hitting... allow an escape route for arbitrary BLOCK!s that want SET-WORD!s via quote...and we keep our nice braced strings without the need for nasty escapes.</p>
+<h2><a name="p-5601-what-about-evaluative-things-in-lists-1" class="anchor" href="https://rebol.metaeducation.com#p-5601-what-about-evaluative-things-in-lists-1"></a>What About Evaluative Things In Lists?</h2>
+<p>The lightness of unadorned WORD! has a big draw in Rebol, and has caused a lot of headaches...for instance in deciding if we should say <strong>Type: 'module</strong> or <strong>Type: module</strong>.</p>
+<p>While there's no rule that says module headers have to obey the same rules as whatever this operation is, it feels unwise to have them deviate.  So this implies <strong>Type: 'module</strong> or moving to something inert like <strong>Type: <span class="hashtag-raw">#module</span></strong> or <strong>Type: "module"</strong></p>
+<p>The problem expands to lists, where you have <strong>category: [fun script]</strong> needing to mitigate or avoid evaluation one way or another:</p>
+<pre><code>category: '[fun script]
+
+category: ['fun 'script]
+
+category: ["fun" "script"]
+
+category: [#fun #script]
+</code></pre>
+<p>While the first option of putting a quote on the list seems like the cleanest, things trying to generate serializations wouldn't have that choice if it was mixing words and objects:</p>
+<pre><code>mix: ['word-one [a: 10 b: 20] 'word-two]
+</code></pre>
+<p>If the outer block were quoted, then it wouldn't dig in to make the inner block into an object.</p>
+<p>These kinds of odd mixtures of evaluation with objects points out a not-uncommon Rebol problem... if you're doing a deserialization and descending into a block that isn't quoted, you might be seeing BLOCK!s that are arguments to functions along with blocks that are meant to act as objects.  Which wins?</p>
+<p>Code like PRINT goes step by step, as opposed to gathering all the strings ahead of time and assuming it is for itself:</p>
+<pre><code>&gt;&gt; print ["hello" reverse "dlrow"]
+hello world
+</code></pre>
+<p>The deserialization operator could work the same way, though it could effectively COMPOSE the BLOCK!s representing objects in so that any functions would be passed the object.  :-/</p>
+<p>Certainly raises some questions, but, they are fairly common Rebol questions.</p>
+<p><strong>...or...REDUCE requests could be explicit?</strong></p>
+<p>We don't have to make "recurses to look for blocks to instantiate objects" also imply that the arrays themselves are evaluative, but I think it would be confusing.  JavaScript programmers expect the arrays inside objects to be evaluated:</p>
+<pre><code> let x = {label: "object", data: {label: "array", data: [1 + 2, 10 + 20]}}
+</code></pre>
+<p>This gives you a nested structure with <strong><code>data: [3, 30]</code></strong>.  So I feel like this operation should follow suit, reducing blocks unless you suppress that.</p>
+<p>So if your input is:</p>
+<pre><code>[label: "object", data: [label: "array", data: [1 + 2, 10 + 20]]]
+</code></pre>
+<p>I think data should be <strong>[3 30]</strong>, and if your input is:</p>
+<pre><code>[label: "object", data: [label: "array", data: '[1 + 2, 10 + 20]]]
+</code></pre>
+<p>Then data should be <strong>[1 + 2, 10 + 20]</strong>.  The mixing and matching really is where you run into trouble, of an array that contains some blocks and some objects...though everything can be represented thanks to generic quoting, it could get messy.</p>
+<h2><a name="p-5601-what-if-we-used-groups-in-serialization-2" class="anchor" href="https://rebol.metaeducation.com#p-5601-what-if-we-used-groups-in-serialization-2"></a>What If We Used GROUP!s in Serialization?</h2>
+<pre><code>&gt;&gt; stuff: reduce [make object! [a: 10 b: 10 + 10]]
+== [object!#[a: 10 b: 20]]  ; or whatever internal representation
+
+&gt;&gt; serialize stuff 
+== [(a: 10 b: 20)]
+
+&gt;&gt; deserialize stuff
+== [object![a: 10 b: 20]]
+</code></pre>
+<p>JSON doesn't use parentheses in this way because it can't.  Parentheses are not reified.</p>
+<p>But if a Rebol system wants to exchange information with another Rebol system "in the style of JSON", GROUP! could be used to represent the key/value objects and BLOCK! could represent plain array/lists...with braces being a handy mode of string representation that can get away with less escaping.</p>
+<p>And with modern COMPOSE you could deserialize and compose, by labeling the compose sites:</p>
+<pre><code>&gt;&gt; deserialize compose &lt;*&gt; [
+    (a: 10 b: 20)  ; deserialize treats as object
+    (&lt;*&gt; reduce [1 + 2 3 + 4])  ; array before deserialize
+ ]
+</code></pre>
+<p>Whatever you call it, having something like COMPOSE which treats nested levels of GROUP!s as object creation requests isn't that crazy an idea.  (Perhaps OBJECTIFY ?)</p>
+          <p><a href="https://rebol.metaeducation.com/t/json-envy-serialization-dialect-in-rebol/2140/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/json-envy-serialization-dialect-in-rebol/2140/1</link>
+        <pubDate>Sat, 23 Oct 2021 06:06:48 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2140-1</guid>
+        <source url="https://rebol.metaeducation.com/t/json-envy-serialization-dialect-in-rebol/2140.rss">JSON Envy: Serialization Dialect in Rebol?</source>
+      </item>
+  </channel>
+</rss>

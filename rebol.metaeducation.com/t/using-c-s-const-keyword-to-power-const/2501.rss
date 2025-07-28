@@ -1,0 +1,223 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Using C++&#39;s const keyword to Power CONST</title>
+    <link>https://rebol.metaeducation.com/t/using-c-s-const-keyword-to-power-const/2501</link>
+    <description>[quote=&quot;hostilefork, post:1, topic:976&quot;]
+I feel like it shouldn&#39;t be controversial to say **it should not be this easy to write self-modifying code on accident.**
+[/quote]
+
+**[CONST and MUTABLE](https://rebol.metaeducation.com/t/value-vs-series-modification-bit-const-and-mutable/976)** have been around for a while now, and I think the chosen balance has worked out rather well.
+
+One historical problem point with these mutability features is that there was no compile-time checks to make sure code wasn&#39;t violating it.  *There were tons of cases of PROTECT bits not being honored, simply because there wasn&#39;t a check for mutability in some routine.*  The person hacking on the C code to REVERSE or SORT a series would have to explicitly remember to think that was a mutating operation and check the bit.
+
+The obvious-sounding way to stop these problems from creeping in would be to leverage the `const` annotation in C and C++.  All the routines that modified series would require the caller to have a non-const pointer in their hand...while routines that could be done on read-only series could take either a const or non-const pointer.
+
+So consider the simple example of getting an element at a position in an array:
+
+     Element* Array_At(Array* array, Index n)
+         { ...lots of code... }
+
+Historically this would take in a mutable Array (the only kind there was) and give back a mutable Cell.  But what we want is for mutable arrays to give back mutable cells, and const arrays to give const cells.  So we could simply create a wrapper that calls into the mutable implementation but reskins the result as const for const input:
+
+     Element* Array_At(Array* array, Index n)
+         { ...lots of code... }
+
+     inline const Element* Array_At(const Array* array, Index n)
+         { return Array_At(m_cast(Array*, array), n); }
+
+There&#39;s just one problem... **C doesn&#39;t support overloading.**  You can&#39;t have two functions with the same name and different signatures and have the compiler pick between them.  There&#39;d have to be two different names:
+
+     Element* mutable_Array_At(Array* array, Index n)
+       { ...lots of code... }
+
+     inline const Element* Array_At(const Array* array, Index n)
+       { return mutable_Array_At(m_cast(Array*, array), n); }
+
+This might not seem like that big a deal, *but* the combinatorics add up.  Because now you can&#39;t write a generic macro that speaks about array positions...you have to have macros with different names that call the differently named accessors.  And consider there are *lots* of these routines (Array_Head, Array_Tail, Array_Last... Binary_Head, Binary_Tail... Flex_Data, etc. etc. etc.)  It&#39;s pretty horrific when you start having this explode with mutable_XXX variations and mutable_XXX variations of everything that calls them.
+
+**I came up with a trick to get around it.**  Basically, the trick is to sacrifice some amount of const checking in C.  First, define a macro for something that resolves to `const` in C but vaporizes in C++:
+
+    #ifdef __cplusplus
+        #define const_if_c
+    #else
+        #define const_if_c const
+    #endif
+
+Then, define the functions like this:
+
+    Element* Array_At(const_if_c Array* array, Index n)
+      { ...lots of code... }
+
+    #ifdef __cplusplus
+        inline const Element* Array_At(const Array* array, Index n)
+             { return Array_At(m_cast(Array*, array), n); }
+    #endif
+
+So the C build will give you back a mutable array no matter whether your input array was const or not.  But the C++ build only gives back const arrays for const input.
+
+**This makes systemic enforcement of mutability checking practical.**  If you&#39;re inside the implementation with a `const` array, string, or binary... you won&#39;t be able to make a call to a C routine that will mutate it.  The only way you can get mutable arrays is through specific entry points that extract the array with a runtime check to make sure it&#39;s mutable.
+
+It&#39;s all in the implementation guts...so it only affects those using the core API, not libRebol.  The only thing you need to do is make sure you at some point build the code with a C++ compiler, and it will tell you where any problems are.</description>
+    
+    <lastBuildDate>Fri, 04 Jul 2025 21:14:29 +0000</lastBuildDate>
+    <category>C/C++ Implementation</category>
+    <atom:link href="https://rebol.metaeducation.com/t/using-c-s-const-keyword-to-power-const/2501.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Using C++&#39;s const keyword to Power CONST</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="2501">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">Element* Array_At(const_if_c Array* array, Index n)
+  { ...lots of code... }
+
+#ifdef __cplusplus
+    inline const Element* Array_At(const Array* array, Index n)
+         { return Array_At(m_cast(Array*, array), n); }
+#endif
+</code></pre>
+</blockquote>
+</aside>
+<p>I've built an even more automatic version of this, that's working very well!</p>
+<pre><code>//=//// CONST PROPAGATION TOOLS ///////////////////////////////////////////=//
+//
+// C lacks overloading, which means that having one version of code for const
+// input and another for non-const input requires two entirely different names
+// for the function variations.  That can wind up seeming noisier than is
+// worth it for a compile-time check.
+//
+//    const Member* Get_Member_Const(const Object* ptr) { ... }
+//
+//    Member* Get_Member(Object *ptr) { ... }
+//
+// Needful provides a way to use a single name and avoid code duplication.
+// It's a little tricky, but looks like this:
+//
+//     MUTABLE_IF_C(Member*) Get_Member(CONST_IF_C(Object*) ptr_) {
+//         CONSTABLE(Object*) ptr = m_cast(Object*, ptr_);
+//         ...
+//     }
+//
+// As the macro names suggest, the C build will behave in such a way that
+// the input argument will always appear to be const, and the output argument
+// will always appear to be mutable.  So it will compile permissively with
+// no const const checking in the C build.. BUT the C++ build synchronizes
+// the constness of the input and output arguments (though you have to use
+// a proxy variable in the body if you want mutable access).
+//
+// 1. If writing a simple wrapper whose only purpose is to pipe const-correct
+//    output results from the input's constness, a trick is to use `c_cast()`
+//    which is a "const-preserving cast".
+//
+//    #define Get_Member_As_Foo(ptr)  c_cast(Foo*, Get_Member(ptr))
+//
+// 2. The C++ version of MUTABLE_IF_C() actually spits out a `template&lt;&gt;`
+//    prelude.  If we didn't offer a "hook" to that, then if you wrote:
+//
+//        INLINE MUTABLE_IF_C(Type) Some_Func(...) {...}
+//
+//    You would get:
+//
+//        INLINE template&lt;...&gt; Some_Func(...) {...}
+//
+//    Since that would error, provide a generalized mechanism for optionally
+//    slipping decorators before the template&lt;&gt; definition.
+//
+</code></pre>
+<h2><a name="p-8496-in-c-its-nearly-a-no-op-1" class="anchor" href="https://rebol.metaeducation.com#p-8496-in-c-its-nearly-a-no-op-1"></a>In C, It's Nearly A No-Op...</h2>
+<pre><code>#define CONST_IF_C(param_type) \
+    const param_type  // Note: use c_cast() macros instead, if you can [1]
+
+#define MUTABLE_IF_C(return_type, ...) \
+    __VA_ARGS__ return_type  // __VA_ARGS__ needed for INLINE etc. [2]
+
+#define CONSTABLE(param_type)  param_type  // use m_cast() on assignment
+</code></pre>
+<h2><a name="p-8496-in-c-its-some-magic-but-good-magic-2" class="anchor" href="https://rebol.metaeducation.com#p-8496-in-c-its-some-magic-but-good-magic-2"></a>In C++, It's Some Magic, But Good Magic!</h2>
+<pre><code>#define MUTABLE_IF_C(ReturnType, ...) \
+    template&lt;typename T&gt; \
+    __VA_ARGS__ needful_mirror_const(T, ReturnType)
+
+#define CONST_IF_C(ParamType) /* !!! static_assert ParamType somehow? */ \
+    T&amp;&amp;  // universal reference to arg
+
+#define CONSTABLE(ParamType) \
+    needful_mirror_const(T, ParamType)
+</code></pre>
+<h2><a name="p-8496-a-little-weird-but-it-powers-the-const-features-3" class="anchor" href="https://rebol.metaeducation.com#p-8496-a-little-weird-but-it-powers-the-const-features-3"></a>A Little Weird, But It Powers The Const Features!</h2>
+<p>Without something like this, we really couldn't provide a guarantee that your constness was being honored, it's just too brittle...</p>
+<p>But with this, it's nigh foolproof!</p>
+<p>I'm still thinking about the naming, but I think I want it to be all-caps to call attention to the macro magic.</p>
+          <p><a href="https://rebol.metaeducation.com/t/using-c-s-const-keyword-to-power-const/2501/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/using-c-s-const-keyword-to-power-const/2501/2</link>
+        <pubDate>Fri, 04 Jul 2025 21:14:29 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2501-2</guid>
+        <source url="https://rebol.metaeducation.com/t/using-c-s-const-keyword-to-power-const/2501.rss">Using C++&#39;s const keyword to Power CONST</source>
+      </item>
+      <item>
+        <title>Using C++&#39;s const keyword to Power CONST</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="976">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"><a href="https://rebol.metaeducation.com/t/value-vs-series-modification-bit-const-and-mutable/976/1">Value (vs. Series) Modification Bit: CONST and MUTABLE</a></div>
+<blockquote>
+<p>I feel like it shouldn't be controversial to say <strong>it should not be this easy to write self-modifying code on accident.</strong></p>
+</blockquote>
+</aside>
+<p><strong><a href="https://rebol.metaeducation.com/t/value-vs-series-modification-bit-const-and-mutable/976">CONST and MUTABLE</a></strong> have been around for a while now, and I think the chosen balance has worked out rather well.</p>
+<p>One historical problem point with these mutability features is that there was no compile-time checks to make sure code wasn't violating it.  <em>There were tons of cases of PROTECT bits not being honored, simply because there wasn't a check for mutability in some routine.</em>  The person hacking on the C code to REVERSE or SORT a series would have to explicitly remember to think that was a mutating operation and check the bit.</p>
+<p>The obvious-sounding way to stop these problems from creeping in would be to leverage the <code>const</code> annotation in C and C++.  All the routines that modified series would require the caller to have a non-const pointer in their hand...while routines that could be done on read-only series could take either a const or non-const pointer.</p>
+<p>So consider the simple example of getting an element at a position in an array:</p>
+<pre><code> Element* Array_At(Array* array, Index n)
+     { ...lots of code... }
+</code></pre>
+<p>Historically this would take in a mutable Array (the only kind there was) and give back a mutable Cell.  But what we want is for mutable arrays to give back mutable cells, and const arrays to give const cells.  So we could simply create a wrapper that calls into the mutable implementation but reskins the result as const for const input:</p>
+<pre><code> Element* Array_At(Array* array, Index n)
+     { ...lots of code... }
+
+ inline const Element* Array_At(const Array* array, Index n)
+     { return Array_At(m_cast(Array*, array), n); }
+</code></pre>
+<p>There's just one problem... <strong>C doesn't support overloading.</strong>  You can't have two functions with the same name and different signatures and have the compiler pick between them.  There'd have to be two different names:</p>
+<pre><code> Element* mutable_Array_At(Array* array, Index n)
+   { ...lots of code... }
+
+ inline const Element* Array_At(const Array* array, Index n)
+   { return mutable_Array_At(m_cast(Array*, array), n); }
+</code></pre>
+<p>This might not seem like that big a deal, <em>but</em> the combinatorics add up.  Because now you can't write a generic macro that speaks about array positions...you have to have macros with different names that call the differently named accessors.  And consider there are <em>lots</em> of these routines (Array_Head, Array_Tail, Array_Last... Binary_Head, Binary_Tail... Flex_Data, etc. etc. etc.)  It's pretty horrific when you start having this explode with mutable_XXX variations and mutable_XXX variations of everything that calls them.</p>
+<p><strong>I came up with a trick to get around it.</strong>  Basically, the trick is to sacrifice some amount of const checking in C.  First, define a macro for something that resolves to <code>const</code> in C but vaporizes in C++:</p>
+<pre><code>#ifdef __cplusplus
+    #define const_if_c
+#else
+    #define const_if_c const
+#endif
+</code></pre>
+<p>Then, define the functions like this:</p>
+<pre><code>Element* Array_At(const_if_c Array* array, Index n)
+  { ...lots of code... }
+
+#ifdef __cplusplus
+    inline const Element* Array_At(const Array* array, Index n)
+         { return Array_At(m_cast(Array*, array), n); }
+#endif
+</code></pre>
+<p>So the C build will give you back a mutable array no matter whether your input array was const or not.  But the C++ build only gives back const arrays for const input.</p>
+<p><strong>This makes systemic enforcement of mutability checking practical.</strong>  If you're inside the implementation with a <code>const</code> array, string, or binary... you won't be able to make a call to a C routine that will mutate it.  The only way you can get mutable arrays is through specific entry points that extract the array with a runtime check to make sure it's mutable.</p>
+<p>It's all in the implementation guts...so it only affects those using the core API, not libRebol.  The only thing you need to do is make sure you at some point build the code with a C++ compiler, and it will tell you where any problems are.</p>
+          <p><a href="https://rebol.metaeducation.com/t/using-c-s-const-keyword-to-power-const/2501/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/using-c-s-const-keyword-to-power-const/2501/1</link>
+        <pubDate>Tue, 15 Sep 2020 03:28:33 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2501-1</guid>
+        <source url="https://rebol.metaeducation.com/t/using-c-s-const-keyword-to-power-const/2501.rss">Using C++&#39;s const keyword to Power CONST</source>
+      </item>
+  </channel>
+</rss>

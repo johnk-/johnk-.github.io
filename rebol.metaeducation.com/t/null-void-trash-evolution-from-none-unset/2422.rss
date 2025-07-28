@@ -1,0 +1,535 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>NULL/VOID/TRASH evolution from NONE!/UNSET!</title>
+    <link>https://rebol.metaeducation.com/t/null-void-trash-evolution-from-none-unset/2422</link>
+    <description>&gt; **Here is some history that explains how [NULL and VOID and TRASH](https://rebol.metaeducation.com/t/what-are-null-void-and-trash/2283) evolved from Rebol2&#39;s types.**
+
+---
+
+## Rebol2/R3-Alpha/Red Have Two Kinds of Nothing (both reified)
+
+Historical Redbol gives you two main choices for &quot;nothingness&quot;...**`#[none]`** and **`#[unset]`**... both of which can be found either in variables, or as values in blocks:
+
+    rebol2&gt;&gt; block: reduce [none print &quot;print returns unset&quot;]
+    print returns unset
+    == [none unset]  ; misleadingly renders as WORD!s
+
+    rebol2&gt;&gt; type? first block
+    == none!
+
+    rebol2&gt;&gt; type? second block
+    == unset!
+
+Using `#[none]` has the advantage of being &quot;friendly&quot; on access via word, allowing you to write things like:
+
+    rebol2&gt;&gt; var: none
+
+    rebol2&gt;&gt; either var [print &quot;do something with var&quot;] [print &quot;do something else&quot;]
+    do something else
+
+But when var contained an #[unset], you&#39;d get an error instead:
+
+    rebol2&gt;&gt; unset &#39;var
+
+    rebol2&gt;&gt; either var [print &quot;do something with var&quot;] [print &quot;do something else&quot;]
+    ** Script Error: var has no value
+
+So instead of using var directly, you had to do something more circuitous and pass the word &quot;var&quot; into a special test routine (morally equivalent to today&#39;s **set? &#39;var**)
+
+**Hence #[none] was reached for frequently out of convenience.  Yet this convenience came with a cost: it was very easy to accidentally append one to a block, even if its non-valued intent should have conveyed you might not have wanted to add anything at all.**
+
+But it&#39;s hard to say: sometimes you *did* want to add #[none] to a block, to serve as a placeholder.  
+
+Also, being able to enumerate a block which contained #[unset] values was problematic, because if you did something like a FOR-EACH it would appear that the variable you were enumerating with was itself not set.
+
+## Early Ren-C Made Reified BLANK! and non-Valued NULL
+
+One thing that bugged me was that there was no &quot;pretty&quot; representation for a non-valued state in a block... and that `#[none]` often thus displayed itself as the word `none` (seen in the example at the top of the post).
+
+So the BLANK! datatype took the single underscore **_**.
+
+    &gt;&gt; second [a _]
+    == _
+
+    &gt;&gt; if blank? _ [print &quot;yep, it&#39;s a blank&quot;]
+    yep it&#39;s a blank
+
+    &gt;&gt; if not _ [print &quot;blank is also falsey&quot;]
+    blank is also falsey
+
+And critically, one of the first things I tried to do was rethink the `#[unset]` state into something that you&#39;d never find in a block, and called it NULL (as well as made it correspond to C/Javascript null in the API):
+
+    &gt;&gt; second [a _]
+    == _
+
+    &gt;&gt; third [a _]
+    ; null
+
+Since NULL couldn&#39;t be found in a block, it wasn&#39;t ambiguous when you got NULL back from a block operation as to whether there was a &quot;null in that position&quot;.
+
+But it&#39;s still just two things:
+
+  * **blank!** - A nothing you can put in a block
+      * it was logically false
+      * it was friendly via word access (no need for GET-WORD!)
+
+  * **null** - A nothing you couldn&#39;t put in a block
+       * it was also logically false
+       * it was *unfriendly* via word access (need GET-WORD! for :VAR, or SET? &#39;VAR)
+
+This put you in a difficult situation for your choices of emptiness when you were dealing with something like:
+
+    append block value  ; what nothing state should you use for value?
+
+If you wanted to avoid accidentally appending blanks to arrays, you kind of wanted NULL so you&#39;d get an error.  But once you used NULL, you could not write the convenient **`if value [...]`**  control structure.
+
+## Later Ren-C added a separate &quot;ornery&quot; non-Value State
+
+A third state was added to be neither logically true nor false, and that would trigger an error on accessing a variable with it.  (I&#39;ll whitewash history a bit and say this state was always called &quot;TRASH&quot;, and also always could not be put in blocks.)
+
+This was the new state of unset variables:
+
+    &gt;&gt; unset $x
+
+    &gt;&gt; x
+    ** Error: X is an unset variable
+
+    &gt;&gt; get:any $x
+    == \~\  ; trash!
+
+    &gt;&gt; if get:any $x [print &quot;Ornery!&quot;]
+    ** Error: trash is neither logically true nor false
+
+So NULL now represented a middle ground.  It was something that was easy to test for being nothing (using IF) but that was impossible to accidentally put into a block.
+
+This gave you three behaviors:
+
+    [1]  &gt;&gt; trash-value
+         ** Error: TRASH-VALUE variable is unset
+
+    [2]  &gt;&gt; null-value
+         ; null
+
+         &gt;&gt; append [a b] null-value
+         ** Error: APPEND does not allow adding NULL to blocks
+
+    [3]  &gt;&gt; blank-value
+         == _
+
+         &gt;&gt; append [a b] blank-value
+         == [a b _]
+
+## WORD! Antiforms Brought Infinite Non-Valued Choices
+
+Eventually the NULL state became an isotope of the WORD! null, so a **~null~** antiform.
+
+It joined **~okay~** as an antiform you could test for truthiness and falseyness.
+
+You&#39;d use the null antiform as the initialization for something you may run some code and find it doesn&#39;t assign, and you want to be able to test that.
+
+     directory: ~null~
+
+     for-each [key val] config [
+         if key = &#39;directory [
+             if directory [
+                 fail [&quot;Directory was already set by config:&quot; directory]
+             ]
+             directory: val
+         ]
+     ]
+
+## VOID Provided a Clean &quot;Opt-Out&quot; Option
+
+An unfortunate sacrifice that had been made in the design was that the &quot;non-valued&quot; status of NULL was chosen to raise attention to an error condition, rather than be an opportunity to opt-out of an APPEND:
+
+    &gt;&gt; append [a b] null-value
+    ** Error: This error is the choice that we went with
+
+    &gt;&gt; append [a b] null-value
+    == [a b]  ; would have been another possibility, but too accident prone
+
+Some &quot;strange&quot; things were tried...such as making it so that appending a BLANK! was a no-op, and if you wanted to append a literal blank you had to append a quoted blank:
+
+     &gt;&gt; append [a b] _
+     == [a b]  ; hmmm.
+
+     &gt;&gt; quote _
+     == &#39;_
+
+     &gt;&gt; append [a b] quote _
+     == [a b _]  ; hmmm.
+
+*(It wasn&#39;t that strange considering appending a BLOCK! would append its contents, and a quoted block was being tried as the way of specifying /ONLY.  This line of thinking ultimately led to the [designs for the isotopes that solve things like splicing intent](https://rebol.metaeducation.com/t/a-justification-of-generalized-isotopes/1918), so it wasn&#39;t all for naught!)*
+
+After [invisibles were rethought as GHOST (antiform comma)](https://rebol.metaeducation.com/t/invisibility-reviewed-through-modern-eyes/2034), another unstable antiform state of VOID came as another piece of the puzzle.
+
+    &gt;&gt; void
+    == \~[]~\  ; antiform (pack!) &quot;void&quot;
+
+    &gt;&gt; lift void
+    == ~[]~
+
+I realized that void was the perfect choice for opting out of operations:
+
+    &gt;&gt; append [a b] void
+    == [a b]
+
+    &gt;&gt; append void [a b c]
+    == \~null~\  ; antiform
+
+As you see above, an operation can return null when it doesn&#39;t have another good answer for giving back in case of a no-op.  This gives good error locality, since the null won&#39;t trigger another opting out unless you explicitly convert the null to a void with OPT.
+
+    &gt;&gt; append (append void [a b c]) [d e f]
+    ** Error: APPEND doesn&#39;t accept ~NULL~ antiform for the series argument
+
+    &gt;&gt; opt null
+    == \~[]~\  ; antiform (pack!) &quot;void&quot;
+
+    &gt;&gt; append (opt append void [a b c]) [d e f]
+    == \~null~\  ; antiform
+
+Beyond this, [underscore became just the character literal for SPACE](https://rebol.metaeducation.com/t/reified-unreassignable-nothingness-space-runes/2457)...
+
+This gives a (seemingly) complete picture
+
+    [1]  &gt;&gt; trash-value
+         ** Error: TRASH-VALUE variable is unset
+
+          &gt;&gt; append [a b] get:any $trash-value
+          ** Error: APPEND does not allow adding ~ antiforms to blocks
+          
+    [2]  &gt;&gt; void-func  ; must be a function, since variables can&#39;t store void
+         == \~[]~\  ; antiform (pack!) &quot;void&quot;
+
+         &gt;&gt; append [a b] void-func
+         == [a b]
+
+    [3]  &gt;&gt; null-value
+         == \~null~\  ; antiform
+
+         &gt;&gt; append [a b] null-value
+         ** Error: APPEND does not allow adding NULL to blocks
+
+    [3a] &gt;&gt; opt null-value
+         == \~[]~\  ; antiform (pack!) &quot;void&quot;
+
+         &gt;&gt; append [a b] opt null-value
+         == [a b]
+
+    [4]  &gt;&gt; space
+         == _
+
+         &gt;&gt; append [a b] space
+         == [a b _]</description>
+    
+    <lastBuildDate>Mon, 02 Jun 2025 17:46:23 +0000</lastBuildDate>
+    <category>Redbol</category>
+    <atom:link href="https://rebol.metaeducation.com/t/null-void-trash-evolution-from-none-unset/2422.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>NULL/VOID/TRASH evolution from NONE!/UNSET!</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="bradrn" data-post="2" data-topic="2422">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/bradrn/48/365_2.png" class="avatar"> bradrn:</div>
+<blockquote>
+<p>Ghost’: the antiform of comma. Completely ignored by the evaluator.</p>
+</blockquote>
+</aside>
+<p>Note that GHOST is only ignored in "interstitial slots".  If you try to call a function that isn't expecting a GHOST and pass it as an argument, that's an error:</p>
+<pre><code>&gt;&gt; append [a b c] 'd comment "ignored"
+== [a b c d]
+
+&gt;&gt; append [a b c] comment "not ignored" 'd
+** Script Error: APPEND is missing its VALUE argument
+</code></pre>
+<p>At one point in time, the second worked.  For an understanding of why it no longer does, see:</p>
+<p><a href="https://rebol.metaeducation.com/t/invisibility-reviewed-through-modern-eyes/2034" class="inline-onebox">Making Invisible Functions (e.g. COMMENT, ELIDE)</a></p>
+<aside class="quote no-group" data-username="bradrn" data-post="2" data-topic="2422">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/bradrn/48/365_2.png" class="avatar"> bradrn:</div>
+<blockquote>
+<p>Void’: the antiform of an empty block, i.e. a multi-return containing no elements. Throws on attempts to use it, except with APPEND, where it acts as a no-op. Not sure how this is used.</p>
+</blockquote>
+</aside>
+<p>Void is used generically in many places when you want things to vanish:</p>
+<pre><code>&gt;&gt; compose [&lt;a&gt; (if null [&lt;b&gt;] else [void]) &lt;c&gt;]
+== [&lt;a&gt; &lt;c&gt;]
+</code></pre>
+<p>Allowing NULL to vanish here would be too liberal and not reveal what were likely errors.  If you have something that may be NULL that you want to convert to a VOID if so, you can use OPT.</p>
+<p>VOID is also is used for opting out of things, using the "void-in-null-out" strategy.  Compare:</p>
+<pre><code>&gt;&gt; block: ["a" "b"]
+
+&gt;&gt; unspaced block
+== "ab"
+
+&gt;&gt; to word! unspaced block
+== ab
+</code></pre>
+<p>With:</p>
+<pre><code>&gt;&gt; block: []
+
+&gt;&gt; unspaced block
+== \~null~\  ; antiform
+
+&gt;&gt; to word! unspaced block
+** Script Error: to expects [~[]~ element?] for its value argument
+
+&gt;&gt; opt unspaced block
+== \~[]~\  ; antiform (pack!) "void"
+
+&gt;&gt; to word! opt unspaced block
+== \~null~\  ; antiform
+</code></pre>
+<p>With:</p>
+<pre><code>&gt;&gt; block: null
+
+&gt;&gt; unspaced block
+** Script Error: unspaced expects [~[]~ text! block! the-block! issue!]
+                 for its line argument
+
+&gt;&gt; unspaced opt block
+== \~null~\  ; antiform
+
+&gt;&gt; to word! opt unspaced opt block
+== \~null~\  ; antiform
+</code></pre>
+<p>Historical Redbol had a lot of people asking that things give NONE! back when they took NONE! in, and this "none propagation" was messy in terms of leading to whole chains which would opt themselves out without knowing where the problem was.  Void-in-null-out encourages being more purposeful--you only throw in the OPT where you need them.</p>
+          <p><a href="https://rebol.metaeducation.com/t/null-void-trash-evolution-from-none-unset/2422/3">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/null-void-trash-evolution-from-none-unset/2422/3</link>
+        <pubDate>Sat, 09 Mar 2024 02:14:44 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2422-3</guid>
+        <source url="https://rebol.metaeducation.com/t/null-void-trash-evolution-from-none-unset/2422.rss">NULL/VOID/TRASH evolution from NONE!/UNSET!</source>
+      </item>
+      <item>
+        <title>NULL/VOID/TRASH evolution from NONE!/UNSET!</title>
+        <dc:creator><![CDATA[bradrn]]></dc:creator>
+        <description><![CDATA[
+            <p>I’ve read this through a couple of times, but am still not sure I understand it correctly. The discursive treatment in the [second] post is nice for motivating the various types, but confusing for actually getting a handle on how they work.</p>
+<p>So, trying to summarise the situation, here’s my understanding at the moment of the various values involved:</p>
+<ul>
+<li>‘Space’: a character literal <code>_</code>.</li>
+<li>‘Trash’: the antiform of <code>_</code>. Throws an error on variable access, or any other attempt to use it. Used to represent unset variables.</li>
+<li>‘Void’: the antiform of an empty block, i.e. a multi-return containing no elements. Throws on attempts to use it, except with APPEND, where it acts as a no-op. Not sure how this is used.</li>
+<li>‘Null’: the antiform of <code>null</code>. Does not throw an error on variable access, and tests falsey in conditionals, but throws an error on other attempts to use it. Used to represent uninitialised variables.</li>
+<li>‘Ghost’: the antiform of comma. Completely ignored by the evaluator.</li>
+</ul>
+<p>Does this seem correct?</p>
+          <p><a href="https://rebol.metaeducation.com/t/null-void-trash-evolution-from-none-unset/2422/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/null-void-trash-evolution-from-none-unset/2422/2</link>
+        <pubDate>Sat, 09 Mar 2024 01:17:34 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2422-2</guid>
+        <source url="https://rebol.metaeducation.com/t/null-void-trash-evolution-from-none-unset/2422.rss">NULL/VOID/TRASH evolution from NONE!/UNSET!</source>
+      </item>
+      <item>
+        <title>NULL/VOID/TRASH evolution from NONE!/UNSET!</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <blockquote>
+<p><strong>Here is some history that explains how <a href="https://rebol.metaeducation.com/t/what-are-null-void-and-trash/2283">NULL and VOID and TRASH</a> evolved from Rebol2's types.</strong></p>
+</blockquote>
+<hr>
+<h2><a name="p-7690-rebol2r3-alphared-have-two-kinds-of-nothing-both-reified-1" class="anchor" href="https://rebol.metaeducation.com#p-7690-rebol2r3-alphared-have-two-kinds-of-nothing-both-reified-1"></a>Rebol2/R3-Alpha/Red Have Two Kinds of Nothing (both reified)</h2>
+<p>Historical Redbol gives you two main choices for "nothingness"...<strong><code>#[none]</code></strong> and <strong><code>#[unset]</code></strong>... both of which can be found either in variables, or as values in blocks:</p>
+<pre><code>rebol2&gt;&gt; block: reduce [none print "print returns unset"]
+print returns unset
+== [none unset]  ; misleadingly renders as WORD!s
+
+rebol2&gt;&gt; type? first block
+== none!
+
+rebol2&gt;&gt; type? second block
+== unset!
+</code></pre>
+<p>Using <code>#[none]</code> has the advantage of being "friendly" on access via word, allowing you to write things like:</p>
+<pre><code>rebol2&gt;&gt; var: none
+
+rebol2&gt;&gt; either var [print "do something with var"] [print "do something else"]
+do something else
+</code></pre>
+<p>But when var contained an #[unset], you'd get an error instead:</p>
+<pre><code>rebol2&gt;&gt; unset 'var
+
+rebol2&gt;&gt; either var [print "do something with var"] [print "do something else"]
+** Script Error: var has no value
+</code></pre>
+<p>So instead of using var directly, you had to do something more circuitous and pass the word "var" into a special test routine (morally equivalent to today's <strong>set? 'var</strong>)</p>
+<p><strong>Hence #[none] was reached for frequently out of convenience.  Yet this convenience came with a cost: it was very easy to accidentally append one to a block, even if its non-valued intent should have conveyed you might not have wanted to add anything at all.</strong></p>
+<p>But it's hard to say: sometimes you <em>did</em> want to add #[none] to a block, to serve as a placeholder.</p>
+<p>Also, being able to enumerate a block which contained #[unset] values was problematic, because if you did something like a FOR-EACH it would appear that the variable you were enumerating with was itself not set.</p>
+<h2><a name="p-7690-early-ren-c-made-reified-blank-and-non-valued-null-2" class="anchor" href="https://rebol.metaeducation.com#p-7690-early-ren-c-made-reified-blank-and-non-valued-null-2"></a>Early Ren-C Made Reified BLANK! and non-Valued NULL</h2>
+<p>One thing that bugged me was that there was no "pretty" representation for a non-valued state in a block... and that <code>#[none]</code> often thus displayed itself as the word <code>none</code> (seen in the example at the top of the post).</p>
+<p>So the BLANK! datatype took the single underscore <strong>_</strong>.</p>
+<pre><code>&gt;&gt; second [a _]
+== _
+
+&gt;&gt; if blank? _ [print "yep, it's a blank"]
+yep it's a blank
+
+&gt;&gt; if not _ [print "blank is also falsey"]
+blank is also falsey
+</code></pre>
+<p>And critically, one of the first things I tried to do was rethink the <code>#[unset]</code> state into something that you'd never find in a block, and called it NULL (as well as made it correspond to C/Javascript null in the API):</p>
+<pre><code>&gt;&gt; second [a _]
+== _
+
+&gt;&gt; third [a _]
+; null
+</code></pre>
+<p>Since NULL couldn't be found in a block, it wasn't ambiguous when you got NULL back from a block operation as to whether there was a "null in that position".</p>
+<p>But it's still just two things:</p>
+<ul>
+<li>
+<p><strong>blank!</strong> - A nothing you can put in a block</p>
+<ul>
+<li>it was logically false</li>
+<li>it was friendly via word access (no need for GET-WORD!)</li>
+</ul>
+</li>
+<li>
+<p><strong>null</strong> - A nothing you couldn't put in a block</p>
+<ul>
+<li>it was also logically false</li>
+<li>it was <em>unfriendly</em> via word access (need GET-WORD! for :VAR, or SET? 'VAR)</li>
+</ul>
+</li>
+</ul>
+<p>This put you in a difficult situation for your choices of emptiness when you were dealing with something like:</p>
+<pre><code>append block value  ; what nothing state should you use for value?
+</code></pre>
+<p>If you wanted to avoid accidentally appending blanks to arrays, you kind of wanted NULL so you'd get an error.  But once you used NULL, you could not write the convenient <strong><code>if value [...]</code></strong>  control structure.</p>
+<h2><a name="p-7690-later-ren-c-added-a-separate-ornery-non-value-state-3" class="anchor" href="https://rebol.metaeducation.com#p-7690-later-ren-c-added-a-separate-ornery-non-value-state-3"></a>Later Ren-C added a separate "ornery" non-Value State</h2>
+<p>A third state was added to be neither logically true nor false, and that would trigger an error on accessing a variable with it.  (I'll whitewash history a bit and say this state was always called "TRASH", and also always could not be put in blocks.)</p>
+<p>This was the new state of unset variables:</p>
+<pre><code>&gt;&gt; unset $x
+
+&gt;&gt; x
+** Error: X is an unset variable
+
+&gt;&gt; get:any $x
+== \~\  ; trash!
+
+&gt;&gt; if get:any $x [print "Ornery!"]
+** Error: trash is neither logically true nor false
+</code></pre>
+<p>So NULL now represented a middle ground.  It was something that was easy to test for being nothing (using IF) but that was impossible to accidentally put into a block.</p>
+<p>This gave you three behaviors:</p>
+<pre><code>[1]  &gt;&gt; trash-value
+     ** Error: TRASH-VALUE variable is unset
+
+[2]  &gt;&gt; null-value
+     ; null
+
+     &gt;&gt; append [a b] null-value
+     ** Error: APPEND does not allow adding NULL to blocks
+
+[3]  &gt;&gt; blank-value
+     == _
+
+     &gt;&gt; append [a b] blank-value
+     == [a b _]
+</code></pre>
+<h2><a name="p-7690-word-antiforms-brought-infinite-non-valued-choices-4" class="anchor" href="https://rebol.metaeducation.com#p-7690-word-antiforms-brought-infinite-non-valued-choices-4"></a>WORD! Antiforms Brought Infinite Non-Valued Choices</h2>
+<p>Eventually the NULL state became an isotope of the WORD! null, so a <strong>~null~</strong> antiform.</p>
+<p>It joined <strong>~okay~</strong> as an antiform you could test for truthiness and falseyness.</p>
+<p>You'd use the null antiform as the initialization for something you may run some code and find it doesn't assign, and you want to be able to test that.</p>
+<pre><code> directory: ~null~
+
+ for-each [key val] config [
+     if key = 'directory [
+         if directory [
+             fail ["Directory was already set by config:" directory]
+         ]
+         directory: val
+     ]
+ ]
+</code></pre>
+<h2><a name="p-7690-void-provided-a-clean-opt-out-option-5" class="anchor" href="https://rebol.metaeducation.com#p-7690-void-provided-a-clean-opt-out-option-5"></a>VOID Provided a Clean "Opt-Out" Option</h2>
+<p>An unfortunate sacrifice that had been made in the design was that the "non-valued" status of NULL was chosen to raise attention to an error condition, rather than be an opportunity to opt-out of an APPEND:</p>
+<pre><code>&gt;&gt; append [a b] null-value
+** Error: This error is the choice that we went with
+
+&gt;&gt; append [a b] null-value
+== [a b]  ; would have been another possibility, but too accident prone
+</code></pre>
+<p>Some "strange" things were tried...such as making it so that appending a BLANK! was a no-op, and if you wanted to append a literal blank you had to append a quoted blank:</p>
+<pre><code> &gt;&gt; append [a b] _
+ == [a b]  ; hmmm.
+
+ &gt;&gt; quote _
+ == '_
+
+ &gt;&gt; append [a b] quote _
+ == [a b _]  ; hmmm.
+</code></pre>
+<p><em>(It wasn't that strange considering appending a BLOCK! would append its contents, and a quoted block was being tried as the way of specifying /ONLY.  This line of thinking ultimately led to the <a href="https://rebol.metaeducation.com/t/a-justification-of-generalized-isotopes/1918">designs for the isotopes that solve things like splicing intent</a>, so it wasn't all for naught!)</em></p>
+<p>After <a href="https://rebol.metaeducation.com/t/invisibility-reviewed-through-modern-eyes/2034">invisibles were rethought as GHOST (antiform comma)</a>, another unstable antiform state of VOID came as another piece of the puzzle.</p>
+<pre><code>&gt;&gt; void
+== \~[]~\  ; antiform (pack!) "void"
+
+&gt;&gt; lift void
+== ~[]~
+</code></pre>
+<p>I realized that void was the perfect choice for opting out of operations:</p>
+<pre><code>&gt;&gt; append [a b] void
+== [a b]
+
+&gt;&gt; append void [a b c]
+== \~null~\  ; antiform
+</code></pre>
+<p>As you see above, an operation can return null when it doesn't have another good answer for giving back in case of a no-op.  This gives good error locality, since the null won't trigger another opting out unless you explicitly convert the null to a void with OPT.</p>
+<pre><code>&gt;&gt; append (append void [a b c]) [d e f]
+** Error: APPEND doesn't accept ~NULL~ antiform for the series argument
+
+&gt;&gt; opt null
+== \~[]~\  ; antiform (pack!) "void"
+
+&gt;&gt; append (opt append void [a b c]) [d e f]
+== \~null~\  ; antiform
+</code></pre>
+<p>Beyond this, <a href="https://rebol.metaeducation.com/t/reified-unreassignable-nothingness-space-runes/2457">underscore became just the character literal for SPACE</a>...</p>
+<p>This gives a (seemingly) complete picture</p>
+<pre><code>[1]  &gt;&gt; trash-value
+     ** Error: TRASH-VALUE variable is unset
+
+      &gt;&gt; append [a b] get:any $trash-value
+      ** Error: APPEND does not allow adding ~ antiforms to blocks
+      
+[2]  &gt;&gt; void-func  ; must be a function, since variables can't store void
+     == \~[]~\  ; antiform (pack!) "void"
+
+     &gt;&gt; append [a b] void-func
+     == [a b]
+
+[3]  &gt;&gt; null-value
+     == \~null~\  ; antiform
+
+     &gt;&gt; append [a b] null-value
+     ** Error: APPEND does not allow adding NULL to blocks
+
+[3a] &gt;&gt; opt null-value
+     == \~[]~\  ; antiform (pack!) "void"
+
+     &gt;&gt; append [a b] opt null-value
+     == [a b]
+
+[4]  &gt;&gt; space
+     == _
+
+     &gt;&gt; append [a b] space
+     == [a b _]
+</code></pre>
+          <p><a href="https://rebol.metaeducation.com/t/null-void-trash-evolution-from-none-unset/2422/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/null-void-trash-evolution-from-none-unset/2422/1</link>
+        <pubDate>Fri, 14 May 2021 14:44:05 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2422-1</guid>
+        <source url="https://rebol.metaeducation.com/t/null-void-trash-evolution-from-none-unset/2422.rss">NULL/VOID/TRASH evolution from NONE!/UNSET!</source>
+      </item>
+  </channel>
+</rss>

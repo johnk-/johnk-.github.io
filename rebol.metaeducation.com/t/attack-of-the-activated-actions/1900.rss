@@ -1,0 +1,451 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Attack of the Activated Actions</title>
+    <link>https://rebol.metaeducation.com/t/attack-of-the-activated-actions/1900</link>
+    <description>Here&#39;s something seemingly-simple that a newcomer to Redbol might attempt:
+
+&gt; TASK: Write a function TWOSIE? that...
+&gt;  * returns true if a value is the INTEGER! of 2, or a BLOCK! of length 2
+&gt;  * returns false otherwise
+
+---
+
+    twosie?: func [x] [          ; Ren-C calls this LAMBDA, due to no RETURN
+        to-logic any [
+            x = 2                ; will also pick up DECIMAL!, since 2 = 2.0
+            all [
+                block? x
+                2 = length? x    ; length at current position, not total 
+            ]
+        ]
+    ]
+
+---
+
+An &quot;experienced&quot; Redbol user would point out what happens when you pass a FUNCTION!.
+
+    red&gt;&gt; twosie? :append
+    *** Script Error: = operator is missing an argument
+    *** Where: =
+    *** Stack: twosie? to-logic 
+
+If **x** turns out to be a FUNCTION!, it is invoked by the references inside the body.  Which can cause unwanted side effects, as well as arbitrarily cryptic errors.
+
+## How Was This Mitigated?
+
+You *could* restrict the set of accepted types, and exclude functions.  But if you make it only accept INTEGER! and BLOCK! that undermines the aspect that the function&#39;s job is to do testing.
+
+Doing it &quot;right&quot; is annoying, putting colons on every access...possibly omitting some when the value is in a context where the program logic would say it can&#39;t be a function at that point.
+
+    twosie?: func [x] [
+        to-logic any [
+            :x = 2
+            all [
+                block? :x
+                2 = length? :x       ; :x is optional, as known to be a BLOCK! here
+            ]
+        ]
+    ]
+
+Sometimes, people would minimize the number of GET-WORD!s needed by short-circuiting a test for FUNCTION! first:
+
+    twosie?: func [x] [
+        if function? :x [return false]
+        to-logic any [
+            x = 2
+            all [
+                block? x
+                2 = length? x
+            ]
+        ]
+    ]
+
+This is fairly unsatisfying as well.  It breaks easily if someone reorganizes the code and doesn&#39;t realize the test has to come first, or if there has to be additional handling and skipping all the code that uses the variable isn&#39;t the desired semantic.
+
+**This situation is a tax on users, who are continuously torn between writing obvious code that is broken... vs. cluttered code that winds up being made more brittle due to the maintenance of the clutter.**
+
+It would clearly be ideal if the obvious code was also correct.
+
+## The Nuanced Compromise Of Isotopic ACTION!s
+
+Something that occurred to me was to ask what would happen if there were two kinds of actions:
+
+   * ACTION! isotopes, which would run if they were referenced via a WORD! or TUPLE!
+
+   * Plain ACTION!s, which would be inert when accessed by WORD!
+
+**An obvious *good* part of this idea would be that a &quot;normal&quot; argument to a function would never be able to be an isotope (solving the problems outlined above).**
+
+**An obvious *questionable* part of this idea is introducing another state to worry about.**
+
+I&#39;ve implemented it--though it is a radical change affecting kind of everything.  :-/  There are certainly a lot of questions raised and details to come up.
+
+Something to realize is that there&#39;s a fundamental complexity coming from the fact that Rebol wants WORD! references to execute actions automatically much of the time.  But you still have a lot of places that want to talk about values &quot;as-is&quot;.  We cannot &quot;wish away&quot; that complexity...only reshape it.
+
+**But I think the ability to have obviously-written code in cases like TWOSIE? tips the balance.**  I don&#39;t know that meta-code gets truly any harder to write, it just gets *different*...while the simple examples work without GET-WORD!s.
+
+I&#39;ll use this thread to document differences to know about.</description>
+    
+    <lastBuildDate>Wed, 21 Sep 2022 04:49:53 +0000</lastBuildDate>
+    <category>Semantics</category>
+    <atom:link href="https://rebol.metaeducation.com/t/attack-of-the-activated-actions/1900.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Attack of the Activated Actions</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="4" data-topic="1900">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>However, I do not think there are all that many cases where people are trying to return a function value from an ALL...and if they were, they'd probably want an inert one.</p>
+</blockquote>
+</aside>
+<p>So in Rebmake, there's actually an example (using APPLIQUE, which is just a variant of APPLY where it runs a block of code where SET-WORD!s are bound into the frame you're invoking, so you can write more generically structured conditional code inside the APPLY)</p>
+<pre><code>applique any [
+    :gen-cmd-create :target-platform/gen-cmd-create
+] compose [
+    cmd: (cmd)
+]
+</code></pre>
+<p>You can address this with REIFY:</p>
+<pre><code>applique any [
+    reify :gen-cmd-create
+    reify :target-platform/gen-cmd-create
+] compose [
+    cmd: (cmd)
+]
+</code></pre>
+<p>I've kind of said that's just the way things go when you're constructing blocks, e.g. with COMPOSE.</p>
+<p>...but prohibiting isotopes in things like ANY and ALL rule out other potentially interesting things:</p>
+<pre><code>append [a b c] maybe all [1 &lt; 2, 3 &lt; 4, spread [d e]]
+</code></pre>
+<h2><a name="p-6433-note-any-and-all-arent-chained-to-ifs-idea-of-truthy-1" class="anchor" href="https://rebol.metaeducation.com#p-6433-note-any-and-all-arent-chained-to-ifs-idea-of-truthy-1"></a>Note ANY and ALL Aren't Chained To IF's Idea Of Truthy...</h2>
+<p>It would be a bad idea for ordinary conditionals to do anything but error in response to a void:</p>
+<pre><code>either comment "a" [print "Should this run?"] [print "Or should this run?"]
+</code></pre>
+<p>But ANY and ALL skipping over voids makes sense.  So it's allowed.</p>
+<p>And when we consider the applications, we might reasonably say that non-void isotopes count as "things" that can drop out as results.</p>
+<ul>
+<li>
+<p>This runs up against the proposed concept of WORD! isotopes, <a href="https://rebol.metaeducation.com/t/thinking-about-isotopes-logically-true-and-false/1944">where they're all neither truthy nor falsey except ~true~ and ~false~</a>.  So they'd have their own behavior.</p>
+</li>
+<li>
+<p>It would also be necessary to process isotopic objects to resolve them, otherwise it wouldn't be known if they were truthy or falsey</p>
+</li>
+<li>
+<p>Packs would probably have to be unpacked as well</p>
+</li>
+</ul>
+<h2><a name="p-6433-im-going-to-give-this-a-shot-2" class="anchor" href="https://rebol.metaeducation.com#p-6433-im-going-to-give-this-a-shot-2"></a>I'm Going To Give This A Shot</h2>
+<p>For now, I'm just going to let splices and activations count in ANY and ALL and see how it pans out:</p>
+<pre><code>&gt;&gt; all [1 &lt; 2, 3 &lt; 4, spread [d e]]
+== ~(d e)~  ; isotope
+
+&gt;&gt; any [1 &gt; 2, :append, 3 &gt; 4]
+== ~#[action! {append} [series value /part /dup /line]]~  ; isotope
+</code></pre>
+<p>That <em>looks</em> reasonable, though I'm wary of seeing isotopic acceptance get too wild.</p>
+<p>What makes me willing to make a concession here is that ANY and ALL are used kind of like branching constructs, e.g. <strong>all [a b]</strong> is a stylistic replacement for <strong>if a [b]</strong>.  So it mixes up the character of a conditional with the character of a branch, suggesting that maybe such fluidity is appropriate.</p>
+          <p><a href="https://rebol.metaeducation.com/t/attack-of-the-activated-actions/1900/5">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/attack-of-the-activated-actions/1900/5</link>
+        <pubDate>Wed, 21 Sep 2022 04:49:23 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1900-5</guid>
+        <source url="https://rebol.metaeducation.com/t/attack-of-the-activated-actions/1900.rss">Attack of the Activated Actions</source>
+      </item>
+      <item>
+        <title>Attack of the Activated Actions</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>Continuing to document the new weird things that arise from the concept of ACTION! isotopes... here's a question about what should happen when they meet something like ANY and ALL.</p>
+<pre><code>&gt;&gt; all [x: func [] [print "This is the first behavior we get..."]]
+** Script Error: Invalid use of #[action! []] isotope
+</code></pre>
+<p>Previously, there was no such thing as an ACTION! isotope...and ACTION! was considered a "truthy" value.</p>
+<p>So it's worth pointing out this behavior for IF:</p>
+<pre><code>&gt;&gt; if (x: func [] [print "Hi"]) [print "Truthy?"]
+Truthy?
+</code></pre>
+<p>So why did that work and ALL didn't?  Well IF takes a normal parameter... and the easiest-seeming decision for how to handle an ACTION! isotope when passed to a normal parameter was to just decay it to a regular action.</p>
+<p>But the isotope that appears inside ALL happens during its internal calls to the evaluator, and so we'd have to explicitly decay the action isotopes there.</p>
+<h2><a name="p-6179-easy-enough-to-decay-but-is-it-the-best-answer-1" class="anchor" href="https://rebol.metaeducation.com#p-6179-easy-enough-to-decay-but-is-it-the-best-answer-1"></a>Easy Enough To Decay... but is it the best answer?</h2>
+<p>The harm in decaying is that we are not giving back the "true" answer, which gives things different semantics.  So this ALL expression which would get a non-isotope RESULT:</p>
+<pre><code>result: all [
+    condition1
+    condition2
+    func [] [print "Boo!"]
+]
+</code></pre>
+<p>...would be different from this IF expression, which would get an isotope RESULT:</p>
+<pre><code>result: if all [condition1, condition2] [
+   func [] [print "Boo!"]
+]
+</code></pre>
+<p>Decaying silently means people might try rearranging code, and find those rearrangements aren't the same as they would think they should be.</p>
+<p><strong>However, I do not think there are all that many cases where people are trying to return a function value from an ALL...and if they were, they'd probably want an inert one.</strong></p>
+<p>Because if it's an ALL then they are accepting the idea that there might be a result, and there might not be.  So they're going to presumably want to test against NULL to see if it made a function.</p>
+<p><strong>Most of the time, I imagine they just want to skip over the creation of a temporary function (because I've done this many times).</strong>  And there's an answer for that, which is the same answer as when you use a midstream PRINT...which is to ELIDE it:</p>
+<pre><code>all [..., elide x: func [] [print "..."], ...code using x...]
+</code></pre>
+<p>So it seems to me that if we left isotopic actions as an error in ANY and ALL, it may be better for understanding what's going on.</p>
+<p>It's a little bit of a tough call, though.</p>
+          <p><a href="https://rebol.metaeducation.com/t/attack-of-the-activated-actions/1900/4">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/attack-of-the-activated-actions/1900/4</link>
+        <pubDate>Thu, 28 Jul 2022 04:42:14 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1900-4</guid>
+        <source url="https://rebol.metaeducation.com/t/attack-of-the-activated-actions/1900.rss">Attack of the Activated Actions</source>
+      </item>
+      <item>
+        <title>Attack of the Activated Actions</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>We see that function parameters become safer, and things in FOR-EACH of a block (which does not allow isotopes) become safer.</p>
+<p>We can also make FOR-EACH of an object safer.  Not all objects have isotopes, so those would work normally:</p>
+<pre><code>&gt;&gt; safeobj: make object! [x: 10, y: 20]
+
+&gt;&gt; for-each [key val] safeobj [print [key "is" mold val]]
+x is 10
+y is 20
+</code></pre>
+<p>But if you enumerate something with isotopes, then  we can warn you:</p>
+<pre><code>&gt;&gt; unsafeobj: make object! [x: 10, y: func [] [print "Boo!"]]
+
+&gt;&gt; for-each [key val] unsafeobj [print [key "is" mold val]]
+x is 10
+** Error: must use ^VAL with FOR-EACH to receive isotopes
+</code></pre>
+<p>When you use the ^META convention, the isotopes become inert:</p>
+<pre><code>&gt;&gt; unsafeobj: make object! [x: 10, y: func [] [print "Boo!"]]
+
+&gt;&gt; for-each [key ^val] unsafeobj [print ["meta" key "is" mold val]]
+meta x is '10
+meta y is #[action! []]
+</code></pre>
+<p><img src="https://rebol.metaeducation.com/images/emoji/twitter/+1.png?v=14" title=":+1:" class="emoji only-emoji" alt=":+1:" loading="lazy" width="20" height="20"></p>
+<h2><a name="p-6176-loophole-function-return-results-1" class="anchor" href="https://rebol.metaeducation.com#p-6176-loophole-function-return-results-1"></a>Loophole: Function Return Results</h2>
+<p>But what about other operations like SELECT or DO? they don't have the safety that a function argument or FOR-EACH gets:</p>
+<pre><code>&gt;&gt; unsafeobj: make object! [x: 10, y: func [] [print "Boo!"]]
+
+&gt;&gt; value: select unsafeobj 'y
+== #[action []]  ; isotope
+
+&gt;&gt; if action? value [print "Same old problem"]
+Boo!
+** Error: ACTION? does not accept ~ isotope 
+</code></pre>
+<p><strong>We could annotate the assigned word in some way to show it accepted isotopes...</strong></p>
+<pre><code>&gt;&gt; value: select unsafeobj 'y
+** Error: Result is isotope, use VALUE/: if intended
+
+&gt;&gt; value/: select unsafeobj 'y
+== #[action []]  ; isotope
+</code></pre>
+<p>But this would create a kind of widespread ugliness, e.g. with function generators:</p>
+<pre><code>foo/: func [] [print "Hello"]
+</code></pre>
+<p>I did have a thought that we might make FUNC return a plain ACTION!, and then activate it with some special operator:</p>
+<pre><code>foo: runs func [] [print "Hello"]
+</code></pre>
+<p>Or possibly retake <code>-&gt;</code> for this, and move lambda to <code>=&gt;</code> again:</p>
+<pre><code>foo: -&gt; func [] [print "Hello"]
+</code></pre>
+<p>The operator could use special mechanics to left-quote FOO: and take away the requirement that it be FOO/: to receive an isotope.</p>
+<p>This may seem to introduce some amount of "noise".  But it would mean we wouldn't have to do as much sketchy implicit isotope decay.  And I think it could be argued that in a world where both inert and activated functions exist, it is best not to try and hide the "activation".</p>
+<p><strong>SELECT could refuse to return an isotope result unless the caller requested it as ^META...</strong></p>
+<p>We actually do know whether there's a ^META result request in effect (we have to, in order to know whether an isotopic error should be returned normally or raised as an error.)</p>
+<p>This could be information a function is allowed to know about its return results, and it could refuse to return an isotopic result unless it was doing so as a ^META.</p>
+<pre><code>&gt;&gt; unsafeobj: make object! [x: 10, y: func [] [print "Boo!"]]
+
+&gt;&gt; value: select unsafeobj 'x
+== 10
+
+&gt;&gt; value: select unsafeobj 'y
+** Error: SELECT will not return isotope value unless result is ^META
+
+&gt;&gt; value': ^ select unsafeobj 'y
+== #[action! []]
+
+&gt;&gt; if action? value' [print "Better outcome?"]
+Better outcome?
+</code></pre>
+<p>This feels good in a "you get what you pay for" sense.  You don't have to go to the ^META level if you're just working with inert data.  And you only have to when you'd likely be writing unsafe code otherwise.</p>
+<p>But it requires every function like SELECT and DO to mark themselves to need this, where generators like FUNC are exempted.</p>
+<p><strong>If it were just me, I'd probably try the <code>-&gt;</code> to activate ACTION!s, and then say all other isotopes required <code>foo/:</code> syntax to accept isotopes as function results.</strong></p>
+<p>That seems like it's the most clear way to do it.  But at least for the moment, it's probably better to keep things more familiar, add the extra check to SELECT and similar functions, and see how it goes.</p>
+          <p><a href="https://rebol.metaeducation.com/t/attack-of-the-activated-actions/1900/3">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/attack-of-the-activated-actions/1900/3</link>
+        <pubDate>Wed, 27 Jul 2022 19:28:35 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1900-3</guid>
+        <source url="https://rebol.metaeducation.com/t/attack-of-the-activated-actions/1900.rss">Attack of the Activated Actions</source>
+      </item>
+      <item>
+        <title>Attack of the Activated Actions</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>This is the historical behavior of when you have an FUNCTION! value cell in a block, and DO it:</p>
+<pre><code>redbol&gt;&gt; do compose [x: (func [] [print "HI" return 10])]
+HI
+== 10
+
+redbol&gt;&gt; x
+== 10
+</code></pre>
+<p>That's because the COMPOSE put a FUNCTION! in the slot, and the behavior of such a cell when encountered via DO is to execute.   So it ran, and the resulting value is 10.</p>
+<p>If you wanted to actually put the function itself into X, you'd have to use their QUOTE (which I call QUOTE2, e.g. what Ren-C uses THE for.)</p>
+<pre><code>redbol&gt;&gt; do compose [x: quote (func [] [print "HI" return 10])]  ; QUOTE2
+== #[action! [...]]
+
+redbol&gt;&gt; x
+HI
+== 10
+</code></pre>
+<h2><a name="p-6175-ren-c-compose-leverages-generic-quoting-1" class="anchor" href="https://rebol.metaeducation.com#p-6175-ren-c-compose-leverages-generic-quoting-1"></a>Ren-C COMPOSE Leverages Generic Quoting</h2>
+<p>Ren-C has had a fairly interesting answer to the second desire, where you can put a quote mark on the GROUP! and as such get a generic quoting:</p>
+<pre><code>&gt;&gt; do compose [x: '(func [] [print "HI"])]
+== #[action! {x} []]
+
+&gt;&gt; x
+HI
+== 10
+</code></pre>
+<p>But that was in the times before action isotopes...</p>
+<h2><a name="p-6175-difference-func-like-generators-make-isotopes-2" class="anchor" href="https://rebol.metaeducation.com#p-6175-difference-func-like-generators-make-isotopes-2"></a>Difference: FUNC-Like Generators Make Isotopes</h2>
+<p>If you're looking at this kind of thing:</p>
+<pre><code>do compose [x: (func [] [print "HI", return 10])]
+</code></pre>
+<p>We've got the two intents we might have had before:</p>
+<ol>
+<li>
+<p>You want to run the function once, and put 10 into X</p>
+</li>
+<li>
+<p>You want to generate the function and put it into X so it runs when you reference X</p>
+</li>
+</ol>
+<p>But now, there's a new intent:</p>
+<ol start="3">
+<li>You want to generate the function and put it into X, where referencing X gives you back the function by value without running it</li>
+</ol>
+<p>But no matter which of these three intents you have, FUNC is generating an isotope.  And If we know one thing about isotopes, it's that they can't be put in blocks.</p>
+<p>And COMPOSE builds blocks <strong>...so COMPOSE hates isotopes.</strong></p>
+<p>So you'll get an error unless you do some kind of operation to mitigate the isotope.  Here are the solutions for each of the 3 intents</p>
+<ol>
+<li>
+<p><strong>do compose [x: (reify func [] [print "Hi", return 10])]</strong></p>
+<p>produces <code>[x: #[action! []]]</code>  ; plain action evaluates as invocation</p>
+</li>
+<li>
+<p><strong>do compose [x: (meta func [] [print "Hi", return 10])]</strong></p>
+<p>produces <code>[x: ~#[action! []]~]</code>  ; quasiform evaluates to isotope action</p>
+</li>
+<li>
+<p><strong>do compose [x: '(reify func [] [print "Hi", return 10])]</strong></p>
+<p>produces <code>[x: '#[action! []]]</code>  ; quoted evaluates by dropping quote to normal action</p>
+</li>
+</ol>
+<h2><a name="p-6175-nice-property-all-3-cases-give-a-safely-enumerable-block-3" class="anchor" href="https://rebol.metaeducation.com#p-6175-nice-property-all-3-cases-give-a-safely-enumerable-block-3"></a>Nice Property: All 3 Cases Give A Safely Enumerable Block</h2>
+<p>It does matter which one of these you pick, you can write:</p>
+<pre><code>for-each item compose [x: ...] [
+   print ["type of item is" type of item]
+]
+</code></pre>
+<p>You'll get ITEM as a SET-WORD! and then either an ACTION!, a QUASI!-ACTION!, or a QUOTED!-ACTION!.  None of these will be invoked just through a simple word reference.</p>
+<p>That peace of mind is part of the goal here.</p>
+<h2><a name="p-6175-but-the-cost-is-having-to-be-explicit-4" class="anchor" href="https://rebol.metaeducation.com#p-6175-but-the-cost-is-having-to-be-explicit-4"></a>But The Cost Is Having To Be Explicit...</h2>
+<p>If you try to COMPOSE and just leave it as an isotope, that's an error by default.</p>
+<p>You can make versions of COMPOSE which use a predicate to reify action isotopes automatically--or other decisions.  But I don't think those are good defaults.</p>
+          <p><a href="https://rebol.metaeducation.com/t/attack-of-the-activated-actions/1900/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/attack-of-the-activated-actions/1900/2</link>
+        <pubDate>Wed, 27 Jul 2022 05:04:56 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1900-2</guid>
+        <source url="https://rebol.metaeducation.com/t/attack-of-the-activated-actions/1900.rss">Attack of the Activated Actions</source>
+      </item>
+      <item>
+        <title>Attack of the Activated Actions</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>Here's something seemingly-simple that a newcomer to Redbol might attempt:</p>
+<blockquote>
+<p>TASK: Write a function TWOSIE? that...</p>
+<ul>
+<li>returns true if a value is the INTEGER! of 2, or a BLOCK! of length 2</li>
+<li>returns false otherwise</li>
+</ul>
+</blockquote>
+<hr>
+<pre><code>twosie?: func [x] [          ; Ren-C calls this LAMBDA, due to no RETURN
+    to-logic any [
+        x = 2                ; will also pick up DECIMAL!, since 2 = 2.0
+        all [
+            block? x
+            2 = length? x    ; length at current position, not total 
+        ]
+    ]
+]
+</code></pre>
+<hr>
+<p>An "experienced" Redbol user would point out what happens when you pass a FUNCTION!.</p>
+<pre><code>red&gt;&gt; twosie? :append
+*** Script Error: = operator is missing an argument
+*** Where: =
+*** Stack: twosie? to-logic 
+</code></pre>
+<p>If <strong>x</strong> turns out to be a FUNCTION!, it is invoked by the references inside the body.  Which can cause unwanted side effects, as well as arbitrarily cryptic errors.</p>
+<h2><a name="p-6174-how-was-this-mitigated-1" class="anchor" href="https://rebol.metaeducation.com#p-6174-how-was-this-mitigated-1"></a>How Was This Mitigated?</h2>
+<p>You <em>could</em> restrict the set of accepted types, and exclude functions.  But if you make it only accept INTEGER! and BLOCK! that undermines the aspect that the function's job is to do testing.</p>
+<p>Doing it "right" is annoying, putting colons on every access...possibly omitting some when the value is in a context where the program logic would say it can't be a function at that point.</p>
+<pre><code>twosie?: func [x] [
+    to-logic any [
+        :x = 2
+        all [
+            block? :x
+            2 = length? :x       ; :x is optional, as known to be a BLOCK! here
+        ]
+    ]
+]
+</code></pre>
+<p>Sometimes, people would minimize the number of GET-WORD!s needed by short-circuiting a test for FUNCTION! first:</p>
+<pre><code>twosie?: func [x] [
+    if function? :x [return false]
+    to-logic any [
+        x = 2
+        all [
+            block? x
+            2 = length? x
+        ]
+    ]
+]
+</code></pre>
+<p>This is fairly unsatisfying as well.  It breaks easily if someone reorganizes the code and doesn't realize the test has to come first, or if there has to be additional handling and skipping all the code that uses the variable isn't the desired semantic.</p>
+<p><strong>This situation is a tax on users, who are continuously torn between writing obvious code that is broken... vs. cluttered code that winds up being made more brittle due to the maintenance of the clutter.</strong></p>
+<p>It would clearly be ideal if the obvious code was also correct.</p>
+<h2><a name="p-6174-the-nuanced-compromise-of-isotopic-actions-2" class="anchor" href="https://rebol.metaeducation.com#p-6174-the-nuanced-compromise-of-isotopic-actions-2"></a>The Nuanced Compromise Of Isotopic ACTION!s</h2>
+<p>Something that occurred to me was to ask what would happen if there were two kinds of actions:</p>
+<ul>
+<li>
+<p>ACTION! isotopes, which would run if they were referenced via a WORD! or TUPLE!</p>
+</li>
+<li>
+<p>Plain ACTION!s, which would be inert when accessed by WORD!</p>
+</li>
+</ul>
+<p><strong>An obvious <em>good</em> part of this idea would be that a "normal" argument to a function would never be able to be an isotope (solving the problems outlined above).</strong></p>
+<p><strong>An obvious <em>questionable</em> part of this idea is introducing another state to worry about.</strong></p>
+<p>I've implemented it--though it is a radical change affecting kind of everything.  :-/  There are certainly a lot of questions raised and details to come up.</p>
+<p>Something to realize is that there's a fundamental complexity coming from the fact that Rebol wants WORD! references to execute actions automatically much of the time.  But you still have a lot of places that want to talk about values "as-is".  We cannot "wish away" that complexity...only reshape it.</p>
+<p><strong>But I think the ability to have obviously-written code in cases like TWOSIE? tips the balance.</strong>  I don't know that meta-code gets truly any harder to write, it just gets <em>different</em>...while the simple examples work without GET-WORD!s.</p>
+<p>I'll use this thread to document differences to know about.</p>
+          <p><a href="https://rebol.metaeducation.com/t/attack-of-the-activated-actions/1900/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/attack-of-the-activated-actions/1900/1</link>
+        <pubDate>Wed, 27 Jul 2022 05:01:20 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1900-1</guid>
+        <source url="https://rebol.metaeducation.com/t/attack-of-the-activated-actions/1900.rss">Attack of the Activated Actions</source>
+      </item>
+  </channel>
+</rss>

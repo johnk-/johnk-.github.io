@@ -1,0 +1,223 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Advancements in CastHelper for Hooked Casts</title>
+    <link>https://rebol.metaeducation.com/t/advancements-in-casthelper-for-hooked-casts/2488</link>
+    <description>Progress has been fairly amazing on the debug checks for casts.
+
+The &quot;user experience&quot; of writing hooks for the casts used to be very hard-to-read code for a non-C++ programmer...but it&#39;s now very simple!
+
+Just to give one example, consider casting to an &quot;Element&quot; (e.g. an Array element, something that can live in a BLOCK! or GROUP!).
+
+As a reminder of what the idea is: anywhere in the source where you write either:
+
+    cast(Element*, ...)
+    cast(const Element*, ...)
+
+In an ordinary C build, it will just act like:
+
+    (Element*)(...)
+    (const Element*)(...)
+
+But in an instrumented build using C++, it&#39;s possible to add checks.  These checks can be at compile-time (prohibiting conversions of some combination of types)... or they can be at runtime, validating the bit patterns of the thing being converted.
+
+For Element, we have:
+
+    DECLARE_C_TYPE_LIST(g_convertible_to_cell,
+        Cell, Atom, Element, Value,
+        Pairing,
+        Node, Byte, char, void
+    );
+
+    template&lt;typename F&gt;
+    struct CastHelper&lt;const F*, const Element*&gt; {
+      static void Validate_Bits(const F* p)
+      {
+        STATIC_ASSERT(In_C_Type_List(g_convertible_to_cell, F));
+
+        const Cell* c = u_cast(const Cell*, p);
+        Assert_Cell_Readable(c);
+        assert(LIFT_BYTE(c) != ANTIFORM_0);
+      }
+    };
+
+**That&#39;s extremely easy to read!**
+
+* We are making sure that the [LIFT_BYTE() is not 0](https://rebol.metaeducation.com/t/lift-byte-values-antiform-normal-quasi-quoted/2091), hence not an antiform.
+
+* We&#39;re also checking that it&#39;s a valid readable cell (e.g. the bits have NODE_FLAG_NODE and NODE_FLAG_CELL, and NODE_FLAG_UNREADABLE is not set.)**
+
+* Plus, at **compile-time**, it&#39;s stopping you from all manner of casts which might be accidental to make Cells from things that can&#39;t make sense as Cells.
+
+What **`template&lt;typename F&gt;`**  means is that this is a &quot;wildcard&quot; pattern-matching rule, that the compiler will try to match against any pointer to F.  The name F is arbitrary, but chosen to represent &quot;FROM&quot;, e.g. the datatype we are converting from.
+
+(It would be possible to use more than one wildcard, e.g. **`template&lt;typename F, typename T&gt;`** and match patterns in both the &quot;TO&quot; and the &quot;FROM&quot;.  But here we&#39;re fixed as defining conversions TO an Element*, so there&#39;s no second parameter to the template.)
+
+## Write Just The Const Casts, Works For Mutable
+
+I hammered on this until I could get it to where you could just write the const casts, and it will take care of the mutable form casts (including blocking casting away constness)... running through the same code.  So you don&#39;t have to write two entry points and do the piping through common code yourself.
+
+I&#39;m on the fence on whether it&#39;s worth it to put in wiring to make it possible to separately hook mutable casts--to make sure the bit patterns you have are legal for a mutable pointer.  That&#39;s not really needed given the protection of casting away constness, and the cases where you do cast mutably from raw pointers you probably are doing that on purpose.  But definitely it needs to default to that if you write just the const casts you hook all of them for that pattern match, because this is 99% of the time what you want...it shouldn&#39;t be laborious.
+
+## C++ Is Minimized: DECLARE_C_TYPE_LIST()
+
+Without DECLARE_C_TYPE_LIST() and In_C_Type_List(), this would look like:
+
+    using g_convertible_to_cell = CTypeList&lt;
+        Cell, Atom, Element, Value,
+        Pairing,
+        Node, Byte, char, void
+    )&gt;;
+
+    STATIC_ASSERT((g_convertible_to_cell::contains&lt;F&gt;{}));
+
+It&#39;s quirky--including the quirk that you can&#39;t call the STATIC_ASSERT() macro on expressions which contain templating `&lt;...&gt;` markers unless they&#39;re wrapped in an extra set of parentheses.  So you have to use `static_assert()` which enforces arity-2 in C++11.
+
+## Also Less C++: u_cast()
+
+You don&#39;t want to run the cast hooks while implementing a cast hook!  Originally I used `reinterpret_cast` in this code, so it looked like:
+
+```
+    const Cell* c = reinterpret_cast&lt;const Cell*&gt;(p);
+    Assert_Cell_Readable(c);
+    assert(LIFT_BYTE(c) != ANTIFORM_0);
+    return reinterpret_cast&lt;const Element*&gt;(c);
+```
+
+But the casting system offers **`u_cast()`** as an &quot;unchecked&quot; cast that nevers run the hooks (but is easier to spot as being a cast than the parentheses cast it expands to).
+
+It makes it shorter and less scary to use `u_cast()`, and that&#39;s what&#39;s used in the rest of the codebase to implement unchecked cast.  So that helps make the code more familiar to what the rest of the C looks like.
+
+## Should The `template&lt;&gt;` be Abstracted Away, Too?
+
+I don&#39;t think so.
+
+I think that goes into the realm of pandering a bit too much to C fraidy-cats.  It&#39;s tougher to abstract and I think that token-for-token, it gets it right.
+
+The value here is apparent--and I think I&#39;ve done as much pandering as is appropriate.  What&#39;s left is legitimate C++ that matches the essential complexity of the problem.  (It&#39;s not even duplicating the signature of the types needlessly, as you might use reference types in those positions.)
+
+## In Total, This Is Awesome Stuff
+
+It&#39;s not just about the common casts.  This gives you surgical precision if you&#39;re facing a particular debugging problem that&#39;s narrowed down, and you want to write a bit of custom instrumentation just to catch the problem you&#39;re working on.
+
+Ren-C is able to stay robust despite being a very &quot;Amish&quot; codebase, due to having many of these kinds of features to keep the trains running on time.</description>
+    
+    <lastBuildDate>Mon, 16 Jun 2025 02:53:46 +0000</lastBuildDate>
+    <category>C/C++ Implementation</category>
+    <atom:link href="https://rebol.metaeducation.com/t/advancements-in-casthelper-for-hooked-casts/2488.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Advancements in CastHelper for Hooked Casts</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="2488">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>Ren-C is able to stay robust despite being a very "Amish" codebase, due to having many of these kinds of features to keep the trains running on time.</p>
+</blockquote>
+</aside>
+<p>I'll mention that I'm factoring this stuff out (along with the <a href="https://rebol.metaeducation.com/t/antiform-safety-covariance-and-contravariance/2330">contravariance mechanics</a>, and other things) as a library which other C projects could use.</p>
+<p>But also... so it can have its own set of regression tests.  Because currently the only "test" is having it build the Ren-C codebase.  So if I tweak it and something stops working (e.g. it doesn't run a cast hook that it should) I have no real way of finding out about that, besides setting breakpoints in the hooks and seeing if they're hit or not.</p>
+<h2><a name="p-8429-library-name-needful-1" class="anchor" href="https://rebol.metaeducation.com#p-8429-library-name-needful-1"></a>Library Name: "Needful"</h2>
+<p><a href="https://github.com/hostilefork/ren-c/blob/5849886281c25a6695af8b92823d8766338b014f/src/include/needful/needful-sinks.h">Because it has wrappers like Sink(T), Need(T), Init(T)</a>... ChatGPT had a funny suggestion of calling the library "Needful", as in the amusing Indian-English phrase <em><strong><a href="https://www.grammarly.com/blog/idioms/do-the-needful/">"do the needful"</a></strong></em>.</p>
+<p></p><div class="lightbox-wrapper"><a class="lightbox" href="https://rebol.metaeducation.com/uploads/default/original/1X/d8f8a9d4ac37fa0bdbfa61c7f0f43d0f9415bd6e.jpeg" data-download-href="https://rebol.metaeducation.com/uploads/default/d8f8a9d4ac37fa0bdbfa61c7f0f43d0f9415bd6e" title="image"><img src="https://rebol.metaeducation.com/uploads/default/optimized/1X/d8f8a9d4ac37fa0bdbfa61c7f0f43d0f9415bd6e_2_345x230.jpeg" alt="image" data-base62-sha1="uXpTkL7kfiFGxZeubB8lOQ1t3Qy" width="345" height="230" srcset="https://rebol.metaeducation.com/uploads/default/optimized/1X/d8f8a9d4ac37fa0bdbfa61c7f0f43d0f9415bd6e_2_345x230.jpeg, https://rebol.metaeducation.com/uploads/default/optimized/1X/d8f8a9d4ac37fa0bdbfa61c7f0f43d0f9415bd6e_2_517x345.jpeg 1.5x, https://rebol.metaeducation.com/uploads/default/optimized/1X/d8f8a9d4ac37fa0bdbfa61c7f0f43d0f9415bd6e_2_690x460.jpeg 2x" data-dominant-color="5D5D40"></a></div><p></p>
+<p>I legitimately think this could be helpful for many codebases that have to build as C, for embedded purposes/etc.  Using a C++ compiler to do static analysis is a tool you almost certainly have around, and there's nothing special to set up or install or configure.</p>
+<p>It needs a good marketing phraseology...</p>
+<p><em><strong>"Needful: The library that does nothing in your C programs (and you NEED it!)"</strong></em></p>
+<p><img src="https://rebol.metaeducation.com/images/emoji/twitter/slight_smile.png?v=14" title=":slight_smile:" class="emoji only-emoji" alt=":slight_smile:" loading="lazy" width="20" height="20"></p>
+          <p><a href="https://rebol.metaeducation.com/t/advancements-in-casthelper-for-hooked-casts/2488/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/advancements-in-casthelper-for-hooked-casts/2488/2</link>
+        <pubDate>Mon, 16 Jun 2025 00:21:20 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2488-2</guid>
+        <source url="https://rebol.metaeducation.com/t/advancements-in-casthelper-for-hooked-casts/2488.rss">Advancements in CastHelper for Hooked Casts</source>
+      </item>
+      <item>
+        <title>Advancements in CastHelper for Hooked Casts</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>Progress has been fairly amazing on the debug checks for casts.</p>
+<p>The "user experience" of writing hooks for the casts used to be very hard-to-read code for a non-C++ programmer...but it's now very simple!</p>
+<p>Just to give one example, consider casting to an "Element" (e.g. an Array element, something that can live in a BLOCK! or GROUP!).</p>
+<p>As a reminder of what the idea is: anywhere in the source where you write either:</p>
+<pre><code>cast(Element*, ...)
+cast(const Element*, ...)
+</code></pre>
+<p>In an ordinary C build, it will just act like:</p>
+<pre><code>(Element*)(...)
+(const Element*)(...)
+</code></pre>
+<p>But in an instrumented build using C++, it's possible to add checks.  These checks can be at compile-time (prohibiting conversions of some combination of types)... or they can be at runtime, validating the bit patterns of the thing being converted.</p>
+<p>For Element, we have:</p>
+<pre><code>DECLARE_C_TYPE_LIST(g_convertible_to_cell,
+    Cell, Atom, Element, Value,
+    Pairing,
+    Node, Byte, char, void
+);
+
+template&lt;typename F&gt;
+struct CastHelper&lt;const F*, const Element*&gt; {
+  static void Validate_Bits(const F* p)
+  {
+    STATIC_ASSERT(In_C_Type_List(g_convertible_to_cell, F));
+
+    const Cell* c = u_cast(const Cell*, p);
+    Assert_Cell_Readable(c);
+    assert(LIFT_BYTE(c) != ANTIFORM_0);
+  }
+};
+</code></pre>
+<p><strong>That's extremely easy to read!</strong></p>
+<ul>
+<li>
+<p>We are making sure that the <a href="https://rebol.metaeducation.com/t/lift-byte-values-antiform-normal-quasi-quoted/2091">LIFT_BYTE() is not 0</a>, hence not an antiform.</p>
+</li>
+<li>
+<p>We're also checking that it's a valid readable cell (e.g. the bits have NODE_FLAG_NODE and NODE_FLAG_CELL, and NODE_FLAG_UNREADABLE is not set.)**</p>
+</li>
+<li>
+<p>Plus, at <strong>compile-time</strong>, it's stopping you from all manner of casts which might be accidental to make Cells from things that can't make sense as Cells.</p>
+</li>
+</ul>
+<p>What <strong><code>template&lt;typename F&gt;</code></strong>  means is that this is a "wildcard" pattern-matching rule, that the compiler will try to match against any pointer to F.  The name F is arbitrary, but chosen to represent "FROM", e.g. the datatype we are converting from.</p>
+<p>(It would be possible to use more than one wildcard, e.g. <strong><code>template&lt;typename F, typename T&gt;</code></strong> and match patterns in both the "TO" and the "FROM".  But here we're fixed as defining conversions TO an Element*, so there's no second parameter to the template.)</p>
+<h2><a name="p-8428-write-just-the-const-casts-works-for-mutable-1" class="anchor" href="https://rebol.metaeducation.com#p-8428-write-just-the-const-casts-works-for-mutable-1"></a>Write Just The Const Casts, Works For Mutable</h2>
+<p>I hammered on this until I could get it to where you could just write the const casts, and it will take care of the mutable form casts (including blocking casting away constness)... running through the same code.  So you don't have to write two entry points and do the piping through common code yourself.</p>
+<p>I'm on the fence on whether it's worth it to put in wiring to make it possible to separately hook mutable casts--to make sure the bit patterns you have are legal for a mutable pointer.  That's not really needed given the protection of casting away constness, and the cases where you do cast mutably from raw pointers you probably are doing that on purpose.  But definitely it needs to default to that if you write just the const casts you hook all of them for that pattern match, because this is 99% of the time what you want...it shouldn't be laborious.</p>
+<h2><a name="p-8428-c-is-minimized-declare_c_type_list-2" class="anchor" href="https://rebol.metaeducation.com#p-8428-c-is-minimized-declare_c_type_list-2"></a>C++ Is Minimized: DECLARE_C_TYPE_LIST()</h2>
+<p>Without DECLARE_C_TYPE_LIST() and In_C_Type_List(), this would look like:</p>
+<pre><code>using g_convertible_to_cell = CTypeList&lt;
+    Cell, Atom, Element, Value,
+    Pairing,
+    Node, Byte, char, void
+)&gt;;
+
+STATIC_ASSERT((g_convertible_to_cell::contains&lt;F&gt;{}));
+</code></pre>
+<p>It's quirky--including the quirk that you can't call the STATIC_ASSERT() macro on expressions which contain templating <code>&lt;...&gt;</code> markers unless they're wrapped in an extra set of parentheses.  So you have to use <code>static_assert()</code> which enforces arity-2 in C++11.</p>
+<h2><a name="p-8428-also-less-c-u_cast-3" class="anchor" href="https://rebol.metaeducation.com#p-8428-also-less-c-u_cast-3"></a>Also Less C++: u_cast()</h2>
+<p>You don't want to run the cast hooks while implementing a cast hook!  Originally I used <code>reinterpret_cast</code> in this code, so it looked like:</p>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">    const Cell* c = reinterpret_cast&lt;const Cell*&gt;(p);
+    Assert_Cell_Readable(c);
+    assert(LIFT_BYTE(c) != ANTIFORM_0);
+    return reinterpret_cast&lt;const Element*&gt;(c);
+</code></pre>
+<p>But the casting system offers <strong><code>u_cast()</code></strong> as an "unchecked" cast that nevers run the hooks (but is easier to spot as being a cast than the parentheses cast it expands to).</p>
+<p>It makes it shorter and less scary to use <code>u_cast()</code>, and that's what's used in the rest of the codebase to implement unchecked cast.  So that helps make the code more familiar to what the rest of the C looks like.</p>
+<h2><a name="p-8428-should-the-template-be-abstracted-away-too-4" class="anchor" href="https://rebol.metaeducation.com#p-8428-should-the-template-be-abstracted-away-too-4"></a>Should The <code>template&lt;&gt;</code> be Abstracted Away, Too?</h2>
+<p>I don't think so.</p>
+<p>I think that goes into the realm of pandering a bit too much to C fraidy-cats.  It's tougher to abstract and I think that token-for-token, it gets it right.</p>
+<p>The value here is apparent--and I think I've done as much pandering as is appropriate.  What's left is legitimate C++ that matches the essential complexity of the problem.  (It's not even duplicating the signature of the types needlessly, as you might use reference types in those positions.)</p>
+<h2><a name="p-8428-in-total-this-is-awesome-stuff-5" class="anchor" href="https://rebol.metaeducation.com#p-8428-in-total-this-is-awesome-stuff-5"></a>In Total, This Is Awesome Stuff</h2>
+<p>It's not just about the common casts.  This gives you surgical precision if you're facing a particular debugging problem that's narrowed down, and you want to write a bit of custom instrumentation just to catch the problem you're working on.</p>
+<p>Ren-C is able to stay robust despite being a very "Amish" codebase, due to having many of these kinds of features to keep the trains running on time.</p>
+          <p><a href="https://rebol.metaeducation.com/t/advancements-in-casthelper-for-hooked-casts/2488/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/advancements-in-casthelper-for-hooked-casts/2488/1</link>
+        <pubDate>Sun, 15 Jun 2025 20:21:16 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2488-1</guid>
+        <source url="https://rebol.metaeducation.com/t/advancements-in-casthelper-for-hooked-casts/2488.rss">Advancements in CastHelper for Hooked Casts</source>
+      </item>
+  </channel>
+</rss>

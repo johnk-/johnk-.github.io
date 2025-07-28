@@ -1,0 +1,212 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>TRANSCODE and LOAD Alternative Multi-Return Concept</title>
+    <link>https://rebol.metaeducation.com/t/transcode-and-load-alternative-multi-return-concept/1925</link>
+    <description>&gt; **UPDATE 2022:** This is no longer a pattern supported by the multi-return machinery itself, due to problems arising with [how feeding information from an output request affects composition]() (e.g. things like an ENCLOSE).  Making multi-returns pure outputs that are atomically returned via  a single &quot;isotopic&quot; package turns out to be much more solid.
+&gt;
+&gt; *However*, it can still be accomplished using infix functions...for those who would find it useful.  You end up taking responsibility for doing the necessary SET&#39;s yourself (since the infix consumes the SET-WORD! or SET-BLOCK! on the left).  But if enough people thought it was interesting, common mechanics for that could be factored out.
+&gt;
+&gt; *(Whether this is &quot;dialecting&quot; is subject to debate, but I wanted to preserve the writeup here, vs. in &quot;Show and Tell&quot; where it might suggest this is an active feature of todays transcode.)*
+
+---
+
+[...In April 2020...] I was looking at TRANSCODE, which is a fairly complex in terms of its parameterization.  This is the basic routine that exposes the scanner and turns UTF-8 into Rebol values.  *(Cool sidenote: in Ren-C with UTF-8 Everywhere you can now use it on strings, while R3-Alpha could only use it on binaries...)*
+
+A typical TRANSCODE operation turns a string into a block, so conceptually:
+
+     &gt;&gt; transcode &quot;1 [2] &lt;3&gt;&quot;
+     == [1 [2] &lt;3&gt;]
+
+     &gt;&gt; transcode &quot;[1 [2] &lt;3&gt;]&quot;
+     == [[1 [2] &lt;3&gt;]]   ; always a block of values, even if only one block value
+
+Sometimes people want to transcode just one value at a time, so there is TRANSCODE/NEXT.  As with DO/NEXT, this introduces another useful output... which is where you want to write the advanced position to do further processing.  Let&#39;s look at it in that old style (none of this is real code in Ren-C, so just read it, don&#39;t run it):
+
+     &gt;&gt; transcode/next &quot;1 [2] &lt;3&gt;&quot; &#39;new-pos
+     == 1
+
+     &gt;&gt; new-pos
+     == &quot;[2] &lt;3&gt;&quot;
+
+There&#39;s yet another potential output variation coming from the /RELAX switch.  This means that if you have gibberish, it will skip that token and return an ERROR! value:
+
+     &gt;&gt; transcode/next/relax &quot;4bad [2] &lt;3&gt;&quot; &#39;new-pos
+     == make error! [...whatever...]
+
+     &gt;&gt; new-pos
+     == &quot;[2] &lt;3&gt;&quot;
+
+That&#39;s not ideal, as with some kind of ANY-CONTEXT! literal solution you might actually find an ERROR! value in a scan.
+
+### [Then Multi-Returns Were Re-Conceived As Refinement Doppelgangers](https://rebol.metaeducation.com/t/multiple-return-values/1134/6?u=hostilefork)
+
+The way you would do a multi-return is to mark a parameter a &quot;return&quot; parameter, e.g. an output.  The parameter is set either to null, or something to assign--like a refinement--in order to indicate it is requested.  Then at the end of the function when it tears down the frame, those values are set.
+
+So this way if you have a WORD! or PATH! you want to assign, you can pass it in as an argument.  But if you use the multi-return convention, it will implicitly load those slots with variables out of the block on the left.
+
+That means these two situations would appear equivalent to the insides of TRANSCODE:
+
+    &gt;&gt; value: transcode/next/relax &quot;1 [2] &lt;3&gt;&quot; &#39;next-pos &#39;error
+    
+    &gt;&gt; [value next-pos error]: transcode &quot;1 [2] &lt;3&gt;&quot;
+
+And then, these two would appear equivalent:
+
+    &gt;&gt; value: transcode/relax &quot;1 [2] &lt;3&gt;&quot; &#39;error
+    
+    &gt;&gt; [value _ error]: transcode &quot;1 [2] &lt;3&gt;&quot;
+
+This means that there needs to be a way of marking arguments as returns in the function spec, and their order matters (just as order of ordinary arguments matters).
+
+It was a great duality, giving you the option to work with named arguments if you want, but provides a shorthand...where SET-BLOCK! collaborates with the evaluator to push into those slots.
+
+**It was quite amazing to see [the benefits to TRANSCODE right off the bat](https://github.com/metaeducation/ren-c/blob/5d70aa4a85dbe3a831653e14b72117e90997fa09/tests/string/transcode.test.reb)!**
+
+## [Then I repeated the success with LOAD...](https://github.com/metaeducation/ren-c/commit/072e932260af3e9bd31fd0092ac80aeedb38139c)
+
+If you want a header you can just say:
+
+    [data header]: load %some-file.reb
+
+And if you don&#39;t want a header, you just say **data: load %some-file.reb** as normal.  This replaces the way the output *changed* in historical Rebol, where LOAD sometimes returned a BLOCK! with a header as the second item, and sometimes it did not.
+
+    rebol2&gt;&gt; load {[Rebol [Title: &quot;hi&quot;] a b c]}
+    == [a b c]
+
+    rebol2&gt;&gt; load/header {[Rebol [Title: &quot;hi&quot;] a b c]}
+    == [make object! [
+            Title: &quot;hi&quot;
+            Date: none
+            Name: none
+            Version: none
+            ; ...etc, etc...
+            Language: none
+            Type: none
+            Content: none
+        ] a b c
+    ]
+
+What&#39;s also an improvement by setting variables directly over the BLOCK! approach is that you don&#39;t have to put BLANK! in a slot, you can really return NULL:
+
+    &gt;&gt; [data header]: load &quot;&lt;no&gt; #header &#39;here&quot;
+    == [&lt;no&gt; #header &#39;here]
+
+    &gt;&gt; data
+    == [&lt;no&gt; #header &#39;here]
+
+    &gt;&gt; header
+    ; null
+
+---
+
+&gt; **REMINDER:** Not a supported feature anymore in the multi-return mechanics due to compositional problems, but still a trick you could do if you wanted to for a special purpose!</description>
+    
+    <lastBuildDate>Fri, 19 Aug 2022 14:32:07 +0000</lastBuildDate>
+    <category>Dialects/DSLs</category>
+    <atom:link href="https://rebol.metaeducation.com/t/transcode-and-load-alternative-multi-return-concept/1925.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>TRANSCODE and LOAD Alternative Multi-Return Concept</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <blockquote>
+<p><strong>UPDATE 2022:</strong> This is no longer a pattern supported by the multi-return machinery itself, due to problems arising with <a>how feeding information from an output request affects composition</a> (e.g. things like an ENCLOSE).  Making multi-returns pure outputs that are atomically returned via  a single "isotopic" package turns out to be much more solid.</p>
+<p><em>However</em>, it can still be accomplished using infix functions...for those who would find it useful.  You end up taking responsibility for doing the necessary SET's yourself (since the infix consumes the SET-WORD! or SET-BLOCK! on the left).  But if enough people thought it was interesting, common mechanics for that could be factored out.</p>
+<p><em>(Whether this is "dialecting" is subject to debate, but I wanted to preserve the writeup here, vs. in "Show and Tell" where it might suggest this is an active feature of todays transcode.)</em></p>
+</blockquote>
+<hr>
+<p>[...In April 2020...] I was looking at TRANSCODE, which is a fairly complex in terms of its parameterization.  This is the basic routine that exposes the scanner and turns UTF-8 into Rebol values.  <em>(Cool sidenote: in Ren-C with UTF-8 Everywhere you can now use it on strings, while R3-Alpha could only use it on binaries...)</em></p>
+<p>A typical TRANSCODE operation turns a string into a block, so conceptually:</p>
+<pre><code> &gt;&gt; transcode "1 [2] &lt;3&gt;"
+ == [1 [2] &lt;3&gt;]
+
+ &gt;&gt; transcode "[1 [2] &lt;3&gt;]"
+ == [[1 [2] &lt;3&gt;]]   ; always a block of values, even if only one block value
+</code></pre>
+<p>Sometimes people want to transcode just one value at a time, so there is TRANSCODE/NEXT.  As with DO/NEXT, this introduces another useful output... which is where you want to write the advanced position to do further processing.  Let's look at it in that old style (none of this is real code in Ren-C, so just read it, don't run it):</p>
+<pre><code> &gt;&gt; transcode/next "1 [2] &lt;3&gt;" 'new-pos
+ == 1
+
+ &gt;&gt; new-pos
+ == "[2] &lt;3&gt;"
+</code></pre>
+<p>There's yet another potential output variation coming from the /RELAX switch.  This means that if you have gibberish, it will skip that token and return an ERROR! value:</p>
+<pre><code> &gt;&gt; transcode/next/relax "4bad [2] &lt;3&gt;" 'new-pos
+ == make error! [...whatever...]
+
+ &gt;&gt; new-pos
+ == "[2] &lt;3&gt;"
+</code></pre>
+<p>That's not ideal, as with some kind of ANY-CONTEXT! literal solution you might actually find an ERROR! value in a scan.</p>
+<h3><a name="p-3760-then-multi-returns-were-re-conceived-as-refinement-doppelgangershttpsrebolmetaeducationcomtmultiple-return-values11346uhostilefork-1" class="anchor" href="https://rebol.metaeducation.com#p-3760-then-multi-returns-were-re-conceived-as-refinement-doppelgangershttpsrebolmetaeducationcomtmultiple-return-values11346uhostilefork-1"></a><a href="https://rebol.metaeducation.com/t/multiple-return-values/1134/6">Then Multi-Returns Were Re-Conceived As Refinement Doppelgangers</a></h3>
+<p>The way you would do a multi-return is to mark a parameter a "return" parameter, e.g. an output.  The parameter is set either to null, or something to assign--like a refinement--in order to indicate it is requested.  Then at the end of the function when it tears down the frame, those values are set.</p>
+<p>So this way if you have a WORD! or PATH! you want to assign, you can pass it in as an argument.  But if you use the multi-return convention, it will implicitly load those slots with variables out of the block on the left.</p>
+<p>That means these two situations would appear equivalent to the insides of TRANSCODE:</p>
+<pre><code>&gt;&gt; value: transcode/next/relax "1 [2] &lt;3&gt;" 'next-pos 'error
+
+&gt;&gt; [value next-pos error]: transcode "1 [2] &lt;3&gt;"
+</code></pre>
+<p>And then, these two would appear equivalent:</p>
+<pre><code>&gt;&gt; value: transcode/relax "1 [2] &lt;3&gt;" 'error
+
+&gt;&gt; [value _ error]: transcode "1 [2] &lt;3&gt;"
+</code></pre>
+<p>This means that there needs to be a way of marking arguments as returns in the function spec, and their order matters (just as order of ordinary arguments matters).</p>
+<p>It was a great duality, giving you the option to work with named arguments if you want, but provides a shorthand...where SET-BLOCK! collaborates with the evaluator to push into those slots.</p>
+<p><strong>It was quite amazing to see <a href="https://github.com/metaeducation/ren-c/blob/5d70aa4a85dbe3a831653e14b72117e90997fa09/tests/string/transcode.test.reb">the benefits to TRANSCODE right off the bat</a>!</strong></p>
+<h2><a name="p-3760-then-i-repeated-the-success-with-loadhttpsgithubcommetaeducationren-ccommit072e932260af3e9bd31fd0092ac80aeedb38139c-2" class="anchor" href="https://rebol.metaeducation.com#p-3760-then-i-repeated-the-success-with-loadhttpsgithubcommetaeducationren-ccommit072e932260af3e9bd31fd0092ac80aeedb38139c-2"></a><a href="https://github.com/metaeducation/ren-c/commit/072e932260af3e9bd31fd0092ac80aeedb38139c">Then I repeated the success with LOAD...</a></h2>
+<p>If you want a header you can just say:</p>
+<pre><code>[data header]: load %some-file.reb
+</code></pre>
+<p>And if you don't want a header, you just say <strong>data: load %some-file.reb</strong> as normal.  This replaces the way the output <em>changed</em> in historical Rebol, where LOAD sometimes returned a BLOCK! with a header as the second item, and sometimes it did not.</p>
+<pre><code>rebol2&gt;&gt; load {[Rebol [Title: "hi"] a b c]}
+== [a b c]
+
+rebol2&gt;&gt; load/header {[Rebol [Title: "hi"] a b c]}
+== [make object! [
+        Title: "hi"
+        Date: none
+        Name: none
+        Version: none
+        ; ...etc, etc...
+        Language: none
+        Type: none
+        Content: none
+    ] a b c
+]
+</code></pre>
+<p>What's also an improvement by setting variables directly over the BLOCK! approach is that you don't have to put BLANK! in a slot, you can really return NULL:</p>
+<pre><code>&gt;&gt; [data header]: load "&lt;no&gt; #header 'here"
+== [&lt;no&gt; #header 'here]
+
+&gt;&gt; data
+== [&lt;no&gt; #header 'here]
+
+&gt;&gt; header
+; null
+</code></pre>
+<hr>
+<blockquote>
+<p><strong>REMINDER:</strong> Not a supported feature anymore in the multi-return mechanics due to compositional problems, but still a trick you could do if you wanted to for a special purpose!</p>
+</blockquote>
+          <p><a href="https://rebol.metaeducation.com/t/transcode-and-load-alternative-multi-return-concept/1925/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/transcode-and-load-alternative-multi-return-concept/1925/1</link>
+        <pubDate>Fri, 10 Apr 2020 20:20:05 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1925-1</guid>
+        <source url="https://rebol.metaeducation.com/t/transcode-and-load-alternative-multi-return-concept/1925.rss">TRANSCODE and LOAD Alternative Multi-Return Concept</source>
+      </item>
+      <item>
+        <title>TRANSCODE and LOAD Alternative Multi-Return Concept</title>
+        <dc:creator><![CDATA[BlackATTR]]></dc:creator>
+        <description><![CDATA[
+            <p>Very cool. Thank you— I can see this being really useful for dialects (being coerced out of text, which is relevant for me), and almost anything which helps dialects is a good thing, in my opinion.</p>
+          <p><a href="https://rebol.metaeducation.com/t/transcode-and-load-alternative-multi-return-concept/1925/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/transcode-and-load-alternative-multi-return-concept/1925/2</link>
+        <pubDate>Thu, 09 Apr 2020 00:03:18 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1925-2</guid>
+        <source url="https://rebol.metaeducation.com/t/transcode-and-load-alternative-multi-return-concept/1925.rss">TRANSCODE and LOAD Alternative Multi-Return Concept</source>
+      </item>
+  </channel>
+</rss>

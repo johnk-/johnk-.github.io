@@ -1,0 +1,323 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Unstable Isotope Conundrums</title>
+    <link>https://rebol.metaeducation.com/t/unstable-isotope-conundrums/2033</link>
+    <description>An unstable isotope is one that cannot be stored in a variable.  The clearest example of one of these is a PACK!.
+
+Quick refresher: because functions receive their arguments in variables, you clearly cannot pass an unstable isotope to a function.  You instead use ^META parameters and get the quasiform.
+
+    &gt;&gt; pack [3 4]
+    ; first in pack of length 2
+    == 3
+
+    &gt;&gt; lift pack [3 4]
+    == ~[&#39;3 &#39;4]~
+
+    &gt;&gt; [a b]: pack [3 4]
+    == 3
+
+    &gt;&gt; a
+    == 3
+
+    &gt;&gt; b
+    == 4
+
+**But what about non-variable situations... like expressions that are being tested for being truthy or falsey?**
+
+Right now, tests for truthiness throw the unstable state away.  For instance, ALL:
+
+    &gt;&gt; all [1 2 pack [3 4]]
+    == 3
+
+The PACK! formed by the PACK function is decayed to just 3 by the ALL, and then the 3 was tested as truthy.  If you wanted to get past this, you would have to lift-and-then-unlift the pack:
+
+    &gt;&gt; unlift all [1 2 lift pack [3 4]]
+    ; first in pack of length 2
+    == 3
+
+But note that here, it&#39;s testing the lifted-pack ~[&#39;3 &#39;4]~ for truthiness, not the 3.  So if null were in the meta pack, it would still wind up truthy.
+
+    &gt;&gt; all [1 2 meta pack [null null]]
+    == ~[~null~ ~null~]~
+
+Whereas a regular pack would be decayed before the test:
+
+    &gt;&gt; all [1 2 pack [null null]]
+    == \~null~\  ; antiform
+
+You might ask *&quot;Why not just say all PACK!s are truthy, so you don&#39;t have to LIFT and UNLIFT them?&quot;*
+
+Well just think about it: when you use a multi-returning function you may only be interested in the primary result...and even only be slightly aware that more results are available.  For instance: not everyone knows that today&#39;s FIND returns an additional output if you want it (it&#39;s the end of a match).
+
+**Saying that packs must decay to test them for truthiness doesn&#39;t seem too baffling, but what about loop constructs that don&#39;t test for truthiness?**
+
+Is this harmless?
+
+    &gt;&gt; flag: okay
+
+    &gt;&gt; lift while [flag] [flag: null, pack [3 4]]
+    == ~[&#39;3 &#39;4]~
+
+It seems all right, although this becomes a property that [has to be preserved by compositions like FOR-BOTH](https://rebol.metaeducation.com/t/demonstrating-for-both-loop-composability-for-the-win/1833). (As it so happens, the composition does work.)
+
+[But what about INSIST?](https://rebol.metaeducation.com/t/the-mismatch-of-arity-1-until-and-arity-2-while/594/8?u=hostilefork)  In INSIST the loop condition and the body are the same, and in order to exit the loop the body must be truthy...so you can&#39;t get a pack out:
+
+    &gt;&gt; until [pack [3 4]]
+    == 3
+
+And also... what about situations like CONTINUE:WITH or STOP:WITH.  If the :WITH parameter is a plain refinement and not a ^META one, then the information will be lost:
+
+    &gt;&gt; cycle [stop:with pack [3 4]]
+    == 3
+
+## Maybe Test DECAY&#39;d Value, Preserve PACK! ?
+
+Constructs like ALL or UNTIL might decay only for the purposes of the truthiness test, but preserve the original PACK! for the actual return.
+
+For instance could you do this?
+
+    &gt;&gt; [a :b]: all [
+           1 = 1
+           2 = 2
+           pack [3 4]
+       ]
+    == 3
+
+    &gt;&gt; a
+    == 3
+
+    &gt;&gt; b
+    == 4
+
+I&#39;ve pointed out that PACKs with falsey items have to break the chain:
+
+    &gt;&gt; [a :b]: all [
+           1 = 1
+           2 = 2
+           pack [null 4]
+       ]
+    == \~null~\  ; antiform
+
+    &gt;&gt; a
+    == \~null~\  ; antiform
+
+    &gt;&gt; b
+    == \~null~\  ; antiform
+
+If you didn&#39;t intend that you&#39;d have to LIFT the pack inside the ALL...and UNLIFT outside as discussed (in this case with UNLIFT* which passes through null as-is vs. erroring if the leading conditions resulted in a null outcome)
+
+    &gt;&gt; [a :b]: unlift* all [
+           1 = 1
+           2 = 2
+           lift pack [null 4]
+       ]
+    == \~null~\  ; antiform
+
+    &gt;&gt; a
+    == \~null~\  ; antiform
+
+    &gt;&gt; b
+    == 4
+
+Taking this preservation to extremes would complicate a lot of places in the code.  For instance: IF tolerates function branches, and will pass on the condition to the branch:
+
+    &gt;&gt; var: [a b c]
+
+    &gt;&gt; if var (func [x] [print [&quot;var was&quot; mold x]])
+    var was [a b c]
+
+But what if you want to do this with a pack, and have the option of receiving it in that function?
+
+     &gt;&gt; if pack [1 2] (func [x] [print [&quot;var was&quot; mold x]])
+     var was 1
+
+     &gt;&gt; if pack [1 2] (func [^x] [print [&quot;meta var was&quot; mold x]])
+     meta var was ~[1 2]~
+
+     &gt;&gt; if pack [false 2] (func [^x] [print [&quot;meta var was&quot; mold x]])
+     == \~null~\  ; antiform
+
+Interesting though that may look, it changes IF to where it has to take its condition as a ^META parameter, otherwise it decays and can&#39;t be passed on.
+
+I can&#39;t tell if this is a high-enough leverage piece of functionality to be worth complicating IF or not.
+
+## For Now, Tempting To Say &quot;Loop Protocol&quot; Can&#39;t Return PACK!
+
+It&#39;s not necessarily *hard* to make :WITH a ^META-refinement on CONTINUE and STOP... at least in terms of allowing PACK!.  **continue:with fail error** would cause some uncomfortable results.
+
+Again, note there are ways to work around not processing unstable pack! isotopes by the :WITH itself, by LIFT-ing on the inside and UNLIFT-ing on the outside:
+
+     &gt;&gt; cycle [stop:with lift pack [3 4]]
+     == ~[3 4]~
+
+     &gt;&gt; [a b]: unlift cycle [stop:with lift pack [3 4]]
+     == 3
+
+     &gt;&gt; a
+     == 3
+
+     &gt;&gt; b
+     == 4
+
+Every time I see this, I do kind of wish up and down arrows were on our keyboards:
+
+      [a b]: ↓ cycle [stop:with ↑ pack [3 4]]
+
+If caret were taken for LIFT, you only get half of this:
+
+     [a b]: unlift cycle [stop:with ^ pack [3 4]]</description>
+    
+    <lastBuildDate>Sun, 01 Jun 2025 19:55:29 +0000</lastBuildDate>
+    <category>Internals</category>
+    <atom:link href="https://rebol.metaeducation.com/t/unstable-isotope-conundrums/2033.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Unstable Isotope Conundrums</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>An unstable isotope is one that cannot be stored in a variable.  The clearest example of one of these is a PACK!.</p>
+<p>Quick refresher: because functions receive their arguments in variables, you clearly cannot pass an unstable isotope to a function.  You instead use ^META parameters and get the quasiform.</p>
+<pre><code>&gt;&gt; pack [3 4]
+; first in pack of length 2
+== 3
+
+&gt;&gt; lift pack [3 4]
+== ~['3 '4]~
+
+&gt;&gt; [a b]: pack [3 4]
+== 3
+
+&gt;&gt; a
+== 3
+
+&gt;&gt; b
+== 4
+</code></pre>
+<p><strong>But what about non-variable situations... like expressions that are being tested for being truthy or falsey?</strong></p>
+<p>Right now, tests for truthiness throw the unstable state away.  For instance, ALL:</p>
+<pre><code>&gt;&gt; all [1 2 pack [3 4]]
+== 3
+</code></pre>
+<p>The PACK! formed by the PACK function is decayed to just 3 by the ALL, and then the 3 was tested as truthy.  If you wanted to get past this, you would have to lift-and-then-unlift the pack:</p>
+<pre><code>&gt;&gt; unlift all [1 2 lift pack [3 4]]
+; first in pack of length 2
+== 3
+</code></pre>
+<p>But note that here, it's testing the lifted-pack ~['3 '4]~ for truthiness, not the 3.  So if null were in the meta pack, it would still wind up truthy.</p>
+<pre><code>&gt;&gt; all [1 2 meta pack [null null]]
+== ~[~null~ ~null~]~
+</code></pre>
+<p>Whereas a regular pack would be decayed before the test:</p>
+<pre><code>&gt;&gt; all [1 2 pack [null null]]
+== \~null~\  ; antiform
+</code></pre>
+<p>You might ask <em>"Why not just say all PACK!s are truthy, so you don't have to LIFT and UNLIFT them?"</em></p>
+<p>Well just think about it: when you use a multi-returning function you may only be interested in the primary result...and even only be slightly aware that more results are available.  For instance: not everyone knows that today's FIND returns an additional output if you want it (it's the end of a match).</p>
+<p><strong>Saying that packs must decay to test them for truthiness doesn't seem too baffling, but what about loop constructs that don't test for truthiness?</strong></p>
+<p>Is this harmless?</p>
+<pre><code>&gt;&gt; flag: okay
+
+&gt;&gt; lift while [flag] [flag: null, pack [3 4]]
+== ~['3 '4]~
+</code></pre>
+<p>It seems all right, although this becomes a property that <a href="https://rebol.metaeducation.com/t/demonstrating-for-both-loop-composability-for-the-win/1833">has to be preserved by compositions like FOR-BOTH</a>. (As it so happens, the composition does work.)</p>
+<p><a href="https://rebol.metaeducation.com/t/the-mismatch-of-arity-1-until-and-arity-2-while/594/8">But what about INSIST?</a>  In INSIST the loop condition and the body are the same, and in order to exit the loop the body must be truthy...so you can't get a pack out:</p>
+<pre><code>&gt;&gt; until [pack [3 4]]
+== 3
+</code></pre>
+<p>And also... what about situations like CONTINUE:WITH or STOP:WITH.  If the :WITH parameter is a plain refinement and not a ^META one, then the information will be lost:</p>
+<pre><code>&gt;&gt; cycle [stop:with pack [3 4]]
+== 3
+</code></pre>
+<h2><a name="p-6617-maybe-test-decayd-value-preserve-pack-1" class="anchor" href="https://rebol.metaeducation.com#p-6617-maybe-test-decayd-value-preserve-pack-1"></a>Maybe Test DECAY'd Value, Preserve PACK! ?</h2>
+<p>Constructs like ALL or UNTIL might decay only for the purposes of the truthiness test, but preserve the original PACK! for the actual return.</p>
+<p>For instance could you do this?</p>
+<pre><code>&gt;&gt; [a :b]: all [
+       1 = 1
+       2 = 2
+       pack [3 4]
+   ]
+== 3
+
+&gt;&gt; a
+== 3
+
+&gt;&gt; b
+== 4
+</code></pre>
+<p>I've pointed out that PACKs with falsey items have to break the chain:</p>
+<pre><code>&gt;&gt; [a :b]: all [
+       1 = 1
+       2 = 2
+       pack [null 4]
+   ]
+== \~null~\  ; antiform
+
+&gt;&gt; a
+== \~null~\  ; antiform
+
+&gt;&gt; b
+== \~null~\  ; antiform
+</code></pre>
+<p>If you didn't intend that you'd have to LIFT the pack inside the ALL...and UNLIFT outside as discussed (in this case with UNLIFT* which passes through null as-is vs. erroring if the leading conditions resulted in a null outcome)</p>
+<pre><code>&gt;&gt; [a :b]: unlift* all [
+       1 = 1
+       2 = 2
+       lift pack [null 4]
+   ]
+== \~null~\  ; antiform
+
+&gt;&gt; a
+== \~null~\  ; antiform
+
+&gt;&gt; b
+== 4
+</code></pre>
+<p>Taking this preservation to extremes would complicate a lot of places in the code.  For instance: IF tolerates function branches, and will pass on the condition to the branch:</p>
+<pre><code>&gt;&gt; var: [a b c]
+
+&gt;&gt; if var (func [x] [print ["var was" mold x]])
+var was [a b c]
+</code></pre>
+<p>But what if you want to do this with a pack, and have the option of receiving it in that function?</p>
+<pre><code> &gt;&gt; if pack [1 2] (func [x] [print ["var was" mold x]])
+ var was 1
+
+ &gt;&gt; if pack [1 2] (func [^x] [print ["meta var was" mold x]])
+ meta var was ~[1 2]~
+
+ &gt;&gt; if pack [false 2] (func [^x] [print ["meta var was" mold x]])
+ == \~null~\  ; antiform
+</code></pre>
+<p>Interesting though that may look, it changes IF to where it has to take its condition as a ^META parameter, otherwise it decays and can't be passed on.</p>
+<p>I can't tell if this is a high-enough leverage piece of functionality to be worth complicating IF or not.</p>
+<h2><a name="p-6617-for-now-tempting-to-say-loop-protocol-cant-return-pack-2" class="anchor" href="https://rebol.metaeducation.com#p-6617-for-now-tempting-to-say-loop-protocol-cant-return-pack-2"></a>For Now, Tempting To Say "Loop Protocol" Can't Return PACK!</h2>
+<p>It's not necessarily <em>hard</em> to make :WITH a ^META-refinement on CONTINUE and STOP... at least in terms of allowing PACK!.  <strong>continue:with fail error</strong> would cause some uncomfortable results.</p>
+<p>Again, note there are ways to work around not processing unstable pack! isotopes by the :WITH itself, by LIFT-ing on the inside and UNLIFT-ing on the outside:</p>
+<pre><code> &gt;&gt; cycle [stop:with lift pack [3 4]]
+ == ~[3 4]~
+
+ &gt;&gt; [a b]: unlift cycle [stop:with lift pack [3 4]]
+ == 3
+
+ &gt;&gt; a
+ == 3
+
+ &gt;&gt; b
+ == 4
+</code></pre>
+<p>Every time I see this, I do kind of wish up and down arrows were on our keyboards:</p>
+<pre><code>  [a b]: ↓ cycle [stop:with ↑ pack [3 4]]
+</code></pre>
+<p>If caret were taken for LIFT, you only get half of this:</p>
+<pre><code> [a b]: unlift cycle [stop:with ^ pack [3 4]]
+</code></pre>
+          <p><a href="https://rebol.metaeducation.com/t/unstable-isotope-conundrums/2033/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/unstable-isotope-conundrums/2033/1</link>
+        <pubDate>Thu, 22 Jun 2023 17:09:32 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2033-1</guid>
+        <source url="https://rebol.metaeducation.com/t/unstable-isotope-conundrums/2033.rss">Unstable Isotope Conundrums</source>
+      </item>
+  </channel>
+</rss>

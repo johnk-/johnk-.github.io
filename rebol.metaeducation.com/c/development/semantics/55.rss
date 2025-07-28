@@ -1,0 +1,2119 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:discourse="http://www.discourse.org/" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Semantics - AltRebol</title>
+    <link>https://rebol.metaeducation.com/c/development/semantics/55</link>
+    <description>Topics in the &#39;Semantics&#39; category While the &quot;Internals&quot; discusses the bits and bytes of how things are implemented, this category is for discussing things design questions of the language... like what &lt;strong&gt;do []&lt;/strong&gt; should return.</description>
+    
+      <lastBuildDate>Fri, 25 Jul 2025 15:53:47 +0000</lastBuildDate>
+      <atom:link href="https://rebol.metaeducation.com/c/development/semantics/55.rss" rel="self" type="application/rss+xml" />
+        <item>
+          <title>Can VOID, GHOST!, ACTION! Be More Decay-Friendly?</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Semantics</category>
+          <description><![CDATA[
+            <p>I wrote about a <a href="https://rebol.metaeducation.com/t/re-imagining-do-next-as-eval-step/767/3">small but important tweak to the behavior of multi-returns</a>, which allowed changing:</p>
+<pre><code>[pos :result]: eval:step pos
+</code></pre>
+<p>Into just:</p>
+<pre><code>[pos result]: eval:step pos
+</code></pre>
+<p>I mention that I believe that that multi-returns with too few values unsetting the variables (vs. panic'ing in the moment) was better in the long run.  e.g. if EVAL:STEP returns just NULL and not a PACK!, then setting POS to NULL and <strong>unsetting</strong> RESULT was an overall win.</p>
+<p><em>(Absorbing this requires understanding what modern "unsetness" is...variables truly holding no value, not even TRASH!, and what the implications of this so-called "dual state" are.)</em></p>
+<p>I also mention that in practice, it would often be necessary for the result variable to be ^META.  Because if it's not, any non-decayable values would panic.  This wouldn't just happen for ERROR! antiforms (which there's a reasonable probability you'd want to just panic anyway).  It would also happen for GHOST!</p>
+<pre><code>; this would panic -&gt; can't decay GHOST! to ordinary result, need ^result
+[pos result]: eval:step [comment "hi" ...]
+</code></pre>
+<p>I'll point out that there's rules about ACTION!s as well, which are that you can't assign actions to plain variables unless they are deemed "unsurprising" (kind of a dicey concept, still being hammered out)</p>
+<pre><code>; this would panic -&gt; can't assign ACTION! to plain WORD!, need ^result
+[pos result]: eval:step [if okay [lambda [x] [x]] ...]  ; "surprising" action
+</code></pre>
+<p>We know the new rules for decay of VOID, which is to unset the variable, but what are the implications of that here?</p>
+<pre><code>[pos result]: eval:step [foo: void ...]
+</code></pre>
+<p>That will unset <code>foo</code>, <a href="https://rebol.metaeducation.com/t/should-void-assigns-mean-fully-remove-a-key/2431">because that's now legitimate</a>.</p>
+<p>But we're in a bit of an unfortunate position, because if we allow this decay it undermines one of my ideas <em>a little</em>... of saying that the unset state isn't an evaluative result.  (It's still true, in the sense that using <code>^result</code> would expose that the real evaluative state was void...but it feels like a shaky conflation.)</p>
+<h2><a name="p-8555-question-on-the-table-can-this-be-easierbetter-1" class="anchor" href="https://rebol.metaeducation.com#p-8555-question-on-the-table-can-this-be-easierbetter-1"></a>Question On The Table: Can This Be Easier/Better?</h2>
+<p>Lots to tackle here, but...</p>
+<p>I'll start by mentioning an old trick, which was to say that by default EVAL would by default keep stepping to not show you the GHOST!s.</p>
+<pre><code>&gt;&gt; [pos result]: eval:step [comment "hello" elide print "world" 10 + 20 ...]
+world
+== \~['[...] '30]~\  ; antiform
+</code></pre>
+<p>In that one step, it zoomed you past the GHOST!-producing steps and took you right to the first real result (if any).</p>
+<p>That may seem convenient, but it means you need a refinement like :GHOSTABLE to ask to see the invisibles.  I'm kind of annoyed by it.</p>
+<p>Another thought would be to give back something "innocuous" as a proxy for invisibility, under the assumption that the default would be not to care:</p>
+<pre><code>&gt;&gt; [pos result]: eval:step [comment "hello" elide print "world" 10 + 20 ...]
+== \~['[elide print "world" 10 + 20 ...] ~#ghost~]~\  ; antiform
+</code></pre>
+<p>There you're getting back a TRASH! that's a stable antiform, and it's labeled "<span class="hashtag-raw">#ghost</span>" which cues you to knowing it was a ghost (though it's a conflation, as it could have been a trash that said ghost).  That may be interesting to you for your purposes or it may not--maybe you don't have any particular difference in treatment in your particular evaluator client for things that return ghosts vs. a random thing that produced TRASH!.</p>
+<p>So my concept here is: if you were already writing handling for TRASH!, maybe whatever you're doing for trash works well enough for ghosts too.</p>
+<p>If we were to lean in this direction, I think it would support the idea that TRASH! is treated like no vote in things like ANY and ALL.  (<a href="https://rebol.metaeducation.com/t/the-truthiness-of-trash/2180/5">Right now it's truthy</a>, but the idea of being no vote is in the same ballpark and has been considered.)</p>
+<p>And it might provide an escape hatch for the not-so-nice void problem as well:</p>
+<pre><code>&gt;&gt; [pos result]: eval:step [foo: void ...]
+== \~['[...] ~#void~]~\  ; antiform
+</code></pre>
+<p><strong>This would be SET-BLOCK saying that when it unpacks VOID and GHOST! into variables that are non-^META, it doesn't go through "standard decay"... because it doesn't want to conflate no pack item with pack item that's void or ghost.</strong></p>
+<p>If we then made things like ANY and ALL treat TRASH! the same as voids/ghosts and just ignore it, then you can see a somewhat coherent plan taking shape, allowing you to get meaningful work done without having to invoke the ^META convention.  <em>"It's all trash to me"</em>, unless you have a reason to discern it.</p>
+<h2><a name="p-8555-but-what-about-actions-2" class="anchor" href="https://rebol.metaeducation.com#p-8555-but-what-about-actions-2"></a>But, What About ACTION!s...?</h2>
+<p>This question about "how much lying is acceptable" gets us into the weeds a bit here with ACTION!.</p>
+<p>I'm trying to narrow down the cases where plain word assignments are allowed to put ACTION!s into words, because of the significant burden that it creates to not know whether variables contain actions or not.</p>
+<p>Right now, saying you have to use ^META variables is that tool:</p>
+<pre><code>[pos ^result]: eval:step [bar: lambda [x] [x] ...]
+</code></pre>
+<p>All the lying to make trash out of ghosts and voids wouldn't help a case for generalized eval-stepping if you couldn't step over that.</p>
+<p>What could it do?  Return a TRASH! that says just <code>~#action~</code>  ?  Degrade it into a plain FRAME!, instead of an antiform one?</p>
+<p>Between those two options, it seems to me producing TRASH! is the better plan.  As with ghost and void, if you find this is in-band of something you truly care about, you could deal with it.</p>
+<p>Unfortunately, ACTION!s are truthy.  So we can't really square that with something that's trying to blend with TRASH!</p>
+<h2><a name="p-8555-conclusions-3" class="anchor" href="https://rebol.metaeducation.com#p-8555-conclusions-3"></a>Conclusions (?)</h2>
+<p>It may just be that if you're doing EVAL:STEP and you aren't completely sure what you're processing, you have to use ^META for the result.</p>
+<p>I'm not 100% thrilled with the idea of not being able to distinguish:</p>
+<pre><code>[x y]: pack [1 + 2 void]  ; will unset y
+
+[x y]: pack [1 + 2]  ; will unset y
+</code></pre>
+<p>And only being able to tell the difference if you write:</p>
+<pre><code>[x ^y]: pack [1 + 2 void]  ; ^y will hold void
+
+[x ^y]: pack [1 + 2]  ; will unset y
+</code></pre>
+<p>But if it does that, is there any good reason for GHOST! not to do it too, so that at least if you think they both should be handled the same way that you only have to write one set of handling?</p>
+<pre><code>&gt;&gt; x: comment "hi"
+== \~,~\  ; antiform
+
+&gt;&gt; unset? $x
+== \~okay~\  ; antiform
+</code></pre>
+<p>Or is GHOST! &lt;=&gt; TRASH! conflation better?</p>
+<pre><code>&gt;&gt; x: comment "hi"
+== \~,~\  ; antiform
+
+&gt;&gt; trash? ^x
+== \~okay~\  ; antiform
+</code></pre>
+<h2><a name="p-8555-calm-down-people-it-was-just-a-little-liehttpswwwyoutubecomwatchvjuecqo7rz7c-4" class="anchor" href="https://rebol.metaeducation.com#p-8555-calm-down-people-it-was-just-a-little-liehttpswwwyoutubecomwatchvjuecqo7rz7c-4"></a><a href="https://www.youtube.com/watch?v=jUEcqo7Rz7c"><em>"Calm down people... it was just a little lie..."</em></a></h2>
+<p><strong>This is tough, because plain ol' panic was comforting.</strong></p>
+<p>But that first lie of saying non-^META assignments of VOID would unset variables led to a generalized principle that PACK!s that are too short to fulfill all their assignments would unset variables.  <strong>Yes it's a lie, but I've thought about this from a lot of angles now, and pretty sure that is the right choice.</strong></p>
+<p>That lie wasn't made to stop people from having to ^META variables in packs, it was to stop them from having to <code>:OPTIONALIZE</code> them... which created a conflation.</p>
+<p>With this new rule in place, there's the issue of whether these must be equivalent in terms of the effect on X:</p>
+<pre><code> x: ...expr...  &lt;=&gt;    [x]: pack [...expr...]
+
+^x: ...expr...  &lt;=&gt;   [^x]: pack [...expr...]
+</code></pre>
+<p><em>(The appealingness of the ^X case seems like a pretty strong argument for PACK to accept ERROR! by default, <a href="https://rebol.metaeducation.com/t/packs-decaying-to-first-item-when-others-are-error/2514">I think I'm realizing that it is misguided to panic on them and the safety problem should be addressed other ways</a>.)</em></p>
+<p>If this rule needs to be true (and I think it does) then a VOID in a pack has to do what a void not in a pack would do... so if the variable is not ^META, it needs to unset it.</p>
+<p><strong>Maybe that's the only lie, and we don't need to become pathological liars because of it.</strong></p>
+<p>If GHOST! and ACTION! just panic for now when used in non-^META assignments, it just means people processing arbitrary code need to use ^META assignments, and that's basically futureproof (as much as anything here is).</p>
+<p>If experience comes to show that more lies have value, we can  cross that bridge when we come to it.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/can-void-ghost-action-be-more-decay-friendly/2515">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/can-void-ghost-action-be-more-decay-friendly/2515</link>
+          <pubDate>Fri, 25 Jul 2025 15:53:47 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2515</guid>
+          <source url="https://rebol.metaeducation.com/t/can-void-ghost-action-be-more-decay-friendly/2515.rss">Can VOID, GHOST!, ACTION! Be More Decay-Friendly?</source>
+        </item>
+        <item>
+          <title>Applying Sigils Using CHAIN! (@:var) =&gt; (pin var)</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Semantics</category>
+          <description><![CDATA[
+            <p><a class="mention" href="https://rebol.metaeducation.com/u/bradrn">@bradrn</a> had an interesting suggestion here:</p>
+<aside class="quote no-group" data-username="bradrn" data-post="1" data-topic="2460">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/bradrn/48/365_2.png" class="avatar"><a href="https://rebol.metaeducation.com/t/differences-between-x-and-x/2460/1">Differences Between ^x: and [^x]:</a></div>
+<blockquote>
+<p>Or <code>@:x</code> could get the value of <code>:x</code>, then apply <code>@</code> to it. (Note that these should probably be unordered, as I mentioned earlier.) Of course, they’re useful in dialects too.</p>
+</blockquote>
+</aside>
+<p>That could be cool.</p>
+<pre><code>&gt;&gt; word: 'foo
+
+&gt;&gt; @:word
+== @foo
+</code></pre>
+<p>I'm hard pressed to think of what else it would do.  The colon and the concept of "chaining" kind of suggests it.</p>
+<p>I've biased the system to error on applying Sigils to things that already have them, because I think that's too permissive, and leads to misunderstandings:</p>
+<pre><code>&gt;&gt; x: @foo
+
+&gt;&gt; lift x
+** Error...
+
+&gt;&gt; lift:force x
+== ^foo
+</code></pre>
+<p>So I'd probably suggest this operator error by default as well.</p>
+<p>It could work with GROUP!s and evaluate them, but it might be noisier than just using PIN.</p>
+<pre><code>&gt;&gt; stuff: [foo baz bar]
+
+&gt;&gt; @:(pick stuff 2)
+== @baz
+
+&gt;&gt; pin pick stuff 2
+== @baz
+</code></pre>
+<p>Same number of characters.  I would usually prefer the latter as the parentheses take it from "slightly and relevantly symbol-y" to "more symbol-y than it need be".  Also with 4 inline cells it has better locality (vs. a 2-element CHAIN! with a 3-element GROUP! in it.)</p>
+<p>But, good to have options.  Also, since you can't assign Sigils, maybe the operator could stand alone:</p>
+<pre><code>&gt;&gt; @: pick stuff 2
+== @baz
+</code></pre>
+<p>Looks like an assignment, but... <img src="https://rebol.metaeducation.com/images/emoji/twitter/man_shrugging.png?v=14" title=":man_shrugging:" class="emoji" alt=":man_shrugging:" loading="lazy" width="20" height="20"> Someone might like it.  (I don't <img src="https://rebol.metaeducation.com/images/emoji/twitter/slight_smile.png?v=14" title=":slight_smile:" class="emoji" alt=":slight_smile:" loading="lazy" width="20" height="20">)</p>
+            <p><small>4 posts - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/applying-sigils-using-chain-var-pin-var/2461">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/applying-sigils-using-chain-var-pin-var/2461</link>
+          <pubDate>Mon, 19 May 2025 10:23:16 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2461</guid>
+          <source url="https://rebol.metaeducation.com/t/applying-sigils-using-chain-var-pin-var/2461.rss">Applying Sigils Using CHAIN! (@:var) =&gt; (pin var)</source>
+        </item>
+        <item>
+          <title>Should Things Like TEXT? Fail On NULL</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Semantics</category>
+          <description><![CDATA[
+            <p>One of the principal ideas of the null state is to be a falsey state a variable can hold that reflects it hasn't been assigned... but that you can access without getting an error on word fetch.</p>
+<p>Increasingly I've come to believe that functions should not accept NULL states as arguments, <em>unless they are specifically designed for doing conditional tests</em> (e.g. IF needs to take NULL in its condition slot...)</p>
+<p>I think that if you write code that says <strong><code>if not text? var [...]</code></strong> and VAR was null, that should be an error to cue you into the fact that your test was meaningless.  We now have empty splice that can serve a role of a "friendlier" form of nothing (the new BLANK now that _ is SPACE).  So you can use that for your variable if you need tests like this to succeed.</p>
+<p>If you really want to "opt out" and get the test to fail on null, there's OPT which will pass a void... and then that will let you say "I meant to do that".  (And I think OPT of the ~()~ antiform should probably also return a void state, but you wouldn't have to do that to get the test to fail if using the empty splice as your blank state).</p>
+<h2><a name="p-8286-should-testing-quoted-values-soft-fail-1" class="anchor" href="https://rebol.metaeducation.com#p-8286-should-testing-quoted-values-soft-fail-1"></a>Should Testing Quoted Values Soft Fail?</h2>
+<p>I kind of feel like you're potentially missing some of the picture if you're working with quoted values and don't realize it:</p>
+<pre><code>&gt;&gt; foo: first ['&lt;thing&gt;]
+== '&lt;thing&gt;
+
+&gt;&gt; tag? foo
+== ~null~  ; anti
+</code></pre>
+<p>I mean, it <em>is</em> a tag... it's just a quoted one.  Same with pinned/lifted/tied values.</p>
+<pre><code>&gt;&gt; bar: @&lt;thing&gt;
+== @&lt;thing&gt;
+
+&gt;&gt; tag? bar
+== ~null~  ; anti
+</code></pre>
+<p>These could give ERROR! back, and you could say <strong><code>try tag? bar</code></strong> if you wanted to say "yeah I know it's quoted, and I want that to not be a match".</p>
+<p>(I've discussed leading colon as a shorthand for TRY in the modern world, so it could be <strong><code>:tag? bar</code></strong> in that world, for people who like brevity.)</p>
+<p>I don't think having a speedbump here is as likely to be as inconvenient as one might think. And it could cue you to ask <strong><code>tag? noquote bar</code></strong> or <strong><code>tag? plain bar</code></strong> or whatever your particular meaning was.</p>
+<p>I'm not as confident about this as I am about the need to panic (not error) on null.</p>
+<h2><a name="p-8286-what-to-call-the-typeset-2" class="anchor" href="https://rebol.metaeducation.com#p-8286-what-to-call-the-typeset-2"></a>What To Call The Typeset?</h2>
+<p>I think the set of things that we're talking about the signature testing for here is "every stable value state except for KEYWORD! and TRASH!"</p>
+<p>I've struggled with the <strong>SOMETHING?</strong> term and the over-generality of <strong>NOTHING?</strong>... and here I think we don't want <code>~okay~</code> to pass either ... and ~okay~ seems like something.</p>
+<p><strong>TESTABLE?</strong>  <img src="https://rebol.metaeducation.com/images/emoji/twitter/face_with_diagonal_mouth.png?v=14" title=":face_with_diagonal_mouth:" class="emoji" alt=":face_with_diagonal_mouth:" loading="lazy" width="20" height="20">  <strong>TYPECHECKABLE?</strong></p>
+<p>Well, I'll have to think about it.  In any case, I'm sure enough that I want to start failing on NULL.</p>
+            <p><small>3 posts - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/should-things-like-text-fail-on-null/2452">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/should-things-like-text-fail-on-null/2452</link>
+          <pubDate>Thu, 15 May 2025 11:13:09 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2452</guid>
+          <source url="https://rebol.metaeducation.com/t/should-things-like-text-fail-on-null/2452.rss">Should Things Like TEXT? Fail On NULL</source>
+        </item>
+        <item>
+          <title>Evaluator Hooking (&quot;RebindableSyntax&quot;)</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Semantics</category>
+          <description><![CDATA[
+            <p>After debating the topic for some time, <strong><a href="https://rebol.metaeducation.com/t/uses-of-fence-in-dialecting/1728">I decided FENCE! should indeed be evaluative.</a></strong></p>
+<p>But rather than setting what it does in stone... let's imagine that what FENCE! does when it evaluates is actually to pass the fence to a function you can redefine in the environment.</p>
+<pre><code>demo: func [] [
+    let fence!-EVAL: func [fence] [
+        print "I got a fence of length" length of fence
+        return try second fence
+    ]
+    return {a b c}
+]
+
+&gt;&gt; fence!-EVAL: identity/  ; inside DEMO has a LET of its own choice
+
+&gt;&gt; demo
+I got a fence of length 3
+== b
+
+&gt;&gt; {x: 10 y: 20}
+== {x: 10 y: 20}  ; ...!
+</code></pre>
+<p>By allowing FENCE! to be evaluative, you can even allow it to be <em>unevaluative</em> if you choose, in a context:</p>
+<p><img src="https://rebol.metaeducation.com/images/emoji/twitter/exploding_head.png?v=14" title=":exploding_head:" class="emoji only-emoji" alt=":exploding_head:" loading="lazy" width="20" height="20"></p>
+<p><strong>That's an idea so powerful...that having <code>block!-EVAL</code>, <code>group!-EVAL</code>, etc. functions all being looked up and run seems like it needs to be done <em>right now</em>.</strong>  Whatever optimizations are needed to make it not slow in the general non-overridden case can be attended to.</p>
+<p>Since FENCE! doesn't do anything at all yet, it's a perfect guinea pig for the technique.</p>
+<h2><a name="p-8240-the-default-evaluation-should-be-likely-be-dialected-make-1" class="anchor" href="https://rebol.metaeducation.com#p-8240-the-default-evaluation-should-be-likely-be-dialected-make-1"></a>The Default Evaluation Should Be Likely Be Dialected "MAKE"</h2>
+<p>I think I like the idea that CONSTRUCT is actually is what FENCE! does by default, and you can direct it to make something that's not an object with some special notation (perhaps just something that looks up to a DATATYPE! in the first slot?)</p>
+<pre><code>&gt;&gt; string: "0201"
+
+&gt;&gt; {integer! reverse string}
+== 1020
+</code></pre>
+<p>I've proposed this before.  <em>But that was before pure virtual binding.</em>  Now the parts are here, and it's right within reach.</p>
+<p>It's time to go for it, because this is what the whole thing is supposed to be about.  <img src="https://rebol.metaeducation.com/images/emoji/twitter/rocket.png?v=14" title=":rocket:" class="emoji" alt=":rocket:" loading="lazy" width="20" height="20"></p>
+<hr>
+<h2><a name="p-8240-h-20-minutes-later-2" class="anchor" href="https://rebol.metaeducation.com#p-8240-h-20-minutes-later-2"></a>20 Minutes Later...</h2>
+<p><em>It works.</em>  <img src="https://rebol.metaeducation.com/images/emoji/twitter/slight_smile.png?v=14" title=":slight_smile:" class="emoji" alt=":slight_smile:" loading="lazy" width="20" height="20"></p>
+<pre><code>&gt;&gt; {x: 10 y: 20}
+== #[object! [
+    x: 10
+    y: 20
+]]
+
+&gt;&gt; fence!-EVAL: func [f] [print ["Length is" length of f]]
+
+&gt;&gt; {x: 10 y: 20}
+Length is 4
+
+&gt;&gt; fence!-EVAL: construct/
+
+&gt;&gt; {x: 10 y: 20}
+== #[object! [
+    x: 10
+    y: 20
+]]
+</code></pre>
+<p>Years to ponder, minutes to implement.  <img src="https://rebol.metaeducation.com/images/emoji/twitter/hourglass_done.png?v=14" title=":hourglass_done:" class="emoji" alt=":hourglass_done:" loading="lazy" width="20" height="20">   <em>(Of course, it hinges on the blood sweat and tears of pure virtual binding.)</em></p>
+<hr>
+<p>Despite being extensible... <em>IT'S FASTER THAN MAKE OBJECT!</em> because instead of looking up MAKE and looking up OBJECT! and building a frame and all that, it calls a native arity-1 intrinsically, with no frame at all!  So you're paying for fewer word lookups and not even making a frame the resulting function (if you are using an intrinsic, which CONSTRUCT is, and presumably whatever other default maker would be too).  <img src="https://rebol.metaeducation.com/images/emoji/twitter/racing_car.png?v=14" title=":racing_car:" class="emoji" alt=":racing_car:" loading="lazy" width="20" height="20"></p>
+<p>But crucially here...you should always have fallbacks for doing the creation without needing to use the lexical form.  So you can use FENCE! creatively, however you like... but still have MAKE OBJECT! (or whatever) passed blocks to get the behavior if you need it.</p>
+<p>And if there's only hookpoints for BLOCK!, FENCE! and GROUP!... but not their variations.. you'll always have quoted '[blocks] and $(groups) etc to fall back on if necessary.</p>
+<h2><a name="p-8240-wild-example-1-progressive-parsing-3" class="anchor" href="https://rebol.metaeducation.com#p-8240-wild-example-1-progressive-parsing-3"></a>Wild Example <span class="hashtag-raw">#1</span> : Progressive Parsing</h2>
+<p>Let's say you wanted to do a parse, but not all at once... rather continuing it a little piece at a time with handling code.</p>
+<pre><code>data: [
+    The Sharp Gray @Fork "Quantum Leaped" Over The Lazy @Red
+]
+
+f: lambda [rule [block!]] [
+    parse data [accept [rule, elide data: &lt;here&gt;]]
+]
+</code></pre>
+<p>The short (meaningless) name gets things about as brief as you can get in "historical" code:</p>
+<pre><code>designer: f [some word!, one]
+assert [designer = @Fork]
+
+occurrence: f [text!, elide 'Over]
+assert [occurrence = "Quantum Leaped"]
+
+other: f [collect [
+    keep one, keep ('Intellectually) keep spread across to &lt;end&gt;
+]]
+assert [other = [The Intellectually Lazy @Red]] 
+</code></pre>
+<p><strong>But what if you wanted to do it so that a FENCE! was an implicit call to the parse steps?</strong></p>
+<pre><code>fence!-EVAL: lambda [rule [fence!]] [
+    rule: as block! rule
+    parse data [accept [rule, elide data: &lt;here&gt;]]
+]
+</code></pre>
+<p>Then your calls could look like this:</p>
+<pre><code>designer: {some word!, one}
+assert [designer = @Fork]
+
+occurrence: {text!, elide 'Over}
+assert [occurrence = "Quantum Leaped"]
+
+other: {collect [
+    keep one, keep ('Intellectually) keep spread across to &lt;end&gt;
+]}
+assert [other = [The Intellectually Lazy @Red]] 
+</code></pre>
+<p><strong>Yes, it works!</strong></p>
+<p><img src="https://rebol.metaeducation.com/images/emoji/twitter/open_mouth.png?v=14" title=":open_mouth:" class="emoji only-emoji" alt=":open_mouth:" loading="lazy" width="20" height="20"></p>
+<h2><a name="p-8240-is-it-that-different-than-using-a-function-yes-4" class="anchor" href="https://rebol.metaeducation.com#p-8240-is-it-that-different-than-using-a-function-yes-4"></a>Is It THAT Different Than Using A Function?  YES.</h2>
+<p><em>The difference is significant, and more than just cosmetic.</em></p>
+<p>We've seen arguments against "more parts" before... e.g. saying that GROUP! is not necessary if you have BLOCK! (or vice-versa) because you can always split your intent up into multiple tokens.  But it's very Turing Tar-Pit to say "oh it's all the same"... <em>because it is not the same</em>.  <img src="https://rebol.metaeducation.com/images/emoji/twitter/pouting_cat.png?v=14" title=":pouting_cat:" class="emoji" alt=":pouting_cat:" loading="lazy" width="20" height="20"></p>
+<p>When the FENCE! can encode itself in one value vs. needing a word-and-a-value, you get better compositional properties.  You have smoother meta-analysis when building higher level things that the fences are composed into (vs. WORD!+BLOCK!)</p>
+<h2><a name="p-8240-i-see-mountains-of-potential-here-5" class="anchor" href="https://rebol.metaeducation.com#p-8240-i-see-mountains-of-potential-here-5"></a><em>I see mountains of potential here.</em></h2>
+<p><img src="https://rebol.metaeducation.com/images/emoji/twitter/mountain.png?v=14" title=":mountain:" class="emoji only-emoji" alt=":mountain:" loading="lazy" width="20" height="20"> <img src="https://rebol.metaeducation.com/images/emoji/twitter/man_climbing.png?v=14" title=":man_climbing:" class="emoji only-emoji" alt=":man_climbing:" loading="lazy" width="20" height="20"></p>
+            <p><small>5 posts - 2 participants</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/evaluator-hooking-rebindablesyntax/2443">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/evaluator-hooking-rebindablesyntax/2443</link>
+          <pubDate>Sat, 10 May 2025 14:17:30 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2443</guid>
+          <source url="https://rebol.metaeducation.com/t/evaluator-hooking-rebindablesyntax/2443.rss">Evaluator Hooking (&quot;RebindableSyntax&quot;)</source>
+        </item>
+        <item>
+          <title>OPT(IONAL) and Packs-With-Nulls</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Semantics</category>
+          <description><![CDATA[
+            <p>Antiform packs that contain pure nulls, e.g. the "heavy null" <strong><code>~[~null~]~</code></strong>, are a cornerstone of how Ren-C handles the situation of a branch that returns null... to avoid having such branches run, and then pass control to an ELSE even though the branch was executed.</p>
+<p>This is both beautiful and a thorny edge case.  Some constructs want to treat a boxed null just the same as an unboxed one.  Others don't.  It can be a bit hairy.</p>
+<p>So to reserve the functionality for just pure nulls and branches... I discourage the creation of packs with nulls in them for the ordinary functioning of routines--if you can avoid it (you sometimes can't).  The general rule of thumb is that your functions should not put nulls in packs, and if they ever return null it should be the <em>only</em> return--not in a pack.  (Similar guidance discourages putting error antiforms in packs, but making it the overall result.)</p>
+<h2><a name="p-8206-case-study-split-path-1" class="anchor" href="https://rebol.metaeducation.com#p-8206-case-study-split-path-1"></a>Case Study: SPLIT-PATH</h2>
+<p>So the SPLIT-PATH function in Ren-C is a multi-return, giving you two parts: the file component, and the path component:</p>
+<pre><code>&gt;&gt; meta split-path %foo/bar.txt
+== ~['%foo/ '%bar.txt]~
+
+&gt;&gt; split-path %foo/bar.txt
+== %foo/
+</code></pre>
+<p>It seemed that a lot of calls to it wanted the directory, so I made that the first return.</p>
+<p>The problem arises when a component is missing:</p>
+<pre><code>&gt;&gt; meta split-path %bar.txt
+== ~[~null~ '%bar.txt]~
+
+&gt;&gt; split-path %bar.txt
+== ~null~  ; anti
+</code></pre>
+<p>Why is this a problem?  Well, there are functions such as OPT that don't want to decay their arguments... but rather be driven by pure nulls.  So this gives:</p>
+<pre><code>&gt;&gt; decay opt split-path %bar.txt
+== ~null~  ; anti
+</code></pre>
+<p>Not what the person using OPT wanted.  They wanted VOID.</p>
+<p>You might address this by decaying your null value before passing it to OPT.</p>
+<pre><code>&gt;&gt; opt decay split-path %bar.txt
+== ~[]~  ; anti
+</code></pre>
+<p>This is a bit of a bummer.  Making OPT decay things removes a safeguard I was fond of, which is catching situations where you expected a branching construct to produce something if it ran:</p>
+<pre><code>&gt;&gt; compose [a (? if 1 &lt; 2 [... code that inadvertently makes null ...]) c]
+== [a c]
+</code></pre>
+<p>My feeling here is that the ? isn't a carte-blanche on null-producing branches... it's to address the fact that we have to make IF return null instead of void (as void triggers THEN and not ELSE, by design).</p>
+<h2><a name="p-8206-are-there-just-different-types-of-opt-2" class="anchor" href="https://rebol.metaeducation.com#p-8206-are-there-just-different-types-of-opt-2"></a>Are There Just Different Types Of OPT</h2>
+<p>The default OPT(IONAL) has to be willing to decay a pack that's got a ~null~ in the first slot.</p>
+<p>But maybe the ? form refuses to and gives an informative error.... <em>to say the null arose from a branch, not from the failure to execute a branch.</em></p>
+<p>If it were done with a refinement it would be OPT:LIGHT, I guess (?)</p>
+<p>(Because I think PURE will be coming soon for pure functions with no side-effects, I want to stop saying "pure null" for a null that's not in a pack.  I'm okay calling it "light null" compared to "heavy null" because the terms aren't really used elsewhere.)</p>
+            <p><small>2 posts - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/opt-ional-and-packs-with-nulls/2435">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/opt-ional-and-packs-with-nulls/2435</link>
+          <pubDate>Mon, 05 May 2025 10:58:36 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2435</guid>
+          <source url="https://rebol.metaeducation.com/t/opt-ional-and-packs-with-nulls/2435.rss">OPT(IONAL) and Packs-With-Nulls</source>
+        </item>
+        <item>
+          <title>Should &quot;Exotic Fields&quot; Be Able To Examine PACK! ?</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Semantics</category>
+          <description><![CDATA[
+            <p>The general pitch of unstable block antiforms is that they decay to their first element in assignments to single words:</p>
+<pre><code>&gt;&gt; x: pack [1 2]
+== ~['1 '2]~  ; anti
+
+&gt;&gt; x
+== 1
+</code></pre>
+<p>SET-BLOCK! is one of the things that is able to do special handling to pick apart the pack:</p>
+<pre><code>&gt;&gt; [x y]: pack [1 2]
+== ~['1 '2]~  ; anti
+
+&gt;&gt; x
+== 1
+
+&gt;&gt; y
+== 2
+</code></pre>
+<p>But you can create your own operators that work with packs... they're just antiform blocks, after all.  If you take an argument as ^META and typecheck for packs you can do whatever you like.  You could re-implement the functionality of SET-BLOCK! yourself if you felt like it, designing whatever you want:</p>
+<pre><code>&gt;&gt; my-10times-assigner [x y] pack [1 2]
+== ~['1 '2]~
+
+&gt;&gt; x
+== 10
+
+&gt;&gt; y
+== 20
+</code></pre>
+<h2><a name="p-8196-but-should-plain-assignments-ever-process-packs-1" class="anchor" href="https://rebol.metaeducation.com#p-8196-but-should-plain-assignments-ever-process-packs-1"></a>But Should Plain Assignments Ever Process Packs?</h2>
+<p>e.g. should this hypothetical PACK-SUMMER! be possible, which assigns the sum of pack elements?</p>
+<pre><code> &gt;&gt; type of ps
+ == ~{pack-summer!}~
+
+ &gt;&gt; ps.x: pack [10 20]
+ == ~['10 '20]~
+
+ &gt;&gt; ps.x
+ == 30  ; e.g. the assignment received 10 + 20
+</code></pre>
+<p>You can imagine other ideas, such as reacting to raised errors somehow, vs. having an enforced pattern of skipping the assignment and propagating the raise.  <img src="https://rebol.metaeducation.com/images/emoji/twitter/face_with_diagonal_mouth.png?v=14" title=":face_with_diagonal_mouth:" class="emoji" alt=":face_with_diagonal_mouth:" loading="lazy" width="20" height="20"></p>
+<h2><a name="p-8196-freedom-to-vs-freedom-fromhttpbloghostileforkcomfreedom-to-and-freedom-from-2" class="anchor" href="https://rebol.metaeducation.com#p-8196-freedom-to-vs-freedom-fromhttpbloghostileforkcomfreedom-to-and-freedom-from-2"></a><a href="http://blog.hostilefork.com/freedom-to-and-freedom-from/">Freedom To vs. Freedom From</a></h2>
+<p><strong>This doesn't seem like a wise axis of extensibility to me.</strong></p>
+<p>The possible benefits appear outweighed by the loss of certainty about how things will act.</p>
+<p>It also means doing minor transformations would wreck things.</p>
+<pre><code> &gt;&gt; temp: pack [10 20]
+ == 10
+
+ &gt;&gt; ps.x: temp
+ == 10
+</code></pre>
+<p>But while that may seem damning, it's the case for any time a function takes an unstable antiform... you can't factor the expression and expect it to work the same.  To truly preserve things, you have to do lift and unlift.</p>
+<pre><code>&gt;&gt; temp: lift pack [10 20]
+== ~['10 '20]~
+
+&gt;&gt; ps.x: unlift temp
+== ~['10 '20]~  ; anti
+
+&gt;&gt; ps.x
+== 30
+</code></pre>
+<p>But still... I just don't think I like the idea of having what looks like an assignment be able to subvert the expectations that you're taking decayed information.</p>
+<p>The one exception I am making is for the empty ~[]~ antiform, which indicates a desire to remove the key itself.  So the assignment (POKE) protocol gets 0 or 1 values.  I think that one exception is enough.</p>
+            <p><small>3 posts - 2 participants</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/should-exotic-fields-be-able-to-examine-pack/2432">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/should-exotic-fields-be-able-to-examine-pack/2432</link>
+          <pubDate>Fri, 02 May 2025 17:58:11 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2432</guid>
+          <source url="https://rebol.metaeducation.com/t/should-exotic-fields-be-able-to-examine-pack/2432.rss">Should &quot;Exotic Fields&quot; Be Able To Examine PACK! ?</source>
+        </item>
+        <item>
+          <title>Should VOID Assigns Mean &quot;Fully Remove A Key&quot;?</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Semantics</category>
+          <description><![CDATA[
+            <p>Rebol2 and R3-Alpha distinguish between fields not in an object, and those that are in the object but unset:</p>
+<pre><code>rebol2&gt;&gt; obj: make object! [x: "unsetme"]
+
+rebol2&gt;&gt; unset bind 'x obj
+
+rebol2&gt;&gt; &gt;&gt; print mold obj
+make object! [
+    x: unset
+]
+
+rebol2&gt;&gt; unset? obj/x  ; asks if obj/x is an "UNSET! value"
+== true
+
+rebol2&gt;&gt; unset? obj/asdf
+** Script Error: Invalid path value: asdf
+</code></pre>
+<p>Ren-C has this distinction today, as well.</p>
+<pre><code>&gt;&gt; obj: make object! [x: ~]
+
+&gt;&gt; unset? $obj.x  ; asks if obj.x looks up to a TRASH! value
+== ~okay~  ; anti
+
+&gt;&gt; unset? $obj.asdf
+** Error: Cannot pick asdf in obj
+</code></pre>
+<p><em>(Red says both <strong>obj/x</strong> and <strong>obj/asdf</strong> are "UNSET?", so you have to ask something like <strong>(unset? obj/asdf/jkl)</strong> before you get an error.)</em></p>
+<h2><a name="p-8195-this-is-the-unresolved-vs-unset-distinction-1" class="anchor" href="https://rebol.metaeducation.com#p-8195-this-is-the-unresolved-vs-unset-distinction-1"></a>This Is the "Unresolved" (vs. "Unset"?) Distinction</h2>
+<p>I think UNRESOLVED? is a pretty good name for the test saying there's no variable location to even find for something to ask about its state.</p>
+<pre><code>&gt;&gt; obj: make object! [x: ~]
+
+&gt;&gt; unresolved? $obj.x
+== ~null~  ; anti
+
+&gt;&gt; unresolved? $obj.asdf
+== ~okay~  ; anti
+</code></pre>
+<p>I don't know if the UNRESOLVED? question should accept multiple steps of not being resolved.  Perhaps there's a refinement...</p>
+<pre><code>&gt;&gt; unresolved? $asdf.jkl.qwertyiop
+** Error: Multi-step unresolved, use UNRESOLVED?:MULTI if intended
+
+&gt;&gt; unresolved?:multi $asdf.jkl.qwertyiop
+== ~okay~  ; anti
+</code></pre>
+<p>Beyond that, it's a little tricky to cover all the states related to "unsetness".  There's TRIPWIRE! and TRASH! which both generate errors on reads, and currently both count as UNSET?.  Then DEFAULT will overwrite null variables as well...so that's DEFAULTABLE? (void variables aren't really understood as to whether default should overwrite them).</p>
+<p>I don't know.  But I do think that terms like UNSPECIFIED?/UNRESOLVED?/UNDEFINED? all kind of cluster together... and among them UNRESOLVED? stands out to me as the best one to draw from for saying there really is no variable location at all.</p>
+<h2><a name="p-8195-distinction-is-hazy-for-things-like-map-2" class="anchor" href="https://rebol.metaeducation.com#p-8195-distinction-is-hazy-for-things-like-map-2"></a>Distinction Is Hazy For Things Like MAP!</h2>
+<p>Originally I had it so you would remove keys from MAP! by setting them to <code>~null~</code> antiforms.</p>
+<p>Later I decided it would be more consistent if you asked to "remove" them by setting them to trash, so they'd be unset and you'd have to TRY to access them.</p>
+<p><strong>But removal from maps removes them from enumeration.</strong>  This is like being "unresolved", not like being "unset".</p>
+<p>A similar issue happened with the ENVIRONMENT! type for modeling environment variables.  Removing with trash seems wrong.</p>
+<h2><a name="p-8195-wild-thought-void-empty-pack-to-mean-remove-3" class="anchor" href="https://rebol.metaeducation.com#p-8195-wild-thought-void-empty-pack-to-mean-remove-3"></a>Wild Thought: VOID (empty PACK!) To Mean REMOVE ?</h2>
+<p>Empty PACK! (now called "VOID") is an unstable antiform used to opt out of things like COMPOSE</p>
+<p><em>But what if it was the way to ask for a removal from a MAP?</em></p>
+<pre><code> &gt;&gt; m: to map! [a 10 b 20]
+
+ &gt;&gt; m.a: void
+ == ~[]~  ; anti
+
+ &gt;&gt; m
+ == #[map [b 20]]
+</code></pre>
+<p>This would only be usable on datatypes where removals were legal... such as MAP! and ENVIRONMENT!.  You can't remove cells from a FRAME!--they're in fixed positions that have been compiled in.  Today's OBJECT! doesn't allow removals either (though perhaps it could/should?)</p>
+<p>The rule for accepting an unstable assignment of this form would be that this removes the item from enumeration entirely.  Whereas if you assigned with a TRASH! the understanding is you're just making something that errors on access, but would still be in an enumeration of available keys.</p>
+<h2><a name="p-8195-strangely-compelling-use-of-unstable-antiforms-4" class="anchor" href="https://rebol.metaeducation.com#p-8195-strangely-compelling-use-of-unstable-antiforms-4"></a>Strangely Compelling Use Of Unstable Antiforms</h2>
+<p>This does feel like it pushes to a clearer resolution of my misgivings of the incorrect parallels between map/environment removals and trashing object/frame cells... in terms of the effects on enumeration.</p>
+            <p><small>3 posts - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/should-void-assigns-mean-fully-remove-a-key/2431">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/should-void-assigns-mean-fully-remove-a-key/2431</link>
+          <pubDate>Fri, 02 May 2025 12:10:03 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2431</guid>
+          <source url="https://rebol.metaeducation.com/t/should-void-assigns-mean-fully-remove-a-key/2431.rss">Should VOID Assigns Mean &quot;Fully Remove A Key&quot;?</source>
+        </item>
+        <item>
+          <title>Should Failed IF Be NULL (and Break My Heart :broken_heart:)?</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Semantics</category>
+          <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="1244">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"><a href="https://rebol.metaeducation.com/t/the-canonical-list-of-non-negotiables/1244/1">The Canonical List of Non-Negotiables</a></div>
+<blockquote>
+<p>So failed conditionals were re-tuned to return VOID:</p>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">&gt;&gt; compose [&lt;a&gt; (if false [&lt;b&gt;]) &lt;c&gt;]
+== [&lt;a&gt; &lt;c&gt;]
+
+&gt;&gt; unspaced ["a" if false ["b"] "c"]
+== "ac"
+</code></pre>
+</blockquote>
+</aside>
+<p>This idea has been near and dear to my heart: that without any additional work, failed IF returns something that will vaporize in COMPOSE and UNSPACED.</p>
+<p>But over time the costs have been adding up.  Are these costs too great?  Let's look.</p>
+<h2><a name="p-8150-it-makes-if-different-from-all-the-other-branching-constructs-1" class="anchor" href="https://rebol.metaeducation.com#p-8150-it-makes-if-different-from-all-the-other-branching-constructs-1"></a>It makes IF different from all the other branching constructs</h2>
+<p>e.g. CASE and SWITCH return NULL when they don't take a branch.  IF being different is a design/cognitive load, some might argue.</p>
+<h2><a name="p-8150-what-if-you-actually-want-an-if-that-returns-null-2" class="anchor" href="https://rebol.metaeducation.com#p-8150-what-if-you-actually-want-an-if-that-returns-null-2"></a>What if you actually <em>want</em> an IF that returns NULL?</h2>
+<p>For instance, setting refinements in a frame:</p>
+<pre><code>&gt;&gt; bunch-of-dups: 'yes
+
+&gt;&gt; f: make frame! append/
+
+&gt;&gt; f.series: [a b c]
+&gt;&gt; f.value: 'd
+&gt;&gt; f.dup: if yes? bunch-of-dups [5]
+
+&gt;&gt; eval f
+== [a b c d d d d d]
+</code></pre>
+<p>It's not legal to make <strong><code>f.dup</code></strong> a void, so in this situation we want <code>if null [5]</code> to be null.</p>
+<p>There are workarounds of course:</p>
+<pre><code>f.dup: either bunch-of-dups [5] [null]
+
+f.dup: all [bunch-of-dups, 5]
+</code></pre>
+<p>Historical Redbol of course biased this the other way, which is why when you want a COMPOSE slot to go away that's when you have to use <strong><code>either condition [...stuff...] []</code></strong></p>
+<h2><a name="p-8150-branches-weirder-than-they-need-to-be-maybe-3" class="anchor" href="https://rebol.metaeducation.com#p-8150-branches-weirder-than-they-need-to-be-maybe-3"></a>Branches Weirder Than They Need To Be, Maybe?</h2>
+<p>THEN and ELSE <em>MUST</em> be weirder than (deferred) infix IF and IF NOT... because their treatment of "heavy nulls" (e.g. antiform blocks with quasi-nulls in them) differs.</p>
+<pre><code> &gt;&gt; if (pack [null]) [print "This does not run"]
+
+ &gt;&gt; (pack [null]) then [print "This runs"]
+ This runs
+</code></pre>
+<p>This is a weird little design edge of necessity, that branching constructs turn "plain null" into "boxed null" in order to signify that a branch ran.   We do not want branches that incidentally evaluate to null to lead to else branches running:</p>
+<pre><code>&gt;&gt; if 1 = 1 [print "BRANCH", x: null] else [print "ELSE"]
+BRANCH
+ELSE  ; !!! Noooo !!!
+</code></pre>
+<p>But THEN and ELSE are reacting to either unboxed void or unboxed null. Given that NULL is now the <em>only</em> falsey state, might it be better if unboxed null was the only state they reacted to?</p>
+<h2><a name="p-8150-there-could-be-shorthands-4" class="anchor" href="https://rebol.metaeducation.com#p-8150-there-could-be-shorthands-4"></a>There Could Be Shorthands...</h2>
+<p>OPTIONAL has a shorthand as the <strong>?</strong> operator, and this would fit IF into the same strategy as other constructs:</p>
+<pre><code>&gt;&gt; compose [&lt;a&gt; (? if null [&lt;b&gt;]) &lt;c&gt;]
+== [&lt;a&gt; &lt;c&gt;]
+
+&gt;&gt; unspaced ["a" ? if null ["b"] "c"]
+== "ac"
+</code></pre>
+<p>Or maybe the voiding IF has a special name.  Like IFF for "IF-and-only-IF", meaning you don't intend to use it with THEN or ELSE, so it might return VOID which they (conceivably?) error on if they're testing for "falsey" ness?</p>
+<pre><code>&gt;&gt; compose [&lt;a&gt; (iff null [&lt;b&gt;]) &lt;c&gt;]
+== [&lt;a&gt; &lt;c&gt;]
+
+&gt;&gt; unspaced ["a" iff null ["b"] "c"]
+== "ac"
+</code></pre>
+<h2><a name="p-8150-possibly-creative-concepts-from-if-if-etc-5" class="anchor" href="https://rebol.metaeducation.com#p-8150-possibly-creative-concepts-from-if-if-etc-5"></a>Possibly Creative Concepts From <code>if (if ...) [...]</code> etc.</h2>
+<p>Turning IF back into something that returns a falsey null permits things like <strong><code>if (if ...) [...]</code></strong> and other creative concepts, and it's not like there aren't uses in aggregate expressions for an IF that gives falsey results instead of opt out on not branching.</p>
+<p>Since both are useful, being able to give an inch here and split it out into two different constructs might be the good answer...making IF like every other conditional construct that returns null on branch not taken?</p>
+            <p><small>3 posts - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/should-failed-if-be-null-and-break-my-heart/2419">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/should-failed-if-be-null-and-break-my-heart/2419</link>
+          <pubDate>Thu, 17 Apr 2025 09:12:25 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2419</guid>
+          <source url="https://rebol.metaeducation.com/t/should-failed-if-be-null-and-break-my-heart/2419.rss">Should Failed IF Be NULL (and Break My Heart :broken_heart:)?</source>
+        </item>
+        <item>
+          <title>Multiply-Unpacking Multi-Returns</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Semantics</category>
+          <description><![CDATA[
+            <p>I haven't really figured out my philosophy about putting multi-returns in multi-returns.</p>
+<p>Looking at the question just in terms of fundamentals...should this be legal?</p>
+<pre><code>&gt;&gt; x: pack [pack [1 2] 3]
+== 1  ; double-decay?
+</code></pre>
+<p>And this seems rather ambiguous:</p>
+<pre><code>&gt;&gt; [x y]: pack [pack [1 2] 3]
+== ???
+</code></pre>
+<p>Is that <code>x = 1</code> and <code>y = 3</code>?  Or <code>x = 1</code> and <code>y = 2</code> ?</p>
+<p>I'll point out the availability of nested block notation:</p>
+<pre><code>&gt;&gt; [[x] y]: pack [pack [1 2] 3]
+== 1
+
+&gt;&gt; x
+== 1
+
+&gt;&gt; y
+== 3
+</code></pre>
+<p>So it seems to me <em>that</em> should be legal, in the sense that you've indicated that you know what you're doing in the unpacking.  It isn't necessary for the first element to be a pack...</p>
+<pre><code>&gt;&gt; [[x] y]: pack [1 3]
+== 1
+
+&gt;&gt; x
+== 1
+
+&gt;&gt; y
+== 3
+</code></pre>
+<p>You're just covering the case of demonstrating that you know the first thing might be a pack.</p>
+<h2><a name="p-8023-case-study-evaluate-1" class="anchor" href="https://rebol.metaeducation.com#p-8023-case-study-evaluate-1"></a>Case Study: EVALUATE</h2>
+<p>I've talked about how using :STEP <a href="https://rebol.metaeducation.com/t/re-imagining-eval-next/767">changes the return result of EVALUATE into a multi-return unconditionally</a>, with the synthesized product as the second result.</p>
+<p>This is to say that if you have a function that returns multiple values, you can dodge ambiguity by making it so that the first result can never be a multi-return.  This lets you unambiguously interpret the multi-return.</p>
+<p>So in places where EVAL:STEP is used, I've effectively been saying this is legal:</p>
+<pre><code>&gt;&gt; [pos result]: pack [[print "hi"] pack [2 3]]
+== [print "hi"]
+
+&gt;&gt; pos
+== [print "hi"]
+
+&gt;&gt; result
+== 2
+</code></pre>
+<p>If you wanted to unpack it further, you'd need <strong><code>[pos [a b]]:</code></strong> or to ask for the pack in its meta form, such as by <strong><code>[pos ^result]:</code></strong></p>
+<p>If this is allowed, it makes it seem "unfair" that the first position wouldn't double-decay.  Would it be too much to ask to require you to say <strong><code>[pos [result]]:</code></strong> if there was a chance of the second value being a multi-return?</p>
+<p>That <em>feels</em> like too much to ask to me.  If I could write <strong><code>result: some-multi-return-func</code></strong> then it seems I should be able to write <strong><code>[pos result]: eval:step [some-multi-return-func]</code></strong></p>
+<p>But if double decay is allowed, does that mean triple-decay is too?  Arbitrary-recursive decay where you get an infinite loop, by building self-referential packs?</p>
+<p>Is it better to have a rule that the first slot won't double-decay, or just enforce it by convention by trying not to design functions that are multi-return which have multi-returns in their first position?</p>
+<h2><a name="p-8023-another-case-study-parse-2" class="anchor" href="https://rebol.metaeducation.com#p-8023-another-case-study-parse-2"></a>Another Case Study: PARSE</h2>
+<p>Right now, PARSE is broken into layers... a lower level <code>PARSE*</code> that is always a multi-return function (if it's not raising an error), and it gives back a synthesized result as well as an array of residual "pending" items.</p>
+<p><em>(Residual pending items are leftover items that combinators produced in the pending list, that were neither rolled back nor consumed by another combinator.  It's what you'd get if you did something like <code>parse "a" [keep "a"]</code>, e.g. did a KEEP with no corresponding COLLECT to filter the collected item out of the list.  Sometimes residual pending items are intentional, e.g. in the <a href="https://rebol.metaeducation.com/t/visual-parse-on-the-web-has-arrived/1837">Visual Parse Demo</a> where a list of underlines--produced by any MARK combinators that don't get rolled back--bubble up to the EPARSE driver so it can draw those underlines.)</em></p>
+<p>The higher level PARSE doesn't offer the pending items--it just errors if it sees any leftovers.  The problem would be that without these layers, the default interpretation of unpacking wouldn't be able to unpack multi-returns synthesized by parse:</p>
+<pre><code>&gt;&gt; [x y]: parse "bbb" [some "a" (pack [1 2]) | some "b" (pack [3 4])]
+; I want to get x = 3, y = 4 from this
+</code></pre>
+<p>The desire to have this be the common behavior is why <code>PARSE*</code> is needed to get the pending list as a multi-return.</p>
+<p>But I've faced some problems with wrappers over the lower level PARSE* having to redo work, e.g. to implement the PARSE:MATCH refinement, which can't be put on the lower level parse and needs to be repeated in each wrapper.</p>
+<p>It might be that thinking of this in terms of "higher level" and "lower level" is wrong, and I should follow the method of EVAL to actually use a refinement to change the return result of a single PARSE construct.  So PARSE:PENDING or somesuch, to shift into a multi-return mode where the pending list is the main result, and the synthesized result (which may be a multi-return) is secondary.</p>
+<p>Anyway, I'll take another look at this.  Questions remain about how many decays to allow, but so long as this is seen as a kind of video game we shouldn't be afraid of infinite loops.  They're trivial enough to cause in other places.  <img src="https://rebol.metaeducation.com/images/emoji/twitter/man_shrugging.png?v=14" title=":man_shrugging:" class="emoji" alt=":man_shrugging:" loading="lazy" width="20" height="20">  Just make sure you can Ctrl-C out of it and try to give some guidance... (hopefully you can debug step through the decays, I'll have to think about that).</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/multiply-unpacking-multi-returns/2367">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/multiply-unpacking-multi-returns/2367</link>
+          <pubDate>Thu, 06 Mar 2025 20:56:39 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2367</guid>
+          <source url="https://rebol.metaeducation.com/t/multiply-unpacking-multi-returns/2367.rss">Multiply-Unpacking Multi-Returns</source>
+        </item>
+        <item>
+          <title>The Semantics of JOIN</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Semantics</category>
+          <description><![CDATA[
+            <p><strong>As <a class="mention" href="https://rebol.metaeducation.com/u/brett">@Brett</a>'s critique of yesteryear pointed out, <a href="https://rebol.metaeducation.com/t/rejoin-ugliness-and-the-usefulness-of-tests/248">REJOIN sucked</a>.</strong></p>
+<p>If naming were consistent, you might think from this pattern:</p>
+<pre><code>append a reduce b &lt;=&gt; repend a b
+</code></pre>
+<p>...that the following would have been true:</p>
+<pre><code>join a reduce b &lt;=&gt; rejoin a b  ; one would have perhaps thought?
+</code></pre>
+<p>But no...REJOIN was single arity (and was a mess).</p>
+<h2><a name="p-7907-so-rejoin-is-in-the-trash-heap-but-what-about-join-1" class="anchor" href="https://rebol.metaeducation.com#p-7907-so-rejoin-is-in-the-trash-heap-but-what-about-join-1"></a>So REJOIN is in the trash heap, but what about JOIN?</h2>
+<p>JOIN implicitly reduced, and was basically this:</p>
+<pre><code>join a b &lt;=&gt; append copy a reduce b
+</code></pre>
+<p>But <strong>b</strong> didn't have to be a BLOCK!, so if it was not, it wasn't reduced and just left as-is.</p>
+<pre><code>rebol2&gt;&gt; join "abc" [1 + 2 3 + 4]
+== "abc37"  ; so the block was reduced
+
+rebol2&gt;&gt; d: 10
+rebol2&gt;&gt; join "abc" 'd
+== "abcd"  ; not abc10, so the word was *not* reduced
+</code></pre>
+<p>Red did not carry forward this definition:</p>
+<pre><code>&gt;&gt; join
+*** Script Error: join has no value
+</code></pre>
+<h2><a name="p-7907-next-level-join-allow-join-datatype-2" class="anchor" href="https://rebol.metaeducation.com#p-7907-next-level-join-allow-join-datatype-2"></a>Next-Level JOIN: Allow JOIN  DATATYPE</h2>
+<p>At some point, it occurred to me that if you could use JOIN with a datatype, it could step in to fill in the desires of REJOIN more clearly:</p>
+<pre><code>&gt;&gt; join binary! [1 + 2 #{DECAFBAD} 2 + 3]
+== #{03DECAFBAD05}
+</code></pre>
+<p>There really had been expressions of this like:</p>
+<pre><code>rebol2&gt;&gt; rejoin [#{} 1 + 2 #{DECAFBAD} 2 + 3]
+== #{03DECAFBAD05}
+</code></pre>
+<p>But see Brett's critique, if the surface-level badness isn't enough to convince you!</p>
+<p>I also wanted to support things that Rebol2 probably meant to, but did not.  This should give a WORD! back:</p>
+<pre><code>rebol2&gt;&gt; join 'a 'b
+== "ab"  ; should be word! `ab`
+</code></pre>
+<p>Plus, I thought it might be nice to have a non-reducing variant, done with <code>@[...]</code></p>
+<pre><code>&gt;&gt; join word! @[a 1 + 2]
+== a1+2
+</code></pre>
+<p>I've mentioned elsewhere that I think having <em>join-like</em> actions be done with JOIN is superior to being some form of MAKE, when there's nebulousness for what MAKE means.</p>
+<h2><a name="p-7907-making-peace-with-uneasiness-about-list-ambiguity-3" class="anchor" href="https://rebol.metaeducation.com#p-7907-making-peace-with-uneasiness-about-list-ambiguity-3"></a>Making Peace (?) With Uneasiness About List Ambiguity</h2>
+<p>Ergonomically, it's nice for JOIN to be able to take either a BLOCK! or some other type.</p>
+<p>One of the biggest uses of JOIN is with files:</p>
+<pre><code>join directory %foo.txt
+</code></pre>
+<p>It would be annoying if you had to write:</p>
+<pre><code>join directory [%foo.txt]
+</code></pre>
+<p>But then, you have the problem that if you're joining onto a BLOCK!, then a BLOCK! is a legitimate thing to join:</p>
+<pre><code>&gt;&gt; join [a b] [1 + 2 10 + 20]
+== [a b 3 30]  ; "traditional" behavior
+
+&gt;&gt; join [a b] [1 + 2]
+== [a b [1 + 2 10 + 20]]  ; ...but this could be valid
+</code></pre>
+<p>We could "fix" this by defining JOIN as a non-reducing construct, then have people use SPREAD and REDUCE:</p>
+<pre><code>&gt;&gt; join [a b] spread reduce [1 + 2 10 + 20]
+== [a b 3 30]
+
+&gt;&gt; join [a b] [1 + 2 10 + 20]
+== [a b [1 + 2 10 + 20]]
+
+&gt;&gt; join [a b] reduce [1 + 2 10 + 20]
+== [a b [3 30]]
+</code></pre>
+<p>But this doesn't exactly square with the JOIN of a DATATYPE! case, and the most common desires.</p>
+<p>If anything, I'd rather make JOIN always take a <strong><code>[...]</code></strong> or <strong><code>@[...]</code></strong> in the second argument, and then create some other non-reducing construct that slaps two things together.</p>
+<pre><code>&gt;&gt; block: [a b]
+
+&gt;&gt; adjoin block [c d]
+== [a b [c d]]
+
+&gt;&gt; adjoin block spread [e f]
+== [a b [c d] e f]
+
+&gt;&gt; block
+== [a b]  ; unmodified (difference from append)
+</code></pre>
+<p>But asking people to write <strong><code>(adjoin directory %foo.txt)</code></strong> is... ugly.</p>
+<p>A compromise is to narrow it, so that you could only use it with single items when joining with non-lists...</p>
+<pre><code>&gt;&gt; join "abc" "def"
+== "abcdef"
+
+&gt;&gt; join [a b c] "def"
+** Error: JOIN with a list must use [...] or @[...]
+</code></pre>
+<p>This would help steer you away from writing code like <strong><code>join list value</code></strong> and think it works, to only find it falling down when value becomes a BLOCK!.</p>
+<h2><a name="p-7907-is-reduce-just-join-block-4" class="anchor" href="https://rebol.metaeducation.com#p-7907-is-reduce-just-join-block-4"></a>Is REDUCE just JOIN BLOCK! ?</h2>
+<p>The implementation of JOIN that I'm working on seems like a more powerful REDUCE.</p>
+<p>But questions start to arise about the binding... what should the binding be?</p>
+<pre><code>&gt;&gt; join [add 1] ['multiply 2 3]
+== [add 1 multiply 2 3]
+</code></pre>
+<p>In that case, I'm going to assume the produced block would have the binding of the [add 1] block.  Since multiply is <strong><code>'multiply</code></strong> and not <strong><code>$multiply</code></strong> it would be unbound and hence an evaluation would be driven by that first argument's binding.</p>
+<p>But what if you just said:</p>
+<pre><code>&gt;&gt; join block! ['add 1 'multiply 2 3]
+== [add 1 multiply 2 3]
+</code></pre>
+<p>Before, the second block's binding was disregarded in the product.  But when there's no first block to get the binding from, does it assume the binding of the second block?  And how would you get an unbound block if you wanted it?</p>
+<p>We could say that you get an unbound block, but if you want a bound block, you'd say:</p>
+<pre><code>&gt;&gt; join $[] ['add 1 'multiply 2 3]
+== [add 1 multiply 2 3]
+</code></pre>
+<p>Then we have similar questions for things like word!:</p>
+<pre><code>&gt;&gt; join word! ["a" "b"]
+== ab
+</code></pre>
+<p>I feel that pretty obviously should be unbound.  But words follow different rules:</p>
+<pre><code>&gt;&gt; join $a ["b"]
+== ab  ; can't necessarily be bound, just because a was...
+</code></pre>
+<p>That would suggest all words come back unbound from a joining process.</p>
+<p>So no shortage of questions.  But in general, I think JOIN is on the right track, and splitting MAKE behaviors that are JOIN-like to it seems good.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/the-semantics-of-join/2333">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/the-semantics-of-join/2333</link>
+          <pubDate>Sat, 16 Nov 2024 18:33:28 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2333</guid>
+          <source url="https://rebol.metaeducation.com/t/the-semantics-of-join/2333.rss">The Semantics of JOIN</source>
+        </item>
+        <item>
+          <title>Embracing A &quot;Useless&quot; Definition of TO</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Semantics</category>
+          <description><![CDATA[
+            <p>Many years ago, I thought about <strong><a href="https://rebol.metaeducation.com/t/hacking-away-on-the-to-and-make-matrix/649">trying to untangle of the TO and MAKE matrix</a></strong>.  These operations are notoriously unpredictable in historical Redbol.</p>
+<p>I tried putting some stakes in the ground about what I believed <em>had</em> to be true.  It was difficult because I could not think of too many.</p>
+<p>One thing I said was that TO should always create a "new" value (if the value was not immediate).  And I felt like this should be true:</p>
+<pre><code>to (type of value) value
+; ...same as...
+copy value
+</code></pre>
+<p>Grasping for any stake in the ground I could find, I was pretty sure that TO of a string representation of an integer to an integer should give you the integer:</p>
+<pre><code>&gt;&gt; to integer! "1020"
+== 1020  ; we know this, at least? (one hopes...)
+</code></pre>
+<p>And the reverse, one would think, as well:</p>
+<pre><code>&gt;&gt; to text! 1020
+== "1020"  ; what else *could* it be?  codepoint 1020? -&gt; "ϼ"
+</code></pre>
+<p>But beyond that it was hard to think of the pattern.</p>
+<h2><a name="p-7876-coming-back-to-an-old-idea-reversibility-1" class="anchor" href="https://rebol.metaeducation.com#p-7876-coming-back-to-an-old-idea-reversibility-1"></a>Coming Back To An Old Idea: Reversibility</h2>
+<p>When I first encountered Rebol and was made aware of these problems, I suggested TO should be reversible:</p>
+<pre><code>value1 = to (type of value1) to type2 value1
+</code></pre>
+<p>However, this gave what <em>appeared</em> to be very "unexciting" options for behavior:</p>
+<pre><code>&gt;&gt; to block! 1
+== [1]
+
+&gt;&gt; to integer! [1]
+== 1
+
+&gt;&gt; to integer! [...anything else in a block that's not integer...]
+** Error.  Always.
+</code></pre>
+<p>That particular idea was was so long ago that I don't have direct quotes on hand of people saying "nah, that sucks, TO could barely do anything."  But I'm pretty sure it was panned by basically everyone I suggested it to.  I guess I agreed, because I dropped it.</p>
+<p><strong>Coming back to it now, and seeing it in a new light, I see this as much more useful than I used to.</strong>  Especially when compared to the historical mess that makes TO nigh-unusable.</p>
+<p>And in fact, it fits in with several Rebol2/Red behaviors that I'd thought were kind of pointless before:</p>
+<pre><code>&gt;&gt; to integer! &lt;1&gt;
+== 1
+
+&gt;&gt; to tag! 1
+== &lt;1&gt;
+</code></pre>
+<p>The use I didn't see at the time was the frequent need when dialecting to push values out of band, into some other type, without losing their meaning.  If you have a dialect in which integers already mean something, but you want a way of pushing some integer-oriented instruction in there...you can use these kinds of operations.</p>
+<p>Definitional errors in Ren-C make this convenient, since checking if something fits the pattern is quick, you just throw in a TRY and the antiform error that's the return result of the TO will be suppressed, giving you a "falsey" null:</p>
+<pre><code>&gt;&gt; thing: &lt;a b&gt;
+
+&gt;&gt; to integer! thing
+** Error: Cannot TO convert &lt;a b&gt; to integer
+
+&gt;&gt; try to integer! thing
+== ~null~  ; anti
+</code></pre>
+<p>The more I look at it the more useful it appears.  And it helps give clarity to the MAKE vs. TO division.  If you have something that isn't shaped like this, then <em>maybe</em> MAKE is the right place to put it.  For example:</p>
+<pre><code>&gt;&gt; to percent! 1
+== 1%
+
+&gt;&gt; to integer! 1%
+== 1
+
+&gt;&gt; make percent! 1
+== 100%
+</code></pre>
+<p><em>(Note: I think ENCODE + DECODE is a better place for binary conversions, e.g. ENCODE 'IEEE-754 is better than MAKE BINARY! of a decimal because that could mean many things, and ENCODE can have more parameterization for single vs. double precision, etc.  I don't know<br>
+if TO BINARY! should work at all, but if it does, I'd probably agree with the Rebol2 choice to give the binary representation of the UTF-8 string... e.g. (to binary! 1020) as #{31303230} ... and use more explicit future-proof routines to encode with specified byte size and endianness.)</em></p>
+<h2><a name="p-7876-reversibility-rules-out-rounding-2" class="anchor" href="https://rebol.metaeducation.com#p-7876-reversibility-rules-out-rounding-2"></a>Reversibility Rules Out Rounding</h2>
+<p>In order to get losslessness in the representation, you can't throw out information.</p>
+<p>So this works:</p>
+<pre><code>&gt;&gt; to integer! 1.0
+== 1
+
+&gt;&gt; to decimal! 1
+== 1.0
+</code></pre>
+<p>But this does not:</p>
+<pre><code> &gt;&gt; to integer! 1.5
+ ** Error: Can't TO INTEGER! a DECIMAL! w/digits after decimal point
+</code></pre>
+<p>I don't think that's a problem, because that seems like a job for ROUND.  Unfortunately, R3-Alpha and Red do something dumb:</p>
+<pre><code>rebol2&gt;&gt; round 1.5
+== 2
+
+red&gt;&gt; round 1.5
+== 2.0
+
+r3-alpha&gt;&gt; round 1.5
+== 2.0
+</code></pre>
+<p>It seems this was part of a shift to try and preserve the input type, to facilitate things like rounding MONEY!:</p>
+<pre><code>r3-alpha&gt;&gt; round $1.50
+== $2
+</code></pre>
+<p>So I guess the way the thinking went was that if you want to keep MONEY! as MONEY! when you round it, all types should act that way.</p>
+<p>I think the relationship between INTEGER! and DECIMAL!, which lack decoration, suggests something more intimate where the type can be lost.  If you don't want to lose it, ROUND:TO 1.0</p>
+<pre><code>&gt;&gt; round 1.5
+== 2
+
+&gt;&gt; round:to 1.5 1
+== 2
+
+&gt;&gt; round:to 1.5 1.0
+== 2.0
+</code></pre>
+<h2><a name="p-7876-blank-pretty-much-has-to-mean-empty-3" class="anchor" href="https://rebol.metaeducation.com#p-7876-blank-pretty-much-has-to-mean-empty-3"></a>BLANK! Pretty Much Has To Mean Empty</h2>
+<p>If we're talking about equivalencies, we now know this:</p>
+<pre><code>&gt;&gt; for-each 'x _ [print "Doesn't run"]
+== ~void~  ; anti
+
+&gt;&gt; empty? _
+== ~okay~  ; anti
+</code></pre>
+<p>And so really, it seems that the TO conversion of BLANK! has only one set of answers to fit into the family of reversibility:</p>
+<pre><code>&gt;&gt; to block! _
+== []
+
+&gt;&gt; to text! _
+== ""
+
+&gt;&gt; to blank! &lt;&gt;
+== _
+
+&gt;&gt; to blank! #{}
+== _
+</code></pre>
+<p>And if you try to TO BLANK! anything that's not conceptually empty, you'd get an error.</p>
+<pre><code>&gt;&gt; to blank! &lt;a&gt;
+** Error: ...
+</code></pre>
+<p>I don't know if there's a motivating case for saying <strong>to integer! _</strong> should pick something like 0 as an answer, though Rebol2 did something of that sort:</p>
+<pre><code>rebol2&gt;&gt; to integer! none
+== 0
+</code></pre>
+<p>Neither Red nor R3-Alpha carried that forward, <a href="https://github.com/metaeducation/rebol-issues/issues/1018">though it was discussed</a></p>
+<h2><a name="p-7876-can-be-checked-in-the-implementation-4" class="anchor" href="https://rebol.metaeducation.com#p-7876-can-be-checked-in-the-implementation-4"></a>Can Be Checked In The Implementation</h2>
+<p>I've started hacking this through, and it's gone relatively well.  TO dispatches <em><strong>to the type it's converting from</strong></em>, with the type being converted to as the argument.</p>
+<p>And it's nice in the sense that the TO native driving the process can also check the reversibility constraint in the debug build, to give it some teeth.</p>
+<p><em>(I've rigged up some interesting frame mechanics to enable doing this reversal efficiently, that have sped up other parts of the system (like CASCADE) with "downlevel shifting", that can bypass a trampoline bounce...)</em></p>
+<p>Anyway, things are a mess right now with a couple hundred broken tests to painfully sift through.  But I think the reversibility rule is good... biggest questions are whether that relaxes in terms of spacing...</p>
+<pre><code>&gt;&gt; to block! "  1    2  "
+== [1 2]  ; legal?
+</code></pre>
+<p>This would suggest you would have to compare with the trimmed/canonized version of your input.</p>
+<p>Also, issues of string representations.</p>
+<pre><code>&gt;&gt; b: to block! "--{1}--"
+== ["1"]  ; legal?
+</code></pre>
+<p>So there are some pain points, but chipping away at them.</p>
+            <p><small>2 posts - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/embracing-a-useless-definition-of-to/2325">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/embracing-a-useless-definition-of-to/2325</link>
+          <pubDate>Fri, 08 Nov 2024 17:57:07 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2325</guid>
+          <source url="https://rebol.metaeducation.com/t/embracing-a-useless-definition-of-to/2325.rss">Embracing A &quot;Useless&quot; Definition of TO</source>
+        </item>
+        <item>
+          <title>Bitten By Right Side Evaluation First</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Semantics</category>
+          <description><![CDATA[
+            <p>I was writing some code like this:</p>
+<pre><code>while [not tail? info] [
+    if find leaders info.1.name [
+        leader-protos.(info.1.name): take info
+    ] else [
+        info: next info
+    ]
+]
+</code></pre>
+<p>Due to the post title you probably already see the bug.  TAKE INFO on the right hand side runs <em>before</em> the <strong>info.1.name</strong>.  So it's inserting under the next name.</p>
+<p>I think we can (and should) precalculate the groups on the left hand side.  Basically walk the tuple and push its elements to the stack before doing the right hand side evaluation.</p>
+            <p><small>3 posts - 2 participants</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/bitten-by-right-side-evaluation-first/2301">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/bitten-by-right-side-evaluation-first/2301</link>
+          <pubDate>Sat, 28 Sep 2024 17:53:43 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2301</guid>
+          <source url="https://rebol.metaeducation.com/t/bitten-by-right-side-evaluation-first/2301.rss">Bitten By Right Side Evaluation First</source>
+        </item>
+        <item>
+          <title>LIFT:LITE - When You Don&#39;t Want Quasiforms</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Semantics</category>
+          <description><![CDATA[
+            <p>There was a time before quasiforms existed, but where there was generic quoting.</p>
+<p>It was in this time that LIFT was invented.  It did the only thing it could do:</p>
+<ul>
+<li>
+<p>When you LIFT-ed a plain (or quoted) thing, it got one quote level added</p>
+</li>
+<li>
+<p>When you UNLIFT-ed an "antiform" you would get a plain version of the thing</p>
+</li>
+</ul>
+<p>So it worked like this:</p>
+<pre><code>&gt;&gt; lift first [(d e f)]
+== '(d e f)
+
+&gt;&gt; lift first ['(d e f)]
+== ''(d e f)
+
+&gt;&gt; spread [a b c]
+== \(a b c)\  ; antiform
+
+&gt;&gt; lift spread [a b c]
+== (a b c)
+</code></pre>
+<p><em>(That's not how it works now--for good reasons.  Not only is it a bit too easy to get confused about whether a meta protocol is in effect, the absence of quasiforms leaves a representational hole for values that produce antiforms under evaluation.  But I won't rewrite a <a href="https://rebol.metaeducation.com/t/a-justification-of-generalized-isotopes/1918">A Justification Of Generalized Iostopes</a> here, this post has another purpose.)</em></p>
+<h2><a name="p-7760-another-historical-twist-lift-of-null-was-null-1" class="anchor" href="https://rebol.metaeducation.com#p-7760-another-historical-twist-lift-of-null-was-null-1"></a>Another Historical Twist: LIFT of NULL was NULL</h2>
+<p>NULL was an outlier--at various times having no quoted form (and at other times being considered a quote of nothingness, e.g. the lone apostrophe (<strong><code>'</code></strong>)).</p>
+<p>I don't exactly remember what state NULL was in at the time LIFT was being invented.  But regardless, it was initially decided that LIFT and UNLIFT of NULL could just give null back.</p>
+<p>This actually turned out to frequently be useful...for instance <a href="https://rebol.metaeducation.com/t/demonstrating-for-both-loop-composability-for-the-win/1833">when writing a loop wrapper like FOR-BOTH</a></p>
+<pre><code>for-both: func [var blk1 blk2 body] [  ; the historical formulation
+    return unlift all [
+        lift for-each var blk1 body  ; LIFT NULL =&gt; NULL allows chaining BREAK
+        lift for-each var blk2 body
+    ]
+]
+</code></pre>
+<p>Though while it was useful there, plenty of places needed to speak fully abstractly about all possible states.  So as the model shaped up, LIFT of NULL fit into the regular pattern of all things having reified lifts, giving <strong><code>~null~</code></strong>.</p>
+<h2><a name="p-7760-i-wanted-a-liftlitehttpswwwyoutubecomwatchvimv0g-4cycw-2" class="anchor" href="https://rebol.metaeducation.com#p-7760-i-wanted-a-liftlitehttpswwwyoutubecomwatchvimv0g-4cycw-2"></a><a href="https://www.youtube.com/watch?v=Imv0g-4cycw">I Wanted A LIFT:LITE</a></h2>
+<p>The idea of a LIFT variation that passed through keywords as-is came along as <strong><code>lift:lite</code></strong>.</p>
+<pre><code>&gt;&gt; lift:lite [a b c]
+== '[a b c]
+
+&gt;&gt; spread [a b c]
+== \~(a b c)~\  ; antiform
+
+&gt;&gt; lift:lite spread [a b c]
+== ~(a b c)~
+
+&gt;&gt; lift:lite null
+== \~null~\  ; antiform
+
+&gt;&gt; lift:lite first [~null~ ~void~]
+== '~null~
+</code></pre>
+<p>So today's LIFT:LITE still produces quasiforms for antiforms--just not for the <code>~null~</code> and <code>~[]~</code> void antiforms (and I now imagine it should probably pass through <code>~okay~</code> and <code>~NaN~</code> as well):</p>
+<pre><code>for-both: func [var blk1 blk2 body] [
+    return unlift:lite all [
+        lift:lite for-each var blk1 body  ; lift:lite null =&gt; ~null~ antiform
+        lift:lite for-each var blk2 body  ; lift:lite void =&gt; ~[]~ antiform
+    ]
+]
+</code></pre>
+<h2><a name="p-7760-but-what-if-liftlite-didnt-make-any-quasiforms-at-all-3" class="anchor" href="https://rebol.metaeducation.com#p-7760-but-what-if-liftlite-didnt-make-any-quasiforms-at-all-3"></a>But What If LIFT:LITE Didn't Make <em>Any</em> Quasiforms At All?</h2>
+<p>By design, <a href="https://rebol.metaeducation.com/t/quasiforms-arent-super-friendly-and-they-shouldnt-be/2273">quasiforms are not very friendly</a>.  So if you have an antiform in your hand... and you know you have an antiform in your hand... it's easy to take a step to a quasiform, but you need another step to get back to a plain form you can interact with.</p>
+<p>So why not have LIFT:LITE take care of it?</p>
+<pre><code>&gt;&gt; lift:lite null
+== \~null~\  ; antiform
+
+&gt;&gt; lift:lite spread [a b c]
+== (a b c)
+</code></pre>
+<p>This doesn't make a difference to things like FOR-BOTH.  They'll still work--plain forms are just as truthy as quasiforms for the lifted states.  They just have to remember to use UNLIFT:LITE on the reverse end.  <em>(If you use plain UNLIFT it will catch your error, as UNLIFT does not accept plain forms.)</em></p>
+<p>It might seem random to pair up the feature of not making quasiforms with passing thru null and void.  But I actually think the kinds of places where you'd want one behavior do overlap significantly with the other.</p>
+<p>And we're really just running out of terms, here.  Throwing another nuance in to say <em>"I want partial LIFT, but only partial in the sense that I'm passing through null and void, not partial in terms of the other antiforms--make those quasiforms"</em> is just starting to go beyond the ability to give names to.</p>
+<p>So in my head, having LIFT:LITE be formulated as "do what LIFT would do in a historical world where quasiforms and meta-nulls didn't exist" feels pretty good.</p>
+<h2><a name="p-7760-its-still-fundamentally-a-valid-lift-4" class="anchor" href="https://rebol.metaeducation.com#p-7760-its-still-fundamentally-a-valid-lift-4"></a>It's Still Fundamentally a "Valid LIFT"</h2>
+<p>I couldn't really think of a good name for the operation besides just saying it was an alternate behavior of LIFT. "Lite" is a bit strange but I felt it fit.</p>
+<p>Note that it doesn't make sense as a refinement to REIFY.  Because being willing to produce something that can't be put in a block fundamentally undermines what the word REIFY means.  (<strong><code>reify:...NOT!</code></strong>)</p>
+<p>The thing about LIFT:LITE is that it really is giving you a full-spectrum meta representation of what you had in your hand.  Every input state maps to a unique output state.  The default LIFT happens to also be a fully reifying operation as well...but here we are saying that's not intrinsic to "a meta operation".</p>
+<p><em>(Would there be any use for a LIFT that passes through <em>all</em> antiforms--not just the antiform words--and just quotes everything else?  That's more a variation of QUOTE than it is a variation of LIFT.  I can't offhand think of a case where that would ever be useful.)</em></p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/lift-lite-when-you-dont-want-quasiforms/2296">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/lift-lite-when-you-dont-want-quasiforms/2296</link>
+          <pubDate>Mon, 23 Sep 2024 13:42:44 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2296</guid>
+          <source url="https://rebol.metaeducation.com/t/lift-lite-when-you-dont-want-quasiforms/2296.rss">LIFT:LITE - When You Don&#39;t Want Quasiforms</source>
+        </item>
+        <item>
+          <title>The Meaning of the FORM String Operation</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Semantics</category>
+          <description><![CDATA[
+            <p>So FORM's vague job is to give a "human readable representation" of the data it's given.</p>
+<p>So for TEXT!, it gives you a representation of the string without delimiters--in contrast to MOLD, which gives you the delimiters:</p>
+<pre><code>&gt;&gt; form "hello world"
+== "hello world"
+
+&gt;&gt; mold "hello world"
+== {"hello world"}
+</code></pre>
+<p>And you're probably thinking <em>"Uh...FORM of a text string is a no-op.  Why would you do that?"</em></p>
+<p>The idea is that there are things other than text which do what the delimiters.  Such as TAG!</p>
+<pre><code>&gt;&gt; form &lt;hello world&gt;
+== "&lt;hello world&gt;"
+
+&gt;&gt; mold &lt;hello world&gt;
+== "&lt;hello world&gt;"
+</code></pre>
+<p>What if you don't want delimiters on your TAG!s and such?  Well... for any string-ish type, thanks to UTF-8 we have a <em>super efficient</em> operation called AS TEXT! which aliases any type as a string.  It reuses the memory:</p>
+<pre><code>&gt;&gt; tag: &lt;hello world&gt;
+
+&gt;&gt; text: as text! &lt;hello world&gt;
+== "hello world"
+
+&gt;&gt; append tag "ly Ren-C user"
+== &lt;hello worldly Ren-C user&gt;
+
+&gt;&gt; text
+== "hello worldly Ren-C user"
+</code></pre>
+<p>You can use it on ANY-WORD! as well, and it will give you a read-only string... and not have the sigils:</p>
+<pre><code>&gt;&gt; as text! '$var
+== "var"
+</code></pre>
+<p>I have an inkling that over the subset of operations to which you can use both TO and AS, that you should get the same result... just a copy:</p>
+<pre><code>&gt;&gt; tag: &lt;hello world&gt;
+
+&gt;&gt; text: to text! &lt;hello world&gt;  ; TO TEXT!, not AS TEXT!
+== "hello world"
+
+&gt;&gt; append tag "ly Ren-C user"
+== &lt;hello worldly Ren-C user&gt;
+
+&gt;&gt; text
+== "hello world"
+</code></pre>
+<h2><a name="p-7708-so-form-adds-delimiters-and-toas-text-does-not-1" class="anchor" href="https://rebol.metaeducation.com#p-7708-so-form-adds-delimiters-and-toas-text-does-not-1"></a>So FORM adds delimiters, and TO+AS TEXT! Does Not...</h2>
+<p>...BUT...let's go back:</p>
+<pre><code>&gt;&gt; form "hello world"
+== "hello world"
+
+&gt;&gt; form &lt;hello world&gt;
+== "&lt;hello world&gt;"
+</code></pre>
+<p>Why again is FORM a no-op on text, but adds delimiters to tags?</p>
+<h2><a name="p-7708-and-how-about-blocks-2" class="anchor" href="https://rebol.metaeducation.com#p-7708-and-how-about-blocks-2"></a>And How About Blocks?</h2>
+<p>The block behavior of FORM historically strikes me as not terribly useful:</p>
+<pre><code>rebol2/red&gt;&gt; form [I am [:a "block" that:] &lt;is&gt; (being formed)]
+== "I am a block that &lt;is&gt; being formed"
+
+r3-alpha&gt;&gt; form [I am [:a "block" that:] &lt;is&gt; (being formed)]
+== "I am :a block that: &lt;is&gt; being formed"
+</code></pre>
+<p>How often do you want to take a bunch of material and throw away decorations from some of it, and flatten out all the lists with no processing but spaces?</p>
+<p>I don't think I've ever used that.  I see more use in MOLD SPREAD, which it seems like R3-Alpha was edging toward and didn't quite get there.</p>
+<pre><code>&gt;&gt; mold spread [I am [:a "block" that:] &lt;is&gt; (being "formed")]
+== {(I am :a "block" that: &lt;is&gt; (being "formed"))}
+</code></pre>
+<h2><a name="p-7708-who-is-calling-form-and-why-are-they-calling-it-3" class="anchor" href="https://rebol.metaeducation.com#p-7708-who-is-calling-form-and-why-are-they-calling-it-3"></a>Who is Calling FORM (and why are they calling it?)</h2>
+<p>The variance in behaviors across R3-Alpha and Red show what is usually true when you see variation--<em>people don't know why the thing exists, find out it has random behavior, then avoid using it in favor of other things</em>.</p>
+<p>Most uses seem to be turning WORD! to string, and turning TAG! to string with some assurance it will have the delimiters on it.  Nobody really uses it on blocks.</p>
+<p>I don't yet have a complete answer for either getting rid of it, or defining it rigorously.  But I'm going to start paying more attention to it.</p>
+            <p><small>2 posts - 2 participants</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/the-meaning-of-the-form-string-operation/2288">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/the-meaning-of-the-form-string-operation/2288</link>
+          <pubDate>Fri, 20 Sep 2024 09:16:05 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2288</guid>
+          <source url="https://rebol.metaeducation.com/t/the-meaning-of-the-form-string-operation/2288.rss">The Meaning of the FORM String Operation</source>
+        </item>
+        <item>
+          <title>Make REPLACE/ALL Default Semantics of REPLACE?</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Semantics</category>
+          <description><![CDATA[
+            <p>Pretty much every time I use REPLACE, I mean REPLACE/ALL.  But I get bitten because I forget the /ALL.</p>
+<pre><code>&gt;&gt; string: "I am pretty sure I feel like I usually want to REPLACE/ALL"
+
+&gt;&gt; replace string "I" "You"
+== "You am pretty sure I feel like I usually want to REPLACE/ALL"
+</code></pre>
+<p>Grammar aside, I don't feel like there's a natural boundedness on REPLACE.  It seems to me the exception is replacing just one thing, e.g. REPLACE/ONE.</p>
+<p>Does anyone have a good argument for why REPLACE shouldn't replace all by default?</p>
+<p>It would also be nice to know if any replacements were done.  A multi-return parameter which was the count of replacements--or null if no replacements made--would be very useful.</p>
+            <p><small>3 posts - 2 participants</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/make-replace-all-default-semantics-of-replace/2269">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/make-replace-all-default-semantics-of-replace/2269</link>
+          <pubDate>Wed, 11 Sep 2024 13:33:15 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2269</guid>
+          <source url="https://rebol.metaeducation.com/t/make-replace-all-default-semantics-of-replace/2269.rss">Make REPLACE/ALL Default Semantics of REPLACE?</source>
+        </item>
+        <item>
+          <title>The Truthiness of Trash</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Semantics</category>
+          <description><![CDATA[
+            <p><strong>Does it really add value to consider the "TRASH" state (antiform RUNE!) to be neither truthy nor falsey?</strong></p>
+<p>Here's a quick survey of how UNSET! (the most trash-like thing in historical Rebol) is handled:</p>
+<h3><a name="p-7286-rebol2-1" class="anchor" href="https://rebol.metaeducation.com#p-7286-rebol2-1"></a>Rebol2</h3>
+<pre><code>rebol2&gt;&gt; either get/any 'asdf [print "truthy"] [print "falsey"]
+** Script Error: either is missing its condition argument
+
+rebol2&gt;&gt; unset? all [get/any 'asdf]
+== true
+
+rebol2&gt;&gt; unset? any [get/any 'asdf]
+== true
+
+rebol2&gt;&gt; case [get/any 'asdf [print "truthy"]]
+** Script Error: Block did not return a value
+</code></pre>
+<h3><a name="p-7286-r3-alpha-2" class="anchor" href="https://rebol.metaeducation.com#p-7286-r3-alpha-2"></a>R3-Alpha</h3>
+<pre><code>r3-alpha&gt;&gt; either get/any 'asdf [print "truthy"] [print "falsey"]
+** Script error: either does not allow unset! for its condition argument
+
+r3-alpha&gt;&gt; unset? all [get/any 'asdf]
+== true
+
+r3-alpha&gt;&gt; unset? any [get/any 'asdf]
+== false  ; ...huh?
+
+r3-alpha&gt;&gt; any [get/any 'asdf 1020]   
+== 1020
+
+r3-alpha&gt;&gt; case [get/any 'asdf [print "truthy"]]
+** Script error: block did not return a value
+</code></pre>
+<h3><a name="p-7286-red-3" class="anchor" href="https://rebol.metaeducation.com#p-7286-red-3"></a>Red</h3>
+<pre><code>red&gt;&gt; if get/any 'asdf [print "truthy"]
+truthy
+
+red&gt;&gt; either get/any 'asdf [print "truthy"] [print "falsey"]
+*** Script Error: block did not return a value  ; &lt;-- huh?
+
+red&gt;&gt; unset? all [get/any 'asdf]
+== true
+
+red&gt;&gt; unset? any [get/any 'asdf]
+== true
+
+red&gt;&gt; case [get/any 'asdf [print "truthy"]]
+*** Script Error: block did not return a value  ; &lt;-- huh, again?
+</code></pre>
+<h2><a name="p-7286-oldes-rebol3-4" class="anchor" href="https://rebol.metaeducation.com#p-7286-oldes-rebol3-4"></a>Oldes Rebol3</h2>
+<p>Transparent in <a href="https://github.com/Oldes/Rebol3/commit/2ba01ead3b5da1ab609fa25a0c675b30e96bb163">ANY and ALL</a> (like a Ren-C void), but presumably still an error in plain IF or EITHER or CASE...</p>
+<p><strong>UPDATE:</strong> Oldes has <a href="https://github.com/Oldes/Rebol3/commit/0b7c672ce63ca463e663fd893d684e5ff86fc4c6">committed a change making UNSET! truthy in CASE</a></p>
+<h2><a name="p-7286-ren-cs-always-error-has-been-more-consistent-but-5" class="anchor" href="https://rebol.metaeducation.com#p-7286-ren-cs-always-error-has-been-more-consistent-but-5"></a>Ren-C's "Always Error" Has Been More <em>Consistent</em>, But...</h2>
+<p>Clearly people have been pushing away from it being an error.</p>
+<p>So does being "ornery" for conditional logic really help matters?  When we consider the dual role of trash as an "uninteresting, but successful" result, might we get as much (or more?) value from considering it to be always truthy?</p>
+<p>For example: Ren-C uses TRASH as the result of PRINT when the print actually produces output.  Otherwise, you get NULL.</p>
+<pre><code>&gt;&gt; message: "Hello"
+== "Hello"
+
+&gt;&gt; print message  ; won't have a console "==" due to being a trash result
+Hello
+
+&gt;&gt; trash? print message
+Hello
+== ~okay~  ; anti
+
+&gt;&gt; message: null
+== ~null~  ; anti
+
+&gt;&gt; print maybe message
+== ~null~  ; anti
+
+&gt;&gt; print []
+== ~null~  ; anti
+</code></pre>
+<p>TRASH has the property of suppressing console output, which is desirable in most print cases--at least those that do print output.  And if you said <code>(x: print "Hello")</code> you'd get a variable that would create an error on access, which seems also desirable.</p>
+<p>If trash was truthy, that makes it easier to act on the trash-vs-null distinction in something like an ANY or ALL construct.</p>
+<h2><a name="p-7286-should-meaningless-but-truthy-unset-variable-state-6" class="anchor" href="https://rebol.metaeducation.com#p-7286-should-meaningless-but-truthy-unset-variable-state-6"></a>Should "Meaningless but Truthy" = "Unset Variable State"?</h2>
+<p>A related question may be if functions like PRINT should be returning the same value as what is held by an unset variable.</p>
+<blockquote>
+<p><em><strong>UPDATE 2025: It's not anymore!</strong></em>  Trash is an ornery state, but not what variables that are truly "unset" hold, which is a so-called "dual" state.</p>
+</blockquote>
+<h2><a name="p-7286-truthy-trash-seems-to-have-more-pluses-than-minuses-7" class="anchor" href="https://rebol.metaeducation.com#p-7286-truthy-trash-seems-to-have-more-pluses-than-minuses-7"></a>Truthy Trash Seems To Have More Pluses than Minuses</h2>
+<p>My "semantic safety" bias initially had made me think that when you have a function like PRINT, it's nice to catch potential mistakes when you tried to act like it was a function that could meaningfully be tested for some kind of logical result.  So I pushed R3-Alpha's error from IF and EITHER further into ANY and ALL.</p>
+<p>Then I went and made it so that when the PRINT received an opted-out input, it gave back NULL instead of TRASH.  <img src="https://rebol.metaeducation.com/images/emoji/twitter/face_with_diagonal_mouth.png?v=14" title=":face_with_diagonal_mouth:" class="emoji" alt=":face_with_diagonal_mouth:" loading="lazy" width="20" height="20">  So it was something you could act on with ELSE, but not other conditional constructs.</p>
+<p>The evolution from UNSET! to the blank-antiform that is today's TRASH has been a long and winding one.  Working around its ornery-ness gave rise to all kinds of interesting designs like voids, and invisibles like ELIDE PRINT.</p>
+<p>But though I'm sure that I haven't considered all the angles yet...having trash be neither-true-nor-false is looking more like a dying historical artifact than something with a clear motivation applicable to the present.</p>
+<p>Trash being always truthy offers consistency...and it's possible to ELIDE it to get "no vote" so it won't affect an ANY or ALL (the way Oldes R3 treats unsets).  Yet having the vote isn't entirely useless either.  I can't think of a whole lot of downside, so I think it's worth trying.</p>
+<hr>
+<p>A better axis of orneryness that may actually catch more problems in practice is: <strong><a href="https://rebol.metaeducation.com/t/making-call-raise-a-definitional-error-for-bad-exit-codes/2068/2">Should Trash be Illegal in Comparisons</a></strong></p>
+<p>(I point out in that discussion that simply disabling the ability to check trash for truthiness/falseyness is kind of a strange counterpart to a routine that returns--say--an INTEGER! in all cases, where you get zero information from testing an integer conditionally but without anything to stop you...making the disablement of testing trash conditionally seem like a fairly empty gesture.)</p>
+            <p><small>4 posts - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/the-truthiness-of-trash/2180">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/the-truthiness-of-trash/2180</link>
+          <pubDate>Fri, 03 May 2024 17:27:29 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2180</guid>
+          <source url="https://rebol.metaeducation.com/t/the-truthiness-of-trash/2180.rss">The Truthiness of Trash</source>
+        </item>
+        <item>
+          <title>Should SET-WORD!s Propagate Undecayed Packs?</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Semantics</category>
+          <description><![CDATA[
+            <p>Packs are antiform blocks, which decay if not specifically handled.</p>
+<pre><code>&gt;&gt; pack [1 2]
+== \~['1 '2]~\  ; antiform (pack!)
+
+&gt;&gt; a: pack [1 2]
+== 1
+
+&gt;&gt; a
+== 1
+</code></pre>
+<p>From time to time, I've wondered if there's a good reason why the plain SET-WORD! shouldn't propagate the pack:</p>
+<pre><code>&gt;&gt; a: pack [1 2]
+== \~['1 '2]~\  ; antiform (pack!)
+
+&gt;&gt; a
+== 1
+</code></pre>
+<p>One rationale is that intuitively, <strong>a:</strong> should be a synonym for <strong>[a]:</strong>, e.g. "unpack one item" is implicit.</p>
+<p>But that just bumps the question to the next one we might ask: why doesn't a multi-return without a "circled" result just evaluate to the whole pack?</p>
+<p>It looks to make some sense at first, it allows you to chain indefinitely:</p>
+<pre><code>&gt;&gt; [a b]: [c d]: pack [1 2]
+== \~['1 '2]~\  ; antiform (pack!)
+
+&gt;&gt; a
+== 1
+
+&gt;&gt; b
+== 2
+
+&gt;&gt; c
+== 1
+
+&gt;&gt; d
+== 2
+</code></pre>
+<p>Though it feels a little bit unsettling when you drop it down:</p>
+<pre><code>&gt;&gt; [a b]: [c]: pack [1 2]
+== \~['1 '2]~\  ; antiform (pack!)
+
+&gt;&gt; a
+== 1
+
+&gt;&gt; b
+== 2
+
+&gt;&gt; c
+== 1
+</code></pre>
+<p>But we could argue that if you're bothered, then you use circling.  Note in the below example you'd have to use <code>:b</code> in order to indicate you were okay with unpacking fewer values than available.</p>
+<pre><code>&gt;&gt; [a :b]: [{c}]: pack [1 2]
+== 1
+
+&gt;&gt; a
+== 1
+
+&gt;&gt; b
+== \~null~\  ; antiform
+
+&gt;&gt; c
+== 1
+</code></pre>
+<p>We could then make a choice if <strong>a:</strong> was a synonym for <strong>[a]:</strong> or for <strong>[{a}]:</strong></p>
+<h2><a name="p-7278-most-recent-motivation-for-thinking-about-this-1" class="anchor" href="https://rebol.metaeducation.com#p-7278-most-recent-motivation-for-thinking-about-this-1"></a>Most Recent Motivation For Thinking About This</h2>
+<p>I rewrote <a href="https://rebol.metaeducation.com/t/speed-of-uparse/2177/3">some code in an example</a> from this:</p>
+<pre><code>[^result remainder]: parser input except e -&gt; [
+    remainder: input  ; succeed on parser fail but don't advance input
+    return null
+]
+return ^result  ; return successful parser result
+</code></pre>
+<p>...to this:</p>
+<pre><code>return [{^} remainder]: parser input except [
+    remainder: input  ; succeed on parser fail but don't advance input
+    return null
+]
+</code></pre>
+<p>The idea is that the parser being called has multiple return results... the first is the synthesized value, the second is the amount it advanced.  <em>(There's a third result on some parsers of "pending items", but this OPTIONAL combinator has an "autopipe" which is just bubbling the pending items through in the order of successful parsers called...so the third result is specialized out on its interface and on the parsers it calls.)</em></p>
+<p><strong>However, the synthesized value can itself be a pack.</strong>  This means that if we named a variable in the slot where the <code>^</code> is, then that pack would be decayed to store in the variable unless we used a ^META result.</p>
+<p>So does the act of not-naming and just circling subvert the decay?  Or should the circled result not be decayed even if the variable is?</p>
+<pre><code>&gt;&gt; [{a} b]: pack [pack [1 2] 3]
+== ~['1 '2]~  ; anti  (or should it be decayed to 1?)
+
+&gt;&gt; a
+== 1
+
+&gt;&gt; b
+== 3
+</code></pre>
+<p>It's a different--but related--question.  It seems it should align with the behavior of plain assignments:</p>
+<pre><code>&gt;&gt; a: pack [1 2]
+== \~['1 '2]~\  ; antiform  (implied if the above behavior is chosen)
+
+&gt;&gt; a
+== 1
+</code></pre>
+<h2><a name="p-7278-not-100-certain-but-i-think-undecayed-propagation-is-good-2" class="anchor" href="https://rebol.metaeducation.com#p-7278-not-100-certain-but-i-think-undecayed-propagation-is-good-2"></a>Not 100% Certain, But I Think Undecayed Propagation Is Good</h2>
+<p>I'll point out that it's possible to DECAY things pretty easily, but you can't recover a pack after it has been decayed.</p>
+<p>So I'm getting the feeling that it's probably best to decay the assignments, but propagate the undecayed pack.  It looks like the more general and useful behavior...even if it seems a bit confusing.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/should-set-word-s-propagate-undecayed-packs/2178">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/should-set-word-s-propagate-undecayed-packs/2178</link>
+          <pubDate>Fri, 29 Mar 2024 21:22:15 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2178</guid>
+          <source url="https://rebol.metaeducation.com/t/should-set-word-s-propagate-undecayed-packs/2178.rss">Should SET-WORD!s Propagate Undecayed Packs?</source>
+        </item>
+        <item>
+          <title>VOID Branches (not branches that evaluate to void)</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Semantics</category>
+          <description><![CDATA[
+            <p>I've mentioned before that <a href="https://rebol.metaeducation.com/t/augment-add-parameters-and-refinements-after-the-fact/1216">AUGMENT can be used to implement the legacy SWITCH/DEFAULT behavior</a>.</p>
+<p>But looking at what seems like the "correct" formulation of that code today, we get:</p>
+<pre><code>switch-d: enclose (augment :switch [
+    /default "Default case if no others are found"
+        [block!]
+]) lambda [f [frame!]] [
+    let def: f.default
+    eval f else (maybe def)
+]
+</code></pre>
+<p>It points out the existence of <em>void branches</em>... so not branches that evaluate to void (e.g. <code>[void]</code>) but code that evaluates to a branch to run, and that branch is void.</p>
+<p>Considering this specific usage only, it suggests a semantic for ELSE of a VOID branch, which is that you want it to act like there was no branch at all.  e.g. as if you'd written just <strong><code>eval f</code></strong> with no ELSE.</p>
+<pre><code> &gt;&gt; if 10 &gt; 20 [1 + 2]
+ == ~null~  ; anti
+
+ &gt;&gt; if 10 &gt; 20 [1 + 2] else [10 + 20]
+ == 30
+
+ &gt;&gt; if 10 &gt; 20 [1 + 2] else (void)
+ == ~null~  ; anti
+</code></pre>
+<p>Would the same apply to THEN?</p>
+<pre><code> &gt;&gt; if true [1 + 2]
+ == 3
+
+ &gt;&gt; if true [1 + 2] then [10 + 20]
+ == 30
+
+ &gt;&gt; if true [1 + 2] then (void)
+ == 3
+</code></pre>
+<p><img src="https://rebol.metaeducation.com/images/emoji/twitter/thinking.png?v=14" title=":thinking:" class="emoji only-emoji" alt=":thinking:" loading="lazy" width="20" height="20"></p>
+<p>I don't know if it's great, but it's certainly better than evaluating to NULL (via some void-in-null-out rationale) because that would trigger an ELSE branch.</p>
+<pre><code> &gt;&gt; if true [1 + 2] then (void) else [print "we don't want this."]
+ we don't want this.
+</code></pre>
+<p>But what should other branching constructs do, like CASE or SWITCH?  Might a void branch suggest "opting out" of that particular branch?</p>
+<pre><code> case [
+     1 &lt; 2 (void)
+     3 &lt; 4 [print "Should this run?"]
+ ]
+</code></pre>
+<p>A CASE (at least CASE:ALL) is supposed to be synonymous with a series of IF statements.  And IF can't exactly do that, unless it decided to be GHOST...</p>
+<pre><code>&gt;&gt; 1 + 2 if 10 &gt; 20 (void)
+== 3
+</code></pre>
+<p>That would be a bit weird, but, it does sort of parallel what happens when ELSE and THEN effectively vaporize themselves.</p>
+<p>As with most things on the edge of usefulness, I don't know about this... other than the situation of wanting to revoke the ELSE branch in SWITCH-D.  I'll keep an eye on it.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/void-branches-not-branches-that-evaluate-to-void/2176">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/void-branches-not-branches-that-evaluate-to-void/2176</link>
+          <pubDate>Thu, 28 Mar 2024 13:07:17 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2176</guid>
+          <source url="https://rebol.metaeducation.com/t/void-branches-not-branches-that-evaluate-to-void/2176.rss">VOID Branches (not branches that evaluate to void)</source>
+        </item>
+        <item>
+          <title>Differences Between ^x: and [^x]:</title>
+          <dc:creator><![CDATA[bradrn]]></dc:creator>
+          <category>Semantics</category>
+          <description><![CDATA[
+            <aside class="quote no-group" data-username="bradrn" data-post="6" data-topic="2147">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/bradrn/48/365_2.png" class="avatar"><a href="https://rebol.metaeducation.com/t/a-proliferation-of-word-s/2147/6">A proliferation of $#@^':~WORD~:s</a></div>
+<blockquote>
+<p>It still doesn’t explain why you can’t add sigils to things like THE-WORD!, though. I still maintain that that capability would be useful to have, considering that the various sigils have more or less orthogonal semantics. It also doesn’t address my second bullet point (that Ren-C has this elaborate structure but doesn’t seem to get much use out of it).</p>
+</blockquote>
+</aside>
+<p>If anything, I’m now leaning even more in the direction that combining sigils should be possible, because I can see obvious interpretations of those combinations. For instance, <code>^x:</code> could assign the meta of the following value to <code>x</code>. Or <code>@:x</code> could get the value of <code>:x</code>, then apply <code>@</code> to it. (Note that these should probably be unordered, as I mentioned earlier.) Of course, they’re useful in dialects too.</p>
+            <p><small>4 posts - 2 participants</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/differences-between-x-and-x/2460">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/differences-between-x-and-x/2460</link>
+          <pubDate>Thu, 15 Feb 2024 10:45:14 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2460</guid>
+          <source url="https://rebol.metaeducation.com/t/differences-between-x-and-x/2460.rss">Differences Between ^x: and [^x]:</source>
+        </item>
+        <item>
+          <title>MOLD/ONLY vs. MOLD SPREAD</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Semantics</category>
+          <description><![CDATA[
+            <p>Historically, the way you would ask to mold an array without its delimiters was with MOLD/ONLY:</p>
+<pre><code>rebol2&gt;&gt; mold [a b c]
+== "[a b c]"
+
+rebol2&gt;&gt; mold/only [a b c]
+== "a b c" 
+</code></pre>
+<p>In Ren-C this raises some existential questions, like how should quoted arrays be handled?</p>
+<pre><code>mold/only first [''(a b c) d e]  ; ???
+</code></pre>
+<p>But I think there's a better answer: <em>use SPREAD and splice isotopes</em>.  If you want to mold the contents of an array, then turning it into a splice seems the natural answer.  And since you can't have splices of quoted things...there's a nice unambiguous answer.</p>
+<pre><code>&gt;&gt; mold [a b c]
+== "[a b c]"
+
+&gt;&gt; mold spread [a b c]
+== "a b c"
+</code></pre>
+<p>It does raise the question of what to do if you have something that might be an array or might not.  How do you tell it to mold as is if it's not an array, or without the delimiters if it is?  That's what MOLD/ONLY did, after all:</p>
+<pre><code>rebol2&gt;&gt; mold/only [b l o c k]
+== "b l o c k"
+
+rebol2&gt;&gt; mold/only &lt;tag&gt;
+== "&lt;tag&gt;"
+</code></pre>
+<p><em>"SPREAD won't SPREAD tags..."</em> you say.  And no, it won't.  But I think this is a rare case... and the neat thing about putting the bit on the value (as opposed to a refinement) is you can make functions like SPREAD-OR-AS-IS.  Or SPREAD-IF-PATH-OR-GROUP.  You can really tweak this however you want.</p>
+<pre><code>&gt;&gt; mold spread-or-as-is &lt;tag&gt;
+== "&lt;tag&gt;"
+
+&gt;&gt; mold spread-or-as-is "[b l o c k]"
+== "b l o c k"
+
+&gt;&gt; spread-if-path-or-group 'p/a/t/h
+== ~(p a t h)~  ; isotope
+
+&gt;&gt; mold spread-if-path-or-group 'p/a/t/h
+== "p a t h"
+</code></pre>
+<p>How about THAT?  All of this hinges on the idea that MOLD doesn't generally know how to mold isotopes, as they have no representation.  It just chooses to interpret the request to mold a splice isotope as "contents matter, no delimiters".</p>
+<p>More control, more clarity, and the death of another /ONLY.  What more could you ask for?</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/mold-only-vs-mold-spread/2059">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/mold-only-vs-mold-spread/2059</link>
+          <pubDate>Sun, 22 Oct 2023 23:59:02 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2059</guid>
+          <source url="https://rebol.metaeducation.com/t/mold-only-vs-mold-spread/2059.rss">MOLD/ONLY vs. MOLD SPREAD</source>
+        </item>
+        <item>
+          <title>UNION, INTERSECT, DIFFERENCE...and Splices</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Semantics</category>
+          <description><![CDATA[
+            <p>There is a pattern that comes up a lot in Query which looks like this:</p>
+<pre><code>if not find qe.clause-list 'update [append qe.clause-list 'update]
+</code></pre>
+<p>You could use an operation like UNION here, but since UNION only works on arrays you'd have to put UPDATE in a block:</p>
+<pre><code>qe.clause-list: union qe.clause-list [update]
+</code></pre>
+<p>If the word to update with was in a variable (e.g. <strong>word: 'update</strong>), you couldn't do that block literally...so you'd need some blockifying function to do it:</p>
+<pre><code>qe.clause-list: union qe.clause-list compose [(word)]
+
+qe.clause-list: union qe.clause-list reduce [word]
+
+qe.clause-list: union qe.clause-list :[word]
+
+qe.clause-list: union qe.clause-list enblock word
+</code></pre>
+<h2><a name="p-6712-semantics-of-operating-on-arrays-1" class="anchor" href="https://rebol.metaeducation.com#p-6712-semantics-of-operating-on-arrays-1"></a>Semantics of Operating on Arrays</h2>
+<p>Historical Rebol would only accept BLOCK!s as the second argument to these operations.  I didn't see any reason not to generalize it, so I allowed GROUP!s as well:</p>
+<pre><code>&gt;&gt; intersect [a b c d] '(b c e)
+== [b c]
+
+&gt;&gt; intersect '(a b c d) [b c e]
+== (b c)
+</code></pre>
+<p>But there's a little bit of a question there about the result type.  Both arrays are taken account in terms of the elements, but only the first determines the type.  That's a little bit odd.</p>
+<p>Furthermore, what if you wanted to intersect an array as an item?  The following wouldn't give you what you intended:</p>
+<pre><code>item: [b]
+collection: [[a] [b] [c] [d]]
+
+collection: intersect collection item
+</code></pre>
+<p>You'd have to put the block into another block.  This is another one of those /ONLY style problems...</p>
+<h2><a name="p-6712-with-spread-we-can-do-this-better-2" class="anchor" href="https://rebol.metaeducation.com#p-6712-with-spread-we-can-do-this-better-2"></a>With SPREAD, we can do this better!</h2>
+<p>We can make it so that UNION and friends assume you mean just one item by default, and you need to SPREAD the second argument to get it considered itemwise:</p>
+<pre><code>&gt;&gt; union [a b c d] 'e
+== [a b c d e]
+
+&gt;&gt; union [[a] [b] [c] [d]] [e]
+== [[a] [b] [c] [d] [e]]
+
+&gt;&gt; union [[a] [b] [c] [d]] spread [e]
+== [[a] [b] [c] [d] e]
+</code></pre>
+<p>So this means the operation from Query could be a little more succinct:</p>
+<pre><code>if not find qe.clause-list 'update [append qe.clause-list 'update]
+=&gt;
+qe.clause-list: union qe.clause-list 'update
+</code></pre>
+<p>But more importantly, the as-is nature would avoid needing to jump through hoops for single-item operands:</p>
+<pre><code> word: update
+qe.clause-list: union qe.clause-list word
+</code></pre>
+<p>There are some questions about whether there is a guarantee of where the update would be added if it wasn't there... does it matter if it's added at the beginning or the end?</p>
+<p>This is not a new question for these operations... the blocks are being treated as sets, so theoretically multiple answers could be valid:</p>
+<pre><code>&gt;&gt; intersect [a b c d] spread [c b e]
+== [b c]
+
+ &gt;&gt; intersect [a b c d] spread [c b e]
+== [c b]  ; what promises this wouldn't be the answer?
+</code></pre>
+<p>I think it's likely beneficial to make some kind of promise here.</p>
+<h2><a name="p-6712-should-unionetc-mutate-by-default-3" class="anchor" href="https://rebol.metaeducation.com#p-6712-should-unionetc-mutate-by-default-3"></a>Should UNION/etc. mutate by default?</h2>
+<p>I point out that you'd have to write:</p>
+<pre><code>qe.clause-list: union qe.clause-list 'update
+</code></pre>
+<p>In the Rebol model, "modify by default" is how things like APPEND or REVERSE work.  That would suggest you could write:</p>
+<pre><code>union qe.clause-list 'update
+</code></pre>
+<p>And if you didn't want to modify qe.clause-list directly, you could copy it:</p>
+<pre><code>result: union copy qe.clause-list 'update
+</code></pre>
+<p>If the interface to these functions was changed to work with splices and treat everything else as-is by default, it seems like a good time to make this change for consistency.</p>
+            <p><small>2 posts - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/union-intersect-difference-and-splices/2058">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/union-intersect-difference-and-splices/2058</link>
+          <pubDate>Sun, 22 Oct 2023 06:06:42 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2058</guid>
+          <source url="https://rebol.metaeducation.com/t/union-intersect-difference-and-splices/2058.rss">UNION, INTERSECT, DIFFERENCE...and Splices</source>
+        </item>
+        <item>
+          <title>COMMA! and GROUP! Error Parity, e.g. (1 +) and 1,</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Semantics</category>
+          <description><![CDATA[
+            <p>I've mentioned the idea of "error parity" between comma and reaching the end of a group:</p>
+<aside class="quote no-group quote-modified" data-username="hostilefork" data-post="1" data-topic="1387">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"><a href="https://rebol.metaeducation.com/t/the-language-worlds-weirdest-comma-mechanic/1387/1">The Language World's Weirdest COMMA! Mechanic</a></div>
+<blockquote>
+<pre><code>&gt;&gt; all [1 +, 2 3 + 4]
+** Script Error: + is missing its value2 argument
+
+&gt;&gt; all [(1 +) 2 3 + 4]
+** Script Error: + is missing its value2 argument
+</code></pre>
+</blockquote>
+</aside>
+<p>Today we get this equivalence due to a number of complex flags and conditions, in particular BARRIER_HIT:</p>
+<pre><code>//=//// FEED_FLAG_BARRIER_HIT /////////////////////////////////////////////=//
+//
+// Evaluation of arguments can wind up seeing a comma and "consuming" it.
+// But the evaluation will advance the frame.  So if a function has more than
+// one argument it has to remember that one of its arguments saw a "barrier",
+// otherwise it would receive an end signal on an earlier argument yet then
+// get a later argument fulfilled.
+//
+#define FEED_FLAG_BARRIER_HIT \
+    FLAG_LEFT_BIT(3)
+</code></pre>
+<p>So what's going on is:</p>
+<ul>
+<li>
+<p>Explicit commas (as well as specially marked functions) put the evaluator into a BARRIER_HIT state.</p>
+</li>
+<li>
+<p>While in the barrier state, subsequent evaluations trying to gather arguments for the same function are rigged to act the same as end-of-block.</p>
+<ul>
+<li>
+<p>If a function's arguments don't tolerate <strong><code>&lt;end&gt;</code></strong> then this will give an error</p>
+</li>
+<li>
+<p>If it is tolerant of <code>&lt;end&gt;</code> then it will be able to call the function.</p>
+</li>
+</ul>
+</li>
+<li>
+<p>Starting the next fresh evaluation step clears the BARRIER_HIT state.</p>
+</li>
+</ul>
+<h2><a name="p-6650-an-early-weakness-noted-literal-arguments-1" class="anchor" href="https://rebol.metaeducation.com#p-6650-an-early-weakness-noted-literal-arguments-1"></a>An Early Weakness Noted: Literal Arguments</h2>
+<p>I quickly spotted the case of taking the next argument literally (remember that <strong>the x</strong> is just <strong>x</strong>):</p>
+<pre><code>the, 1 + 2
+; vs
+(the) 1 + 2
+</code></pre>
+<p>I wasn't sure of the value of protecting people from themselves here, vs. making COMMA! the one datatype you could not pass as quoted.  If it were to be prohibited, we could ask where the right place for the prohibition is:</p>
+<ol>
+<li>
+<p>In the evaluator guts, by simulating an <strong><code>&lt;end&gt;</code></strong> signal for this case</p>
+</li>
+<li>
+<p>Inside of THE, testing for <strong><code>if comma? arg [...]</code></strong> in the implementation</p>
+</li>
+<li>
+<p>In the type checking, via <strong><code>the: native [arg [(non-comma? element?)]]</code></strong></p>
+</li>
+</ol>
+<p>Today we could choose (1), which is what happens for evaluative parameters.  However we don't do this for quoted parameters...so today it is allowed:</p>
+<pre><code>; today's behavior
+&gt;&gt; the,
+== ,
+</code></pre>
+<p>Or it could be an error unless you say <strong>THE/COMMA</strong>, which would force use of (2).</p>
+<h2><a name="p-6650-but-would-simpler-be-better-2" class="anchor" href="https://rebol.metaeducation.com#p-6650-but-would-simpler-be-better-2"></a>But... Would Simpler Be Better?</h2>
+<p>The existing designs predate NIHIL (an isotopic empty pack).  One major aspect of nihil is that almost no functions will accept it as a parameter.</p>
+<p>So we might ask how different COMMA! needs to be from reaching a nihil state, e.g. a COMMENT?  Would this be sensible as being equivalent mechanics:</p>
+<pre><code>&gt;&gt; all [1 +, "hi" 2 3 + 4]
+** Script Error: + is missing its value2 argument
+
+&gt;&gt; all [1 + comment "hi" 2 3 + 4]
+** Script Error: + is missing its value2 argument
+</code></pre>
+<p>e.g. <strong>How bad would it be if the BARRIER_HIT mechanics went away, and we simply leveraged the idea that commas evaluated to nihil...and most functions refuse nihil arguments?</strong></p>
+<h2><a name="p-6650-downside-of-simplicity-behavior-in-pack-3" class="anchor" href="https://rebol.metaeducation.com#p-6650-downside-of-simplicity-behavior-in-pack-3"></a>Downside of Simplicity: Behavior in PACK!</h2>
+<p>I decided to test this idea of making COMMA! evaluate NIHIL just like a comment would.  But found trouble because I had code that was doing something like this:</p>
+<pre><code>[a b]: pack [1 + 2, 10 + 20]
+</code></pre>
+<p>It didn't work, because PACK was built on top of REDUCE-EACH with a ^META variable.  REDUCE-EACH performed three evaluation steps on the right hand side... the second evaluated the comma and got back a nihil (empty pack):</p>
+<pre><code>&gt;&gt; meta pack [1 + 2, 10 + 20]
+== ~['3 ~[]~ '30]~
+</code></pre>
+<p>The concept here is that if you use REDUCE-EACH with a ^META variable, you have to handle everything--that includes packs and errors.  This needs to be legal in order to do things like multi-returns with unstable isotopes (this is integral to UPARSE, for instance).</p>
+<p>So this means we <em>definitely</em> want this behavior:</p>
+<pre><code>&gt;&gt; meta pack [1 + 2 comment "hi" 10 + 20]
+== ~['3 ~[]~ '30]~
+</code></pre>
+<p><strong>This suggests either that you can't use commas in PACK, -or- that PACK needs to be proactive about skipping over the commas at source level.</strong>  So long as PACK is based on REDUCE-EACH, then that suggests REDUCE-EACH needs to be able to skip commas...because you wouldn't be able to distinguish the cases based on the NIHIL evaluation product alone.</p>
+<p>Something to notice about that idea is that if it's literally looking for commas, that means you can't make your own comma-like construct that acts like a barrier.</p>
+<h2><a name="p-6650-another-wrinkle-set-block-with-comma-on-right-4" class="anchor" href="https://rebol.metaeducation.com#p-6650-another-wrinkle-set-block-with-comma-on-right-4"></a>Another Wrinkle: SET-BLOCK! with Comma on Right</h2>
+<p>If you were to write something like this, it wouldn't give an error:</p>
+<pre><code>&gt;&gt; [/a /b]: ,
+== ~null~  ; isotope
+
+&gt;&gt; a
+== ~null~  ; isotope
+
+&gt;&gt; b
+== ~null~  ; isotope
+</code></pre>
+<p>This is because the slashes indicate the results are optional, e.g. a shorter pack is accepted.  If COMMA!'s stopping power in the main evaluator comes only from the idea that it evaluates to an empty pack, it won't complain at the lack of a meaningful expression to its right.</p>
+<p>Things like META which can accept empty packs would also not trigger an error:</p>
+<pre><code>&gt;&gt; meta,
+== ~[]~
+</code></pre>
+<p>These don't offhand seem that bad, and maybe could even be seen as good if you look at it from a certain point of view.  But it does show that the "stopping power" of commas isn't bullteproof.</p>
+<h2><a name="p-6650-what-about-thenelseetc-5" class="anchor" href="https://rebol.metaeducation.com#p-6650-what-about-thenelseetc-5"></a>What About THEN/ELSE/etc. ?</h2>
+<p>THEN and ELSE are infix and treat their left hand side evaluatively:</p>
+<pre><code>(1 + 2, then [print "what happens here?"])
+</code></pre>
+<p>This would wind up acting the same as:</p>
+<pre><code>(1 + 2 comment "hi" then [print "what happens here?"])
+</code></pre>
+<p>It needs to be an error...and it currently is.  The error arises because THEN and ELSE refuse to operate on nihil.  But at the moment this is a distinct case from not having a left hand argument at all.</p>
+<pre><code>(then [print "what happens here?"])
+</code></pre>
+<p>Today, there are mechanics that make the left hand side look like an <code>&lt;end&gt;</code> condition...which falls under the complexity of BARRIER_HIT.</p>
+<h2><a name="p-6650-alternative-evaluator-skips-over-comma-when-possible-6" class="anchor" href="https://rebol.metaeducation.com#p-6650-alternative-evaluator-skips-over-comma-when-possible-6"></a>Alternative: Evaluator Skips Over COMMA! When Possible</h2>
+<p>This would mean if you wrote something like:</p>
+<pre><code>&gt;&gt; do/next [, , , 1 + 2, , 10 + 20] 'pos
+== 3
+
+&gt;&gt; pos
+== [, , 10 + 20]  ; or possibly just [10 + 20] if it skipped trailing commas
+</code></pre>
+<p><em>I think this is how things worked long ago before the BARRIER_HIT flag was introduced.</em>  The concept was that a literal barrier (was <strong><code>|</code></strong>, now <strong><code>,</code></strong>) would be greedily consumed in interstitial evaluations, but raise errors otherwise.</p>
+<p>This way, a COMMA! could just stay un-consumed by the evaluator.  Function calls gathering their argument would look ahead and say "hey is there <em>either</em> an end of block or a COMMA!" and if so, not run an evaluation and report an <code>&lt;end&gt;</code> condition.  This could be reported for arbitrarily many arguments...and so long as they were endable you would receive that condition.  In other words: the BARRIER_HIT flag was conveyed merely by a lagging comma that would stick around.</p>
+<p><em>This feels very regressive, because every stepwise evaluating function inherits this complexity.</em>  The nice consequence of saying that COMMA! just evaluates to NIHIL is that it triggers the same handling you would use for COMMENT-like functions.</p>
+<h2><a name="p-6650-on-balance-i-think-the-barrier_hit-flag-has-to-die-7" class="anchor" href="https://rebol.metaeducation.com#p-6650-on-balance-i-think-the-barrier_hit-flag-has-to-die-7"></a>On Balance, I Think the BARRIER_HIT Flag Has To Die</h2>
+<p><strong>I'm bullish on COMMA! as a great addition to the language.</strong>  But the various hoops that are jumped through to try and make it mimic the end of a block seem like a bridge too far.</p>
+<p>To me, having commas vaporize is neat tech... and the idea is that if you handle things like COMMENT and ELIDE you get the comma handling for free.  This seems quite elegant to me.</p>
+<p>Maybe functions like REDUCE-EACH need a refinement that lets you detect commas differently:</p>
+<pre><code>&gt;&gt; reduce-each x [1 + 2, (elide print "Hi!") 10 + 20] [probe x]
+3
+Hi!
+30
+== 30
+
+&gt;&gt; reduce-each ^x [1 + 2, (elide print "Hi!") 10 + 20] [probe x]
+'3
+Hi!  ; skipped over comma, by default
+~[]~
+'30
+== '30
+
+&gt;&gt; reduce-each/comma ^x [1 + 2, (elide print "Hi!") 10 + 20] [probe x]
+'3
+~,~  ; isotope
+Hi!
+~[]~
+'30
+== '30
+</code></pre>
+<p>Here I fancifully suggest giving back an isotopic comma to draw attention to it.  Since all other values come back meta'd, this doesn't conflate with any "real" evaluative result.  e.g. <strong><code>[~,~, ~,~]</code></strong> could distinguish "real isotopic commas" from source-level commas that REDUCE-EACH is offering to tell you about.</p>
+<p>That requires commas to be stable isotopes.  But one could also not worry about the conflation, and reduce to an unstable isotope:</p>
+<pre><code>&gt;&gt; ,
+== ~,~  ; isotope
+</code></pre>
+<p>Then instead of people directly testing for NIHIL? most people could test for NOTHING? or VAPOR? which meant either nihil or isotopic comma.  :-/</p>
+<p>Some crazy ideas here, but I think on balance that trying to make commas "bulletproof" leads to more confusion and problems than just making them do whatever comments do, with meta-REDUCE-EACH skipping them by default.</p>
+<h2><a name="p-6650-this-means-killing-off-user-defined-expression-barriers-8" class="anchor" href="https://rebol.metaeducation.com#p-6650-this-means-killing-off-user-defined-expression-barriers-8"></a>This Means Killing Off User-Defined Expression Barriers</h2>
+<p>Paring it down such that NIHIL results are "mean" enough to stop evaluations for all practical purposes, the special flag for letting functions cause the BARRIER_HIT flag can be dropped too.  This was made available via the TWEAK function:</p>
+<pre><code>//=//// DETAILS_FLAG_IS_BARRIER ///////////////////////////////////////////=//
+//
+// Special action property set with TWEAK.  Used by |
+//
+// The "expression barrier" was once a built-in type (BAR!) in order to get
+// a property not possible to achieve with functions...that it would error
+// if it was used during FULFILL_ARG and would be transparent in evaluation.
+//
+// Transparency was eventually generalized as "invisibility".  But attempts
+// to intuit the barrier-ness from another property (e.g. "infix but no args")
+// were confusing.  It seems an orthogonal feature in its own right, so it
+// was added to the TWEAK list pending a notation in function specs.
+//
+#define DETAILS_FLAG_IS_BARRIER \
+    SERIES_FLAG_25
+</code></pre>
+<p><strong>I don't feel any particular qualm about losing this feature, because I've never really used it.</strong></p>
+<p>And under the new concept, you get "barriery-enough" just by evaluating to NIHIL.  You're no better or worse than COMMA!</p>
+<p><em>(Actually that's not quite true, because currently COMMA! doesn't do lookahead, so it can't serve as the left hand side of an infix function that doesn't quote the left hand side.  But WORD! does do lookahead.  If we wanted to go for full parity, we'd allow the lookahead for evaluative commas...but making comma worse just to give it parity with a WORD! doesn't seem too smart.  If we decided that COMMA! was actually a WORD! that was a synonym for NIHIL and just rendered funny, then it might make sense... but that would wreck other things--like the PACK exception for commas.)</em></p>
+            <p><small>2 posts - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/comma-and-group-error-parity-e-g-1-and-1/2212">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/comma-and-group-error-parity-e-g-1-and-1/2212</link>
+          <pubDate>Mon, 24 Jul 2023 04:47:32 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2212</guid>
+          <source url="https://rebol.metaeducation.com/t/comma-and-group-error-parity-e-g-1-and-1/2212.rss">COMMA! and GROUP! Error Parity, e.g. (1 +) and 1,</source>
+        </item>
+        <item>
+          <title>Correct Formulation of ME and MY</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Semantics</category>
+          <description><![CDATA[
+            <p>The ME function is used with infix to allow you to avoid repeating the name of a variable:</p>
+<pre><code>&gt;&gt; variable: 10
+
+&gt;&gt; variable: me + 1
+== 11
+
+&gt;&gt; variable
+== 11
+</code></pre>
+<p>So that's the same as if you'd written <strong>variable: variable + 1</strong>.</p>
+<p>There's an analogous operation for non-infix functions called MY.</p>
+<pre><code>&gt;&gt; block: [a b c]
+
+&gt;&gt; block: my next
+== [b c]
+
+&gt;&gt; block
+== [b c]
+</code></pre>
+<p>So the same if you had written <strong>block: next block</strong>.</p>
+<h2><a name="p-6586-here-is-the-naive-macro-implementation-of-me-1" class="anchor" href="https://rebol.metaeducation.com#p-6586-here-is-the-naive-macro-implementation-of-me-1"></a>Here Is The "Naive" Macro Implementation of ME</h2>
+<pre><code>me: infixed macro [
+    'left [set-word! set-tuple!]
+    'right [word! tuple! path!]
+][
+    reduce [left, plain left, right]
+]
+</code></pre>
+<p>So the macro is looking for a SET-WORD! or SET-TUPLE! on the left, and then something indicating the action to run on the right.  It replaces the whole sequence with what was on the left, then a plain WORD! or TUPLE! version of what was on the left, and then what's on the right.</p>
+<p>MY is done similarly, just with <strong>reduce [left, right, plain left]</strong> to put the repeated term after the call.</p>
+<p>This is naive for two reasons:</p>
+<ul>
+<li>
+<p>It doesn't check that what the RIGHT parameter looks up to is an action</p>
+</li>
+<li>
+<p>If the SET-TUPLE! in LEFT has a GROUP! in it, then it will be executed twice.</p>
+</li>
+</ul>
+<h2><a name="p-6586-here-is-a-non-naive-implementation-of-me-2" class="anchor" href="https://rebol.metaeducation.com#p-6586-here-is-a-non-naive-implementation-of-me-2"></a>Here is A "Non-Naive" Implementation of ME</h2>
+<pre><code>macro [
+    'left [set-word! set-tuple!]
+    'right [word! tuple! path!]
+    &lt;local&gt; value
+][
+    [left value]: resolve left  ; avoid double-evaluation
+    :['set left meta value ensure action! get right]
+]
+</code></pre>
+<p>The RESOLVE function is used to turn a TUPLE! or PATH! with groups in it into an inert representation:</p>
+<pre><code> &gt;&gt; blk: [a b [c d]]
+
+ &gt;&gt; resolve 'blk.(print "hi", 1 + 2).2
+ hi
+ == @[blk 3 2]
+</code></pre>
+<p>GET and SET accept these blocks as an alternative to words/tuples to be used to describe what to set or get.</p>
+<p>It has to use a BLOCK! representation because not all things can be represented in paths that can be used with picking (note this implies you cannot pick with isotopes, otherwise not all blocks would be resolvable).</p>
+<p>So long as RESOLVE is walking the path, you can ask it to give you back the value of what's there.</p>
+<h2><a name="p-6586-but-the-non-naive-version-triggers-a-binding-bug-3" class="anchor" href="https://rebol.metaeducation.com#p-6586-but-the-non-naive-version-triggers-a-binding-bug-3"></a>But the non-naive version triggers a binding bug...</h2>
+<p>It's also rather slow.  In trying to prioritize, it may be better to just document the right answer, as I've done here... :-/</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/correct-formulation-of-me-and-my/2020">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/correct-formulation-of-me-and-my/2020</link>
+          <pubDate>Fri, 03 Mar 2023 21:23:09 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2020</guid>
+          <source url="https://rebol.metaeducation.com/t/correct-formulation-of-me-and-my/2020.rss">Correct Formulation of ME and MY</source>
+        </item>
+        <item>
+          <title>Picking ACTION!s from BLOCK!s In The Age of Isotopes</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Semantics</category>
+          <description><![CDATA[
+            <p>In <strong><a href="https://rebol.metaeducation.com/t/reds-design-issues-wiki/1282">Red's Design Questions wiki</a></strong>, they bring up the issue of why picking functions out of blocks runs them:</p>
+<pre><code>red&gt;&gt; block: reduce [does [print "Evaluated."]]
+  == [func [][print "Evaluated."]]
+
+red&gt;&gt; equal? block/1 first block
+Evaluated.  ; d'oh
+== false
+</code></pre>
+<p><a href="https://gitter.im/red/red?at=5c782ca0c1cab53d6f53dd6d">In the Gitter conversation</a>, <span class="mention">@hiiamboris</span> calls it a "shady area" that they can't get out of "under the current semantic model".  He suggests it is clear that <strong><code>block/1</code></strong> should not run an action, but possible that <strong>block/word</strong> would mean to.</p>
+<p>They contemplate the idea that <strong>block/1</strong> would not run the action, but pick it:</p>
+<pre><code>red&gt;&gt; block: reduce [does [print "Evaluated."]]
+  == [func [][print "Evaluated."]]
+
+red&gt;&gt; equal? block/1 first block  ; hypothetical behavior
+== false
+</code></pre>
+<p><strong>I will argue this doesn't really help you much, the problem just becomes one step removed.</strong>  Quite often people are picking things out of blocks to put them in variables, and you'll just get bit there instead:</p>
+<pre><code>red&gt;&gt; otherblock: copy []
+== []
+
+red&gt;&gt; temp: block/1
+== func [][print "Evaluated."]
+
+red&gt;&gt; append otherblock temp
+Evaluated.  ; d'oh
+== [unset]  ; double d'oh
+</code></pre>
+<h2><a name="p-6543-isotopes-bring-the-better-semantic-model-1" class="anchor" href="https://rebol.metaeducation.com#p-6543-isotopes-bring-the-better-semantic-model-1"></a>Isotopes Bring The Better Semantic Model!</h2>
+<p>In Ren-C's concept (as I'm working on it), the only actions that will run from a word reference are those that are antiforms (antiform of FRAME!).  And FUNC or DOES create antiform actions.</p>
+<p>So you would be stopped from making an illegal block up front:</p>
+<pre><code>&gt;&gt; block: reduce [does [print "Evaluated."]]
+** Script Error: Invalid use of action! antiform
+</code></pre>
+<p>You can put quasi-FRAME!s, plain FRAME!s, and quoted FRAME! in blocks.  Just not antiform ones.</p>
+<p>Whichever you choose, the equality test will work... and picking out a value into a variable will give you an inert variable to work with, that can be used with things like append!</p>
+<pre><code>&gt;&gt; block: reduce [reify does [print "Evaluated."]] 
+== [~&amp;[frame! []]~]
+
+&gt;&gt; equal? block.1 first block
+== \~okay~\  ; antiform  &lt;-- didn't run and print "Evaluated", yay!
+
+&gt;&gt; otherblock: copy []
+== []
+
+&gt;&gt; temp: block.1
+== ~&amp;[frame! []]~
+
+&gt;&gt; append otherblock temp
+== [~&amp;[frame! []]~]   ; &lt;-- didn't run and gave sensible block out
+</code></pre>
+<p>I used REIFY there and got a quasi-frame.  BUT which would you rather put in the block: a quasi-action or a plain one?  This depends on what you plan to do with the block.  A plain action will execute when encountered by the evaluator, while a quasi-action will evaluate to an isotopic action--suitable for assigning via SET-WORD! when you meant to make that word dispatch the function when referenced.</p>
+<p>My leaning is to say that either form can be used with APPLY, RUN, or the terminal path form:</p>
+<pre><code>&gt;&gt; block: reduce [reify does [print "Evaluated."]] 
+== [~&amp;[frame! []]~]
+
+&gt;&gt; run block.1
+Evaluated.
+
+&gt;&gt; block: reduce [lift:lite does [print "Evaluated."]] 
+== [&amp;[frame! []]]
+
+&gt;&gt; apply block.1 []
+Evaluated.
+</code></pre>
+<p><em>(See post on <a href="https://rebol.metaeducation.com/t/reify-vs-meta-vs-something/2001">difference between REIFY and LIFT</a>, and the search for a better term...)</em></p>
+<p>If you want to pick an action out of a block and put it into a variable, where it will execute from that variable, there is the RUNS transformer.  It will turn a quasi or plain FRAME! into an FRAME! antiform...</p>
+<pre><code> &gt;&gt; active-var: runs block.1
+ == \~&amp;[frame! {active-var} []]~\  ; antiform  &lt;-- also cached name, neat!
+
+ &gt;&gt; active-var
+ Evaluated.
+</code></pre>
+<p><img src="https://rebol.metaeducation.com/images/emoji/twitter/clap.png?v=14" title=":clap:" class="emoji only-emoji" alt=":clap:" loading="lazy" width="20" height="20"></p>
+<p>You can use UNLIFT more generically to get an antiform back from any quasiform (not just actions), or ANTI to get an antiform from a plain form.</p>
+<h2><a name="p-6543-the-invariant-is-what-counts-here-2" class="anchor" href="https://rebol.metaeducation.com#p-6543-the-invariant-is-what-counts-here-2"></a>The Invariant Is What Counts, Here!</h2>
+<p>The mountain that has been climbed is that we can now say that for any block, this is true:</p>
+<pre><code>block2: collect [
+    for-each item block1 [keep item]
+]
+
+assert [equal? block1 block2]
+</code></pre>
+<ul>
+<li>
+<p>I've just covered that there are no antiform actions to implicitly execute; you'd get an error trying to put them in the block.</p>
+</li>
+<li>
+<p>There are no blocks/groups/paths that will splice into the target, because splicing requires an explicit conversion to an antiform.</p>
+</li>
+<li>
+<p>There are no "unsets" to trip on that you can find in a block, because the state conveying "unsetness" (trash!) is an antiform.</p>
+</li>
+</ul>
+<p>Of course with objects, it's going to be a different story.  I think we'll still want some safeguards:</p>
+<pre><code>for-each [key value] object [...]  ; will error when value is action
+
+for-each [key ^value] object [...]  ; will give a lifted value
+</code></pre>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/picking-action-s-from-block-s-in-the-age-of-isotopes/2002">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/picking-action-s-from-block-s-in-the-age-of-isotopes/2002</link>
+          <pubDate>Fri, 06 Jan 2023 03:16:23 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2002</guid>
+          <source url="https://rebol.metaeducation.com/t/picking-action-s-from-block-s-in-the-age-of-isotopes/2002.rss">Picking ACTION!s from BLOCK!s In The Age of Isotopes</source>
+        </item>
+        <item>
+          <title>SPLIT Semantics</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Semantics</category>
+          <description><![CDATA[
+            <p><a href="https://gitter.im/red/red?at=63523097f00b697fec501c7a">On Red Gitter</a>, it was discussed "which of the following is 'correct'":</p>
+<pre><code>Red&gt; split "" ","
+== [""]
+
+R3&gt; split "" ","
+== []
+</code></pre>
+<p>Rebolek thinks R3 is right.  Boris says:</p>
+<blockquote>
+<p>I don't think there's a correct answer, just choices. I prefer the Red version because:<br>
+it strictly follows the rule: `number-of-segments = 1 + number-of-delimiters", no exceptions, so it's easier to reason about</p>
+<p>it should be able thus to preserve the type in case one wants to rejoin it later (that it doesn't is a bug, try split %"" ",")</p>
+</blockquote>
+<p>So there's a couple of ways to look at it.</p>
+<p>But I have a philosophy about these things where I want edge cases to be "noisy", because usually they require special handling.  I might even say:</p>
+<pre><code>&gt;&gt; split "" ","
+== ~null~  ; isotope
+</code></pre>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/split-semantics/1998">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/split-semantics/1998</link>
+          <pubDate>Thu, 22 Dec 2022 04:04:52 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-1998</guid>
+          <source url="https://rebol.metaeducation.com/t/split-semantics/1998.rss">SPLIT Semantics</source>
+        </item>
+  </channel>
+</rss>

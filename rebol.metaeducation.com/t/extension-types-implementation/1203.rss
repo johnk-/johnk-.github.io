@@ -1,0 +1,130 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>&quot;Extension Types&quot; Implementation</title>
+    <link>https://rebol.metaeducation.com/t/extension-types-implementation/1203</link>
+    <description>Where could I find the discussion about new implementation of user defined datatypes ?</description>
+    
+    <lastBuildDate>Fri, 18 Jul 2025 03:56:23 +0000</lastBuildDate>
+    <category>Datatypes</category>
+    <atom:link href="https://rebol.metaeducation.com/t/extension-types-implementation/1203.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>&quot;Extension Types&quot; Implementation</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="2" data-topic="1203">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>Of this byte, only 64 of the states are used in R3-Alpha--and I believe Red. This was chosen instead of 256 in order to limit the number of kinds that need to be handled in a TYPESET! to 64 bits...making typesets small enough to fit in the rest of the cell. <strong><a href="https://rebol.metaeducation.com/t/further-optimizations-of-breaking-the-64-type-barrier/2369">Ren-C has broken this barrier to something nearer to 256 fundamental types (plus builtin typesets)</a></strong>, but that's just for a finite number of built in things..</p>
+</blockquote>
+</aside>
+<p>Thought I'd mention that this has been jostled, to where now 2 bits of the byte that had previously been allocated to just the "heart" are now taken by the SIGIL (either none, <a href="https://rebol.metaeducation.com/t/new-names-for-foo-foo-and-foo/2447">TIE PIN, or META</a>).</p>
+<p>That pushes back to just 64 possibilites for the heart... minus one for TYPE_0 as the "custom/extension" type.</p>
+<p><strong>BUT...</strong> it's not as much of a constraint to have 63 fundamental types as it once was!  Obviously, the TYPE_0 affords arbitrarily many more types...with the drawback being that those types have to sacrifice one of their 3 non-header cell slots for their "actual" type information (the ExtraHeart, called so because it's a pointer resident in the Cell's "extra" slot).</p>
+<p>Yet also, because the types do a lot more heavy lifting.  CHAIN! takes care of not just <strong>a:b:c</strong> but also <strong>a:</strong> and <strong>:b</strong> and <strong>a/b:</strong> etc.  And since <code>^foo</code> and friends are handled by a sigil on the word, there's no longer a need for META-WORD! as one of the 63 fundamental types... it's just a sigil on a WORD!.</p>
+<p>So in fact, only 33 fundamental types are used right now... leaving 30 more available.</p>
+          <p><a href="https://rebol.metaeducation.com/t/extension-types-implementation/1203/6">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/extension-types-implementation/1203/6</link>
+        <pubDate>Fri, 18 Jul 2025 03:56:23 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1203-6</guid>
+        <source url="https://rebol.metaeducation.com/t/extension-types-implementation/1203.rss">&quot;Extension Types&quot; Implementation</source>
+      </item>
+      <item>
+        <title>&quot;Extension Types&quot; Implementation</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>Due to the type system being a mess and needing rethinking, I had taken all of the extension type implementations (IMAGE!, GOB!, STRUCT! etc.) out of the main repository and moved them into their own GitHub projects.</p>
+<p><em>(I'd wanted to do that anyway--because I wanted separate issue trackers for each extension, distinct from the core.)</em></p>
+<p>Then I ripped out the first attempt at extension types because it was very messy.</p>
+<p>But now we have a big advancement, in terms of a unified model of <a href="https://rebol.metaeducation.com/t/further-optimizations-of-breaking-the-64-type-barrier/2369">Generic Dispatch</a> which uses the same methodology to dispatch things like COMPARE, MAKE, MOLD, and everything else.  This uniformity makes it easier to make an extension type conform to the interface, because there's only one interface to conform to.</p>
+<p>So I'm starting to return to putting the implementation in.</p>
+<aside class="quote no-group" data-username="hostilefork" data-post="2" data-topic="1203">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>So "extension types" are a primordial implementation of a strategy to reserve <em>one</em> heart byte to mean "this cell gives up one of its three non-header platform-pointer-units to be a heap pointer to information about its type and its behaviors".</p>
+</blockquote>
+</aside>
+<p>One thing I'm doing differently this time is I'm making a special choice of the HEART_BYTE() value to indicate custom types.</p>
+<p><strong>I'm using zero.</strong></p>
+<p>Why is it important to use zero?  Well, because I have a C++ class for encoding optionality, like <code>std::optional</code> (or Rust's <code>Option</code>, or Haskell's <code>Maybe</code>).  This class protects you at compile-time from trying to pass optional things to places that expect the thing to be there.</p>
+<p>But in order to compile to C, the state used has to be C's idea of "falsey" when not under the C++ rules.  That means null pointers or 0 values.</p>
+<p>It's hard to stress how important it is when dealing with a feature like this to get good solid checking on when you are dealing with an extension type and when you aren't.  You also need protections, like a protection against comparison:</p>
+<pre><code>if (Type_Of(cell1) == Type_Of(cell2))
+    return "They're equal types!";  // ...OR NOT, if distinct extension types!
+</code></pre>
+<p>When you are comparing two bytes and one of the bytes encodes "it's custom, and you have to look elsewhere in the cell for the specific extension type", then you need to stop that kind of code from being written at compile-time.  C++ can do this by deleting the overload when optional types try to compare:</p>
+<pre><code>#if CHECK_OPTIONAL_TYPEMACRO
+    bool operator==(Option(Type)&amp; a, Option(Type)&amp; b) = delete;
+    bool operator!=(Option(Type)&amp; a, Option(Type)&amp; b) = delete;
+#endif
+</code></pre>
+<p>So what's neat is that in the C build, Option(Type) is a macro that just turns into Type.  And you can test it for falseyness, with the code working just the same...without the compile-time checks.</p>
+<p>It might sound like a small thing to change the byte to be 0 for extension types, but it makes a tremendous difference for problems that I was seeing in the code when it was a TYPE_CUSTOM that you had to remember to check for.  This gives a big leg up.</p>
+<p>Anyway, while the IMAGE! and VECTOR! and FFI! code are all fairly messy and outdated at this point, it would be nice to bring them back into the fold just to show that the system <em>can</em> be extended.  So I'm working with IMAGE! at the moment as a first extension type to bring back.</p>
+          <p><a href="https://rebol.metaeducation.com/t/extension-types-implementation/1203/5">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/extension-types-implementation/1203/5</link>
+        <pubDate>Wed, 26 Mar 2025 16:25:20 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1203-5</guid>
+        <source url="https://rebol.metaeducation.com/t/extension-types-implementation/1203.rss">&quot;Extension Types&quot; Implementation</source>
+      </item>
+      <item>
+        <title>&quot;Extension Types&quot; Implementation</title>
+        <dc:creator><![CDATA[GiuseppeChillemi]]></dc:creator>
+        <description><![CDATA[
+            <p>I have not logged in sice last year but I have been here reading the progresses without logging in. This has caused me to not read your reply. I'll read it during this week, thanks.</p>
+          <p><a href="https://rebol.metaeducation.com/t/extension-types-implementation/1203/3">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/extension-types-implementation/1203/3</link>
+        <pubDate>Sun, 03 Mar 2024 15:07:16 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1203-3</guid>
+        <source url="https://rebol.metaeducation.com/t/extension-types-implementation/1203.rss">&quot;Extension Types&quot; Implementation</source>
+      </item>
+      <item>
+        <title>&quot;Extension Types&quot; Implementation</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>The new thing that has come on the scene isn't what I'd really call "user defined datatypes" as much as "extension defined datatypes".  It's for C programmers to implement types like IMAGE! or GOB! with a DLL or statically linked module...without those being built in a-priori.</p>
+<p>The feature's goal was to get past a historical property that limited Rebol to 64 built-in datatypes, which had to be named in the core interpreter and could not be changed or extended.  Ren-C wanted to be much more modular...to avoid carrying the weight of things like GOB! to the JavaScript build (or a redundant IMAGE! datatype that was handled by a browser's canvas.)  Then the web build could choose its own extension types, perhaps some kind of JAVASCRIPT-OBJECT! proxy or a CANVAS!, etc.</p>
+<p>This was needed during the breaking the project up into independently selectable extensions--of which there are now 31.  See <a href="https://github.com/metaeducation/ren-c/blob/master/extensions/README.md">the README.md</a> for a few notes:</p>
+<p><a href="https://github.com/metaeducation/ren-c/tree/master/extensions">https://github.com/metaeducation/ren-c/tree/master/extensions</a></p>
+<p><em>(At this time, the web build uses only <strong>JavaScript</strong>, <strong>Console</strong>, and <strong>Debugger</strong>.)</em></p>
+<h1><a name="p-3496-implementation-details-1" class="anchor" href="https://rebol.metaeducation.com#p-3496-implementation-details-1"></a>Implementation Details</h1>
+<p>A "value cell" in Rebol and Red are four platform pointers in size.  Of these, the first platform pointer slot is used as bits for a "header".  How the other three pointers are interpreted depends on a byte in that header...which was called the VAL_TYPE() in R3-Alpha (though Ren-C calls this the "cell <em>heart</em>").</p>
+<p>Of this byte, only 64 of the states are used in R3-Alpha--and I believe Red.  This was chosen instead of 256 in order to limit the number of kinds that need to be handled in a TYPESET! to 64 bits...making typesets small enough to fit in the rest of the cell.  <strong><a href="https://rebol.metaeducation.com/t/further-optimizations-of-breaking-the-64-type-barrier/2369">Ren-C has broken this barrier to something nearer to 256 fundamental types (plus builtin typesets)</a></strong>, but that's just for a finite number of built in things..</p>
+<p>So "extension types" are a primordial implementation of a strategy to reserve <em>one</em> heart byte to mean "this cell gives up one of its three non-header platform-pointer-units to be a heap pointer to information about its type and its behaviors".  That allows an arbitrary number of these to be added.  They can't pack quite as much data into their cells as the built-in types, since they only have two pointers instead of three to work with.  But given that you can always point to some allocated data (and usually need to), it's not a big problem.</p>
+<h2><a name="p-3496-open-questions-2" class="anchor" href="https://rebol.metaeducation.com#p-3496-open-questions-2"></a>Open Questions</h2>
+<p>How datatypes will participate in a naming ecology is not known.  Right now the theory is that they register via a URL!.  That is to say that <strong>type of foo</strong> could come back as something including <code>http://example.com/types/matrix</code>.  While that's a bit drawn out, one idea that came up in error IDs was that there might be a form of comparison function that lets you get as specific as you want about that... e.g.</p>
+<pre><code>&gt;&gt; /matrix submatches http://example.com/types/matrix
+== #[true]
+
+&gt;&gt; /types/matrix submatches http://example.com/types/matrix
+== #[true]
+</code></pre>
+<p>There's still plenty still to worry about.  But the first tier goal of being able to build variants of Rebol without GOB! or IMAGE! or VECTOR! or STRUCT! (or mentioning them in built-in type table), while still keeping all those features working has been achieved.</p>
+          <p><a href="https://rebol.metaeducation.com/t/extension-types-implementation/1203/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/extension-types-implementation/1203/2</link>
+        <pubDate>Sat, 07 Sep 2019 14:55:44 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1203-2</guid>
+        <source url="https://rebol.metaeducation.com/t/extension-types-implementation/1203.rss">&quot;Extension Types&quot; Implementation</source>
+      </item>
+      <item>
+        <title>&quot;Extension Types&quot; Implementation</title>
+        <dc:creator><![CDATA[GiuseppeChillemi]]></dc:creator>
+        <description><![CDATA[
+            <p>Where could I find the discussion about new implementation of user defined datatypes ?</p>
+          <p><a href="https://rebol.metaeducation.com/t/extension-types-implementation/1203/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/extension-types-implementation/1203/1</link>
+        <pubDate>Sat, 07 Sep 2019 09:58:39 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1203-1</guid>
+        <source url="https://rebol.metaeducation.com/t/extension-types-implementation/1203.rss">&quot;Extension Types&quot; Implementation</source>
+      </item>
+  </channel>
+</rss>

@@ -1,0 +1,218 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>PERHAPS We Need a Shorthand for `inline (opt rule)` ?</title>
+    <link>https://rebol.metaeducation.com/t/perhaps-we-need-a-shorthand-for-inline-opt-rule/2023</link>
+    <description>Today, rules that look up to NULL will PANIC in parse--right at the moment of fetching the word:
+
+    &gt;&gt; prefix: null, suffix: &quot;)&quot;
+
+    &gt;&gt; parse &quot;aaa)&quot; [prefix, some &quot;a&quot;, suffix]
+    ** PANIC: (prefix is null, and we raise errors for that in parse)
+
+If we didn&#39;t panic, there would really only be two other options:
+
+1. Make **`null`** always succeed, keeping the parse position where it is (synonym for **`[]`**)
+
+2. Make **`null`** always be an unsuccessful combinator match, but not cause a failure (synonym for **`VETO`**)
+
+The behavior I&#39;m looking for in this post is optionality, which would correspond to the &quot;always succeed&quot; behavior.  (e.g. if there is no prefix, so I want to skip worrying about matching it).  I feel it is pretty obvious that should not be the default behavior for encountering a null variable.
+
+(If null variables did anything other than error, they should probably do (2) and not match... but I don&#39;t think that&#39;s very wise compared with panic&#39;ing.)
+
+## How To Get Optionality Today: **`inline (opt rule)`**
+
+INLINE will take the synthesized product of the following rule (usually a GROUP!) and use it like a rule--as if it had been COMPOSE&#39;d into the stream of operations.
+
+If you inline a NULL, that&#39;s presumed to be an accident so it panics.  But if you inline a VOID, that is considered a no-op, so it does nothing.  Hence if you OPT a NULL to get a VOID and inline that, it will succeed with no effect:
+
+    &gt;&gt; prefix: null, suffix: &quot;)&quot;
+
+    &gt;&gt; parse &quot;aaa)&quot; [inline (opt prefix), some &quot;a&quot;, inline (opt suffix)]
+    == &quot;)&quot;
+
+This works, but one can wonder about a combinator which was more succinct to accomplish the same thing, without the parentheses and without the OPT.
+
+Since we don&#39;t have a name for it, let&#39;s call it PERHAPS for a moment:
+
+    &gt;&gt; prefix: null, suffix: &quot;)&quot;
+
+    &gt;&gt; parse &quot;aaa)&quot; [perhaps prefix, some &quot;a&quot;, perhaps suffix]
+    == &quot;)&quot;
+
+It seems like a close parallel to OPT in the evaluative world, where NULL is turned into VOID with other things passed thru...
+
+...but PARSE&#39;s OPT is entrenched as being about optionality of a rule that exists matching... not optionality of the rule itself.  So this is a fundamentally different intent.
+
+## Trickery Needed To &quot;COMBINATE&quot; NULL
+
+Unless quoting is involved, the combinator that would be getting the NULL from a word lookup initially would be the WORD! combinator.
+
+So when a parser gets produced from a WORD! combinator, when that parser is called by another combinated parser it will PANIC.  It can&#39;t return an ERROR!, because that would just be interpreted as a rule that didn&#39;t match.
+
+So the only way I can see a null-tolerant PERHAPS fitting in would be that it would have to quote its argument, so the WORD! combinator didn&#39;t get involved.  It would then do the WORD! fetch itself, turning into a failing combinator if it fetched null.
+
+That may seem to work, but...
+
+## Compositional Problems With PERHAPS
+
+Let&#39;s say you wanted this:
+
+ *&quot;if there&#39;s a prefix, match some non-zero number of instances, but if prefix is null then don&#39;t worry about matching&quot;*:
+
+INLINE can do it:
+
+    &gt;&gt; parse &quot;aaa)))&quot; [
+           inline (when prefix &#39;[some prefix])  ; when is IF, but VOID if no branch
+           some &quot;a&quot;
+           inline (when suffix &#39;[some suffix])
+       ]
+    == &quot;)&quot;
+
+You can actually leverage VETO and COMPOSE here, to get the COMPOSE to cut itself short:
+
+    &gt;&gt; parse &quot;aaa)))&quot; [
+           inline (opt compose [some (any [prefix veto])])
+           some &quot;a&quot;
+           inline (opt compose [some (any [suffix veto])])
+       ]
+    == &quot;)&quot;
+
+You can shorthand that to get something brief that doesn&#39;t need to repeat PREFIX/SUFFIX.  But it would still be kind of long.
+
+But what if we tried to do that with the hypothetical PERHAPS...could it work?
+
+    &gt;&gt; parse &quot;aaa)))&quot; [some perhaps prefix, some &quot;a&quot;, some perhaps suffix]
+    ; infinite loop!
+
+There&#39;s a problem here.  Because **perhaps prefix** just succeeds and doesn&#39;t advance the input when prefix is null.  But if you combine that with `some` the null case will just match nothing in perpetuity, causing an infinite loop.
+
+This may look familiar, because if you write **some opt [...anything...]** you&#39;ll always get an infinite loop.  But in that case it&#39;s just wrong thinking: you know that the repetitive nature of `some` looking for an eventual non-match meant you must have intended **some [...anything...]** (at least one) or **opt some [...anything...]** (zero or more).
+
+:thinking: 
+
+### NOTE THAT HISTORICAL PARSE HAS NO GOOD ANSWER FOR THIS
+ 
+Rebol2 treats NONE! as a no-op which just succeeds but doesn&#39;t advance the input.  So the following gives you an infinite loop:
+
+     rebol2&gt;&gt; prefix: none suffix: &quot;)&quot;
+
+     rebol2&gt;&gt; parse &quot;aaa)))&quot; [some prefix some &quot;a&quot; some suffix]   
+     ; infinite loop
+ 
+The hackish &quot;must make progress&quot; rules in R3-Alpha actually make the above &quot;work as intended&quot;, because the SOME will bail out after one non-advancing match.  I don&#39;t consider that a &quot;good&quot; answer--more a random effect.
+
+## **`some perhaps`** Is Semantically Perilous
+
+Parsers can only succeed or fail right now.  So for **some perhaps** to work, you&#39;d have to be able to say something else: &quot;opt out above me as far as you can, but be fundamentally successful&quot;.
+
+How far would that make sense to go?  It would certainly have to stop at the BLOCK! combinator to be of any use.  But what makes the BLOCK! combinator special to squash the &quot;bubble up opt-out success&quot; idea?
+
+The reason that INLINE can work with a cobbled together rule is because it can be specific about where the point of opting-out should stop.  If PERHAPS is nested inside and trying to signal that outward, it doesn&#39;t work.
+
+## Is PERHAPS Still Useful Enough To Make?
+
+A quoting combinator that glosses over null rules seems useful--even if it can&#39;t be used in composition.  Though given that OPT is taken for something much more common and relevant to parsing, it&#39;s hard to give it a good name.
+
+The alternative is perhaps use **`[]`** or some **`noop`** rule (if that&#39;s clearer/faster) as the state of your rule when it&#39;s not applicable.  But the whole thing is that you might want to use null for the state for its conditional falseyness for other parts of your situation.
+
+*Perhaps* it isn&#39;t necessary.  But it&#39;s been on my mind a while, and I wanted to write it up.</description>
+    
+    <lastBuildDate>Sat, 12 Jul 2025 10:41:07 +0000</lastBuildDate>
+    <category>Parsing</category>
+    <atom:link href="https://rebol.metaeducation.com/t/perhaps-we-need-a-shorthand-for-inline-opt-rule/2023.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>PERHAPS We Need a Shorthand for `inline (opt rule)` ?</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>Today, rules that look up to NULL will PANIC in parse--right at the moment of fetching the word:</p>
+<pre><code>&gt;&gt; prefix: null, suffix: ")"
+
+&gt;&gt; parse "aaa)" [prefix, some "a", suffix]
+** PANIC: (prefix is null, and we raise errors for that in parse)
+</code></pre>
+<p>If we didn't panic, there would really only be two other options:</p>
+<ol>
+<li>
+<p>Make <strong><code>null</code></strong> always succeed, keeping the parse position where it is (synonym for <strong><code>[]</code></strong>)</p>
+</li>
+<li>
+<p>Make <strong><code>null</code></strong> always be an unsuccessful combinator match, but not cause a failure (synonym for <strong><code>VETO</code></strong>)</p>
+</li>
+</ol>
+<p>The behavior I'm looking for in this post is optionality, which would correspond to the "always succeed" behavior.  (e.g. if there is no prefix, so I want to skip worrying about matching it).  I feel it is pretty obvious that should not be the default behavior for encountering a null variable.</p>
+<p>(If null variables did anything other than error, they should probably do (2) and not match... but I don't think that's very wise compared with panic'ing.)</p>
+<h2><a name="p-6590-how-to-get-optionality-today-inline-opt-rule-1" class="anchor" href="https://rebol.metaeducation.com#p-6590-how-to-get-optionality-today-inline-opt-rule-1"></a>How To Get Optionality Today: <strong><code>inline (opt rule)</code></strong></h2>
+<p>INLINE will take the synthesized product of the following rule (usually a GROUP!) and use it like a rule--as if it had been COMPOSE'd into the stream of operations.</p>
+<p>If you inline a NULL, that's presumed to be an accident so it panics.  But if you inline a VOID, that is considered a no-op, so it does nothing.  Hence if you OPT a NULL to get a VOID and inline that, it will succeed with no effect:</p>
+<pre><code>&gt;&gt; prefix: null, suffix: ")"
+
+&gt;&gt; parse "aaa)" [inline (opt prefix), some "a", inline (opt suffix)]
+== ")"
+</code></pre>
+<p>This works, but one can wonder about a combinator which was more succinct to accomplish the same thing, without the parentheses and without the OPT.</p>
+<p>Since we don't have a name for it, let's call it PERHAPS for a moment:</p>
+<pre><code>&gt;&gt; prefix: null, suffix: ")"
+
+&gt;&gt; parse "aaa)" [perhaps prefix, some "a", perhaps suffix]
+== ")"
+</code></pre>
+<p>It seems like a close parallel to OPT in the evaluative world, where NULL is turned into VOID with other things passed thru...</p>
+<p>...but PARSE's OPT is entrenched as being about optionality of a rule that exists matching... not optionality of the rule itself.  So this is a fundamentally different intent.</p>
+<h2><a name="p-6590-trickery-needed-to-combinate-null-2" class="anchor" href="https://rebol.metaeducation.com#p-6590-trickery-needed-to-combinate-null-2"></a>Trickery Needed To "COMBINATE" NULL</h2>
+<p>Unless quoting is involved, the combinator that would be getting the NULL from a word lookup initially would be the WORD! combinator.</p>
+<p>So when a parser gets produced from a WORD! combinator, when that parser is called by another combinated parser it will PANIC.  It can't return an ERROR!, because that would just be interpreted as a rule that didn't match.</p>
+<p>So the only way I can see a null-tolerant PERHAPS fitting in would be that it would have to quote its argument, so the WORD! combinator didn't get involved.  It would then do the WORD! fetch itself, turning into a failing combinator if it fetched null.</p>
+<p>That may seem to work, but...</p>
+<h2><a name="p-6590-compositional-problems-with-perhaps-3" class="anchor" href="https://rebol.metaeducation.com#p-6590-compositional-problems-with-perhaps-3"></a>Compositional Problems With PERHAPS</h2>
+<p>Let's say you wanted this:</p>
+<p><em>"if there's a prefix, match some non-zero number of instances, but if prefix is null then don't worry about matching"</em>:</p>
+<p>INLINE can do it:</p>
+<pre><code>&gt;&gt; parse "aaa)))" [
+       inline (when prefix '[some prefix])  ; when is IF, but VOID if no branch
+       some "a"
+       inline (when suffix '[some suffix])
+   ]
+== ")"
+</code></pre>
+<p>You can actually leverage VETO and COMPOSE here, to get the COMPOSE to cut itself short:</p>
+<pre><code>&gt;&gt; parse "aaa)))" [
+       inline (opt compose [some (any [prefix veto])])
+       some "a"
+       inline (opt compose [some (any [suffix veto])])
+   ]
+== ")"
+</code></pre>
+<p>You can shorthand that to get something brief that doesn't need to repeat PREFIX/SUFFIX.  But it would still be kind of long.</p>
+<p>But what if we tried to do that with the hypothetical PERHAPS...could it work?</p>
+<pre><code>&gt;&gt; parse "aaa)))" [some perhaps prefix, some "a", some perhaps suffix]
+; infinite loop!
+</code></pre>
+<p>There's a problem here.  Because <strong>perhaps prefix</strong> just succeeds and doesn't advance the input when prefix is null.  But if you combine that with <code>some</code> the null case will just match nothing in perpetuity, causing an infinite loop.</p>
+<p>This may look familiar, because if you write <strong>some opt [...anything...]</strong> you'll always get an infinite loop.  But in that case it's just wrong thinking: you know that the repetitive nature of <code>some</code> looking for an eventual non-match meant you must have intended <strong>some [...anything...]</strong> (at least one) or <strong>opt some [...anything...]</strong> (zero or more).</p>
+<p><img src="https://rebol.metaeducation.com/images/emoji/twitter/thinking.png?v=14" title=":thinking:" class="emoji only-emoji" alt=":thinking:" loading="lazy" width="20" height="20"></p>
+<h3><a name="p-6590-note-that-historical-parse-has-no-good-answer-for-this-4" class="anchor" href="https://rebol.metaeducation.com#p-6590-note-that-historical-parse-has-no-good-answer-for-this-4"></a>NOTE THAT HISTORICAL PARSE HAS NO GOOD ANSWER FOR THIS</h3>
+<p>Rebol2 treats NONE! as a no-op which just succeeds but doesn't advance the input.  So the following gives you an infinite loop:</p>
+<pre><code> rebol2&gt;&gt; prefix: none suffix: ")"
+
+ rebol2&gt;&gt; parse "aaa)))" [some prefix some "a" some suffix]   
+ ; infinite loop
+</code></pre>
+<p>The hackish "must make progress" rules in R3-Alpha actually make the above "work as intended", because the SOME will bail out after one non-advancing match.  I don't consider that a "good" answer--more a random effect.</p>
+<h2><a name="p-6590-some-perhaps-is-semantically-perilous-5" class="anchor" href="https://rebol.metaeducation.com#p-6590-some-perhaps-is-semantically-perilous-5"></a><strong><code>some perhaps</code></strong> Is Semantically Perilous</h2>
+<p>Parsers can only succeed or fail right now.  So for <strong>some perhaps</strong> to work, you'd have to be able to say something else: "opt out above me as far as you can, but be fundamentally successful".</p>
+<p>How far would that make sense to go?  It would certainly have to stop at the BLOCK! combinator to be of any use.  But what makes the BLOCK! combinator special to squash the "bubble up opt-out success" idea?</p>
+<p>The reason that INLINE can work with a cobbled together rule is because it can be specific about where the point of opting-out should stop.  If PERHAPS is nested inside and trying to signal that outward, it doesn't work.</p>
+<h2><a name="p-6590-is-perhaps-still-useful-enough-to-make-6" class="anchor" href="https://rebol.metaeducation.com#p-6590-is-perhaps-still-useful-enough-to-make-6"></a>Is PERHAPS Still Useful Enough To Make?</h2>
+<p>A quoting combinator that glosses over null rules seems useful--even if it can't be used in composition.  Though given that OPT is taken for something much more common and relevant to parsing, it's hard to give it a good name.</p>
+<p>The alternative is perhaps use <strong><code>[]</code></strong> or some <strong><code>noop</code></strong> rule (if that's clearer/faster) as the state of your rule when it's not applicable.  But the whole thing is that you might want to use null for the state for its conditional falseyness for other parts of your situation.</p>
+<p><em>Perhaps</em> it isn't necessary.  But it's been on my mind a while, and I wanted to write it up.</p>
+          <p><a href="https://rebol.metaeducation.com/t/perhaps-we-need-a-shorthand-for-inline-opt-rule/2023/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/perhaps-we-need-a-shorthand-for-inline-opt-rule/2023/1</link>
+        <pubDate>Fri, 07 Apr 2023 00:14:18 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2023-1</guid>
+        <source url="https://rebol.metaeducation.com/t/perhaps-we-need-a-shorthand-for-inline-opt-rule/2023.rss">PERHAPS We Need a Shorthand for `inline (opt rule)` ?</source>
+      </item>
+  </channel>
+</rss>

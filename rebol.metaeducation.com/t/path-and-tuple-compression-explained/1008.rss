@@ -1,0 +1,193 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>PATH! and TUPLE! compression, explained</title>
+    <link>https://rebol.metaeducation.com/t/path-and-tuple-compression-explained/1008</link>
+    <description>Since I ever saw them, **I wanted to unify PATH! and REFINEMENT!**
+
+* It did not make sense to me that there was **foo/bar** and **/bar** but not **/foo/bar** or **bar/**
+
+* I pretty quickly landed on the idea that if you saw something like **/bar** it would be a 2-element PATH!, where the first element was simply BLANK!.
+
+As simple as that sounds, changing to this design the way R3-Alpha was written would make the PATH! form of **/bar** cost *SEVEN TIMES* as much!!!
+
+* When REFINEMENT! was an ANY-WORD! class it cost 4 pointers resident in a block
+
+    * That&#39;s 16 bytes on 32-bit platforms, 32 bytes on 64-bit platforms
+
+* The initial implementation in NewPath cost those pointers *plus* 8 pointers for a series stub *plus* a pool element that was 4 units long of 4 pointers each...to be big enough for 2 elements and a terminator.
+
+    * That&#39;s 112 bytes on 32-bit platforms, 224 bytes on 64-bit platforms
+
+Not only do you get a factor of 7 cost increase, you now have 3 separate locations in memory to jump around at to process what you have (in addition to the locality issue of having to go find the symbol itself, which WORD!s had to do as well).
+
+In the &quot;keeping it Amish&quot; spirit, it felt like too much when the difference between **/FOO** and **FOO** jumped like that.  It only takes a few factors of 10 to get to the kinds of software situations we see today.  :-/
+
+## Before Going Further: Let&#39;s Recap CELLs and STUBs
+
+For those who&#39;ve looked at Rebol sources, you know that a Rebol cell is the size of *four platform pointers*.
+
+Ren-C keeps the general gist, with some important adjustments.  It breaks down as:
+
+* **header:** one pointer-sized integer (uintptr_t).  This tells you the cell&#39;s type (e.g. REB_BLOCK, REB_INTEGER), among other things.  Only 32 bits are used of this (operated on through `uint_fast32_t` alias field, in case 32-bit masking operations are faster on 64-bit platforms than a 64-bit `uintptr_t`).  This allows the system to function identically on 32 and 64 bit systems...though the extra 32 bits could be applied to some kind of 64-bit optimization purpose.
+
+* **&quot;extra&quot;**: one pointer or pointer-sized integer.  It&#39;s a union, and which of the union fields is active depends on the type of the cell.  For &quot;bindable&quot; types, this holds a *binding*...and that&#39;s a fairly deep topic.  But if a type isn&#39;t bindable--let&#39;s say a MONEY! or a DATE!, then it can just use this for some spare bits to help put more data in the cell without needing to do a dynamic allocation.
+
+* **&quot;payload&quot;**: Also a union that depends on the type of cell, but this one is the size of *two* platform pointers.  That makes it sufficient to hold something like a 64-bit floating point number on 32-bit platforms.  It comes after the &quot;extra&quot; on purpose--so that as long as the cell is on a 64-bit boundary, then on 32-bit platforms this payload will be on a 64-bit boundary as well.  (That&#39;s important.)
+
+Beyond just alignment, there&#39;s a lot of nuance to cells, and staying on the right side of the standard.  Being able to assign different datatype payloads but still use generic routines on the binding, being able to assign the header in one instruction without breaking strict aliasing.  There&#39;s comments in the code if people want to go down a rabbit hole.
+
+But the main thing to take away is that you&#39;re not paying a catastrophic cost for something like a 64-bit integer in a Rebol array.  It&#39;s 2x the size it would be otherwise.  Fatter than a low-level C type, sure...but all the bits are right there with good locality...you don&#39;t have to go through a dereference to some malloc()&#39;d entity.  Not much of a big deal.
+
+## Despite Optimizations, *Arrays Cost Notably More*
+
+When we try to understand the difference between **[1 2 3]** and **[[1] [2] [3]]**, just how much of cost is that in bytes or processing overhead?  If you&#39;re designing a dialect, should you fear BLOCK!s, GROUP!s, and PATH!s?
+
+Well, when you&#39;ve got that cell and the header says it&#39;s a REB_BLOCK, the &quot;extra&quot; field is used for stuff I&#39;m not going to explain here.  But the Reb_Block_Payload union contains to two things: a *series stub* pointer and the index that series value has in the block.
+
+Series stubs are fixed-size tracking entities.  Though they&#39;re pretty small, they&#39;re still *eight platform pointers*.  To get to the stub from the cell you have to hop through the pointer to another memory location, and so that&#39;s going to affect caching.
+
+If you have a block of length 1 or 0, then Ren-C has a very neat optimization called &quot;singular arrays&quot;.  The payload for the array lives *directly in the series stub*.  Careful mechanics allow this to work, not breaking any alignment or aliasing rules, and even building some safety in via bit patterns to help catch attempts to wander off the edge of the data into neighboring stubs.
+
+So in this case--if you&#39;re lucky--you&#39;ve gone from taking 4 platform pointers for just the REB_INTEGER cell, to a REB_BLOCK cell of 4 platform pointers...and a series stub of 8 pointers.  3x the size for **[1]** vs. just **1**.
+
+But let&#39;s say instead of a block, you were doing a PATH!, like the proposed 2-element path for **/refinement** (a BLANK! that&#39;s not rendered, and then the WORD! &quot;refinement&quot;).  What would a 2-element array cost?
+
+You&#39;ve still got the 4 pointer cell and the 8 pointer series stub.  But now you need a dynamic allocation to hold the 2 cells, so that would be 8 more platform pointers.
+
+&gt; Note: It would have needed to be 4 cells when a terminator was needed...but [the terminator no longer applies](https://rebol.metaeducation.com/t/moving-away-from-null-termination-end-of-block-s/1445)!  So arrays of length 2 can really just use 8 pointers in their allocation now.  :partying_face:
+
+*Grand Total:* 4 + 8 + 8 =&gt; **20 platform pointers**...for something that took only 4 before!  So **[1 1]** is 5x as big as **1**, and on a 64-bit platform we&#39;re talking 160 bytes.  For a refinement like **[_ refine]** that&#39;s not even counting the storage for the UTF-8 name of the refinement and overhead for that...this is how much it costs just to *point* to it!
+
+I&#39;m neglecting all the overhead that dynamic allocation systems have to keep for their internal bookkeeping.  Plus, remember that locality...spreading this data out is about more than just how many bytes you use, it&#39;s *where* the bytes are.
+
+## Major Realization: PATH!s and TUPLE!s Should Be Immutable
+
+Once I realized paths and tuples could be immutable, it began to make sense that they could avoid the problem of being like arrays.
+
+I called them &quot;sequences&quot;, and dropped the assumption that every sequence had an array backing it.  Instead, some would...and some would not.
+
+So you wouldn&#39;t ask for a pointer to the head cell of a sequence directly.  Instead, you would ask for the Nth element of a sequence...and *maybe* you would get a pointer to a cell that was part of an array.  Or you could get a pointer back to a temporary cell you passed in where the item would be written.
+
+Then, something like a refinement-type PATH! would not point at an array stub, but to a word spelling stub.  It&#39;s possible to tell the difference because in Ren-C all Stubs have &quot;flavor bytes&quot; (which are a parallel to the heart byte in a Cell that tells you if it&#39;s a BLOCK! or WORD! etc.)
+
+Since 1-element paths are illegal, we can assume that if a path points to a word spelling it must represent either **/a** or **a/**.  The distinction is encoded with a single bit in the cell.
+
+## It&#39;s All Been Working Great
+
+Immutable PATH! and TUPLE! are clearly good, and they permit this optimization.
+
+This has tied down [some of the more egregious ambiguities in PATH!](http://rebol.metaeducation.com/t/taming-the-pathology-of-path/1006), making it a solid and reliable part for dialecting--something it has certainly not been in the past.  If we can kill off things like **`a/:b:`** in favor of **`a/(b):`** and pay no more for it, we very well may should.</description>
+    
+    <lastBuildDate>Wed, 22 Nov 2023 09:16:13 +0000</lastBuildDate>
+    <category>Optimization</category>
+    <atom:link href="https://rebol.metaeducation.com/t/path-and-tuple-compression-explained/1008.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>PATH! and TUPLE! compression, explained</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>Almost 5 years ago (!) I optimized PATH! and TUPLE! that looked like <strong><code>/foo</code></strong> (or <strong><code>foo/</code></strong>, or <strong><code>.foo</code></strong>, or <strong><code>foo.</code></strong>) to cost no more than the R3-Alpha REFINEMENT!... at 4 platform pointers.</p>
+<p>Without the optimization, the 2-element paths cost 20 platform pointers:</p>
+<aside class="quote no-group quote-modified" data-username="hostilefork" data-post="1" data-topic="1008">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>But let's say instead of a block, you were doing a PATH!, like the proposed 2-element path for <strong>/refinement</strong> (a BLANK! that's not rendered, and then the WORD! "refinement"). What would a 2-element array cost?</p>
+<p>You've still got the 4 pointer cell and the 8 pointer series stub. But now you need a dynamic allocation to hold the 2 cells, so that would be 8 more platform pointers.</p>
+<p><em>Grand Total:</em> 4 + 8 + 8 =&gt; <strong>20 platform pointers</strong>...for something that took only 4 before! So <strong>[1 1]</strong> is 5x as big as <strong>1</strong>, and on a 64-bit platform we're talking 160 bytes. For a refinement like <strong>[_ refine]</strong> that's not even counting the storage for the UTF-8 name of the refinement and overhead for that...this is how much it costs just to <em>point</em> to it!</p>
+</blockquote>
+</aside>
+<p>The optimization is great, but you can't apply that trick to <strong><code>foo.bar</code></strong> or <strong><code>foo/bar</code></strong> (or <strong><code>foo/[bar]</code></strong> etc.)  Without the blank, you need two cells.</p>
+<p>So I had an idea: to reuse the mechanic behind PAIR! that manages to store two cells and skips the array node.  So it's 4 + 8 = 12 platform pointers, instead of 20 for these cases.</p>
+<p>It was very close to being implemented, and while going over the code I realized that all the disclaimers about it not being implemented were taking up more space and concern than just going ahead and writing it.  All the hard work was done--and powering the relatively-few PAIR! that I ever use.</p>
+<h2><a name="p-6732-how-much-does-it-save-1" class="anchor" href="https://rebol.metaeducation.com#p-6732-how-much-does-it-save-1"></a>How Much Does It Save?</h2>
+<p>I don't know how typical the boot code is, but if you boot the system there are 1,648 of these 2-element PATH!s/TUPLE!s being created in memory.</p>
+<p>So on a plain boot of a system, it's saving 1,648 * 8 = 13184 platform pointers.  On a 64-bit system that's 105,472 bytes (half that on 32-bit)</p>
+<p>It's not a "ton" (though 105K here, 105K there, eventually you're talking megabytes).  But it could provide another benefit in the form of locality.  It means that when something like <strong>block.1</strong> is being processed, it can use the node in the TUPLE! directly, instead of needing to follow it to a dynamic allocation.</p>
+<p>In practice, it seems the code as written right now is more or less breaking even.  So running the code for detecting the new form basically equals hopping through to the array.  Hence it's really just the memory benefit for now...though I imagine with some tuning that could change.</p>
+<p>Anyway, 105K memory savings at runtime seems like the kind of thing that's worth it, so... it's in now.</p>
+          <p><a href="https://rebol.metaeducation.com/t/path-and-tuple-compression-explained/1008/3">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/path-and-tuple-compression-explained/1008/3</link>
+        <pubDate>Wed, 22 Nov 2023 08:40:42 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1008-3</guid>
+        <source url="https://rebol.metaeducation.com/t/path-and-tuple-compression-explained/1008.rss">PATH! and TUPLE! compression, explained</source>
+      </item>
+      <item>
+        <title>PATH! and TUPLE! compression, explained</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>Since I ever saw them, <strong>I wanted to unify PATH! and REFINEMENT!</strong></p>
+<ul>
+<li>
+<p>It did not make sense to me that there was <strong>foo/bar</strong> and <strong>/bar</strong> but not <strong>/foo/bar</strong> or <strong>bar/</strong></p>
+</li>
+<li>
+<p>I pretty quickly landed on the idea that if you saw something like <strong>/bar</strong> it would be a 2-element PATH!, where the first element was simply BLANK!.</p>
+</li>
+</ul>
+<p>As simple as that sounds, changing to this design the way R3-Alpha was written would make the PATH! form of <strong>/bar</strong> cost <em>SEVEN TIMES</em> as much!!!</p>
+<ul>
+<li>
+<p>When REFINEMENT! was an ANY-WORD! class it cost 4 pointers resident in a block</p>
+<ul>
+<li>That's 16 bytes on 32-bit platforms, 32 bytes on 64-bit platforms</li>
+</ul>
+</li>
+<li>
+<p>The initial implementation in NewPath cost those pointers <em>plus</em> 8 pointers for a series stub <em>plus</em> a pool element that was 4 units long of 4 pointers each...to be big enough for 2 elements and a terminator.</p>
+<ul>
+<li>That's 112 bytes on 32-bit platforms, 224 bytes on 64-bit platforms</li>
+</ul>
+</li>
+</ul>
+<p>Not only do you get a factor of 7 cost increase, you now have 3 separate locations in memory to jump around at to process what you have (in addition to the locality issue of having to go find the symbol itself, which WORD!s had to do as well).</p>
+<p>In the "keeping it Amish" spirit, it felt like too much when the difference between <strong>/FOO</strong> and <strong>FOO</strong> jumped like that.  It only takes a few factors of 10 to get to the kinds of software situations we see today.  :-/</p>
+<h2><a name="p-2952-before-going-further-lets-recap-cells-and-stubs-1" class="anchor" href="https://rebol.metaeducation.com#p-2952-before-going-further-lets-recap-cells-and-stubs-1"></a>Before Going Further: Let's Recap CELLs and STUBs</h2>
+<p>For those who've looked at Rebol sources, you know that a Rebol cell is the size of <em>four platform pointers</em>.</p>
+<p>Ren-C keeps the general gist, with some important adjustments.  It breaks down as:</p>
+<ul>
+<li>
+<p><strong>header:</strong> one pointer-sized integer (uintptr_t).  This tells you the cell's type (e.g. REB_BLOCK, REB_INTEGER), among other things.  Only 32 bits are used of this (operated on through <code>uint_fast32_t</code> alias field, in case 32-bit masking operations are faster on 64-bit platforms than a 64-bit <code>uintptr_t</code>).  This allows the system to function identically on 32 and 64 bit systems...though the extra 32 bits could be applied to some kind of 64-bit optimization purpose.</p>
+</li>
+<li>
+<p><strong>"extra"</strong>: one pointer or pointer-sized integer.  It's a union, and which of the union fields is active depends on the type of the cell.  For "bindable" types, this holds a <em>binding</em>...and that's a fairly deep topic.  But if a type isn't bindable--let's say a MONEY! or a DATE!, then it can just use this for some spare bits to help put more data in the cell without needing to do a dynamic allocation.</p>
+</li>
+<li>
+<p><strong>"payload"</strong>: Also a union that depends on the type of cell, but this one is the size of <em>two</em> platform pointers.  That makes it sufficient to hold something like a 64-bit floating point number on 32-bit platforms.  It comes after the "extra" on purpose--so that as long as the cell is on a 64-bit boundary, then on 32-bit platforms this payload will be on a 64-bit boundary as well.  (That's important.)</p>
+</li>
+</ul>
+<p>Beyond just alignment, there's a lot of nuance to cells, and staying on the right side of the standard.  Being able to assign different datatype payloads but still use generic routines on the binding, being able to assign the header in one instruction without breaking strict aliasing.  There's comments in the code if people want to go down a rabbit hole.</p>
+<p>But the main thing to take away is that you're not paying a catastrophic cost for something like a 64-bit integer in a Rebol array.  It's 2x the size it would be otherwise.  Fatter than a low-level C type, sure...but all the bits are right there with good locality...you don't have to go through a dereference to some malloc()'d entity.  Not much of a big deal.</p>
+<h2><a name="p-2952-despite-optimizations-arrays-cost-notably-more-2" class="anchor" href="https://rebol.metaeducation.com#p-2952-despite-optimizations-arrays-cost-notably-more-2"></a>Despite Optimizations, <em>Arrays Cost Notably More</em></h2>
+<p>When we try to understand the difference between <strong>[1 2 3]</strong> and <strong>[[1] [2] [3]]</strong>, just how much of cost is that in bytes or processing overhead?  If you're designing a dialect, should you fear BLOCK!s, GROUP!s, and PATH!s?</p>
+<p>Well, when you've got that cell and the header says it's a REB_BLOCK, the "extra" field is used for stuff I'm not going to explain here.  But the Reb_Block_Payload union contains to two things: a <em>series stub</em> pointer and the index that series value has in the block.</p>
+<p>Series stubs are fixed-size tracking entities.  Though they're pretty small, they're still <em>eight platform pointers</em>.  To get to the stub from the cell you have to hop through the pointer to another memory location, and so that's going to affect caching.</p>
+<p>If you have a block of length 1 or 0, then Ren-C has a very neat optimization called "singular arrays".  The payload for the array lives <em>directly in the series stub</em>.  Careful mechanics allow this to work, not breaking any alignment or aliasing rules, and even building some safety in via bit patterns to help catch attempts to wander off the edge of the data into neighboring stubs.</p>
+<p>So in this case--if you're lucky--you've gone from taking 4 platform pointers for just the REB_INTEGER cell, to a REB_BLOCK cell of 4 platform pointers...and a series stub of 8 pointers.  3x the size for <strong>[1]</strong> vs. just <strong>1</strong>.</p>
+<p>But let's say instead of a block, you were doing a PATH!, like the proposed 2-element path for <strong>/refinement</strong> (a BLANK! that's not rendered, and then the WORD! "refinement").  What would a 2-element array cost?</p>
+<p>You've still got the 4 pointer cell and the 8 pointer series stub.  But now you need a dynamic allocation to hold the 2 cells, so that would be 8 more platform pointers.</p>
+<blockquote>
+<p>Note: It would have needed to be 4 cells when a terminator was needed...but <a href="https://rebol.metaeducation.com/t/moving-away-from-null-termination-end-of-block-s/1445">the terminator no longer applies</a>!  So arrays of length 2 can really just use 8 pointers in their allocation now.  <img src="https://rebol.metaeducation.com/images/emoji/twitter/partying_face.png?v=14" title=":partying_face:" class="emoji" alt=":partying_face:" loading="lazy" width="20" height="20"></p>
+</blockquote>
+<p><em>Grand Total:</em> 4 + 8 + 8 =&gt; <strong>20 platform pointers</strong>...for something that took only 4 before!  So <strong>[1 1]</strong> is 5x as big as <strong>1</strong>, and on a 64-bit platform we're talking 160 bytes.  For a refinement like <strong>[_ refine]</strong> that's not even counting the storage for the UTF-8 name of the refinement and overhead for that...this is how much it costs just to <em>point</em> to it!</p>
+<p>I'm neglecting all the overhead that dynamic allocation systems have to keep for their internal bookkeeping.  Plus, remember that locality...spreading this data out is about more than just how many bytes you use, it's <em>where</em> the bytes are.</p>
+<h2><a name="p-2952-major-realization-paths-and-tuples-should-be-immutable-3" class="anchor" href="https://rebol.metaeducation.com#p-2952-major-realization-paths-and-tuples-should-be-immutable-3"></a>Major Realization: PATH!s and TUPLE!s Should Be Immutable</h2>
+<p>Once I realized paths and tuples could be immutable, it began to make sense that they could avoid the problem of being like arrays.</p>
+<p>I called them "sequences", and dropped the assumption that every sequence had an array backing it.  Instead, some would...and some would not.</p>
+<p>So you wouldn't ask for a pointer to the head cell of a sequence directly.  Instead, you would ask for the Nth element of a sequence...and <em>maybe</em> you would get a pointer to a cell that was part of an array.  Or you could get a pointer back to a temporary cell you passed in where the item would be written.</p>
+<p>Then, something like a refinement-type PATH! would not point at an array stub, but to a word spelling stub.  It's possible to tell the difference because in Ren-C all Stubs have "flavor bytes" (which are a parallel to the heart byte in a Cell that tells you if it's a BLOCK! or WORD! etc.)</p>
+<p>Since 1-element paths are illegal, we can assume that if a path points to a word spelling it must represent either <strong>/a</strong> or <strong>a/</strong>.  The distinction is encoded with a single bit in the cell.</p>
+<h2><a name="p-2952-its-all-been-working-great-4" class="anchor" href="https://rebol.metaeducation.com#p-2952-its-all-been-working-great-4"></a>It's All Been Working Great</h2>
+<p>Immutable PATH! and TUPLE! are clearly good, and they permit this optimization.</p>
+<p>This has tied down <a href="http://rebol.metaeducation.com/t/taming-the-pathology-of-path/1006">some of the more egregious ambiguities in PATH!</a>, making it a solid and reliable part for dialecting--something it has certainly not been in the past.  If we can kill off things like <strong><code>a/:b:</code></strong> in favor of <strong><code>a/(b):</code></strong> and pay no more for it, we very well may should.</p>
+          <p><a href="https://rebol.metaeducation.com/t/path-and-tuple-compression-explained/1008/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/path-and-tuple-compression-explained/1008/1</link>
+        <pubDate>Fri, 11 Jan 2019 05:13:22 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1008-1</guid>
+        <source url="https://rebol.metaeducation.com/t/path-and-tuple-compression-explained/1008.rss">PATH! and TUPLE! compression, explained</source>
+      </item>
+  </channel>
+</rss>

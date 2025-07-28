@@ -1,0 +1,1247 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Big Alien Proposal :flying_saucer: &quot;/WORD&quot; Runs Functions</title>
+    <link>https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905</link>
+    <description>So far, **`/leading`** **`/slash`** **`/notation`** has just been evaluator inert, lining up with Rebol2 and Red and R3-Alpha:
+
+    redbol&gt;&gt; /foo
+    == /foo
+
+That inertness doesn&#39;t seem to get leveraged much.  And in Ren-C it&#39;s a particularly weak choice, since the evaluator has generic quoting to get you the literal result:
+
+    ren-c&gt;&gt; &#39;/foo
+    == /foo
+
+Also, leading slash is an actual PATH!...encompassing arbitrary patterns like **`/lib.append/dup/part`**.  So I&#39;ve always been wondering if there was some interesting evaluator behavior for it, like...
+
+* ...asking to pick from &quot;global scope&quot;: if your function has an argument called ALL then /ALL might get you the definition outside your function?  (Something like **`::foo`** in C++)
+
+* ...maybe a shorthand for **`self/foo`** for picking members out of objects inside of methods?
+
+Yet nothing has ever really stuck.  But @IngoHohmann pointed out that there&#39;s a basic thing that leading slashes might do for us which may have been overlooked...
+
+...*simply running functions*.
+
+## &quot;But WORD!s Run Functions, Why Should /FOO Do That?&quot;
+
+There are many reasons, but the biggest one is...
+
+---
+
+**I feel pretty much 100% certain it is time that we switched to a world *where not all WORD!s holding ACTION!s will run them.***
+
+---
+It&#39;s too cumbersome when writing generic code to worry that a value you got &quot;from somewhere&quot; and put into a SET-WORD! has to be handled with special operators:
+
+     &gt;&gt; var: select obj &#39;item
+     &gt;&gt; if integer? var [print &quot;INT&quot;]
+     Muhaha the next thing at your callsite was [print &quot;INT&quot;]  ; eek, VAR was action
+
+     &gt;&gt; var: first block
+     &gt;&gt; if integer? var [print &quot;INT&quot;]
+     HAH! Did you think blocks were safe?  Not at all: [print &quot;INT&quot;]  ; in blocks too!
+
+:man_facepalming: 
+
+Whether you think of it in terms of &quot;security&quot;--or simply bugs and chaos--this *persistent tax* on Redbol code authors has lacked a palatable solution.  Putting a GET-XXX! on every access is ugly, and easy to forget.  What we&#39;ve ended up with is a mishmash...where people are constantly forced to choose between deciding if the brokenness is likely enough to cause a problem that it&#39;s worth it to make the code ugly.
+
+(When code ages, it&#39;s like it develops some sort of pox--as leading colons are added on an ad-hoc basis, then no one really knows if they&#39;re safe to remove.)
+
+**I propose that only specially marked assignments would *automatically* run a function through a word reference, requiring UNRUN or ^META access to get the action value literally.**
+
+    &gt;&gt; /foo: func [x] [print [&quot;X is&quot; x]]
+    == ~#[frame! [x]]~  ; anti
+
+    &gt;&gt; foo 10
+    X is 10
+
+    &gt;&gt; ^foo
+    == ~#[frame! {foo} [x]]~
+
+    &gt;&gt; unrun foo
+    == #[frame! [x]]
+
+**If a function is assigned through a plain SET-WORD!, then that would be inert by default...but able to take advantage of this new leading-slash execution.**
+
+    &gt;&gt; foo: func [x] [print [&quot;X is&quot; x]]
+
+    &gt;&gt; foo
+    == #[frame! {foo} [x]]
+
+    &gt;&gt; /foo 10
+    X is 10
+
+## Compliance Isn&#39;t Actually That Ugly!
+
+If you look at the definition of an object, then annotating the member functions isn&#39;t really so bad:
+
+    obj: make object! [
+        data: 1
+        /accessor: does [return data + 1]
+    ]
+
+This also gives us some extra ammo: **it could motivate using OBJ/ACCESSOR to invoke the function, and have OBJ.ACCESSOR give it back as-is**.
+
+You could then tell where the function invocations were: XXX.YYY.ZZZ is never a function call.  XXX/YYY/ZZZ always is, and you know YYY is a function.  XXX.YYY/ZZZ is a function call, and you know ZZZ is a function.  Readability is improved by a lot!
+
+## It Can Be A Nice Dialecting Pattern
+
+**It&#39;s useful in dialects where plain WORD! references are taken for another meaning.**  For instance, UPARSE by default assumes a word means a combinator, so if you want to run a function that uses parse rules to gather its arguments you need something else:
+
+    &gt;&gt; parse [1] [/negate integer!]
+    == -1
+
+    &gt;&gt; parse [1 2] [/add integer! integer!]
+    == 3
+
+Initially I tried this with terminal slashes, as **`negate/`** and **`add/`**, but that doesn&#39;t look as good (and separates the functions from their arguments).
+
+## What Do We Lose?
+
+Because I was trying to think of a meaningful evaluator behavior for leading-slash values, I didn&#39;t do much with them.  But eventually I decided to use them in New Apply:
+
+  https://forum.rebol.info/t/apply-ii-the-revenge/1834
+
+They&#39;re nice because they break up the space:
+
+    &gt;&gt; apply :append [[a b c] [d e] /dup 2]
+    == [a b c [d e] [d e]]
+
+But SET-WORD! is reasonable at this, and commas can make it more visually separate if needed:
+
+    &gt;&gt; apply :append [[a b c] [d e] dup: 2]
+    == [a b c [d e] [d e]]
+
+    &gt;&gt; apply :append [[a b c] [d e], dup: 2]
+    == [a b c [d e] [d e]]
+
+Of course whatever we put here is being overloaded.  If you want a SET-WORD! for assignment purposes, you&#39;d have to put it in a group:
+
+    &gt;&gt; apply :append [(var: [a b c]) [d e], dup: 2]
+    == [a b c [d e] [d e]]
+
+    &gt;&gt; var
+    == [a b c]
+
+So we could think of this similarly.  If you wanted to use a refinement-style path here, you just do it in a group:
+
+    &gt;&gt; apply :append [(/reverse [a b c]) [d e], /dup 2]
+    == [c b a [d e] [d e]]
+
+**APPLY is a dialect, and there are always going to be some tradeoffs made.**   There&#39;s only so many parts.
+
+**It&#39;s probably best to leave APPLY as it is.**  I don&#39;t think we&#39;re going to be in the midst of some epidemic where suddenly every function invocation is done through a leading slash and it&#39;s going to be contentious.  There will also be ways of running a function through REEVAL or maybe a dedicated RUN function that won&#39;t use the slash...
+
+So nothing needs to be lost, really.
+
+## The Big Win is that the *Obvious* Code is the *Correct* Code
+
+I&#39;ve done some tentative implementation on all this, and all together, it seems pretty solid
+
+Really all you&#39;re doing is paying the cost of an extra (easy-to-type) character to say that a word is intended to execute a function without needing to explicitly be told to.
+
+There will be ways to subvert it, as of course you could do this:
+
+    &gt;&gt; /func: enfix lambda [left [set-word!] spec body] [
+           do compose [/(as word! left): lib/func (spec) (body)]
+       ]
+
+    &gt;&gt; cheat: func [] [print &quot;Breakin the law, breakin the law...&quot;]
+
+    &gt;&gt; cheat
+    Breakin the law, breakin the law...
+
+But we wouldn&#39;t make you do it that laboriously, if you&#39;re making something where words need to be associated with functions that run automatically.  And Redbol would do it through some evaluator parameterization as opposed to a mechanism like that.
+
+However, the general expectation would be that most people would embrace the slash, as a useful piece of information...that makes everything work more coherently.</description>
+    
+    <lastBuildDate>Sat, 05 Oct 2024 21:21:57 +0000</lastBuildDate>
+    <category>Datatypes</category>
+    <atom:link href="https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Big Alien Proposal :flying_saucer: &quot;/WORD&quot; Runs Functions</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="35" data-topic="1905">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p><code>~/foo: other/~  ; copies what may be antiform action or unset OTHER</code></p>
+</blockquote>
+</aside>
+<p>This pattern without the ~ comes up a lot, and looks like:</p>
+<pre><code>/foo: other/
+</code></pre>
+<p>What makes it weird is that it feels like the slashes are a paired delimiter, like <strong><code>[foo: other]</code></strong></p>
+<p>It does take some getting used to (moreso I think than <strong><code>/foo: func [...] [...]</code></strong> does)</p>
+<p>The "paired" feeling would be lessened with:</p>
+<pre><code>foo/: other/
+</code></pre>
+<p>But I don't like that.  Putting the slashes next to the colon is bad for a number of reasons (e.g. you can't pick out a part of that which is just <strong>foo:</strong>).</p>
+<p>I think the answer is that you use GET if you are bothered by the look.</p>
+<pre><code>/foo: get $other
+</code></pre>
+<p><em>(although I've been mulling whether GET should be willing to give you actions unless you use a refinement...but...it probably should be willing to.  Still looking at how all this works in practice)</em></p>
+          <p><a href="https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905/36">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905/36</link>
+        <pubDate>Sat, 05 Oct 2024 21:21:57 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1905-36</guid>
+        <source url="https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905.rss">Big Alien Proposal :flying_saucer: &quot;/WORD&quot; Runs Functions</source>
+      </item>
+      <item>
+        <title>Big Alien Proposal :flying_saucer: &quot;/WORD&quot; Runs Functions</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="bradrn" data-post="34" data-topic="1905">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/bradrn/48/365_2.png" class="avatar"> bradrn:</div>
+<blockquote>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">obj.field     ; always give value as is
+/obj.field    ; may be an action to run, otherwise give value
+obj.field/    ; must be an action to run
+obj/field     ; same as obj.field/
+</code></pre>
+</blockquote>
+</aside>
+<p>In practice, it's way too easy to mix up <strong><code>obj.field</code></strong> and <strong><code>obj/field</code></strong>.  And it's a very frustrating bug if you thought you were running a function but it just evaluates to the function and keeps going.  So I think <strong><code>obj.field</code></strong> being an error on an action is important</p>
+<p>It doesn't get any less likely to make the mistake when you throw in a leading or terminal slash.  So I think that <strong><code>/xxx</code></strong> for any XXX not running a function causes more harm than good.  And similarly, knowing that <strong><code>xxx/</code></strong> will give you an action as-is has too much value as a guarantee.</p>
+<p><strong>I'm finding that I <em>really</em> like the terminal slash to mean both "it's a function" and "don't run it".</strong></p>
+<pre><code>apd2: specialize append/ [
+    dup: 2
+]
+</code></pre>
+<p>In the new model, slashes are tied to function mechanics.  And having it in that position helps throw up a barrier that says "nope, the next thing is <em>not</em> an argument.</p>
+<p>And I like being able to specialize right from a chain:</p>
+<pre><code>&gt;&gt; apd: append:dup/
+
+&gt;&gt; apd [a b c] [d e] 2]
+== [a b c [d e] [d e]]
+</code></pre>
+<p>...BUT...</p>
+<p><strong>In practice, the "I don't know if it's an action or not" does come up pretty often, and I think having a different syntax would be nice.</strong></p>
+<h2><a name="p-7825-i-think-we-should-use-the-parts-building_construction-1" class="anchor" href="https://forum.rebol.info#p-7825-i-think-we-should-use-the-parts-building_construction-1"></a>I Think We Should "Use The Parts" <img src="https://forum.rebol.info/images/emoji/twitter/building_construction.png?v=12" title=":building_construction:" class="emoji" alt=":building_construction:" loading="lazy" width="20" height="20"></h2>
+<p>For instance, there was always a question of if GET-WORD! should allow you to get unset variables... I mentioned above how I dislike this conflation:</p>
+<pre><code>red&gt;&gt; type? :append  ; you might have used GET-WORD! to get as-is action
+== action!
+
+red&gt;&gt; type? :asdfasdf  ; but you would get as-is UNSET!s too :-(
+== unset!
+</code></pre>
+<p>So at least there, we could do better with:</p>
+<pre><code>abc/         ; get what's definitely an action antiform as-is
+abc/~        ; get as-is if action, but nothings/tripwires/holes ok
+/abc: ...    ; assign what is definitely an action
+~/abc: ...   ; assign what could be an action or vacancy
+abc/~: ...   ; maybe same, but doesn't look as good imo
+</code></pre>
+<p><em>That's rather communicative, and avoids the frustrating conflation.</em>  You can get some nice behaviors there, e.g. the following need has come up in practice several times:</p>
+<pre><code>~/foo: other/~  ; copies what may be antiform action or unset OTHER
+</code></pre>
+<p>And it's not throwing out anything, e.g. if you can write <strong><code>negate/multiply/</code></strong> and that's some sort of function composition, you aren't at risk of <strong><code>multiply/~</code></strong> taking away the ability to compose with a function called <strong><code>~</code></strong> because that's a blank quasiform and it can't be assigned to name a function.</p>
+<p>So the question turning around in my head here is: is there some syntax jumble of this form which could meaningfully communicate "action-or-plain-value" for purposes of setting and getting.</p>
+<p>At first I thought maybe terminal dot on a tuple would do this.  But it's very subtle.  Also, the meaning for leading dot as select member out of "current object" is going ahead, and that would put a lot of asymmetry on the trailing dot meaning.</p>
+<p>If this would support anything, it would be terminal dot plus ~ for "vacancy okay on non-action".</p>
+<pre><code>abc.def      ; get non-action as-is
+abc.def.~    ; get non-action as-is, vacancy okay
+</code></pre>
+<p>But here we have the issue that you can legitimately pick <strong><code>~</code></strong> out of things, so you're losing a capability.</p>
+<p>All this makes it feel more like it's better to diminish the constraint slash than try to augment the ability of dot.</p>
+<p>There's #...it can't be reassigned</p>
+<pre><code>abc/         ; get what's definitely an action antiform as-is
+abc/#        ; get as-is if action, but other values ok
+/abc: ...    ; assign what is definitely an action
+#/abc: ...   ; assign what could be an action or other value
+</code></pre>
+<p>Oh, oops.  <strong><code>/</code></strong> is valid in <a href="https://forum.rebol.info/t/issuechar-token-is-hitting-it-out-of-the-park/1364/3">"ISSUECHAR!"</a> literals at this time, so <strong><code>#/abc:</code></strong> doesn't put # at the head of a path, it makes an issue with a slash in it.</p>
+<p>But that is changeable.  You have to put some characters in quotes, e.g. <strong><code>#)</code></strong>, is not a parentheses character... you have to do <strong><code>#")"</code></strong>  otherwise <strong><code>(#)</code></strong> couldn't be a space character literal in a GROUP!.  Slash may just be added to the exceptions, so <strong><code>#"/"</code></strong> in order to allow <strong><code>#</code></strong> in paths.  This is certainly a motivating case.</p>
+<p>I definitely think there is value added by distinguishing this, and letting plain slash in the most common case convey "I <em>know</em> this is an action".</p>
+          <p><a href="https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905/35">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905/35</link>
+        <pubDate>Sat, 05 Oct 2024 20:31:56 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1905-35</guid>
+        <source url="https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905.rss">Big Alien Proposal :flying_saucer: &quot;/WORD&quot; Runs Functions</source>
+      </item>
+      <item>
+        <title>Big Alien Proposal :flying_saucer: &quot;/WORD&quot; Runs Functions</title>
+        <dc:creator><![CDATA[bradrn]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="33" data-topic="1905">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>So WORD! has the fuzzy ability to run it things if they are functions, or give the value as is if not (or error if it's a tripwire or nothing).</p>
+<p>But if your value is in a context and needs to be selected out of it, the current model forces you to pick either path (run it) or tuple (get as is).</p>
+</blockquote>
+</aside>
+<p>Seems to me that this could be made consistent with the SET-WORD! case:</p>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">obj.field     ; always give value as is
+/obj.field    ; may be an action to run, otherwise give value
+obj.field/    ; must be an action to run
+obj/field     ; same as obj.field/
+</code></pre>
+          <p><a href="https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905/34">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905/34</link>
+        <pubDate>Wed, 25 Sep 2024 01:59:54 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1905-34</guid>
+        <source url="https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905.rss">Big Alien Proposal :flying_saucer: &quot;/WORD&quot; Runs Functions</source>
+      </item>
+      <item>
+        <title>Big Alien Proposal :flying_saucer: &quot;/WORD&quot; Runs Functions</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>So I've decided that terminal slash has the best application as fetching an antiform action without running it.</p>
+<p>This is a very commonly needed thing, and representing it with a slash at the end offers the dual benefit of saying "this is something dealing with function dispatch" (as slashes now are exclusively), but also to throw up a kind of barrier between the function and any potential arguments...to help reinforce that it doesn't take them.</p>
+<pre><code>for-next: specialize for-skip/ [skip: 1]
+;                         ---^
+; slash helps reinforce the block is not argument
+</code></pre>
+<p>Much nicer than using <strong><code>get $for-skip</code></strong>, and you even have a typecheck built into it, like:</p>
+<pre><code>for-next: specialize (ensure [action?] get $for-skip) [skip: 1]
+</code></pre>
+<p>I've gone through and applied this and it's very good.  A lot nicer than GET-WORD! ever was, and avoids the nasty conflation of tolerating unset variables as well as defusing actions...which I have always despised.</p>
+<pre><code>red&gt;&gt; type? :append
+== action!
+
+red&gt;&gt; type? :asdfasdf
+== unset!
+</code></pre>
+<p>Terminal slash has one job: give you back an antiform action as-is...and if it isn't one, error.</p>
+<aside class="quote no-group" data-username="bradrn" data-post="26" data-topic="1905">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/bradrn/48/365_2.png" class="avatar"> bradrn:</div>
+<blockquote>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">/obj.field      ; obj.field not required to be an action
+/obj.field/fn   ; obj.field must be an action‽
+</code></pre>
+<p>This feels horribly inconsistent to me. <code>obj.field</code> suddenly means different things depending on what it’s nested in.</p>
+</blockquote>
+</aside>
+<p>So all right, leading slashes should probably mean function call always, when not used in an assignment.</p>
+<p>But assignments are tricky.  I feel this much is firmed up:</p>
+<pre><code> value: ...      ; can't assign an action
+/value: ...      ; might assign an action
+value/: ...      ; must assign an action
+</code></pre>
+<p>It would seem that <strong><code>/value/:</code></strong> is inherently contradictory.  Happy to rule it out for now.</p>
+<p>Think we know this for a fact:</p>
+<pre><code>obj.field: ...   ; can't assign an action
+</code></pre>
+<p>I think this would suggest for the pattern that prefix slash used with tuple <em>might</em> assign an action:</p>
+<pre><code>/obj.field: ...  ; might assign an action
+</code></pre>
+<p>And for consistency, I think it is best to say terminal slash on a tuple acts as it would on a word:</p>
+<pre><code> obj.field/: ...  ; must assign an action
+</code></pre>
+<p>Then we can rule out <strong><code>/obj.field/:</code></strong> as meaningless.</p>
+<p>Then we have the 4 internal slash cases for obj+field.  For the sake of brevity, I think <strong><code>obj/field</code></strong> should be a synonym for <strong><code>obj.field/</code></strong>... one less character</p>
+<pre><code>obj/field: ...  ; must assign an action
+</code></pre>
+<p>As for the stragglers... hm.  I dunno.</p>
+<pre><code> /obj/field: ...  ; ???
+ obj/field/: ...  ; ???
+/obj/field/: ...  ; ???
+</code></pre>
+<p>Conservatively rule them all out for now, I suppose.</p>
+<h2><a name="p-7773-one-gap-run-sequence-if-function-as-is-if-not-1" class="anchor" href="https://forum.rebol.info#p-7773-one-gap-run-sequence-if-function-as-is-if-not-1"></a>One Gap: Run Sequence If Function, As-Is-If-Not</h2>
+<p>So WORD! has the fuzzy ability to run it things if they are functions, or give the value as is if not (or error if it's a tripwire or nothing).</p>
+<p>But if your value is in a context and needs to be selected out of it, the current model forces you to pick either path (run it) or tuple (get as is).</p>
+<p>I don't want to relax the tuple rule.  It's way too easy to mess up and say <strong><code>obj.method</code></strong> and have it fetch inertly and throw everything off.  At minimum you should have to say <strong><code>obj.method.</code></strong> to get that.  And I don't want plain <strong><code>obj.method</code></strong> to be willing to invoke actions, because that loses the whole advantage of this strategy.</p>
+<p>It's probably not wise to have this conflation except for arity-0 functions (how would you meaningfully handle something that sometimes consumed arguments and sometimes didn't?)  And if it's an arity-0 function where you want it to act like a value, <a href="https://forum.rebol.info/t/a-dream-for-debugging-generalized-accessors/2259">maybe that's a job for accessor</a>.</p>
+<p>It's something to keep an eye on, but I guess I'd like to see the motivating examples before trying to solve it.</p>
+          <p><a href="https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905/33">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905/33</link>
+        <pubDate>Tue, 24 Sep 2024 16:32:53 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1905-33</guid>
+        <source url="https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905.rss">Big Alien Proposal :flying_saucer: &quot;/WORD&quot; Runs Functions</source>
+      </item>
+      <item>
+        <title>Big Alien Proposal :flying_saucer: &quot;/WORD&quot; Runs Functions</title>
+        <dc:creator><![CDATA[bradrn]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="31" data-topic="1905">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>I therefore think that if <strong><code>lib.append</code></strong> is to fetch an antiform action, you have to write <strong><code>lib.append.</code></strong> with a terminal dot.</p>
+</blockquote>
+</aside>
+<p>I’d be OK with making <code>lib.append</code> fetch the action. That way, it’s consistent with an ordinary function call <code>append</code>, and you don’t need the <code>lib/append</code> syntax to conflate function calls with tuple access (which I never liked).</p>
+<p>I’m not so happy about the terminal dot, though… it seems like something which would be <em>really</em> easy to miss when reading code. It seems reasonable to make people use <code>get $lib.append/</code> for that comparatively rare case.</p>
+          <p><a href="https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905/32">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905/32</link>
+        <pubDate>Sun, 08 Sep 2024 00:59:17 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1905-32</guid>
+        <source url="https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905.rss">Big Alien Proposal :flying_saucer: &quot;/WORD&quot; Runs Functions</source>
+      </item>
+      <item>
+        <title>Big Alien Proposal :flying_saucer: &quot;/WORD&quot; Runs Functions</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="20" data-topic="1905">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>Traditional Redbol:</p>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">old-append: :lib/append
+old-orange: lib/orange
+</code></pre>
+<p>vs. /WORD is active proposal:</p>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext"> /old-append: lib.append
+ old-orange: lib.orange
+</code></pre>
+</blockquote>
+</aside>
+<p>In practice, I've found that it's really just too easy to type something like <strong><code>lib.append</code></strong> and expect it to run, because you casually forgot to write <strong><code>lib/append</code></strong> ... and it's not as easy to debug as one might think.</p>
+<pre><code>&gt;&gt; lib.append [a b c] [d e]
+== [d e]
+</code></pre>
+<p>I therefore think that if <strong><code>lib.append</code></strong> is to fetch an antiform action, you have to write <strong><code>lib.append/</code></strong> with a terminal slash.</p>
+<pre><code>/old-append: lib.append/
+old-orange: lib.orange
+</code></pre>
+<p>If that's not your style, you could instead write <strong><code>get $lib/append</code></strong> (or <strong><code>get $lib.append/</code></strong>) -- which has the advantage of ensuring the thing being gotten is an action.</p>
+<pre><code>/old-append: get $lib/append
+old-orange: lib.orange
+</code></pre>
+<p>The GET itself may have a refinement to allow active GETs.</p>
+<pre><code>/old-append: get:active $lib.append
+old-orange: lib.orange
+</code></pre>
+<p>That would probably be the tolerant version (e.g. would allow lib.append to be null, etc.)  Rather than add another refinement for "I'm getting an action" that could probably be better done as GET-ACTION.</p>
+          <p><a href="https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905/31">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905/31</link>
+        <pubDate>Sat, 07 Sep 2024 22:49:43 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1905-31</guid>
+        <source url="https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905.rss">Big Alien Proposal :flying_saucer: &quot;/WORD&quot; Runs Functions</source>
+      </item>
+      <item>
+        <title>Big Alien Proposal :flying_saucer: &quot;/WORD&quot; Runs Functions</title>
+        <dc:creator><![CDATA[bradrn]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group quote-modified" data-username="hostilefork" data-post="29" data-topic="1905">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>Well, I like it, so let's see how you feel after some time using it. <img src="https://forum.rebol.info/images/emoji/twitter/slight_smile.png?v=12" title=":slight_smile:" class="emoji" alt=":slight_smile:" loading="lazy" width="20" height="20"></p>
+</blockquote>
+</aside>
+<p>For that matter, let me see how much I like Ren-C in general after using it! It’s fair to say that I’m commenting from the sidelines here.</p>
+<p>(Haskell-Brassica is shaping up nicely, so hopefully the ‘using it’ will come sometime soon…)</p>
+          <p><a href="https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905/30">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905/30</link>
+        <pubDate>Tue, 03 Sep 2024 08:44:55 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1905-30</guid>
+        <source url="https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905.rss">Big Alien Proposal :flying_saucer: &quot;/WORD&quot; Runs Functions</source>
+      </item>
+      <item>
+        <title>Big Alien Proposal :flying_saucer: &quot;/WORD&quot; Runs Functions</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>Well, I like it--and I have some number of years of working in the medium under my belt.  So let's see how you feel after some time using it.  <img src="https://forum.rebol.info/images/emoji/twitter/slight_smile.png?v=12" title=":slight_smile:" class="emoji" alt=":slight_smile:" loading="lazy" width="20" height="20"></p>
+<p>(It's coming along reasonably but it's quite the change.)</p>
+          <p><a href="https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905/29">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905/29</link>
+        <pubDate>Tue, 03 Sep 2024 08:43:05 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1905-29</guid>
+        <source url="https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905.rss">Big Alien Proposal :flying_saucer: &quot;/WORD&quot; Runs Functions</source>
+      </item>
+      <item>
+        <title>Big Alien Proposal :flying_saucer: &quot;/WORD&quot; Runs Functions</title>
+        <dc:creator><![CDATA[bradrn]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="27" data-topic="1905">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>I feel it's easily <em>learnable</em>. And when you're in it for the long haul--as you are with a programming language--learnable things that have payoffs are worth it. (As opposed to <a href="http://blog.hostilefork.com/joel-spolsky-user-interface-design/">"compromising a program's power and beauty...merely to force it to make a mundanely comprehensible first-impression"</a>).</p>
+</blockquote>
+</aside>
+<p>Oh, it’s certainly easy to learn, that was never my issue. I just don’t think the payoff is worth it. Indeed, I think that this change ‘compromises the program’s power and beauty’ — the beauty being that of representing separate operations with separate operators.</p>
+          <p><a href="https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905/28">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905/28</link>
+        <pubDate>Tue, 03 Sep 2024 08:41:55 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1905-28</guid>
+        <source url="https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905.rss">Big Alien Proposal :flying_saucer: &quot;/WORD&quot; Runs Functions</source>
+      </item>
+      <item>
+        <title>Big Alien Proposal :flying_saucer: &quot;/WORD&quot; Runs Functions</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="bradrn" data-post="26" data-topic="1905">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/bradrn/48/365_2.png" class="avatar"> bradrn:</div>
+<blockquote>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">/obj.field      ; obj.field not required to be an action
+/obj.field/fn   ; obj.field must be an action‽
+</code></pre>
+<p>This feels horribly inconsistent to me. <code>obj.field</code> suddenly means different things depending on what it’s nested in.</p>
+</blockquote>
+</aside>
+<p>I feel it's easily <em>learnable</em>.  And when you're in it for the long haul--as you are with a programming language--learnable things that have payoffs are worth it.  (As opposed to <a href="http://blog.hostilefork.com/joel-spolsky-user-interface-design/">"compromising a program's power and beauty...merely to force it to make a mundanely comprehensible first-impression"</a>).</p>
+<p>I'm pretty well-versed in the minefields of problems for which this can help, while keeping things concise.  I've acclimated to it quickly.</p>
+<p>Someone starting out who wants to prefix everything with slash is free to do so, and later learn the other techniques.</p>
+          <p><a href="https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905/27">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905/27</link>
+        <pubDate>Tue, 03 Sep 2024 08:39:39 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1905-27</guid>
+        <source url="https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905.rss">Big Alien Proposal :flying_saucer: &quot;/WORD&quot; Runs Functions</source>
+      </item>
+      <item>
+        <title>Big Alien Proposal :flying_saucer: &quot;/WORD&quot; Runs Functions</title>
+        <dc:creator><![CDATA[bradrn]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="25" data-topic="1905">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">&gt;&gt; /obj.field
+== 10
+
+&gt;&gt; obj/field
+** Error: field is not an action
+</code></pre>
+</blockquote>
+</aside>
+<p>I don’t like this, especially combined with function composition. Consider:</p>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">obj/field       ; obj.field must be an action
+/obj.field      ; obj.field not required to be an action
+/obj.field/fn   ; obj.field must be an action‽
+</code></pre>
+<p>This feels horribly inconsistent to me. <code>obj.field</code> suddenly means different things depending on what it’s nested in.</p>
+<p>I’ll say again that I very much like the idea of separating ‘object access’ from ‘action execution’ (and ‘function refinement’). It breaks that paradigm to say that <code>obj/field</code> does both at once. I can reluctantly accept it if it’s defined to be a syntactic shorthand for <code>/obj.field</code>, but not if it’s a separate thing.</p>
+<p>(As for following slash, I don’t have a problem with it. It feels reasonable to say that <code>/f</code> and <code>f/</code> are two different ways to write the same thing.)</p>
+          <p><a href="https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905/26">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905/26</link>
+        <pubDate>Tue, 03 Sep 2024 08:25:34 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1905-26</guid>
+        <source url="https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905.rss">Big Alien Proposal :flying_saucer: &quot;/WORD&quot; Runs Functions</source>
+      </item>
+      <item>
+        <title>Big Alien Proposal :flying_saucer: &quot;/WORD&quot; Runs Functions</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>This is an error:</p>
+<pre><code>obj.accessor: func [...] [...]
+</code></pre>
+<p>But I'm assuming these forms are both legal:</p>
+<pre><code>obj/accessor: func [...] [...]
+
+/obj.accessor: func [...] [...]
+</code></pre>
+<p>The first one saves you a character, so most people would probably prefer it.</p>
+<p><strong>But this offers us an axis of distinction.</strong>  We could say that <code>obj/accessor</code> demands that what you are assigning is a function, while <code>/obj.accessor</code> merely tolerates it.</p>
+<p>This really does leave me wanting for a way of annotating that you're assigning a WORD! that you insist to be an antiform action.</p>
+<pre><code>???/old-append???: lib.append
+</code></pre>
+<p>You'd have to be able to express it by putting something either in the space before or the space after--because I insist on the slash preceding the function.</p>
+<p>I think with the meaning of slashes after an action being a chain, we can make a reasonable argument for <strong><code>old-append/:</code></strong> ... for those who wish to use it.  But you can't use two, e.g. <strong><code>/old-append/:</code></strong> ... you choose one or the other.</p>
+<aside class="quote no-group" data-username="hostilefork" data-post="15" data-topic="1905">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>This Is Looking Like A Done Deal</p>
+</blockquote>
+</aside>
+<p>Absolutely.</p>
+<p>Overall character counts going down, clarity going up, safety going up... what I'm seeing from how much I've gotten working so far is great.  I think people will get used to it quickly.</p>
+<p>There's a little pain with code written as <code>lib.append [a b c] [d e]</code> because it just evaluates the lib.append to nothing and keeps going.  But, new code written people will be expecting to always see a slash in a sequence if any action is to run.  Historical Rebol didn't have any such TUPLE! so it'll really just be a matter of removing error-causing slashes... only Ren-C code has the problem <em>(and I can take care of it for the codebases we care about enough to run on CI.  I just have a breakpoint whenever a tuple evaluates to an action and go clean it up.  Once all the accidental ones are clean, I can start using them intentionally.)</em></p>
+<p>I've been wondering about some kind of warning on values which get evaluated and just skipped like that... throwing away values is useful sometimes, but I feel like we could be of some help there more generally.</p>
+          <p><a href="https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905/24">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905/24</link>
+        <pubDate>Mon, 02 Sep 2024 04:56:48 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1905-24</guid>
+        <source url="https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905.rss">Big Alien Proposal :flying_saucer: &quot;/WORD&quot; Runs Functions</source>
+      </item>
+      <item>
+        <title>Big Alien Proposal :flying_saucer: &quot;/WORD&quot; Runs Functions</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="13" data-topic="1905">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">&gt;&gt; func [msg] [print ["This" msg]]
+== ~#[frame! [msg]]~  ; anti
+
+&gt;&gt; foo: func [msg] [print ["This" msg]]
+** Error: Cannot save antiform frame with foo: (use /foo:)
+
+&gt;&gt; /foo: func [msg] [print ["This" msg]]
+== ~#[frame! [msg]]~  ; anti
+
+&gt;&gt; foo "Might Have Potential"
+This Might Have Potential
+</code></pre>
+<p><strong><code>/FOO:</code></strong> and <strong><code>/FOO</code></strong> could mean "antiform frames are ok to be assigned here.</p>
+</blockquote>
+</aside>
+<p>This covers "actions are okay" but not "an action was expected".</p>
+<p>Earlier I suggested that maybe <strong><code>foo/:</code></strong> could be that.  But that sucks...it doesn't make any sense--we're putting slashes before actions, not after them.</p>
+<p>It may not be necessary to make a single-value assignment notation that enforces actions.  You could just write <strong><code>/foo: runs (whatever)</code></strong> and then RUNS can be tolerant of antiform frames (as well as normal ones).  It will be intolerant of everything else (like integers).  It's shorter than <strong><code>/foo: ensure [action?] (whatever)</code></strong>  and good enough.</p>
+<p>But I do think we could say with things like <strong><code>get $/foo</code></strong> that it ensures foo is an action (or FRAME!, that it would come back with as a runnable action).</p>
+<pre><code>/old-append: lib.append  ; would work but not guarantee it was an action
+
+/old-append: runs lib.append  ; ensures append is some kind of frame
+
+/old-append: get $/lib.append  ; ensures append is some kind of frame
+</code></pre>
+<p>That feels like it gets good enough coverage.</p>
+<p>Function parameters have typechecking, so if you want an action you say <strong><code>/arg [action?]</code></strong>... whereas just <strong><code>/arg</code></strong> could get you something that may-or-may-not-be-an-action.  I can live with that.</p>
+          <p><a href="https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905/23">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905/23</link>
+        <pubDate>Sun, 01 Sep 2024 19:42:40 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1905-23</guid>
+        <source url="https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905.rss">Big Alien Proposal :flying_saucer: &quot;/WORD&quot; Runs Functions</source>
+      </item>
+      <item>
+        <title>Big Alien Proposal :flying_saucer: &quot;/WORD&quot; Runs Functions</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>2 posts were split to a new topic: <a href="https://forum.rebol.info/t/function-composition-via-path/2242">Function Composition via PATH!</a></p>
+          <p><a href="https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905/18">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905/18</link>
+        <pubDate>Sun, 01 Sep 2024 09:51:35 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1905-18</guid>
+        <source url="https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905.rss">Big Alien Proposal :flying_saucer: &quot;/WORD&quot; Runs Functions</source>
+      </item>
+      <item>
+        <title>Big Alien Proposal :flying_saucer: &quot;/WORD&quot; Runs Functions</title>
+        <dc:creator><![CDATA[bradrn]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="21" data-topic="1905">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>I have a little bit of a qualm here, if <strong><code>/foo</code></strong> is a notation that in some places means <em>"thing that a function can be assigned"</em> and in other places means <em>"invocation of a function"</em>.</p>
+</blockquote>
+</aside>
+<p>I have no problems with this — the situation is perfectly symmetrical. It’s no different to how Lisps let you write things like</p>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">(defun (f x y z) body)
+</code></pre>
+<p>to assign <code>f</code>, and then</p>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">(f x y z)
+</code></pre>
+<p>to use it. Either way, the notation <code>(f x y z)</code> means ‘function <code>f</code> with parameters <code>x</code>, <code>y</code>, <code>z</code>’.</p>
+          <p><a href="https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905/22">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905/22</link>
+        <pubDate>Sat, 31 Aug 2024 10:17:45 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1905-22</guid>
+        <source url="https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905.rss">Big Alien Proposal :flying_saucer: &quot;/WORD&quot; Runs Functions</source>
+      </item>
+      <item>
+        <title>Big Alien Proposal :flying_saucer: &quot;/WORD&quot; Runs Functions</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="13" data-topic="1905">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p><strong><code>/FOO:</code></strong> and <strong><code>/FOO</code></strong> could mean "antiform frames are ok to be assigned here.</p>
+<ul>
+<li>You can use it in function specs, e.g. <strong>func [a] [...]</strong> would not take an antiform action, but <strong>func [/a] [...]</strong> would.</li>
+<li>You could use it in enumerations, e.g. <strong>for-each [key /value] obj [...]</strong> would allow you to receive frame antiforms, but <strong>for-each [key value] obj [...]</strong> would not.</li>
+</ul>
+</blockquote>
+</aside>
+<p>I have a little bit of a qualm here, if <strong><code>/foo</code></strong> is a notation that in some places means <em>"thing that a function can be assigned"</em> and in other places means <em>"invocation of a function"</em>.</p>
+<p>It's only a small qualm.  e.g. in <strong>for-each [key /value]</strong> we know that KEY isn't getting evaluated.  In function specs like <strong>func [a]</strong> we know A isn't getting evaluated.</p>
+<p>We don't want to shuffle it so that <strong>foo/</strong> is the notation for invocation, because that breaks the basic premise of <strong>obj/foo</strong> having the slash before the thing that runs.</p>
+<p>So resolving this would have to put terminal slashes on all the receiving sites.</p>
+<pre><code>foo/: func [obj action/] [
+   let arg1: 10
+   for-each [key value/] obj [
+       if not action? value. [print "Not an action!"]
+   ]
+   let arg2: 20
+   obj/method arg1 arg2
+   action arg1 obj.field
+]
+</code></pre>
+<p><em>I don't like that.</em>  It's ugly, and I think the leading slashes are much more natural:</p>
+<pre><code>/foo: func [obj /action] [
+   let arg1: 10
+   for-each [key /value] obj [
+       if not action? value. [print [key "is not an action!"]]
+   ]
+   let arg2: 20
+   obj/method arg1 arg2
+   action arg1 obj.field
+]
+</code></pre>
+<p>I'm not convinced the first form really offers much benefit at all in practice, and it certainly doesn't offer enough to make things look that bad.</p>
+          <p><a href="https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905/21">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905/21</link>
+        <pubDate>Sat, 31 Aug 2024 09:27:56 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1905-21</guid>
+        <source url="https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905.rss">Big Alien Proposal :flying_saucer: &quot;/WORD&quot; Runs Functions</source>
+      </item>
+      <item>
+        <title>Big Alien Proposal :flying_saucer: &quot;/WORD&quot; Runs Functions</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <h3><a name="p-7477-responses-to-potential-criticisms-1" class="anchor" href="https://forum.rebol.info#p-7477-responses-to-potential-criticisms-1"></a>Responses To Potential Criticisms</h3>
+<hr>
+<blockquote>
+<p><strong><code>append:dup.2:line</code></strong> is less readable than <strong><code>append/dup.2/line</code></strong> because <strong><code>:</code></strong> visually does not separate the words so strongly as <strong><code>/</code></strong>.</p>
+</blockquote>
+<p>Yes, I will admit it doesn't stand out as strongly.  But there are priorities.</p>
+<p>To me, seeing XXX.YYY and knowing that will not run a function vs. XXX/YYY and knowing it will run a function (and that YYY is the function) is a higher priority.</p>
+<p>Along similar lines, when I introduced generic TUPLE! I had some doubts about pushing things down and losing some of the "heft" of slash:</p>
+<pre><code>foo/some-thing
+
+foo.some-thing
+</code></pre>
+<p>I thought "the dash now looks stronger than the dot", to where you might try to grok that as:</p>
+<pre><code>(foo.some)-thing
+</code></pre>
+<p>But the mind is fluid.  You read things how you are used to them.  While I found this a little upsetting at first, that upset quickly gave way as I re-learned.  I don't even think it took a week.  I now think nothing of it, and read it naturally.  <em>(For that matter, we are used to this in filenames, such as <strong><code>my-file.txt</code></strong> not being <strong><code>my-(file.txt)</code></strong>)</em></p>
+<p>My bet is that this will just be another such thing, to where the benefits will vastly outweigh the downsides.</p>
+<hr>
+<blockquote>
+<p>Rebol's ambiguity problems are not solved with <em>optional</em> slash. Only with a mandatory one--which would be a lot of syntax, and reduce the flexibility.</p>
+</blockquote>
+<p>Only WORD! are left as the fuzzy case.  And I believe that it will be annotated enough at the boundaries that you will know what you are getting into.</p>
+<pre><code>foo: func [block /baz &lt;local&gt; bar mumble] [
+    baz 1 2 3
+    /bar: frotz 5 6 7
+    bar 8 9 10
+    mumble: splat 11 12 13
+    append block mumble
+    print "You know this print isn't an argument to mumble"
+]
+</code></pre>
+<p>It's unavoidable that the "keywords" in Rebol have this character, and you won't want the slashes on them.  But I am thinking this is "as good as it gets" in terms of letting you mitigate the burden of the ambiguity, and write clear and safe code.</p>
+<p><a href="https://forum.rebol.info/t/operator-meaning-complete-fully-what-is-that/792/2">Note that we have even more safety offered now with APPLY</a>, which you might use whenever you're getting functions you aren't completely confident in the arity of:</p>
+<pre><code>foo: func [block /baz &lt;local&gt; bar mumble] [
+    baz // [1 2 3]
+    /bar: frotz 5 6 7
+    bar // [8 9 10]
+    mumble: splat 11 12 13
+    append block mumble
+    print "You know this print isn't an argument to mumble"
+
+    ; ... and you know mumble isn't an argument to block!
+]
+</code></pre>
+<hr>
+<blockquote>
+<p>You're losing readability and making the language even more filled with syntax of all kinds.</p>
+</blockquote>
+<p>Consider the difference between these two things.</p>
+<p>Traditional Redbol:</p>
+<pre><code>old-append: :lib/append
+old-orange: lib/orange
+</code></pre>
+<p>vs. /WORD is active proposal:</p>
+<pre><code> /old-append: lib.append
+ old-orange: lib.orange
+</code></pre>
+<p>These are the same number of characters.  But the second not only looks better, it has many nice properties:</p>
+<ul>
+<li>
+<p>It keeps you from having to use an ugly prefix colon when you're fetching <code>APPEND</code> as an active function out of <code>LIB</code> by value... using a tuple (dot) as <code>APPEND.LIB</code> is enough to ensure you won't run a function</p>
+</li>
+<li>
+<p>The prefix slash on <code>/OLD-APPEND</code> shows your acknowledgment that what you're getting can be active (if you just said <code>OLD-APPEND:</code> it would be an error)</p>
+</li>
+<li>
+<p>You are shielded from executing a parameter-consuming function from LIB called orange by using the tuple of <code>LIB.ORANGE</code></p>
+</li>
+<li>
+<p>If orange in lib happens to be an antiform active function, it shields you from assigning that to old-orange because you didn't say <code>/OLD-ORANGE:</code></p>
+</li>
+</ul>
+<p>I'm really skeptical of the good faith of someone who has used Rebol/Red at all and won't acknowledge the superiority of the second form.</p>
+          <p><a href="https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905/20">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905/20</link>
+        <pubDate>Fri, 30 Aug 2024 20:01:03 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1905-20</guid>
+        <source url="https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905.rss">Big Alien Proposal :flying_saucer: &quot;/WORD&quot; Runs Functions</source>
+      </item>
+      <item>
+        <title>Big Alien Proposal :flying_saucer: &quot;/WORD&quot; Runs Functions</title>
+        <dc:creator><![CDATA[BlackATTR]]></dc:creator>
+        <description><![CDATA[
+            <p>I like it. It’s really not hard to understand. Might take a little getting used to, but I think the benefits are clear.</p>
+<p>I’m on board the spaceship.</p>
+<p></p><div class="lightbox-wrapper"><a class="lightbox" href="https://forum.rebol.info/uploads/default/original/1X/8bb25b4b72152afceccd7cf7edc5eb7d658ca350.jpeg" data-download-href="https://forum.rebol.info/uploads/default/8bb25b4b72152afceccd7cf7edc5eb7d658ca350" title="image"><img src="https://forum.rebol.info/uploads/default/optimized/1X/8bb25b4b72152afceccd7cf7edc5eb7d658ca350_2_345x194.jpeg" alt="image" data-base62-sha1="jVOuJqpi5WCg6KePTbBu6hKcWY0" width="345" height="194" srcset="https://forum.rebol.info/uploads/default/optimized/1X/8bb25b4b72152afceccd7cf7edc5eb7d658ca350_2_345x194.jpeg, https://forum.rebol.info/uploads/default/optimized/1X/8bb25b4b72152afceccd7cf7edc5eb7d658ca350_2_517x291.jpeg 1.5x, https://forum.rebol.info/uploads/default/optimized/1X/8bb25b4b72152afceccd7cf7edc5eb7d658ca350_2_690x388.jpeg 2x" data-dominant-color="727469"></a></div><p></p>
+          <p><a href="https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905/17">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905/17</link>
+        <pubDate>Thu, 29 Aug 2024 03:22:06 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1905-17</guid>
+        <source url="https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905.rss">Big Alien Proposal :flying_saucer: &quot;/WORD&quot; Runs Functions</source>
+      </item>
+      <item>
+        <title>Big Alien Proposal :flying_saucer: &quot;/WORD&quot; Runs Functions</title>
+        <dc:creator><![CDATA[bradrn]]></dc:creator>
+        <description><![CDATA[
+            <p>This is the first time I’ve seen this thread, but I really like it! It feels like a great improvement on the basic Rebol notion of refinements.</p>
+<p>(And, for once, I completely agree with the syntax. It reminds me of <a href="https://perl11.org/potion/">Potion</a>, which I’ve always liked.)</p>
+          <p><a href="https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905/16">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905/16</link>
+        <pubDate>Thu, 29 Aug 2024 03:01:12 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1905-16</guid>
+        <source url="https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905.rss">Big Alien Proposal :flying_saucer: &quot;/WORD&quot; Runs Functions</source>
+      </item>
+      <item>
+        <title>Big Alien Proposal :flying_saucer: &quot;/WORD&quot; Runs Functions</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>Looking at some practical examples of the consequences, of course every time you want to assign a function you now have to say <strong>/foo: func [...] [...]</strong> instead of just <strong>foo: func [...] [...]</strong>.  While that may seem a little irritating when it's FUNC, it's actually helpful when you're using something else... like someone reading <strong>/foo: cascade [...]</strong> for the first time will know that CASCADE is a function generator.  So it's more helpful than it seems, and it's an easy-to-hit key on the keyboard.</p>
+<p>it definitely pushes refinements down in terms of how much they stand out:</p>
+<pre><code>for-each [abbrev expansion] data [
+    replace:all sig unspaced [space abbrev space] unspaced [space expansion]
+    replace:all sig unspaced [space abbrev newline] unspaced [space expansion]
+]
+
+response: copy:part lowercase ask ["Okay?" text!] 1
+if response = "y" [break]
+
+surname: across to ","
+thru space [opt some space]
+[firstnames: across to "("] (trim:head:tail firstnames)
+title: between "(" ")"
+</code></pre>
+<p>Colon just doesn't "pop" as much as slash does.</p>
+<p><strong>But I think this is the correct tradeoff, because it means slash now pops as showing you where functions are being called or defined, which is more significant.</strong></p>
+<p>We're getting more bang for our character buck.<br>
+<img src="https://forum.rebol.info/images/emoji/twitter/dollar.png?v=12" title=":dollar:" class="emoji only-emoji" alt=":dollar:" loading="lazy" width="20" height="20"></p>
+<p><a href="https://forum.rebol.info/t/the-fate-of-redbol-emulation-in-a-mostly-unbound-world/2131">Emulation of historical Redbol gets tricky.</a>  But new techniques could address it, when and if it becomes a priority for...someone.</p>
+<h2>
+<a name="but-wait-theres-more-an-insaneo-stylehttpswwwyoutubecomwatchvhq40jnxmdlk-benefit-1" class="anchor" href="https://forum.rebol.info#but-wait-theres-more-an-insaneo-stylehttpswwwyoutubecomwatchvhq40jnxmdlk-benefit-1"></a>BUT WAIT, THERE'S MORE: AN <a href="https://www.youtube.com/watch?v=hQ40jNXMDlk">INSANEO-STYLE</a> BENEFIT!</h2>
+<ul>
+<li>
+<p>path means execute function</p>
+</li>
+<li>
+<p>chain in path means pick refinement</p>
+</li>
+<li>
+<p><strong>tuple in chain means provide argument there</strong> !!!</p>
+</li>
+</ul>
+<p>This gives us what everyone always wanted.</p>
+<pre><code>&gt;&gt; lib/append:dup [a b c] [d e] 2
+== [a b c [d e] [d e]]
+
+&gt;&gt; lib/append:dup.2 [a b c] [d e]
+== [a b c [d e] [d e]]
+
+&gt;&gt; lib/append:dup.2:line [a b c] [d e]
+== [
+    a b c [d e]
+    [d e]
+]
+</code></pre>
+<p>And it means we can <a>do away with skippable parameter hacks</a> <em>(in fact, we can do away with skippable parameters altogether)</em>:</p>
+<pre><code>&gt;&gt; compose:only.&lt;*&gt; [(1 + 2) (&lt;*&gt; 10 + 20) (100 + 200)]
+== [(1 + 2) (30) (100 + 200)]
+</code></pre>
+<p><em>(That's an actual legitimate use of an <strong><code>:ONLY</code></strong> refinement...)</em></p>
+<p>It would be literal, so you'd have to use a GROUP! to evaluate.  So if <strong><code>(a: '**)</code></strong></p>
+<pre><code>&gt;&gt; a: &lt;*&gt;
+
+&gt;&gt; compose:only.(a) [(1 + 2) (** 10 + 20) (100 + 200)]
+== [(1 + 2) (30) (100 + 200)]
+</code></pre>
+<h2>
+<a name="stratospheric-chain-as-the-function-call-dialect-2" class="anchor" href="https://forum.rebol.info#stratospheric-chain-as-the-function-call-dialect-2"></a>Stratospheric: CHAIN! as <em>The Function Call Dialect</em>
+</h2>
+<p>What if you offered the ability to pass the chain to the function so it could handle it itself?</p>
+<pre><code>&gt;&gt; all:not [1 &gt; 2, 3 &gt; 4, 5 &gt; 6]
+== ~true~  ; anti
+</code></pre>
+<p>Instead of being constrained to a finite number of refinements, you could interpret it how you wanted.</p>
+<p>Maybe a version numbering scheme to make the same function have different behaviors, without needing more than one top level declaration...  <strong>something:1</strong> vs. <strong>something:2</strong> as a shorthand for <strong>something:version.1</strong> and <strong>something:version.2</strong> ?</p>
+<p>Hence <strong><code>compose:&lt;*&gt;</code></strong> could be the presumed way to give the limit of what you compose.  You could even change the interpretation of parentheses or fences or blocks...</p>
+<pre><code>&gt;&gt; compose:[$] [a b c [1 + 2] [$ 10 + 20] (100 + 200)]
+== [a b c [1 + 2] 30 (100 + 200)]
+
+&gt;&gt; compose:(a) [a b c [1 + 2] (a 10 + 20) (100 + 200)]
+== [a b c [1 + 2] 30 (100 + 200)]
+</code></pre>
+<p>Sky is no longer the limit.</p>
+<h2>
+<a name="this-is-looking-like-a-done-deal-3" class="anchor" href="https://forum.rebol.info#this-is-looking-like-a-done-deal-3"></a>This Is Looking Like A Done Deal</h2>
+<p>Not only is this going to give greater readability, greater security/sanity, a more coherent model for things I've bumped up against... but it's features I now don't think I can live without.</p>
+<p>I will be beginning the change shortly.</p>
+          <p><a href="https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905/15">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905/15</link>
+        <pubDate>Wed, 28 Aug 2024 19:45:26 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1905-15</guid>
+        <source url="https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905.rss">Big Alien Proposal :flying_saucer: &quot;/WORD&quot; Runs Functions</source>
+      </item>
+      <item>
+        <title>Big Alien Proposal :flying_saucer: &quot;/WORD&quot; Runs Functions</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group quote-modified" data-username="hostilefork" data-post="13" data-topic="1905">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>It would have higher precedence than tuple but lower than path. So:</p>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">foo/bar.baz:mumble:frotz
+</code></pre>
+<p>..that would be a 2-element PATH! with a 3-element CHAIN! in the second position that has a 2-element TUPLE! in its first position</p>
+</blockquote>
+</aside>
+<p>When you look at the case of <strong><code>/foo:</code></strong> it makes sense that the slash is "above" the <strong><code>foo:</code></strong></p>
+<pre><code>/(foo:)  ; this interpretation is correct
+</code></pre>
+<p>If it were the other way around, it would be like you were trying to set a function execution, which makes no sense.</p>
+<pre><code>(/foo):  ; this is not correct
+</code></pre>
+<p>The wrapping path is relaxing a constraint on what would otherwise be a stricter assignment (no antiform frames), and the assignment stays stuck together so you can pick it out of the path.</p>
+<p>And <strong><code>/:a</code></strong> is the representation of a refinement that is allowed to be an antiform action!!</p>
+<p>Since <strong><code>.</code></strong> is a WORD! now we know that <strong><code>/.:</code></strong> has a meaning... assign an antiform action to the dot operator.  <strong><code>/:</code></strong> means run the FRAME! or antiform-frame resident in the <strong><code>:</code></strong> variable.</p>
+<p>You'll need to use escaping to assign forms like <strong><code>:::</code></strong> or <strong><code>//</code></strong> because you can't get the colon "on top" of them.</p>
+<pre><code>&gt;&gt; ($:::): 100
+
+&gt;&gt; :::
+== 100
+
+&gt;&gt; /($//): does [print "A small price to pay"]
+== ~#[frame! []]~  ; anti
+
+&gt;&gt; //
+A small price to pay
+</code></pre>
+<p>It's all clicking.</p>
+<p><img src="https://forum.rebol.info/images/emoji/twitter/star2.png?v=12" title=":star2:" class="emoji only-emoji" alt=":star2:" loading="lazy" width="20" height="20"><br>
+<img src="https://forum.rebol.info/images/emoji/twitter/flying_saucer.png?v=12" title=":flying_saucer:" class="emoji only-emoji" alt=":flying_saucer:" loading="lazy" width="20" height="20"><br>
+<img src="https://forum.rebol.info/images/emoji/twitter/alien.png?v=12" title=":alien:" class="emoji only-emoji" alt=":alien:" loading="lazy" width="20" height="20"></p>
+          <p><a href="https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905/14">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905/14</link>
+        <pubDate>Wed, 28 Aug 2024 06:51:49 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1905-14</guid>
+        <source url="https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905.rss">Big Alien Proposal :flying_saucer: &quot;/WORD&quot; Runs Functions</source>
+      </item>
+      <item>
+        <title>Big Alien Proposal :flying_saucer: &quot;/WORD&quot; Runs Functions</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="12" data-topic="1905">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<h2>Any Synthesis Of Ideas Here That's Not Terrible?</h2>
+<p>It should be remembered that antiform-based Actions are new, and their potential benefits are not completely understood yet.</p>
+</blockquote>
+</aside>
+<hr>
+<p>After about two years of learning to work with antiform-based actions, they are reasonably understood (and understood as the antiform of FRAME!)</p>
+<p><strong>The idea of FUNC returning plain FRAME! and then having a refinement-style assignment promote (demote?) it to an antiform is bad.</strong></p>
+<pre><code>&gt;&gt; foo: func [msg] [print ["This" name]]
+== #[frame! [msg]]
+
+&gt;&gt; foo
+== #[frame! [msg]]
+
+&gt;&gt; run foo "Sucks"
+This Sucks
+
+&gt;&gt; /foo: func [msg] [print ["This" msg]]
+== ~#[frame! [msg]]~  ; anti
+
+&gt;&gt; foo "Sucks As Well"
+This Sucks As Well
+</code></pre>
+<p>It is way too easy to forget the slash.</p>
+<h2><a name="p-7442-but-ive-been-up-all-night-smoking-crackhttpswwwyoutubecomwatchviu7mebovxbs-so-hear-me-out-1" class="anchor" href="https://forum.rebol.info#p-7442-but-ive-been-up-all-night-smoking-crackhttpswwwyoutubecomwatchviu7mebovxbs-so-hear-me-out-1"></a><a href="https://www.youtube.com/watch?v=iU7MEbOVXbs">But I've Been Up All Night Smoking Crack</a>.  So Hear Me Out...</h2>
+<p><strong>What if FUNC returned an antiform FRAME! and you had to use the slash in order to say "yes, I meant to assign that?</strong></p>
+<pre><code>&gt;&gt; func [msg] [print ["This" msg]]
+== ~#[frame! [msg]]~  ; anti
+
+&gt;&gt; foo: func [msg] [print ["This" msg]]
+** Error: Cannot save antiform frame with foo: (use /foo:)
+
+&gt;&gt; /foo: func [msg] [print ["This" msg]]
+== ~#[frame! [msg]]~  ; anti
+
+&gt;&gt; foo "Might Have Potential"
+This Might Have Potential
+</code></pre>
+<p><strong><code>/FOO:</code></strong> and <strong><code>/FOO</code></strong> could mean "antiform frames are ok to be assigned here.</p>
+<ul>
+<li>
+<p>You can use it in function specs, e.g. <strong>func [a] [...]</strong> would not take an antiform action, but <strong>func [/a] [...]</strong> would.</p>
+</li>
+<li>
+<p>You could use it in enumerations, e.g. <strong>for-each [key /value] obj [...]</strong> would allow you to receive frame antiforms, but <strong>for-each [key value] obj [...]</strong> would not.</p>
+</li>
+</ul>
+<h2><a name="p-7442-crazy-talk-crazy_face-what-if-refinements-were-chainhttpsforumrebolinfotintroducingnew-chain-datatype2226-2" class="anchor" href="https://forum.rebol.info#p-7442-crazy-talk-crazy_face-what-if-refinements-were-chainhttpsforumrebolinfotintroducingnew-chain-datatype2226-2"></a>Crazy Talk <img src="https://forum.rebol.info/images/emoji/twitter/crazy_face.png?v=12" title=":crazy_face:" class="emoji" alt=":crazy_face:" loading="lazy" width="20" height="20"> What If Refinements Were <a href="https://forum.rebol.info/t/introducingnew-chain-datatype/2226">CHAIN!</a> ?</h2>
+<p>Under the rule above, you'd have to make your methods in your objects look like this</p>
+<pre><code>obj: make object! [
+    data: 1
+    /accessor: does [return data + 1]
+]
+</code></pre>
+<p>Let's say that in order to call ACCESSOR you had to use a PATH!, e.g. OBJ/ACCESSOR.  And then...for refinements...we use CHAIN! ... our new interstitial peer to TUPLE! and PATH! that uses colons.</p>
+<p>This would make <strong>:word</strong> the new refinement (blank-headed chain):</p>
+<pre><code>obj: make object! [
+    data: 1
+    /accessor: func [arg [integer!] :refine1 [integer!] :refine2] [
+        if refine1 [
+            return data + arg + either refine2 [negate refine1] [refine1]
+        ]
+        return either refine2 [data + negate arg] [data + arg]
+    ]
+]
+</code></pre>
+<p>And if you want to use those refinements:</p>
+<pre><code>obj/accessor:refine1:refine2 10 20
+</code></pre>
+<ul>
+<li>
+<p><strong>By looking at it, you can tell that's a call to a function</strong>... it's only the weird exception of WORD! that were assigned with <strong><code>/word:</code></strong> where you look at <strong><code>word</code></strong> and can't tell in advance</p>
+<ul>
+<li>
+<p>compare with Redbol <strong>foo/baz/bar/mumble</strong> - You have no idea what's going on.</p>
+</li>
+<li>
+<p>Ren-C made an improvement with <strong>foo.baz/bar/mumble</strong> where you know due to the use of refinements that foo.baz must be a function, but you're still out of luck if you just see <strong>foo.baz</strong></p>
+</li>
+<li>
+<p>This gives us <strong>foo/baz:bar:mumble</strong>, where we get a more intuitive sense of where the function is (it's /baz, the thing after the slash) and in the diminished case we'd still know <strong>foo/baz</strong> was a function call</p>
+</li>
+</ul>
+</li>
+<li>
+<p>Field selection via dot of actions could always not run the action even if it's an antiform, e.g. <strong><code>obj.accessor</code></strong> just gives you the frame antiform as is</p>
+<ul>
+<li>The impact of these casually extracted antiforms would be limited to places that were rigged to accept the antiform frames</li>
+</ul>
+</li>
+</ul>
+<h2><a name="p-7442-appenddup-a-b-c-d-e-2-is-different-but-is-it-bad-3" class="anchor" href="https://forum.rebol.info#p-7442-appenddup-a-b-c-d-e-2-is-different-but-is-it-bad-3"></a><strong><code>(append:dup [a b c] [d e] 2)</code></strong> is <em>different</em>, but is it <em>bad</em>?</h2>
+<p>It shifts <strong><code>:foo</code></strong> to be unrelated to "getting"...it would be inert, and used in things like APPLY.</p>
+<p>And with slashes being so applicable to function application, it seems inevitable that <strong><code>//</code></strong> be the operator (though you could use <code>::</code> if you want, these will be WORD!s now)</p>
+<pre><code>append // [[a b c] [d e] :dup 2]
+</code></pre>
+<p><strong>:dup</strong> would become REFINEMENT?.  <em>This would mean that leading colon is how you imply optionality, not slash.</em></p>
+<pre><code>&gt;&gt; [a b c]: pack [1 + 2 10 + 20]
+** Error: not enough values in antiform pack for assignment
+
+&gt;&gt; [a b :c]: pack [1 + 2 10 + 20]
+== 3
+
+&gt;&gt; reduce [a b]
+== [3 30]
+</code></pre>
+<p>In these places, if you used a slash you'd be saying you'd accept action antiforms.  You can use both a slash and optionality: <strong><code>/:c</code></strong>.  And you can circle it too, <strong><code>@/:c</code></strong>, if you really want to !</p>
+<h2><a name="p-7442-execution-suppression-4" class="anchor" href="https://forum.rebol.info#p-7442-execution-suppression-4"></a>Execution Suppression</h2>
+<p>Accomplishing execution suppression could be done with a terminal dot on a WORD!, or the usage of any TUPLE!.  I always thought <strong><code>foo.</code></strong> as <em>"I mean FOO.  Period."</em> had potential.</p>
+<pre><code>&gt;&gt; append [a b c] [d e]
+== [a b c] [d e]
+
+&gt;&gt; append.
+== ~#[frame! [series value :dup :part :line]]~  ; anti
+</code></pre>
+<p>But now we'd have it so <strong>foo.bar</strong> would be enough to get the execution suppression without needing to say <strong>foo.bar.</strong> because even antiform frames won't run unless you say <strong>foo/bar</strong> <img src="https://forum.rebol.info/images/emoji/twitter/bangbang.png?v=12" title=":bangbang:" class="emoji" alt=":bangbang:" loading="lazy" width="20" height="20"></p>
+<p>And there'd be far fewer occasions where you'd need to use <strong><code>foo.</code></strong> "just to be safe".  Because you'd have a sense from wherever it was assigned if you didn't have to worry about it.</p>
+<p>You wind up with a different look:</p>
+<pre><code>&gt;&gt; apply :append [[a b c] [d e] /dup 2]
+
+vs.
+
+&gt;&gt; apply append. [[a b c] [d e] :dup 2]
+</code></pre>
+<p>I can see how the period might suggest <strong><code>(apply append) [[a b c] [d e] :dup 2]</code></strong> if you didn't know what it meant.  But if you don't know what things mean, then you can interpret things all kinds of ways.</p>
+<p>It doesn't seem all that measurably worse--if it's worse at all.  Looking past this one particular case, the benefits are enormous.  And you can always say <strong><code>apply get $append [[a b c] [d e] :dup 2]</code></strong> if you want to be verbose about it.  (This particular case of course has <strong><code>append // [...]</code></strong>)</p>
+<h2><a name="p-7442-and-we-preserve-the-foo-to-run-a-function-or-frame-5" class="anchor" href="https://forum.rebol.info#p-7442-and-we-preserve-the-foo-to-run-a-function-or-frame-5"></a>And We Preserve the /FOO to Run A Function or Frame</h2>
+<pre><code>&gt;&gt; tester: make frame! append.
+== #[frame! [series value :dup :part :line]]
+
+&gt;&gt; tester.series: [a b c]
+&gt;&gt; tester.dup: 2
+
+&gt;&gt; /tester [d e]
+== [a b c [d e] [d e]]
+</code></pre>
+<p>If it's already an action antiform, then the slash can just be commentary for the reader to say "if not obvious from the context, this is a function call"</p>
+<p><img src="https://forum.rebol.info/images/emoji/twitter/exploding_head.png?v=12" title=":exploding_head:" class="emoji only-emoji" alt=":exploding_head:" loading="lazy" width="20" height="20"></p>
+<hr>
+<p><strong>I only just came up with this, but it's based on understanding the pros and cons of prior attempts, and the benefits are easy to articulate.</strong></p>
+<p><strong>I am especially fond of being able to look at <strong>XXX/YYY</strong> and know that's going to run a function, and that <strong>XXX.YYY</strong> never will.</strong></p>
+<p><strong>This critically narrows the scope of negative impacts of antiform FRAME! by making it only relevant to dispatch from WORD!</strong></p>
+<p><strong>...and of course the security of consciously declaring when you're assigning something to a variable that can run arbitrary code from a mere word reference is very important.</strong></p>
+<hr>
+<p>By being forced to say <strong>foo.bar</strong> or <strong>foo/bar</strong> you can't have a situation of "run it if it's a zero arity function or just give me the value".  But maybe that's what <strong>foo/bar/</strong> could mean if it ever comes up.</p>
+          <p><a href="https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905/13">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905/13</link>
+        <pubDate>Tue, 27 Aug 2024 22:41:00 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1905-13</guid>
+        <source url="https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905.rss">Big Alien Proposal :flying_saucer: &quot;/WORD&quot; Runs Functions</source>
+      </item>
+      <item>
+        <title>Big Alien Proposal :flying_saucer: &quot;/WORD&quot; Runs Functions</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>I managed to get a booting system where you have to use <strong><code>/foo:</code></strong> assignments to get functions to execute when dispatched by WORD!.</p>
+<h2>
+<a name="tldr-i-dont-think-i-like-the-first-attempt-but-1" class="anchor" href="https://forum.rebol.info#tldr-i-dont-think-i-like-the-first-attempt-but-1"></a>TL;DR - I Don't Think I Like The First Attempt... BUT...</h2>
+<p>It's valuable exploration, to look at the options and think about alternative designs.</p>
+<h2>
+<a name="i-explored-having-func-not-return-frame-antiforms-2" class="anchor" href="https://forum.rebol.info#i-explored-having-func-not-return-frame-antiforms-2"></a>I Explored Having FUNC <em>Not</em> Return FRAME! Antiforms</h2>
+<p>Having Action be "FRAME!s at quote level -1"... that cannot be put in blocks, and can represent a non-literal sort of usage of actions... is <em>very new</em>.  Like a-couple-weeks-ago new.</p>
+<p>And in the first cut at implementing them, consider what would need to be true for this to work as expected:</p>
+<pre><code>foo: func [x] [print [x]]
+</code></pre>
+<p>In this world, for the word FOO to run the function, that meant the return product of FUNC would have to be a function antiform.</p>
+<p><em>That got ugly.</em>  The whole idea of antiforms is that most routines don't touch them, and error when they encounter them.  But this meant every generator (FUNC, LAMBDA, -&gt;, ADAPT, SPECIALIZE, CHAIN, ENCLOSE...) had to make antiforms.  And everything that processed or composed functions in any way had to either take antiforms or force you to ^META (or "UNRUN") your generated functions.</p>
+<p>I tried throwing in random decaying from antiforms to normal actions, but it felt uncomfortable.</p>
+<p>That's because I imagined no one would want to write the "clean" answer:</p>
+<pre><code>foo: anti func [x] [print [x]]
+</code></pre>
+<p>And probably wouldn't be much better with a specialized native like RUNS that only antiformed actions (in the spirit of how SPREAD only antiforms lists):</p>
+<pre><code>foo: runs func [x] [print [x]]
+</code></pre>
+<p>I suggested even stealing something light like arrow:</p>
+<pre><code>foo: -&gt; func [x] [print [x]]
+</code></pre>
+<p>But the search for minimal also dovetailed with the desire for <strong>lib/append</strong> to reasonably imply <strong>/append</strong> was a function.   So that's part of what birthed the <em>comparatively</em>-palatable idea of slipping it into the assignment with a single easy-to-type character:</p>
+<pre><code>/foo: func [x] [print [x]]
+</code></pre>
+<p>So it's good to try that out.  Not having weird decay operations everywhere feels more stable.</p>
+<p>But...</p>
+<h2>
+<a name="incongruity-with-refinements-feels-worse-than-i-thought-3" class="anchor" href="https://forum.rebol.info#incongruity-with-refinements-feels-worse-than-i-thought-3"></a>Incongruity With Refinements Feels Worse Than I Thought</h2>
+<p>We've already discussed the overlap with APPLY, where leading slashes don't mean function execution, like:</p>
+<pre><code> apply :append [series value /dup 3]
+</code></pre>
+<p>But here, take a look at trying to move the CASE refinement name out of the way so that CASE the function can be used inside a function:</p>
+<pre><code>/alter: func [
+    return: [logic!]
+    series [any-series! port! bitset!] {(modified)}
+    value
+    /case "Case-sensitive comparison"
+][
+    case_ALTER: case
+    /case: :lib.case
+    ...
+]
+</code></pre>
+<p>I'm not bothered by the <em>number</em> of slashes.  I'm bothered by them meaning such unrelated things, yet being used so close to each other in such a core construct.</p>
+<h2>
+<a name="other-than-that-slash-kinda-helped-code-readability-4" class="anchor" href="https://forum.rebol.info#other-than-that-slash-kinda-helped-code-readability-4"></a>Other Than That, Slash Kinda Helped Code Readability</h2>
+<p>If you ignore the refinement debacle, there are some perks.  If we tie together slashiness with "runs a function", then I've already pointed out how this feels pretty natural:</p>
+<pre><code>obj: make object! [
+    data: 1
+    /accessor: does [return data + 1]
+]
+</code></pre>
+<p>But additionally, there are lots of "function generators" out there, with even more in the future.  If you see something that says:</p>
+<pre><code>something: make-processor alpha beta gamma
+</code></pre>
+<p>Knowing if that SOMETHING is an action or not is a fairly important thing.  It means you have to think about how you handle it carefully, even if just passing it around to somewhere else.  So if you see:</p>
+<pre><code>/something: make-processor alpha beta gamma
+</code></pre>
+<p>You have to know the function-or-not at the callsite.  Given that you have to know it when you reference it, then it seems to make some sense to declare it.</p>
+<p>But I feel uneasy about treading on refinement's turf.  And among things in Rebol that seem actually kind of decent, the refinements in function specs actually do feel kind of "good".</p>
+<h2>
+<a name="forgetting-the-slash-was-certainly-annoying-5" class="anchor" href="https://forum.rebol.info#forgetting-the-slash-was-certainly-annoying-5"></a>Forgetting The Slash Was Certainly Annoying</h2>
+<p>We don't have any new-users who are only habituated to a world where you have to put in the slash.  So there's just going to be people who are used to not needing it, forgetting it.</p>
+<p>This does bring about a shift from the <em>"over-execution"</em> of functions when you forget a GET-WORD!, to an <em>"under-execution"</em> of functions when you forget a slash.</p>
+<h2>
+<a name="any-synthesis-of-ideas-here-thats-not-terrible-6" class="anchor" href="https://forum.rebol.info#any-synthesis-of-ideas-here-thats-not-terrible-6"></a>Any Synthesis Of Ideas Here That's Not Terrible?</h2>
+<p><strong>It should be remembered that antiform-based Actions are new, and their potential benefits are not completely understood yet.</strong></p>
+<p>We've seen great benefit from the antiform blocks, <a href="https://forum.rebol.info/t/the-long-awaited-death-of-only/1607">resolving the /ONLY debacle</a>.  And there are ideas behind antiform actions and typesets and such, for solving similar problems of wanting non-literal-value semantics.</p>
+<p><em>The part I liked about this prototype</em> was making things like FUNC and SPECIALIZE and ADAPT and everything else just return regular FRAME!.  It felt cleaner to shift this burden of things becoming antiforms onto the caller, because otherwise the burden was on decaying antiform actions to regular actions.  That burden showed up when fulfilling action parameters, or inside COMPOSE or REDUCE, etc.</p>
+<p>But looking at the two strategies side-by-side, I have to say that it's probably better to lean into the "generator functions" producing antiforms, and work from there.</p>
+          <p><a href="https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905/12">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905/12</link>
+        <pubDate>Thu, 04 Aug 2022 08:48:05 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1905-12</guid>
+        <source url="https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905.rss">Big Alien Proposal :flying_saucer: &quot;/WORD&quot; Runs Functions</source>
+      </item>
+      <item>
+        <title>Big Alien Proposal :flying_saucer: &quot;/WORD&quot; Runs Functions</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="johnk" data-post="10" data-topic="1905">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/johnk/48/229_2.png" class="avatar"> johnk:</div>
+<blockquote>
+<p>I am not convinced that <code>/</code> <em>sounds</em> like a run symbol.</p>
+</blockquote>
+</aside>
+<p>A fair thought...I'd say if there's anything so far bothering me with the prototype is that refinements are slashy, and the conflation starts making me think that those should be executable actions.</p>
+<p>But how would we be representing these things?</p>
+<pre><code>obj&gt;accessor
+obj&gt;accessor/refinement
+obj.subobj&gt;accessor/refinement
+obj.data
+</code></pre>
+<p>This involves coming up with ways to wedge that <code>&gt;</code> (or whatever) into the existing reasonably-well-thought-out-and-working TUPLE! and PATH! mechanics.  What structure would these things be building?</p>
+<p>There might be a RUN-WORD! like <strong><code>&gt;foo</code></strong>, and perhaps we could make an argument that RUN-WORD!s are allowed in PATH!s (at the head only, maybe?) and get something like:</p>
+<pre><code>obj.&gt;accessor/refinement
+</code></pre>
+<p>But... the thing that the slash idea has going for it is just that it seemed fine to say that <strong>obj/accessor</strong> ran a method before.  And a plain word could run an action as well.  So when you tie that together with the idea of <strong>obj.data</strong> for picking a field, it makes the slash seem like an acceptable "method" indicator.  <em>A global slash is just a method on the global context or module itself.</em></p>
+<p>Appreciate the thought, good to keep the ideas coming...</p>
+          <p><a href="https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905/11">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905/11</link>
+        <pubDate>Wed, 03 Aug 2022 03:53:31 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1905-11</guid>
+        <source url="https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905.rss">Big Alien Proposal :flying_saucer: &quot;/WORD&quot; Runs Functions</source>
+      </item>
+      <item>
+        <title>Big Alien Proposal :flying_saucer: &quot;/WORD&quot; Runs Functions</title>
+        <dc:creator><![CDATA[johnk]]></dc:creator>
+        <description><![CDATA[
+            <p>I can see the benefits of this proposal especially from a security point of view. If we are thinking of using <code>RUN</code> then I am not convinced that <code>/</code> <em>sounds</em> like a run symbol.<br>
+<code>&gt;</code> is an extra key press, but it looks much more like a run action to me. We may have to consider a different prompt symbol.</p>
+<pre><code class="lang-auto">&gt;&gt; &gt;foo 10
+X is 10
+</code></pre>
+          <p><a href="https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905/10">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905/10</link>
+        <pubDate>Wed, 03 Aug 2022 03:31:19 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1905-10</guid>
+        <source url="https://forum.rebol.info/t/big-alien-proposal-word-runs-functions/1905.rss">Big Alien Proposal :flying_saucer: &quot;/WORD&quot; Runs Functions</source>
+      </item>
+  </channel>
+</rss>

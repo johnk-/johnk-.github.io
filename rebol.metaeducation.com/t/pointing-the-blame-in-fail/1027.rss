@@ -1,0 +1,233 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Pointing the Blame In FAIL</title>
+    <link>https://rebol.metaeducation.com/t/pointing-the-blame-in-fail/1027</link>
+    <description>If you haven&#39;t been using FAIL, you should!  I&#39;ve pointed out in the past you can just say **case [... fail]** and that&#39;s enough to get a failure and point to that location.  But it now lets you just point at any arbitrary value via a quoted word and it will complain about that word and its value:
+
+    &gt;&gt; foo: 10
+
+    &gt;&gt; fail &#39;foo
+    ** Error: foo is invalid: 10
+    ** Where: fail console
+    ** Near: [fail &#39;foo ~~]
+
+It works for tuples too:
+
+    &gt;&gt; obj: make object! [field: &lt;I&#39;ve been a bad, bad field...&gt;]
+
+    &gt;&gt; fail &#39;obj.field
+    ** Error: obj.field is invalid: &lt;I&#39;ve been a bad, bad field...&gt;
+    ** Where: fail console
+    ** Near: [fail &#39;obj.field ~~]
+
+So this should be your lazy go-to for reporting errors, you get more information and type less than using PRINTs or longer-winded messages.
+
+## But the real strength is implicating callsites, vs FAILs
+
+If you don&#39;t provide a place to blame, the only thing the evaluator knows is the whole stack and the place the failure was.
+
+     my-api: func [x y z] [
+         if true [
+             if y &lt; 100 [
+                  fail &quot;Who&#39;s failing?  one of those IFs?  Or MY-API?&quot;
+            ]
+         ]
+     ]
+
+    &gt;&gt; my-api 1 2 3
+    ** Error: Who&#39;s failing?  one of those IFs?  Or MY-API?
+    ** Where: fail if if my-api console
+    ** Near: [
+        fail &quot;Who&#39;s failing?  one of those IFs?  Or MY-API?&quot; ~...
+
+That&#39;s not a terribly informative error message, but the evaluator doesn&#39;t know any more unless you tell it.  
+
+This is a job for FAIL/BLAME!  Just pass it a WORD! from the frame you wanted to complain about.
+
+    my-api: func [x y z] [
+         if true [
+             if y &lt; 100 [
+                  fail/blame [&quot;Value must be &gt;= 100, not&quot; y] &#39;y
+            ]
+         ]
+     ]
+
+    &gt;&gt; my-api 1 2 3
+    ** Error: Value must be &gt;= 100, not 2
+    ** Where: my-api console
+    ** Near: [... 1 2 3 ~~]
+
+Now the IFs are gone from the reporting stack, and you&#39;re indicating the callsite but not the FAIL itself.  *(Ideally the error message would point to the exact block position where the parameter you are complaining about originated from.  But that information is not preserved at the moment.  In the future it might be kept...maybe in a special slot that would go unused otherwise in 64-bit builds.  So the error report would improve!)*
+
+Again, you could be lazy and just say `fail &#39;y` and get a fair amount of information.  In this case a bit of better information than in the custom message provided--in terms of the right name of the bad parameter!
+
+## This isn&#39;t arcane C magic, it&#39;s usermode Rebol!
+
+You can read and help improve FAIL any day you feel like it!  Please do!</description>
+    
+    <lastBuildDate>Thu, 12 Sep 2024 23:46:48 +0000</lastBuildDate>
+    <category>Errors</category>
+    <atom:link href="https://rebol.metaeducation.com/t/pointing-the-blame-in-fail/1027.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Pointing the Blame In FAIL</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>Note we can't use <strong>'y</strong> to point blame at a variable, because that has no binding.</p>
+<p>But I can't really tell whether we should be using <code>@y</code> or <code>$y</code>.</p>
+<pre><code>; supplying an argument for the FAIL's "BLAME"
+
+fail/blame ["Value must be &gt;= 100, not" y] $y
+fail:$y ["Value must be &gt;= 100, not" y]  ; shorthand
+
+fail/blame ["Value must be &gt;= 100, not" y] @y
+fail:@y ["Value must be &gt;= 100, not" y]  ; shorthand
+</code></pre>
+<p>I'll point out that it will also be possible to use a variable as the primary argument, so an answer for the semantics of that ties in as well.</p>
+<pre><code>; supplying an agument for the FAIL's "REASON"
+
+fail $y
+
+fail @y
+</code></pre>
+<p>The CHAIN! interpretation is up to the function.  But the evaluator dictates the behavior of the case when passing as an argument.  And if you use the <code>$y</code> form, then FAIL receives a plain bound word... but the <code>@y</code> form will give a bound <code>@y</code> with the decoration still intact.</p>
+<p>I think the <strong><code>$</code></strong> looks slightly better.  Beyond that, I'm not sure what guides this particular decision.</p>
+<h2><a name="p-7527-could-should-they-mean-different-things-1" class="anchor" href="https://rebol.metaeducation.com#p-7527-could-should-they-mean-different-things-1"></a>Could (Should?) They Mean Different Things?</h2>
+<p>The <strong><code>(fail @y)</code></strong> form could report a direct complaint about a value.</p>
+<pre><code> &gt;&gt; y: 10
+ &gt;&gt; fail 10
+ ** Error: FAIL does not accept INTEGER! as its REASON argument
+ &gt;&gt; fail @y
+ ** Error: Invalid Value for y: 10
+
+ &gt;&gt; y: "Some String"
+ &gt;&gt; fail y
+ ** Error: Some String  ; acts same as (fail "Some String")
+ &gt;&gt; fail @y
+ ** Error: Invalid Value for y: "Some String"
+</code></pre>
+<p>Then perhaps <strong><code>(fail $y)</code></strong> could be interpreted in more of a sense of blame, without saying that the value is particularly problematic...just pointing to the stack level for the error.  This makes it a shorthand for:</p>
+<pre><code>fail/blame [] $y
+; or
+fail:$y []
+</code></pre>
+<p>I think I like this axis of distinction.  So it suggests /BLAME should take (bound) WORD!s, and hence the $y form is correct.  Works out nicely that it looks better...</p>
+          <p><a href="https://rebol.metaeducation.com/t/pointing-the-blame-in-fail/1027/5">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/pointing-the-blame-in-fail/1027/5</link>
+        <pubDate>Mon, 02 Sep 2024 22:40:57 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1027-5</guid>
+        <source url="https://rebol.metaeducation.com/t/pointing-the-blame-in-fail/1027.rss">Pointing the Blame In FAIL</source>
+      </item>
+      <item>
+        <title>Pointing the Blame In FAIL</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>With the advent of CHAIN!s in the <a href="https://rebol.metaeducation.com/t/big-alien-proposal-word-runs-functions/1905/15">Big Alien Proposal For Function Calls</a>, we have a way to push the /BLAME argument to be in front of the error...instead of behind it.</p>
+<p>Let's say we use CHAIN! like this:</p>
+<pre><code>my-api: func [x y z] [
+     if true [
+         if y &lt; 100 [
+             fail:$y ["Value must be &gt;= 100, not" y]
+        ]
+     ]
+ ]
+</code></pre>
+<p>This is all speculative in terms of exactly how the function would blend its refinement processing with dialecting the CHAIN! it was invoked with.  But using <strong><code>fail:$y</code></strong> instead of <strong><code>fail:y</code></strong> pushes the variable out of band of other refinements that might be used... e.g. you know it's not trying to use a refinement named "y"</p>
+<p>I actually think it looks better than <strong><code>fail $y [...]</code></strong>.  Or rather, coheres better.  It makes more sense when you look at it, I think.  It's the same number of characters, but it makes it pretty clear that the 1st argument to the FAIL is consistently the error specification.  It's in the right slot.</p>
+          <p><a href="https://rebol.metaeducation.com/t/pointing-the-blame-in-fail/1027/4">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/pointing-the-blame-in-fail/1027/4</link>
+        <pubDate>Fri, 30 Aug 2024 05:20:58 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1027-4</guid>
+        <source url="https://rebol.metaeducation.com/t/pointing-the-blame-in-fail/1027.rss">Pointing the Blame In FAIL</source>
+      </item>
+      <item>
+        <title>Pointing the Blame In FAIL</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>5 posts were split to a new topic: <a href="https://rebol.metaeducation.com/t/specificity-of-error-ids-path-url/2229">Specificity of Error IDs (PATH! =&gt; URL!)</a></p>
+          <p><a href="https://rebol.metaeducation.com/t/pointing-the-blame-in-fail/1027/3">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/pointing-the-blame-in-fail/1027/3</link>
+        <pubDate>Fri, 30 Aug 2024 05:11:51 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1027-3</guid>
+        <source url="https://rebol.metaeducation.com/t/pointing-the-blame-in-fail/1027.rss">Pointing the Blame In FAIL</source>
+      </item>
+      <item>
+        <title>Pointing the Blame In FAIL</title>
+        <dc:creator><![CDATA[BlackATTR]]></dc:creator>
+        <description><![CDATA[
+            <p>Sweet. Error handling, one of my bugaboos with rebol. This is a nice improvement and should encourage  better programming practice.</p>
+          <p><a href="https://rebol.metaeducation.com/t/pointing-the-blame-in-fail/1027/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/pointing-the-blame-in-fail/1027/2</link>
+        <pubDate>Tue, 22 Jan 2019 14:50:07 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1027-2</guid>
+        <source url="https://rebol.metaeducation.com/t/pointing-the-blame-in-fail/1027.rss">Pointing the Blame In FAIL</source>
+      </item>
+      <item>
+        <title>Pointing the Blame In FAIL</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>If you haven't been using FAIL, you should!  I've pointed out in the past you can just say <strong>case [... fail]</strong> and that's enough to get a failure and point to that location.  But it now lets you just point at any arbitrary value via a quoted word and it will complain about that word and its value:</p>
+<pre><code>&gt;&gt; foo: 10
+
+&gt;&gt; fail 'foo
+** Error: foo is invalid: 10
+** Where: fail console
+** Near: [fail 'foo ~~]
+</code></pre>
+<p>It works for tuples too:</p>
+<pre><code>&gt;&gt; obj: make object! [field: &lt;I've been a bad, bad field...&gt;]
+
+&gt;&gt; fail 'obj.field
+** Error: obj.field is invalid: &lt;I've been a bad, bad field...&gt;
+** Where: fail console
+** Near: [fail 'obj.field ~~]
+</code></pre>
+<p>So this should be your lazy go-to for reporting errors, you get more information and type less than using PRINTs or longer-winded messages.</p>
+<h2><a name="p-2992-but-the-real-strength-is-implicating-callsites-vs-fails-1" class="anchor" href="https://rebol.metaeducation.com#p-2992-but-the-real-strength-is-implicating-callsites-vs-fails-1"></a>But the real strength is implicating callsites, vs FAILs</h2>
+<p>If you don't provide a place to blame, the only thing the evaluator knows is the whole stack and the place the failure was.</p>
+<pre><code> my-api: func [x y z] [
+     if true [
+         if y &lt; 100 [
+              fail "Who's failing?  one of those IFs?  Or MY-API?"
+        ]
+     ]
+ ]
+
+&gt;&gt; my-api 1 2 3
+** Error: Who's failing?  one of those IFs?  Or MY-API?
+** Where: fail if if my-api console
+** Near: [
+    fail "Who's failing?  one of those IFs?  Or MY-API?" ~...
+</code></pre>
+<p>That's not a terribly informative error message, but the evaluator doesn't know any more unless you tell it.</p>
+<p>This is a job for FAIL/BLAME!  Just pass it a WORD! from the frame you wanted to complain about.</p>
+<pre><code>my-api: func [x y z] [
+     if true [
+         if y &lt; 100 [
+              fail/blame ["Value must be &gt;= 100, not" y] 'y
+        ]
+     ]
+ ]
+
+&gt;&gt; my-api 1 2 3
+** Error: Value must be &gt;= 100, not 2
+** Where: my-api console
+** Near: [... 1 2 3 ~~]
+</code></pre>
+<p>Now the IFs are gone from the reporting stack, and you're indicating the callsite but not the FAIL itself.  <em>(Ideally the error message would point to the exact block position where the parameter you are complaining about originated from.  But that information is not preserved at the moment.  In the future it might be kept...maybe in a special slot that would go unused otherwise in 64-bit builds.  So the error report would improve!)</em></p>
+<p>Again, you could be lazy and just say <code>fail 'y</code> and get a fair amount of information.  In this case a bit of better information than in the custom message provided--in terms of the right name of the bad parameter!</p>
+<h2><a name="p-2992-this-isnt-arcane-c-magic-its-usermode-rebol-2" class="anchor" href="https://rebol.metaeducation.com#p-2992-this-isnt-arcane-c-magic-its-usermode-rebol-2"></a>This isn't arcane C magic, it's usermode Rebol!</h2>
+<p>You can read and help improve FAIL any day you feel like it!  Please do!</p>
+          <p><a href="https://rebol.metaeducation.com/t/pointing-the-blame-in-fail/1027/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/pointing-the-blame-in-fail/1027/1</link>
+        <pubDate>Tue, 22 Jan 2019 09:33:21 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1027-1</guid>
+        <source url="https://rebol.metaeducation.com/t/pointing-the-blame-in-fail/1027.rss">Pointing the Blame In FAIL</source>
+      </item>
+  </channel>
+</rss>

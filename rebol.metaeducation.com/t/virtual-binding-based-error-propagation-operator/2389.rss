@@ -1,0 +1,535 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Virtual-Binding-Based &quot;Error Propagation Operator&quot; :exploding_head:</title>
+    <link>https://rebol.metaeducation.com/t/virtual-binding-based-error-propagation-operator/2389</link>
+    <description>In Rust, if you define your function interface as possibly returning an Error, then you might find a circumstance where you call a function whose error you wish to propagate up to become your function&#39;s error.
+
+Here&#39;s how you&#39;d traditionally write something like that, in a case where it potentially propagates an error from one of two calls:
+
+    fn read_username_from_file_traditional() -&gt; Result&lt;String, io::Error&gt; {
+        let f = match File::open(&quot;username.txt&quot;) {
+            Ok(file) =&gt; file,
+            Err(e) =&gt; return Err(e),
+        };
+        
+        let mut username = String::new();
+        match f.read_to_string(&amp;mut username) {
+            Ok(_) =&gt; Ok(username),
+            Err(e) =&gt; Err(e),
+        }
+    }
+
+But there&#39;s an application of **&quot;the `?` operator&quot;** (which doesn&#39;t really have another name) which will do this propagation for you.
+
+    fn read_username_from_file() -&gt; Result&lt;String, io::Error&gt; {
+        let mut username = String::new();
+        File::open(&quot;username.txt&quot;)?.read_to_string(&amp;mut username)?;
+        Ok(username)
+    }
+
+## Historically We Couldn&#39;t Do Things Like This
+
+There was no way for such an operator to be able to know what the concept of RETURN was.
+
+Hence you see things like:
+
+    change: combinator [
+        &quot;Substitute a match with new data&quot;
+        return: [~#change~]
+        parser [action!]
+        replacer [action!]  ; !!! How to say result is used here?
+        &lt;local&gt; ^replacement
+    ][
+        [^ remainder]: parser input except e -&gt; [  ; first find end position
+            return fail e
+        ]
+
+        [^replacement #]: replacer input except e -&gt; [
+            return fail e
+        ]
+
+        ; CHANGE returns tail, use as new remainder
+        ;
+        remainder: change:part input ^replacement remainder
+        return ~#change~
+    ]
+
+## But Virtual Binding Means We *COULD* Do It
+
+I&#39;m pretty dead-set on using **?** for OPT.  But let&#39;s say we were using **`!!`** for this.
+
+The behavior would be like writing this at the callsite:
+
+    let ^result: some-call xxx yyy zzz
+    if error? ^result [return ^result]
+    result: ^result
+
+So you could rewrite the above as:
+
+    change: combinator [
+        &quot;Substitute a match with new data&quot;
+        return: [~#change~]
+        parser [action!]
+        replacer [action!]  ; !!! How to say result is used here?
+        &lt;local&gt; ^replacement
+    ][
+        [^ remainder]: !! parser input  ; first find end position
+        [^replacement #]: !! replacer input
+
+        ; CHANGE returns tail, use as new remainder
+        ;
+        remainder: change:part input ^replacement remainder
+        return ~#change~
+    ]
+
+**That&#39;s awesome.**  I don&#39;t know that I love the **`!!`** for the name.  As the comment above shows, I use `!!!` for attention.  One exclamation point?
+
+        [^ remainder]: ! parser input  ; first find end position
+        [^replacement&#39; #]: ! replacer input
+
+That&#39;s too slight.  Something out of left field... maybe a visual indication of &quot;pass this error up?&quot;
+
+        [^ remainder]: --^ parser input  ; first find end position
+        [^replacement&#39; #]: --^ replacer input
+
+Or something to indicate what you&#39;re passing up, like `*` for &quot;problem&quot;?
+
+        [^ remainder]: *--^ parser input  ; first find end position
+        [^replacement #]: *--^ replacer input
+
+Interesting looking ideas... but would be a caret-in-word exception.  :-(  *(There&#39;s not--I suppose--any particular reason why you can&#39;t have carets in words if they&#39;re not at the head...we allow it for tick marks.)*
+
+## Nuance of Slashes I Realized
+
+I&#39;ve mentioned the goal that if you write something like **not/even?** that would act as if you had written **not even?**.  I presumed that wouldn&#39;t be useful typically, but it would be useful if you were using a terminal slash, and trying to pass the cascade of functions as a single value somewhere, e.g.
+
+     &gt;&gt; match not/even?/ 7 
+     == 7
+
+*BUT* there&#39;s a rule in infix deferred processing that it runs &quot;one expression evaluation to the left&quot;. 
+
+This means **`!!/foo`** could be used to *not disrupt the infix deferred logic*.  It&#39;s more general than just this case, which is awesome.  But it definitely helps here.
+
+## I&#39;ll Write It Up, But It Needs a Name...
+
+Suggestions, please!</description>
+    
+    <lastBuildDate>Sat, 12 Jul 2025 12:30:37 +0000</lastBuildDate>
+    <category>Errors</category>
+    <atom:link href="https://rebol.metaeducation.com/t/virtual-binding-based-error-propagation-operator/2389.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Virtual-Binding-Based &quot;Error Propagation Operator&quot; :exploding_head:</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="7" data-topic="2389">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">    trappy: func [] [
+        let x: trap 1 * 0
+        let y: trap 1 / 0
+        return x + y
+    ]
+</code></pre>
+</blockquote>
+</aside>
+<p>I'll mention something kind of curious.</p>
+<p>You can actually put the TRAP on the outside of the assignment:</p>
+<pre><code>trappy: func [] [
+    trap let x: 1 * 0
+    trap let y: 1 / 0
+    return x + y
+]
+</code></pre>
+<p>If you weren't using LETs here and depending on the variables surviving the scope, you could even use parentheses:</p>
+<pre><code>trappy: func [&lt;local&gt; x y] [
+    trap (x: 1 * 0)
+    trap (y: 1 / 0)
+    return x + y
+]
+</code></pre>
+<p>This is because the way plain assignment works, it will skip the assignment in case of an error and the overall expression evaluates to an error.</p>
+<p>Note that ^META assignments are different:</p>
+<pre><code>trap ^x: fail "different!"
+</code></pre>
+<p>This would <em>not</em> skip the assignment.  Which means that's fundamentally distinct from:</p>
+<pre><code>^x: trap fail "different!"
+</code></pre>
+<p>I'll mention that the new REQUIRE operator is a general tool for ducking the assignment of errors and failing afterwards when using meta assignment:</p>
+<pre><code>^x: require some-potentially-erroring-thing
+</code></pre>
+<p>Part of what makes this interesting is that I've aligned the C code to use the same techniques and terminology.  So you will see calls to <strong><code>trap ()</code></strong> that propagate errors to the return of the running function (via macro) by testing a global error state.  These calls have to be on the outside in order to be "safe", to avoid usages which might break due to being used in branches without scopes.  Random details here--but--it's cool that the usermode constructs support the style that the C code is forced to use.</p>
+          <p><a href="https://rebol.metaeducation.com/t/virtual-binding-based-error-propagation-operator/2389/8">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/virtual-binding-based-error-propagation-operator/2389/8</link>
+        <pubDate>Sat, 12 Jul 2025 12:30:37 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2389-8</guid>
+        <source url="https://rebol.metaeducation.com/t/virtual-binding-based-error-propagation-operator/2389.rss">Virtual-Binding-Based &quot;Error Propagation Operator&quot; :exploding_head:</source>
+      </item>
+      <item>
+        <title>Virtual-Binding-Based &quot;Error Propagation Operator&quot; :exploding_head:</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="6" data-topic="2389">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>So I've tried TRAP, and I definitely do like having the same word used in the C sources in my poor-man's Rust trick... being a word and not something symbol-y is good. I'm just about ready to commit to it.</p>
+</blockquote>
+</aside>
+<p>Aaaand I've committed it... <em><a href="https://github.com/hostilefork/ren-c/commit/80b2469c711de63ccf22dc83e279f21a39206e5e#diff-59c2d687e1e6ff36e7b8bd41de137836741a51260a2a2ad6ad90c23c30a89da9">to my side branch</a></em>.</p>
+<pre><code>This makes a native that acts a bit like Rust's "?" operator so that
+if you pass it an ERROR!, it will propagate that with a call to whatever
+RETURN is defined as in the local scope.
+
+Hence this:
+
+    trappy: func [] [
+        let x: trap 1 * 0
+        let y: trap 1 / 0
+        return x + y
+    ]
+
+Acts equivalently to if you'd written:
+
+    trappy: func [] [
+        let x: (1 * 0) except e -&gt; [return fail e]
+        let y: (1 / 0) except e -&gt; [return fail e]
+        return x + y
+    ]
+</code></pre>
+<p>Not a ton of the code is modernized to use definitional failures well... so there aren't actually all that many instances of EXCEPT in the code base to replace with TRAP yet.  The exception would be UPARSE, where you can see it tightens things up quite a bit:</p>
+<h2><a name="p-8501-new-executables-soon-ish-i-hope-1" class="anchor" href="https://rebol.metaeducation.com#p-8501-new-executables-soon-ish-i-hope-1"></a>New Executables... Soon-ish... I hope...</h2>
+<p>While it seems like I'll be off on the side branch forever, things are starting to align to where I will hopefully not be <em>too</em> much longer before all these cool features make it to the deployed web console, and a batch of new EXEs.</p>
+<p>(The good news about why it's taking so long is because I keep finding solutions to longstanding problems, and I feel like I need to push every solution through as far as it can go until it sort of plateaus, at which point it will be time for a release.)</p>
+          <p><a href="https://rebol.metaeducation.com/t/virtual-binding-based-error-propagation-operator/2389/7">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/virtual-binding-based-error-propagation-operator/2389/7</link>
+        <pubDate>Thu, 10 Jul 2025 03:45:18 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2389-7</guid>
+        <source url="https://rebol.metaeducation.com/t/virtual-binding-based-error-propagation-operator/2389.rss">Virtual-Binding-Based &quot;Error Propagation Operator&quot; :exploding_head:</source>
+      </item>
+      <item>
+        <title>Virtual-Binding-Based &quot;Error Propagation Operator&quot; :exploding_head:</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="5" data-topic="2389">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>On first glance, that doesn't really convey anything about "and after you trap it, use it as the return value for the current meaning of RETURN"</p>
+</blockquote>
+</aside>
+<p>So I've tried TRAP, and I definitely do like having the same word used in the C sources in my poor-man's Rust trick... being a word and not something symbol-y is good.  I'm just about ready to commit to it.</p>
+<p>But in terms of leaving no-stone-unturned, had another weird idea for a name: <strong>BUBBLE</strong>.</p>
+<p><img src="https://rebol.metaeducation.com/images/emoji/twitter/bubbles.png?v=14" title=":bubbles:" class="emoji only-emoji" alt=":bubbles:" loading="lazy" width="20" height="20"></p>
+<p>Off-the-wall, but... all words that enter the programming domain start as seeming odd, I think (<em>"THROW, CATCH... What is this, a football?"</em>)  But things are driven by analogy.</p>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">change: combinator [
+    "Substitute a match with new data"
+    return: [~#change~]
+    parser [action!]
+    replacer [action!]  ; !!! How to say result is used here?
+    &lt;local&gt; ^replacement
+][
+    [^ remainder]: bubble parser input  ; first find end position
+    [^replacement #]: bubble replacer input
+
+    ; CHANGE returns tail, use as new remainder
+    ;
+    remainder: change:part input ^replacement remainder
+    return ~#change~
+]
+</code></pre>
+<h2><a name="p-8497-bubble-isnt-errorish-trap-isnt-bubble-ish-1" class="anchor" href="https://rebol.metaeducation.com#p-8497-bubble-isnt-errorish-trap-isnt-bubble-ish-1"></a>BUBBLE Isn't Errorish, TRAP Isn't Bubble-ish</h2>
+<p>But bubble looks weird, and I think the brevity and relevance of TRAP wins out here.  You learn what it means.</p>
+<p>You have to read it as "make this <em>function</em> trap the error".  e.g. make the whole function act as a trap.</p>
+          <p><a href="https://rebol.metaeducation.com/t/virtual-binding-based-error-propagation-operator/2389/6">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/virtual-binding-based-error-propagation-operator/2389/6</link>
+        <pubDate>Sun, 06 Jul 2025 09:51:43 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2389-6</guid>
+        <source url="https://rebol.metaeducation.com/t/virtual-binding-based-error-propagation-operator/2389.rss">Virtual-Binding-Based &quot;Error Propagation Operator&quot; :exploding_head:</source>
+      </item>
+      <item>
+        <title>Virtual-Binding-Based &quot;Error Propagation Operator&quot; :exploding_head:</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="2389">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">  [^ remainder]: !! parser input  ; first find end position
+  [^replacement #]: !! replacer input
+</code></pre>
+</blockquote>
+</aside>
+<p>I'm trying to implement a poor-man's version of the error propagation operator inside the C source itself, using some various tricks.</p>
+<p>But given that it's C I have to use a C identifier for the name.</p>
+<p>I actually was thinking of TRAP:</p>
+<pre><code> Index i = TRAP(Series_Index(series));
+ if (i &gt; 0)
+     Do_Something();
+</code></pre>
+<p>Imagine that transforming into something like:</p>
+<pre><code> Index i = Trap_Series_Index(series);
+ if (Did_Trap_Error()) return Trapped_Error();
+ if (i &gt; 0)
+     Do_Something();
+</code></pre>
+<p>The idea is that it's using a global (well, thread-local) state to communicate if the function raised an error.  The Trap_XXX() name suggests that it is a function participating in this protocol, and hence you shouldn't use its result directly (e.g. because the index could be invalid).</p>
+<p>Hence the macro would look like:</p>
+<pre><code>#define TRAP(expr) \
+     Trap_##expr; if (Did_Trap_Error()) return Trapped_Error();
+</code></pre>
+<h2><a name="p-8486-could-trap-be-the-name-of-the-operator-1" class="anchor" href="https://rebol.metaeducation.com#p-8486-could-trap-be-the-name-of-the-operator-1"></a>Could TRAP Be The Name Of The Operator?</h2>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">change: combinator [
+    "Substitute a match with new data"
+    return: [~#change~]
+    parser [action!]
+    replacer [action!]  ; !!! How to say result is used here?
+    &lt;local&gt; ^replacement
+][
+    [^ remainder]: trap parser input  ; first find end position
+    [^replacement #]: trap replacer input
+
+    ; CHANGE returns tail, use as new remainder
+    ;
+    remainder: change:part input ^replacement remainder
+    return ~#change~
+]
+</code></pre>
+<p>The part of the name that sort of makes sense is that it's one of the operations that stops an ERROR! from promoting to a panic.  So it "traps" it.</p>
+<p>On first glance, that doesn't really convey anything about "and after you trap it, use it as the return value for the current meaning of RETURN"</p>
+<p>The thing is, when you see it written like this... <em>there's kind of nowhere else for the error to go, but up</em>.  You evaluated the expression, it produced an ERROR!, you've trapped it...</p>
+<p>...but you're a single arity-function.  What are you going to do with the error?  If you return it as your synthesized result, you're a no-op.  If you panic, you served no purpose..that's what would have presumably happened otherwise.  If you return a WARNING! or similar, you've conflated with non-erroring states...</p>
+<p>EXCEPT is an infix function and arity-2, it does routing.  But TRAP as a prefix function would either need to take a handler as a second argument, or be single-arity and do this forwarding/propagation.</p>
+<h2><a name="p-8486-it-seems-promising-2" class="anchor" href="https://rebol.metaeducation.com#p-8486-it-seems-promising-2"></a>It Seems Promising</h2>
+<p>I like the idea of the parity with the interpreter source, and that means making it a word has benefit.</p>
+<p>So I'll try going in this direction for now.</p>
+          <p><a href="https://rebol.metaeducation.com/t/virtual-binding-based-error-propagation-operator/2389/5">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/virtual-binding-based-error-propagation-operator/2389/5</link>
+        <pubDate>Sun, 29 Jun 2025 10:37:33 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2389-5</guid>
+        <source url="https://rebol.metaeducation.com/t/virtual-binding-based-error-propagation-operator/2389.rss">Virtual-Binding-Based &quot;Error Propagation Operator&quot; :exploding_head:</source>
+      </item>
+      <item>
+        <title>Virtual-Binding-Based &quot;Error Propagation Operator&quot; :exploding_head:</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="3" data-topic="2389">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>Though as it so happens, generators aren't allowed to YIELD a raised error. There is only one raised error contractually that arises from a generator, and that's the generation termination error. This way if you intercept a raised error from a generator you can assume the reason why and act on it. All other raised errors will be promoted to abrupt failure before the YIELD can give them back.</p>
+</blockquote>
+</aside>
+<p>Though I will make the not-insignificant-point that you can beat this by wrapping your generator up to use lift/unlift.</p>
+<p>Basically wrap GENERATOR such that your version's YIELD does a lifted-yield, and that the generator itself is adapted to unlift the result.</p>
+<p>You will have successfully built a generator which can conflate ERROR! antiforms with the "no more to generate" error.</p>
+<p><em>(If it turns out people actually find they want to do this commonly, it could just be a refinement.  GENERATOR:CONFLATE or something.)</em></p>
+          <p><a href="https://rebol.metaeducation.com/t/virtual-binding-based-error-propagation-operator/2389/4">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/virtual-binding-based-error-propagation-operator/2389/4</link>
+        <pubDate>Sat, 05 Apr 2025 12:02:42 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2389-4</guid>
+        <source url="https://rebol.metaeducation.com/t/virtual-binding-based-error-propagation-operator/2389.rss">Virtual-Binding-Based &quot;Error Propagation Operator&quot; :exploding_head:</source>
+      </item>
+      <item>
+        <title>Virtual-Binding-Based &quot;Error Propagation Operator&quot; :exploding_head:</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="bradrn" data-post="2" data-topic="2389">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/bradrn/48/365_2.png" class="avatar"> bradrn:</div>
+<blockquote>
+<p>It is great! I love that Ren-C has become a language where you can do this.</p>
+</blockquote>
+</aside>
+<p>Still a lot of questions to be answered, but it really is night and day from the historical binding model.</p>
+<p>One question to answer with <strong>!!</strong> though is what to do about it when the concept of "what to call to propagate" isn't named RETURN.</p>
+<p>Though as it so happens, generators aren't allowed to YIELD a raised error.  There is only one raised error contractually that arises from a generator, and that's the generation termination error.  This way if you intercept a raised error from a generator you can assume the reason why and act on it.  All other raised errors will be promoted to abrupt failure before the YIELD can give them back.</p>
+<p>But maybe you have a CATCH + THROW situation and you want the throw to be what you use.</p>
+<p>The just-a-thought-for-now concept of <strong><a href="https://rebol.metaeducation.com/t/dialecting-function-calls-new-weird-powerful/2310">dialecting function calls</a></strong> might have some options here.  What about <strong><code>!!:throw</code></strong></p>
+<pre><code>result: catch [
+   !!:throw some expression
+   !!:throw some other expression
+   print "Then you get here"
+   throw &lt;success&gt;
+] except e -&gt; [
+   print ["You failed!" mold e]
+]
+</code></pre>
+<p>So it could presume RETURN if you don't say otherwise, yet still be used for other things.</p>
+<p>The dialected function call concept has been simmering a bit, and I do keep finding places where I think it would be nice.</p>
+<p>Prior to that being decided, there could still be a convention to name your own variants, e.g. <strong>!!-THROW</strong></p>
+<pre><code>result: catch [
+   !!-throw some expression
+   !!-throw some other expression
+   print "Then you get here"
+   throw &lt;success&gt;
+] except e -&gt; [
+   print ["You failed!" mold e]
+]
+</code></pre>
+<p>And you could define it within a context if you planned to use it a lot:</p>
+<pre><code>result: catch [
+   let !!: !!-throw/
+   !! some expression
+   !! some other expression
+   print "Then you get here"
+   throw &lt;success&gt;
+] except e -&gt; [
+   print ["You failed!" mold e]
+]
+</code></pre>
+          <p><a href="https://rebol.metaeducation.com/t/virtual-binding-based-error-propagation-operator/2389/3">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/virtual-binding-based-error-propagation-operator/2389/3</link>
+        <pubDate>Sat, 05 Apr 2025 08:25:23 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2389-3</guid>
+        <source url="https://rebol.metaeducation.com/t/virtual-binding-based-error-propagation-operator/2389.rss">Virtual-Binding-Based &quot;Error Propagation Operator&quot; :exploding_head:</source>
+      </item>
+      <item>
+        <title>Virtual-Binding-Based &quot;Error Propagation Operator&quot; :exploding_head:</title>
+        <dc:creator><![CDATA[bradrn]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="2389">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p><strong>That's awesome.</strong> I don't know that I love the <strong><code>!!</code></strong> for the name</p>
+</blockquote>
+</aside>
+<p>It is great! I love that Ren-C has become a language where you can do this.</p>
+<p>(And personally, I’d be fine with calling it <code>?</code>.)</p>
+<aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="2389">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<h2>I'll Write It Up, But It Needs a Name...</h2>
+<p>Suggestions, please!</p>
+</blockquote>
+</aside>
+<p>I think ‘error propagation operator’ is a fine name. But somehow, I suspect that name would be a little too clunky for your tastes…</p>
+          <p><a href="https://rebol.metaeducation.com/t/virtual-binding-based-error-propagation-operator/2389/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/virtual-binding-based-error-propagation-operator/2389/2</link>
+        <pubDate>Sat, 05 Apr 2025 08:04:19 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2389-2</guid>
+        <source url="https://rebol.metaeducation.com/t/virtual-binding-based-error-propagation-operator/2389.rss">Virtual-Binding-Based &quot;Error Propagation Operator&quot; :exploding_head:</source>
+      </item>
+      <item>
+        <title>Virtual-Binding-Based &quot;Error Propagation Operator&quot; :exploding_head:</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>In Rust, if you define your function interface as possibly returning an Error, then you might find a circumstance where you call a function whose error you wish to propagate up to become your function's error.</p>
+<p>Here's how you'd traditionally write something like that, in a case where it potentially propagates an error from one of two calls:</p>
+<pre><code>fn read_username_from_file_traditional() -&gt; Result&lt;String, io::Error&gt; {
+    let f = match File::open("username.txt") {
+        Ok(file) =&gt; file,
+        Err(e) =&gt; return Err(e),
+    };
+    
+    let mut username = String::new();
+    match f.read_to_string(&amp;mut username) {
+        Ok(_) =&gt; Ok(username),
+        Err(e) =&gt; Err(e),
+    }
+}
+</code></pre>
+<p>But there's an application of <strong>"the <code>?</code> operator"</strong> (which doesn't really have another name) which will do this propagation for you.</p>
+<pre><code>fn read_username_from_file() -&gt; Result&lt;String, io::Error&gt; {
+    let mut username = String::new();
+    File::open("username.txt")?.read_to_string(&amp;mut username)?;
+    Ok(username)
+}
+</code></pre>
+<h2><a name="p-8092-historically-we-couldnt-do-things-like-this-1" class="anchor" href="https://rebol.metaeducation.com#p-8092-historically-we-couldnt-do-things-like-this-1"></a>Historically We Couldn't Do Things Like This</h2>
+<p>There was no way for such an operator to be able to know what the concept of RETURN was.</p>
+<p>Hence you see things like:</p>
+<pre><code>change: combinator [
+    "Substitute a match with new data"
+    return: [~#change~]
+    parser [action!]
+    replacer [action!]  ; !!! How to say result is used here?
+    &lt;local&gt; ^replacement
+][
+    [^ remainder]: parser input except e -&gt; [  ; first find end position
+        return fail e
+    ]
+
+    [^replacement #]: replacer input except e -&gt; [
+        return fail e
+    ]
+
+    ; CHANGE returns tail, use as new remainder
+    ;
+    remainder: change:part input ^replacement remainder
+    return ~#change~
+]
+</code></pre>
+<h2><a name="p-8092-but-virtual-binding-means-we-could-do-it-2" class="anchor" href="https://rebol.metaeducation.com#p-8092-but-virtual-binding-means-we-could-do-it-2"></a>But Virtual Binding Means We <em>COULD</em> Do It</h2>
+<p>I'm pretty dead-set on using <strong>?</strong> for OPT.  But let's say we were using <strong><code>!!</code></strong> for this.</p>
+<p>The behavior would be like writing this at the callsite:</p>
+<pre><code>let ^result: some-call xxx yyy zzz
+if error? ^result [return ^result]
+result: ^result
+</code></pre>
+<p>So you could rewrite the above as:</p>
+<pre><code>change: combinator [
+    "Substitute a match with new data"
+    return: [~#change~]
+    parser [action!]
+    replacer [action!]  ; !!! How to say result is used here?
+    &lt;local&gt; ^replacement
+][
+    [^ remainder]: !! parser input  ; first find end position
+    [^replacement #]: !! replacer input
+
+    ; CHANGE returns tail, use as new remainder
+    ;
+    remainder: change:part input ^replacement remainder
+    return ~#change~
+]
+</code></pre>
+<p><strong>That's awesome.</strong>  I don't know that I love the <strong><code>!!</code></strong> for the name.  As the comment above shows, I use <code>!!!</code> for attention.  One exclamation point?</p>
+<pre><code>    [^ remainder]: ! parser input  ; first find end position
+    [^replacement' #]: ! replacer input
+</code></pre>
+<p>That's too slight.  Something out of left field... maybe a visual indication of "pass this error up?"</p>
+<pre><code>    [^ remainder]: --^ parser input  ; first find end position
+    [^replacement' #]: --^ replacer input
+</code></pre>
+<p>Or something to indicate what you're passing up, like <code>*</code> for "problem"?</p>
+<pre><code>    [^ remainder]: *--^ parser input  ; first find end position
+    [^replacement #]: *--^ replacer input
+</code></pre>
+<p>Interesting looking ideas... but would be a caret-in-word exception.  <img src="https://rebol.metaeducation.com/images/emoji/twitter/frowning.png?v=14" title=":frowning:" class="emoji" alt=":frowning:" loading="lazy" width="20" height="20">  <em>(There's not--I suppose--any particular reason why you can't have carets in words if they're not at the head...we allow it for tick marks.)</em></p>
+<h2><a name="p-8092-nuance-of-slashes-i-realized-3" class="anchor" href="https://rebol.metaeducation.com#p-8092-nuance-of-slashes-i-realized-3"></a>Nuance of Slashes I Realized</h2>
+<p>I've mentioned the goal that if you write something like <strong>not/even?</strong> that would act as if you had written <strong>not even?</strong>.  I presumed that wouldn't be useful typically, but it would be useful if you were using a terminal slash, and trying to pass the cascade of functions as a single value somewhere, e.g.</p>
+<pre><code> &gt;&gt; match not/even?/ 7 
+ == 7
+</code></pre>
+<p><em>BUT</em> there's a rule in infix deferred processing that it runs "one expression evaluation to the left".</p>
+<p>This means <strong><code>!!/foo</code></strong> could be used to <em>not disrupt the infix deferred logic</em>.  It's more general than just this case, which is awesome.  But it definitely helps here.</p>
+<h2><a name="p-8092-ill-write-it-up-but-it-needs-a-name-4" class="anchor" href="https://rebol.metaeducation.com#p-8092-ill-write-it-up-but-it-needs-a-name-4"></a>I'll Write It Up, But It Needs a Name...</h2>
+<p>Suggestions, please!</p>
+          <p><a href="https://rebol.metaeducation.com/t/virtual-binding-based-error-propagation-operator/2389/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/virtual-binding-based-error-propagation-operator/2389/1</link>
+        <pubDate>Fri, 28 Mar 2025 23:29:47 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2389-1</guid>
+        <source url="https://rebol.metaeducation.com/t/virtual-binding-based-error-propagation-operator/2389.rss">Virtual-Binding-Based &quot;Error Propagation Operator&quot; :exploding_head:</source>
+      </item>
+  </channel>
+</rss>

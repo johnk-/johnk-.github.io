@@ -1,0 +1,237 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>What Should Returning a String From a Native Do?</title>
+    <link>https://rebol.metaeducation.com/t/what-should-returning-a-string-from-a-native-do/2357</link>
+    <description>I&#39;ve raved about [how cool rebFunction() is](https://rebol.metaeducation.com/t/no-preprocessing-no-ffi-just-awesome-rebfunction/2224)... though it may seem like mundane C interop, it&#39;s not.  **It&#39;s quite novel.**
+
+But to recap, a trivial example:
+
+```
+const char* Add_1000_Spec = &quot;[ \
+    -{Adds 1000 to whatever you pass in}- \
+    return: [integer!] \
+    x [integer!] \
+]&quot;;
+Bounce Add_1000_Impl(Context* binding)
+{
+    int x = rebUnboxInteger(&quot;x&quot;);
+    int bigger = x + 1000;
+    return rebInteger(bigger);
+}
+
+Value* action = rebFunction(Add_1000_Spec, &amp;Add_1000_Impl);
+```
+
+So here you see us returning a synthesized Rebol Value, an INTEGER!.
+
+You can return other things, such as **`rebDelegate(&quot;...&quot;);`** which defers execution to code which can do all kinds of things like throw or raise errors, or produce unstable antiforms.
+
+## But No Return States Overlap UTF-8 Strings
+
+This is by design.  All Cells and Stubs in the system are out-of-band from valid UTF-8 leading characters.
+
+This means that the meaning for this is wide open:
+
+    const char* Return_Utf8_Spec = &quot;[ \
+        -{return of a C const char literal pointer}- \
+        return: [???] -{what do you think?}- \
+    ]&quot;;
+    Bounce Return_Utf8_Impl(Context* binding)
+    {
+        return &quot;😸 Some UTF-8 Here 😸&quot;;
+    }
+
+## &quot;Obvious&quot; Answer: Return TEXT! 
+
+You might think that it&#39;s completely obvious what should happen in this case: that it returns TEXT! and that&#39;s the end of that.
+
+Hence this would be a synonym for:
+
+    return rebText(&quot;😸 Some UTF-8 Here 😸&quot;);
+
+Given that we could make the &quot;instructions&quot; legal to return as well, it could be equivalent to something even shorter:
+
+    return rebT(&quot;😸 Some UTF-8 Here 😸&quot;);
+
+So this doesn&#39;t really rock anyone&#39;s world with a capability they didn&#39;t already have.
+
+## OR... It Could Run Code...
+
+I&#39;ll point out that plain C strings aren&#39;t generally seen in the API as being equivalent to text literals.  They&#39;re equivalent to code.
+
+    rebElide(&quot;this isn&#39;t a string -{but this is}-&quot;);
+
+So shifting into non-code interpretation requires some kind of marker.
+
+By this logic, we might say that the specific relationship between **return** and a string runs code...but more than that, *delegated* code.
+
+This is to say that because you are returning, you can do things safely that you couldn&#39;t do otherwise... because you&#39;ve passed control back to the trampoline.  Hence something like a FAIL would not cross your own C stack levels.
+
+    return &quot;fail -{This would be safe!}-&quot;
+
+It&#39;s not as powerful as **`rebDelegate()`**, because you can&#39;t splice things in variadically.  And you might wonder how it could work at all...since it doesn&#39;t have a way to capture the shadowed binding variable.
+
+**But interestingly, it doesn&#39;t need to capture the shadowed variable, because in processing the return it&#39;s actually the point of control of the Dispatcher that passed the variable in the first place!**
+
+So indeed, you have access to the full context...including the local variables in the frame.
+
+    const char* Return_Delegates_Spec = &quot;[ \
+        -{Demonstrate returning UTF-8 as delegation}- \
+        return: [tag!] \
+        x [integer!] \
+    ]&quot;;
+    Bounce Return_Delegates_Impl(Context* binding)
+    {
+        if (rebUnboxInteger(&quot;x&quot;) &gt; 1020)
+             return rebValue(&quot;&lt;nice large number!&gt;&quot;);
+        return &quot;raise [-{X value is too small:}- x]&quot;;
+    }
+
+## rebDelegate() Still Is  A Lot More Full-Featured
+
+Not only can you splice, but you can use commas to separate runs of text:
+
+    return rebDelegate(
+        &quot;you&quot;, &quot;can&quot;,
+        &quot;do&quot;, &quot;this&quot;
+        &quot;and splice&quot;, values, &quot;in the midst&quot;
+    );
+
+That doesn&#39;t wind up doing anything weird like giving you &quot;cando&quot;.  The commas in the variadic are token stops.
+
+C++ offers raw strings and you can do things like:
+
+    return R&quot;(fail [
+        -{You can write a really long failure message here}-
+        -{And the raw string will do the right thing}-
+    ])&quot;
+
+I&#39;m used to the commas, but maybe that&#39;s an improvement over:
+
+    return rebDelegate(&quot;fail [&quot;,
+        &quot;-{You can write a really long failure message here}-&quot;,
+        &quot;-{And the raw string will do the right thing}-&quot;
+    &quot;]&quot;);
+
+## Overall, I Think String-As-Delegation Is The Winning Choice
+
+Making a TEXT! string is both counter to the default interpretation of C strings, and will have a well-known shorthand.
+
+I don&#39;t think **`return rebD()`** for rebDelegate() has any particular clarity to it.
+
+Where I see this being most useful is for short failure messages, which are pretty common to be returned...even in the middle of functions.
+
+But it also lets you do things you couldn&#39;t otherwise, like **`return &quot;quit 1&quot;`** or **`return &quot;halt&quot;`**.
+
+If you want to return nothing, you can just say **`return &quot;~&quot;`** instead of **`return rebNothing()`**... we can make that particular case fast where it doesn&#39;t call the evaluator (and maybe some other cases too...)
+
+Really, it&#39;s just a greater force multiplier!</description>
+    
+    <lastBuildDate>Sun, 22 Dec 2024 10:06:12 +0000</lastBuildDate>
+    <category>Language Bridging</category>
+    <atom:link href="https://rebol.metaeducation.com/t/what-should-returning-a-string-from-a-native-do/2357.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>What Should Returning a String From a Native Do?</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>I've raved about <a href="https://rebol.metaeducation.com/t/no-preprocessing-no-ffi-just-awesome-rebfunction/2224">how cool rebFunction() is</a>... though it may seem like mundane C interop, it's not.  <strong>It's quite novel.</strong></p>
+<p>But to recap, a trivial example:</p>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">const char* Add_1000_Spec = "[ \
+    -{Adds 1000 to whatever you pass in}- \
+    return: [integer!] \
+    x [integer!] \
+]";
+Bounce Add_1000_Impl(Context* binding)
+{
+    int x = rebUnboxInteger("x");
+    int bigger = x + 1000;
+    return rebInteger(bigger);
+}
+
+Value* action = rebFunction(Add_1000_Spec, &amp;Add_1000_Impl);
+</code></pre>
+<p>So here you see us returning a synthesized Rebol Value, an INTEGER!.</p>
+<p>You can return other things, such as <strong><code>rebDelegate("...");</code></strong> which defers execution to code which can do all kinds of things like throw or raise errors, or produce unstable antiforms.</p>
+<h2><a name="p-7984-but-no-return-states-overlap-utf-8-strings-1" class="anchor" href="https://rebol.metaeducation.com#p-7984-but-no-return-states-overlap-utf-8-strings-1"></a>But No Return States Overlap UTF-8 Strings</h2>
+<p>This is by design.  All Cells and Stubs in the system are out-of-band from valid UTF-8 leading characters.</p>
+<p>This means that the meaning for this is wide open:</p>
+<pre><code>const char* Return_Utf8_Spec = "[ \
+    -{return of a C const char literal pointer}- \
+    return: [???] -{what do you think?}- \
+]";
+Bounce Return_Utf8_Impl(Context* binding)
+{
+    return "😸 Some UTF-8 Here 😸";
+}
+</code></pre>
+<h2><a name="p-7984-obvious-answer-return-text-2" class="anchor" href="https://rebol.metaeducation.com#p-7984-obvious-answer-return-text-2"></a>"Obvious" Answer: Return TEXT!</h2>
+<p>You might think that it's completely obvious what should happen in this case: that it returns TEXT! and that's the end of that.</p>
+<p>Hence this would be a synonym for:</p>
+<pre><code>return rebText("😸 Some UTF-8 Here 😸");
+</code></pre>
+<p>Given that we could make the "instructions" legal to return as well, it could be equivalent to something even shorter:</p>
+<pre><code>return rebT("😸 Some UTF-8 Here 😸");
+</code></pre>
+<p>So this doesn't really rock anyone's world with a capability they didn't already have.</p>
+<h2><a name="p-7984-or-it-could-run-code-3" class="anchor" href="https://rebol.metaeducation.com#p-7984-or-it-could-run-code-3"></a>OR... It Could Run Code...</h2>
+<p>I'll point out that plain C strings aren't generally seen in the API as being equivalent to text literals.  They're equivalent to code.</p>
+<pre><code>rebElide("this isn't a string -{but this is}-");
+</code></pre>
+<p>So shifting into non-code interpretation requires some kind of marker.</p>
+<p>By this logic, we might say that the specific relationship between <strong>return</strong> and a string runs code...but more than that, <em>delegated</em> code.</p>
+<p>This is to say that because you are returning, you can do things safely that you couldn't do otherwise... because you've passed control back to the trampoline.  Hence something like a FAIL would not cross your own C stack levels.</p>
+<pre><code>return "fail -{This would be safe!}-"
+</code></pre>
+<p>It's not as powerful as <strong><code>rebDelegate()</code></strong>, because you can't splice things in variadically.  And you might wonder how it could work at all...since it doesn't have a way to capture the shadowed binding variable.</p>
+<p><strong>But interestingly, it doesn't need to capture the shadowed variable, because in processing the return it's actually the point of control of the Dispatcher that passed the variable in the first place!</strong></p>
+<p>So indeed, you have access to the full context...including the local variables in the frame.</p>
+<pre><code>const char* Return_Delegates_Spec = "[ \
+    -{Demonstrate returning UTF-8 as delegation}- \
+    return: [tag!] \
+    x [integer!] \
+]";
+Bounce Return_Delegates_Impl(Context* binding)
+{
+    if (rebUnboxInteger("x") &gt; 1020)
+         return rebValue("&lt;nice large number!&gt;");
+    return "raise [-{X value is too small:}- x]";
+}
+</code></pre>
+<h2><a name="p-7984-rebdelegate-still-is-a-lot-more-full-featured-4" class="anchor" href="https://rebol.metaeducation.com#p-7984-rebdelegate-still-is-a-lot-more-full-featured-4"></a>rebDelegate() Still Is  A Lot More Full-Featured</h2>
+<p>Not only can you splice, but you can use commas to separate runs of text:</p>
+<pre><code>return rebDelegate(
+    "you", "can",
+    "do", "this"
+    "and splice", values, "in the midst"
+);
+</code></pre>
+<p>That doesn't wind up doing anything weird like giving you "cando".  The commas in the variadic are token stops.</p>
+<p>C++ offers raw strings and you can do things like:</p>
+<pre><code>return R"(fail [
+    -{You can write a really long failure message here}-
+    -{And the raw string will do the right thing}-
+])"
+</code></pre>
+<p>I'm used to the commas, but maybe that's an improvement over:</p>
+<pre><code>return rebDelegate("fail [",
+    "-{You can write a really long failure message here}-",
+    "-{And the raw string will do the right thing}-"
+"]");
+</code></pre>
+<h2><a name="p-7984-overall-i-think-string-as-delegation-is-the-winning-choice-5" class="anchor" href="https://rebol.metaeducation.com#p-7984-overall-i-think-string-as-delegation-is-the-winning-choice-5"></a>Overall, I Think String-As-Delegation Is The Winning Choice</h2>
+<p>Making a TEXT! string is both counter to the default interpretation of C strings, and will have a well-known shorthand.</p>
+<p>I don't think <strong><code>return rebD()</code></strong> for rebDelegate() has any particular clarity to it.</p>
+<p>Where I see this being most useful is for short failure messages, which are pretty common to be returned...even in the middle of functions.</p>
+<p>But it also lets you do things you couldn't otherwise, like <strong><code>return "quit 1"</code></strong> or <strong><code>return "halt"</code></strong>.</p>
+<p>If you want to return nothing, you can just say <strong><code>return "~"</code></strong> instead of <strong><code>return rebNothing()</code></strong>... we can make that particular case fast where it doesn't call the evaluator (and maybe some other cases too...)</p>
+<p>Really, it's just a greater force multiplier!</p>
+          <p><a href="https://rebol.metaeducation.com/t/what-should-returning-a-string-from-a-native-do/2357/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/what-should-returning-a-string-from-a-native-do/2357/1</link>
+        <pubDate>Sun, 22 Dec 2024 07:39:50 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2357-1</guid>
+        <source url="https://rebol.metaeducation.com/t/what-should-returning-a-string-from-a-native-do/2357.rss">What Should Returning a String From a Native Do?</source>
+      </item>
+  </channel>
+</rss>

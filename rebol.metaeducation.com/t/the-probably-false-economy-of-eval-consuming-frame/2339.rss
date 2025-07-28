@@ -1,0 +1,154 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>The Probably-False Economy of EVAL Consuming FRAME!</title>
+    <link>https://rebol.metaeducation.com/t/the-probably-false-economy-of-eval-consuming-frame/2339</link>
+    <description>The earliest design usages for FRAME! were for things like ENCLOSE.
+
+ENCLOSE builds the frame for the function you&#39;re enclosing, then passes the frame to a function that can manipulate the frame, and invoke it with EVAL (or not invoke it at all, if it wishes).
+
+Here&#39;s a sort of simple historical example:
+
+    /foo: func [a b] [
+       let result: a + b
+       a: b: ~&lt;whatever&gt;~  ; functions can modify args/locals for any reason
+       return result
+    ]
+
+    /bar: enclose foo/ (lambda [f [frame!]] [
+        let b: f.b
+        f.a: f.a * 10
+        (eval f) + b
+    ])
+
+    &gt;&gt; bar 100 10
+    == 1020  ; ((a * 10) + b) + b
+
+You&#39;ll notice above that I didn&#39;t write:
+
+    /bar: enclose foo/ (lambda [f [frame!]] [
+        f.a: f.a * 10
+        (eval f) + f.b
+    ])
+
+This is because EVAL of a FRAME! would &quot;consume&quot; the frame, and trying to use **`f.b`** after the EVAL would raise an error.  In other words, memory was not allocated as it usually would be for a new frame to do the call...but the fields of the frame were the actual values being used.
+
+I overwrote **`a`** and **`b`** to make the point that once that EVAL is called, you can&#39;t rely on any particular state of a frame&#39;s variables.  In the general case, they can be changed to anything.
+
+## `(eval copy f)` is Easy, and So Is Saving Variables, Right?
+
+The premise I was going on was that it seemed like it would be wasteful...especially in scenarios like an ENCLOSE, to make another copy of the frame&#39;s data.
+
+And I figured usually you wouldn&#39;t need to refer to anything from the frame&#39;s input state after you called it.
+
+So you had two choices: either evaluate a copy of the frame, or save any variables you were interested in as locals.
+
+## It Turns Out To Be Incredibly Common To Save Variables
+
+I didn&#39;t know when originally trying to optimize the feature how often an ENCLOSE would need to talk about the input fields after an EVAL call.
+
+But empirically I&#39;d say you need the fields at least half the time.  You actually want it more often than that when you consider debugging--you often want to print some information about the input parameters after you&#39;ve done the EVAL.
+
+## `(let b: f.b)` Costs Much More Than `malloc()+memcpy()`
+
+When you come down to it, relatively speaking: *Evaluator cycles are expensive*.  *Tuple lookup is expensive*.  *Assignment is expensive*.  *LET statements are expensive*.
+
+That&#39;s because this is an interpreted language, and running code in the interpreter involves pushing and popping entities that represent interpreter stack levels.  There&#39;s all kinds of C data structures and layers of C function calls as the gears of the machinery turn...whether your operation be simple or complex.  That&#39;s just the name of the game... **a + b** in a generalized evaluator is going to be at least 100x more costly than adding two integers in C, which is basically just a single CPU instruction.
+
+So if you have to do *any* mitigation of losing the frame data by adding interpreted code, not only are you having to junk up what you&#39;re writing...but you&#39;re also paying much more than you would have if the system had just gone ahead and made a copy.
+
+## Explaining Why You Can&#39;t Is Lamer Than *&quot;It Just Works&quot;*
+
+People understand that if they have a FRAME! for APPEND and they EVAL it, that the series is going to be mutated.
+
+But they&#39;re going to understand less that the series field of the frame is not available at all to them after the call.
+
+It&#39;s kind of a no-brainer to say that if the two approaches were at all comparable in speed or overall performance, that the more useful behavior should be the default.
+
+*And I actually believe the more useful behavior is faster in the general case...by avoiding additional intepreter cycles to save frame fields in variables.*
+
+## `(free f)` Could Use FREE As An Intrinsic If You Want
+
+**[FREE could be trivially made Intrinsic](https://rebol.metaeducation.com/t/intrinsics-functions-without-frames/2050).**
+
+If profiling suggested that something like an ENCLOSE on a function with a large frame was affecting your bottom line by not freeing the frame, you could just free it after the EVAL.  That would leave behind nothing but a tiny useless stub (to avoid latent references in other cells from crashing the GC), so you&#39;d get the same end result as the historical EVAL.
+
+I&#39;m betting that having EVAL be able to be intrinsic when it takes one argument, and making FREE intrinsic would be faster than trying to do some weird refinement like **`eval:free`** to fold both into one operation...because refinement processing has its own cost, which I *think* would be greater.  
+
+But an optimized **`eval-free`** might be worth making, I don&#39;t know.  However its mechanic would simply be to natively fold the free in after the EVAL, instead of trying to make EVAL take over the frame and use its memory.
+
+My guess is that using EVAL-FREE won&#39;t be a benefit most of the time if you add any evaluator cycles to save a variable because of it.
+
+# Hence, EVAL Will No Longer Consume FRAME!
+
+This makes the &quot;action-is-frame&quot; duality even more solid, because as frames are passed around in the system there won&#39;t be &quot;consume frame vs. don&#39;t&quot; flags involved.
+
+You&#39;ll just either free the frame after you&#39;ve applied it, or you won&#39;t.  :man_shrugging:</description>
+    
+    <lastBuildDate>Sun, 01 Dec 2024 03:34:05 +0000</lastBuildDate>
+    <category>Optimization</category>
+    <atom:link href="https://rebol.metaeducation.com/t/the-probably-false-economy-of-eval-consuming-frame/2339.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>The Probably-False Economy of EVAL Consuming FRAME!</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>The earliest design usages for FRAME! were for things like ENCLOSE.</p>
+<p>ENCLOSE builds the frame for the function you're enclosing, then passes the frame to a function that can manipulate the frame, and invoke it with EVAL (or not invoke it at all, if it wishes).</p>
+<p>Here's a sort of simple historical example:</p>
+<pre><code>/foo: func [a b] [
+   let result: a + b
+   a: b: ~&lt;whatever&gt;~  ; functions can modify args/locals for any reason
+   return result
+]
+
+/bar: enclose foo/ (lambda [f [frame!]] [
+    let b: f.b
+    f.a: f.a * 10
+    (eval f) + b
+])
+
+&gt;&gt; bar 100 10
+== 1020  ; ((a * 10) + b) + b
+</code></pre>
+<p>You'll notice above that I didn't write:</p>
+<pre><code>/bar: enclose foo/ (lambda [f [frame!]] [
+    f.a: f.a * 10
+    (eval f) + f.b
+])
+</code></pre>
+<p>This is because EVAL of a FRAME! would "consume" the frame, and trying to use <strong><code>f.b</code></strong> after the EVAL would raise an error.  In other words, memory was not allocated as it usually would be for a new frame to do the call...but the fields of the frame were the actual values being used.</p>
+<p>I overwrote <strong><code>a</code></strong> and <strong><code>b</code></strong> to make the point that once that EVAL is called, you can't rely on any particular state of a frame's variables.  In the general case, they can be changed to anything.</p>
+<h2><a name="p-7936-eval-copy-f-is-easy-and-so-is-saving-variables-right-1" class="anchor" href="https://rebol.metaeducation.com#p-7936-eval-copy-f-is-easy-and-so-is-saving-variables-right-1"></a><code>(eval copy f)</code> is Easy, and So Is Saving Variables, Right?</h2>
+<p>The premise I was going on was that it seemed like it would be wasteful...especially in scenarios like an ENCLOSE, to make another copy of the frame's data.</p>
+<p>And I figured usually you wouldn't need to refer to anything from the frame's input state after you called it.</p>
+<p>So you had two choices: either evaluate a copy of the frame, or save any variables you were interested in as locals.</p>
+<h2><a name="p-7936-it-turns-out-to-be-incredibly-common-to-save-variables-2" class="anchor" href="https://rebol.metaeducation.com#p-7936-it-turns-out-to-be-incredibly-common-to-save-variables-2"></a>It Turns Out To Be Incredibly Common To Save Variables</h2>
+<p>I didn't know when originally trying to optimize the feature how often an ENCLOSE would need to talk about the input fields after an EVAL call.</p>
+<p>But empirically I'd say you need the fields at least half the time.  You actually want it more often than that when you consider debugging--you often want to print some information about the input parameters after you've done the EVAL.</p>
+<h2><a name="p-7936-let-b-fb-costs-much-more-than-mallocmemcpy-3" class="anchor" href="https://rebol.metaeducation.com#p-7936-let-b-fb-costs-much-more-than-mallocmemcpy-3"></a><code>(let b: f.b)</code> Costs Much More Than <code>malloc()+memcpy()</code></h2>
+<p>When you come down to it, relatively speaking: <em>Evaluator cycles are expensive</em>.  <em>Tuple lookup is expensive</em>.  <em>Assignment is expensive</em>.  <em>LET statements are expensive</em>.</p>
+<p>That's because this is an interpreted language, and running code in the interpreter involves pushing and popping entities that represent interpreter stack levels.  There's all kinds of C data structures and layers of C function calls as the gears of the machinery turn...whether your operation be simple or complex.  That's just the name of the game... <strong>a + b</strong> in a generalized evaluator is going to be at least 100x more costly than adding two integers in C, which is basically just a single CPU instruction.</p>
+<p>So if you have to do <em>any</em> mitigation of losing the frame data by adding interpreted code, not only are you having to junk up what you're writing...but you're also paying much more than you would have if the system had just gone ahead and made a copy.</p>
+<h2><a name="p-7936-explaining-why-you-cant-is-lamer-than-it-just-works-4" class="anchor" href="https://rebol.metaeducation.com#p-7936-explaining-why-you-cant-is-lamer-than-it-just-works-4"></a>Explaining Why You Can't Is Lamer Than <em>"It Just Works"</em></h2>
+<p>People understand that if they have a FRAME! for APPEND and they EVAL it, that the series is going to be mutated.</p>
+<p>But they're going to understand less that the series field of the frame is not available at all to them after the call.</p>
+<p>It's kind of a no-brainer to say that if the two approaches were at all comparable in speed or overall performance, that the more useful behavior should be the default.</p>
+<p><em>And I actually believe the more useful behavior is faster in the general case...by avoiding additional intepreter cycles to save frame fields in variables.</em></p>
+<h2><a name="p-7936-free-f-could-use-free-as-an-intrinsic-if-you-want-5" class="anchor" href="https://rebol.metaeducation.com#p-7936-free-f-could-use-free-as-an-intrinsic-if-you-want-5"></a><code>(free f)</code> Could Use FREE As An Intrinsic If You Want</h2>
+<p><strong><a href="https://rebol.metaeducation.com/t/intrinsics-functions-without-frames/2050">FREE could be trivially made Intrinsic</a>.</strong></p>
+<p>If profiling suggested that something like an ENCLOSE on a function with a large frame was affecting your bottom line by not freeing the frame, you could just free it after the EVAL.  That would leave behind nothing but a tiny useless stub (to avoid latent references in other cells from crashing the GC), so you'd get the same end result as the historical EVAL.</p>
+<p>I'm betting that having EVAL be able to be intrinsic when it takes one argument, and making FREE intrinsic would be faster than trying to do some weird refinement like <strong><code>eval:free</code></strong> to fold both into one operation...because refinement processing has its own cost, which I <em>think</em> would be greater.</p>
+<p>But an optimized <strong><code>eval-free</code></strong> might be worth making, I don't know.  However its mechanic would simply be to natively fold the free in after the EVAL, instead of trying to make EVAL take over the frame and use its memory.</p>
+<p>My guess is that using EVAL-FREE won't be a benefit most of the time if you add any evaluator cycles to save a variable because of it.</p>
+<h1><a name="p-7936-hence-eval-will-no-longer-consume-frame-6" class="anchor" href="https://rebol.metaeducation.com#p-7936-hence-eval-will-no-longer-consume-frame-6"></a>Hence, EVAL Will No Longer Consume FRAME!</h1>
+<p>This makes the "action-is-frame" duality even more solid, because as frames are passed around in the system there won't be "consume frame vs. don't" flags involved.</p>
+<p>You'll just either free the frame after you've applied it, or you won't.  <img src="https://rebol.metaeducation.com/images/emoji/twitter/man_shrugging.png?v=14" title=":man_shrugging:" class="emoji" alt=":man_shrugging:" loading="lazy" width="20" height="20"></p>
+          <p><a href="https://rebol.metaeducation.com/t/the-probably-false-economy-of-eval-consuming-frame/2339/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/the-probably-false-economy-of-eval-consuming-frame/2339/1</link>
+        <pubDate>Sun, 01 Dec 2024 00:50:53 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2339-1</guid>
+        <source url="https://rebol.metaeducation.com/t/the-probably-false-economy-of-eval-consuming-frame/2339.rss">The Probably-False Economy of EVAL Consuming FRAME!</source>
+      </item>
+  </channel>
+</rss>

@@ -1,0 +1,201 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Packs Decaying To First Item When Others are ERROR!</title>
+    <link>https://rebol.metaeducation.com/t/packs-decaying-to-first-item-when-others-are-error/2514</link>
+    <description>The concept of an &quot;undecayable PACK!&quot; came up when I was trying to reason about what should happen when you had things like PACK!s of PACK!s...
+
+    &gt;&gt; x: pack [1 2]
+    == \~[&#39;1 &#39;2]~\  ; antiform
+
+    &gt;&gt; x 
+    == 1
+
+    &gt;&gt; x: pack [pack [1 2] 3]
+    == ???
+
+**My belief was that this should panic, rather than do the decay.**  If you truly wanted the first element of an unpacked pack to decay, you could write:
+
+    &gt;&gt; [x]: pack [pack [1 2] 3]
+    == \~[~[1 2]~ &#39;3]~\  ; antiform
+
+    &gt;&gt; x
+    == 1
+
+**This created the notion of an undecayable pack.**  The first cut of the undecayable rule was that  that any pack with an unstable antiform in the first spot (GHOST!, PACK!, ERROR!) would panic if you tried to decay it (vs unpack it).
+
+## Safety Motivation: Don&#39;t Let ERROR! Disappear
+
+Putting ERROR!s in PACK!s isn&#39;t the usual way of doing things.  If a function runs and wants to make you aware of an ERROR!, it should typically return that as the main result of a function...not stow it away inside a pack.  Only if it&#39;s the main result can it be reacted to by things like EXCEPT.
+
+But some cases don&#39;t allow the error to be the sole return result.  For instance, EVALUATE:STEP
+
+    [pos ^result]: evaluate:step [fail &quot;abc&quot; ...]
+
+We need the updated position of the code, even if the code FAIL&#39;d.  Hence, EVALUATE can&#39;t make its main result an ERROR! in the case of an error result, it has to give back a PACK! which encodes both the error and the new position.
+
+*(&quot;Has to&quot; is a strong statement... it&#39;s possible that the next position could be a field of the error, [I&#39;ve discussed some of these odd ideas before](https://rebol.metaeducation.com/t/should-evaluate-step-bomb-on-an-error/1491/3?u=hostilefork).  But it&#39;s better to allow errors in packs.)*
+
+If you don&#39;t receive result as ^META, then the ERROR! wouldn&#39;t be able to store in the ^result and would panic:
+
+    [code result]: evaluate:step [fail &quot;abc&quot; ...]  ; not ^result, so panic
+
+But what if you didn&#39;t store the result at all?
+
+    code: evaluate:step [fail &quot;abc&quot; ...]  ; ???
+
+**I feel like that should panic.**  But why should you have to do an assignment to get the panic?
+
+    evaluate:step [fail &quot;abc&quot; ...]  ; same behavior as when assigned to `code:` ?
+
+That would suggest that if a PACK has an ERROR! in *any* slot, then should the pack decay and not extract that error into a ^META variable, that error becomes a panic.
+
+But this thought leads to another invasive thought...
+
+## ...What About ERROR!s In PACK!s?
+
+I started by talking about undecayability, e.g. you can&#39;t put a PACK! in the first position of a PACK! and have it &quot;double decay&quot;.  Decaying happens *once*.
+
+And then I discussed decaying when there&#39;s an ERROR! in the pack... suggesting that an error at *any* position (not just the first) which is not unpacked into a ^META-variable should panic.
+
+But what if you have a PACK! that&#39;s *not* in the first position of a PACK!... ?  Should that be willing to decay silently?
+
+    &gt;&gt; x: pack [1 pack [2 3]]
+    == 1  ; silently discarded PACK! in second position...
+
+That may seem harmless, BUT, what if that PACK! contained an ERROR! ?
+
+*This led me to theorize that packs which contained unstable antiforms at any position would be &quot;undecayable&quot;*
+
+However, that started to feel too strict, when we look at:
+
+    [code result]: evaluate:step [pack [1 2] ...]  ; works, result decays to 1
+
+    code: evaluate:step [pack [1 2] ...]  ; innocuous, why shouldn&#39;t it work?
+
+And even if I&#39;m assigning the result, [PACK!s propagate in assignments now by default](https://rebol.metaeducation.com/t/should-set-word-s-propagate-undecayed-packs/2178)
+
+    while [[code result]: evaluate:step code] [
+        ...
+    ]
+
+It would be a shame if this decayed a PACK! for result, and then refused to decay it for the WHILE, making you write:
+
+    while [[{code} result]: evaluate:step code] [
+        ...
+    ]
+
+So pre-emptively refusing to toss PACK!s just because they *might* contain an ERROR! doesn&#39;t seem very ergonomic.
+
+## Non-First Item Recursive PACK! Decay Search For ERROR!
+
+So... what if any PACK!s which aren&#39;t in the first position, that you want to discard, will recursively unpack themselves looking for ERROR!, and if they find any then panic?
+
+(And ERROR!s which aren&#39;t in the first position, and aren&#39;t in PACK!, are also sources of panic?)
+
+This would make the system more robust to dropping errors on the floor.  This might make it more reasonable to say that PACK is willing to pack up errors, generally... today you have to use a special operation:
+
+     pack [1020 fail &quot;won&#39;t work&quot;]  ; panics 
+
+     pack* [1020 fail &quot;will work&quot;]  ; allows the error
+
+It&#39;s a little bit disconcerting, to imagine that instead of erroring at the moment of the PACK you trust that wherever the pack is going will handle the error.  But really, that only becomes a problem when you&#39;re dealing with using PACKs in non-multi-return situations, e.g. you make a PACK and then put it in suspended animation somewhere.
+
+If you&#39;re *not* putting packs in suspended animation, but &quot;packing with the intent of unpacking&quot;, then you&#39;re leaving it up to the recipient as to whether they want the error or not.
+
+All things being equal, having just one PACK primitive is preferable.
+
+Things do seem to be falling into place in other ways, and I&#39;m sensing that maybe the right thing to do is to say that if you&#39;re a client with &quot;pack with intent to store&quot;, then you bear the burden of the indefinite lifetime you may give errors in that pack...vs. making it harder to put errors in packs.
+
+:thinking:</description>
+    
+    <lastBuildDate>Fri, 25 Jul 2025 05:16:29 +0000</lastBuildDate>
+    <category>Errors</category>
+    <atom:link href="https://rebol.metaeducation.com/t/packs-decaying-to-first-item-when-others-are-error/2514.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Packs Decaying To First Item When Others are ERROR!</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>The concept of an "undecayable PACK!" came up when I was trying to reason about what should happen when you had things like PACK!s of PACK!s...</p>
+<pre><code>&gt;&gt; x: pack [1 2]
+== \~['1 '2]~\  ; antiform
+
+&gt;&gt; x 
+== 1
+
+&gt;&gt; x: pack [pack [1 2] 3]
+== ???
+</code></pre>
+<p><strong>My belief was that this should panic, rather than do the decay.</strong>  If you truly wanted the first element of an unpacked pack to decay, you could write:</p>
+<pre><code>&gt;&gt; [x]: pack [pack [1 2] 3]
+== \~[~[1 2]~ '3]~\  ; antiform
+
+&gt;&gt; x
+== 1
+</code></pre>
+<p><strong>This created the notion of an undecayable pack.</strong>  The first cut of the undecayable rule was that  that any pack with an unstable antiform in the first spot (GHOST!, PACK!, ERROR!) would panic if you tried to decay it (vs unpack it).</p>
+<h2><a name="p-8553-safety-motivation-dont-let-error-disappear-1" class="anchor" href="https://rebol.metaeducation.com#p-8553-safety-motivation-dont-let-error-disappear-1"></a>Safety Motivation: Don't Let ERROR! Disappear</h2>
+<p>Putting ERROR!s in PACK!s isn't the usual way of doing things.  If a function runs and wants to make you aware of an ERROR!, it should typically return that as the main result of a function...not stow it away inside a pack.  Only if it's the main result can it be reacted to by things like EXCEPT.</p>
+<p>But some cases don't allow the error to be the sole return result.  For instance, EVALUATE:STEP</p>
+<pre><code>[pos ^result]: evaluate:step [fail "abc" ...]
+</code></pre>
+<p>We need the updated position of the code, even if the code FAIL'd.  Hence, EVALUATE can't make its main result an ERROR! in the case of an error result, it has to give back a PACK! which encodes both the error and the new position.</p>
+<p><em>("Has to" is a strong statement... it's possible that the next position could be a field of the error, <a href="https://rebol.metaeducation.com/t/should-evaluate-step-bomb-on-an-error/1491/3">I've discussed some of these odd ideas before</a>.  But it's better to allow errors in packs.)</em></p>
+<p>If you don't receive result as ^META, then the ERROR! wouldn't be able to store in the ^result and would panic:</p>
+<pre><code>[code result]: evaluate:step [fail "abc" ...]  ; not ^result, so panic
+</code></pre>
+<p>But what if you didn't store the result at all?</p>
+<pre><code>code: evaluate:step [fail "abc" ...]  ; ???
+</code></pre>
+<p><strong>I feel like that should panic.</strong>  But why should you have to do an assignment to get the panic?</p>
+<pre><code>evaluate:step [fail "abc" ...]  ; same behavior as when assigned to `code:` ?
+</code></pre>
+<p>That would suggest that if a PACK has an ERROR! in <em>any</em> slot, then should the pack decay and not extract that error into a ^META variable, that error becomes a panic.</p>
+<p>But this thought leads to another invasive thought...</p>
+<h2><a name="p-8553-what-about-errors-in-packs-2" class="anchor" href="https://rebol.metaeducation.com#p-8553-what-about-errors-in-packs-2"></a>...What About ERROR!s In PACK!s?</h2>
+<p>I started by talking about undecayability, e.g. you can't put a PACK! in the first position of a PACK! and have it "double decay".  Decaying happens <em>once</em>.</p>
+<p>And then I discussed decaying when there's an ERROR! in the pack... suggesting that an error at <em>any</em> position (not just the first) which is not unpacked into a ^META-variable should panic.</p>
+<p>But what if you have a PACK! that's <em>not</em> in the first position of a PACK!... ?  Should that be willing to decay silently?</p>
+<pre><code>&gt;&gt; x: pack [1 pack [2 3]]
+== 1  ; silently discarded PACK! in second position...
+</code></pre>
+<p>That may seem harmless, BUT, what if that PACK! contained an ERROR! ?</p>
+<p><em>This led me to theorize that packs which contained unstable antiforms at any position would be "undecayable"</em></p>
+<p>However, that started to feel too strict, when we look at:</p>
+<pre><code>[code result]: evaluate:step [pack [1 2] ...]  ; works, result decays to 1
+
+code: evaluate:step [pack [1 2] ...]  ; innocuous, why shouldn't it work?
+</code></pre>
+<p>And even if I'm assigning the result, <a href="https://rebol.metaeducation.com/t/should-set-word-s-propagate-undecayed-packs/2178">PACK!s propagate in assignments now by default</a></p>
+<pre><code>while [[code result]: evaluate:step code] [
+    ...
+]
+</code></pre>
+<p>It would be a shame if this decayed a PACK! for result, and then refused to decay it for the WHILE, making you write:</p>
+<pre><code>while [[{code} result]: evaluate:step code] [
+    ...
+]
+</code></pre>
+<p>So pre-emptively refusing to toss PACK!s just because they <em>might</em> contain an ERROR! doesn't seem very ergonomic.</p>
+<h2><a name="p-8553-non-first-item-recursive-pack-decay-search-for-error-3" class="anchor" href="https://rebol.metaeducation.com#p-8553-non-first-item-recursive-pack-decay-search-for-error-3"></a>Non-First Item Recursive PACK! Decay Search For ERROR!</h2>
+<p>So... what if any PACK!s which aren't in the first position, that you want to discard, will recursively unpack themselves looking for ERROR!, and if they find any then panic?</p>
+<p>(And ERROR!s which aren't in the first position, and aren't in PACK!, are also sources of panic?)</p>
+<p>This would make the system more robust to dropping errors on the floor.  This might make it more reasonable to say that PACK is willing to pack up errors, generally... today you have to use a special operation:</p>
+<pre><code> pack [1020 fail "won't work"]  ; panics 
+
+ pack* [1020 fail "will work"]  ; allows the error
+</code></pre>
+<p>It's a little bit disconcerting, to imagine that instead of erroring at the moment of the PACK you trust that wherever the pack is going will handle the error.  But really, that only becomes a problem when you're dealing with using PACKs in non-multi-return situations, e.g. you make a PACK and then put it in suspended animation somewhere.</p>
+<p>If you're <em>not</em> putting packs in suspended animation, but "packing with the intent of unpacking", then you're leaving it up to the recipient as to whether they want the error or not.</p>
+<p>All things being equal, having just one PACK primitive is preferable.</p>
+<p>Things do seem to be falling into place in other ways, and I'm sensing that maybe the right thing to do is to say that if you're a client with "pack with intent to store", then you bear the burden of the indefinite lifetime you may give errors in that pack...vs. making it harder to put errors in packs.</p>
+<p><img src="https://rebol.metaeducation.com/images/emoji/twitter/thinking.png?v=14" title=":thinking:" class="emoji only-emoji" alt=":thinking:" loading="lazy" width="20" height="20"></p>
+          <p><a href="https://rebol.metaeducation.com/t/packs-decaying-to-first-item-when-others-are-error/2514/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/packs-decaying-to-first-item-when-others-are-error/2514/1</link>
+        <pubDate>Fri, 25 Jul 2025 04:59:45 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2514-1</guid>
+        <source url="https://rebol.metaeducation.com/t/packs-decaying-to-first-item-when-others-are-error/2514.rss">Packs Decaying To First Item When Others are ERROR!</source>
+      </item>
+  </channel>
+</rss>

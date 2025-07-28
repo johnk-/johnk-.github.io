@@ -1,0 +1,308 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>The Simple-yet-Powerful Magic of The Loop Result Protocol</title>
+    <link>https://rebol.metaeducation.com/t/the-simple-yet-powerful-magic-of-the-loop-result-protocol/609</link>
+    <description>## Loops return null if-and-only-if they break
+
+One very good reason this rule exists is to make it easy to build custom loop constructs out of several other loop constructs.  You can tell &quot;from the outside&quot; whether one of your sub-loops was BREAK&#39;d...this way the the higher level construct is aware it shouldn&#39;t run any more of its component loop phases.
+
+*(If this rule did not exist, then implementing a loop out of several other loops would have to invasively hook and rebind BREAK in each loop body to its own, and handle that.  Even if it were possible--which it probably should be--this would be complex and inefficient.  So the simpler rule is better!)* 
+
+To distinguish this case from normal loop results, a NULL loop body evaluation will be turned into a &quot;boxed&quot; NULL, e.g. a null isotope in a parameter pack:
+
+    &gt;&gt; for-each x [1 2 3] [null]
+    ; first in pack of length 1
+    == ~null~  ; anti
+
+    &gt;&gt; meta for-each x [1 2 3] [null]
+    == ~[~null~]~  ; anti
+
+Parameter packs containing NULL cannot be stored in variables, and will &quot;decay&quot; to a normal NULL when assigned to a variable.
+
+## ...many common loops return void if the body never ran
+
+    &gt;&gt; repeat 0 [&lt;unreturned&gt;]
+    == ~[]~  ; anti
+
+    &gt;&gt; for-each x [] [&lt;unreturned&gt;]
+    == ~[]~  ; anti
+
+Though unlike the return of pure null &quot;if and only if&quot; there was a break, returning void does not guarantee the body never ran.
+
+    &gt;&gt; repeat 1 [elide print &quot;might run, but produce nothing...&quot;]
+    might run, but produce nothing...
+    == ~[]~  ; anti
+
+Note that some loops do not fit this pattern...e.g. an empty MAP-EACH gives an empty block:
+
+    &gt;&gt; map-each x [] [print &quot;never runs&quot;]
+    == []
+ 
+## Reacting to BREAKs is easy!
+
+Loop aggregators aren&#39;t the only place that benefits from being able to tell what happened with a loop from its result.   Plain user code reaps the benefits as well.
+
+If you want to know if a loop BREAK&#39;d, then ELSE is the ticket:
+
+    for-each x block [
+       if some-test x [break]
+    ] else [
+        ; This code runs only if the loop breaks
+        ; ...so it still runs even if block is empty
+    ]
+
+You can combine that with THEN to segregate code when the loop *doesn&#39;t* break:
+
+    for-each x block [
+       if some-test x [break]
+    ] then [
+        ; This code runs only if the loop doesn&#39;t break
+    ] else [
+        ; This code runs only if the loop breaks
+    ]
+
+### Practical example?
+
+Here&#39;s a very cool real world case from the console code:
+
+    pos: molded: mold:limit :v 2048
+    repeat 20 [
+        pos: next of any [find pos newline, break]
+    ] then [
+        insert clear pos &quot;...&quot;
+    ]
+
+You have up to 2048 characters of data coming back from the mold, ok. Now you want just the first 20 lines of that.  If truncation is necessary, put an ellipsis on the end.
+
+FIND will return NULL if it can&#39;t find the thing you asked it, so the ANY will run the break when you can&#39;t get the position.  If it makes it up to 20 without breaking, the THEN clause runs.
+
+So there you go.  The first 20 lines of the first 2048 characters of a mold, truncating with &quot;...&quot;  I think the THEN really follows the idea of *completion*, it makes sense (to me) that a BREAK would bypass a THEN (or an ALSO, which is similar) clause.
+
+I encourage people to get creative, to look at ways to use this to write clearer/shorter/better code.</description>
+    
+    <lastBuildDate>Tue, 10 Sep 2024 15:19:08 +0000</lastBuildDate>
+    <category>Loops</category>
+    <atom:link href="https://rebol.metaeducation.com/t/the-simple-yet-powerful-magic-of-the-loop-result-protocol/609.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>The Simple-yet-Powerful Magic of The Loop Result Protocol</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>I was pondering the edge case of getting two voids into the <a href="https://rebol.metaeducation.com/t/parallel-for-example/2261">FOR-PARALLEL</a> example, and what it would return given the particular choice of how it was implemented:</p>
+<aside class="quote no-group quote-modified" data-username="hostilefork" data-post="1" data-topic="2261">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"><a href="https://rebol.metaeducation.com/t/parallel-for-example/2261/1">Parallel FOR Example</a></div>
+<blockquote>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">    ...
+    blk1 [~void~ any-list?]
+    blk2 [~void~ any-list?]
+    body [block!]
+][
+    return while [(not empty? maybe blk1) or (not empty? maybe blk2)] [
+       ...
+</code></pre>
+</blockquote>
+</aside>
+<p>That meant it would return whatever WHILE returned when it never ran its body, which was VOID.  Currently that is distinct from what WHILE returns when its condition is void...which is NULL, according to <a href="https://rebol.metaeducation.com/t/the-void-in-null-out-protocol/1880">VOID-in-NULL-out</a>.</p>
+<p>But is that right?  Let's revisit the question of what a void input <em>should</em> do for loops:</p>
+<pre><code>&gt;&gt; condition: null
+
+&gt;&gt; for-each item (if condition [block]) [...]
+== ???
+</code></pre>
+<p>Whether we return NULL or VOID here affects things like ANY or ALL... NULL will count as a branch inhibitor and stop either construct.  On the other hand, ELSE considers both pure NULL and pure VOID to be cause to run.</p>
+<p>You could make the case this is not a void-in-null-out situation.  That was invented for functions that were looking for a particular answer and couldn't give it, so instead give a "soft failure".  e.g. <strong>LENGTH OF VOID</strong> is NULL, because it couldn't get the length.  <em>But loops aren't asking any particular question that fails.</em>  They're just a conduit to someone else who might be asking a question.  It's kind of like how <strong><code>eval [void]</code></strong> doesn't give you back NULL just because you evaluated and got void.</p>
+<p>Loop result protocol says we reserve pure NULL for saying the loop encountered a BREAK.  Why would we want to conflate opting out of the loop with breaking, here?  That could be thought of as when it's useful to think "the question" of the loop actually did encounter a soft failure.</p>
+<h3><a name="p-7616-what-about-weird-loops-1" class="anchor" href="https://rebol.metaeducation.com#p-7616-what-about-weird-loops-1"></a>What About "Weird" Loops?</h3>
+<p>Asking what MAP-EACH should do is a curious one.  If a MAP-EACH never runs its body, it gives back an empty block... not void as other constructs do:</p>
+<pre><code>&gt;&gt; for-each x [] [fail "this code should never run"]
+== ~void~  ; anti
+
+&gt;&gt; map-each x [] [fail "this code should never run"]
+== []
+</code></pre>
+<p>Given current thoughts on <a href="https://rebol.metaeducation.com/t/blank-2022-revisiting-the-datatype/1942/11">the semantics of BLANK!</a>, I'm thinking that should give back empty block as well... because an empty string or binary or array all give back empty block.  So it doesn't break any rules for blank to do the same:</p>
+<pre><code>&gt;&gt; map-each x _ [fail "this code should never run"]
+== []
+</code></pre>
+<p><strong>In order to reason about this, we have to think about the applications.</strong></p>
+<p>If someone is writing code like:</p>
+<pre><code>all [
+    ...
+    map-each x (whatever) [...]
+    ...
+]
+</code></pre>
+<p>We can imagine them having the wish to telegraph "opt out" vs. "null" to the ALL.  We know that BREAK in the body of the loop telegraphs null--and that is by design.  But should you be able to telegraph NULL from the <code>(whatever)</code> slot, or only telegraph VOID?</p>
+<p>Let's make it a little more concrete by saying they're using an IF in the slot:</p>
+<pre><code>all [
+    ...
+    map-each x (if condition [whatever]) [...]
+    ...
+]
+</code></pre>
+<p>Transformation-wise, they could have written that as:</p>
+<pre><code>all [
+    ...
+    if condition [
+        map-each x (whatever) [...]
+    ]
+    ...
+]
+</code></pre>
+<p>So getting void from a conditional expression is easy in such a case.  Getting NULL is trickier.</p>
+<p>The other likely instance is a calculated expression that may be null.</p>
+<pre><code>all [
+    ...
+    map-each x (maybe some long expression) [...]
+    ...
+]
+</code></pre>
+<p>You'd have to create a variable in order to pull that out, and not repeat the expression.  Can we say anything about how likely it is that someone wants to telegraph NULL vs. VOID out of that?</p>
+<p>And furthermore: because MAP-EACH is intrinsically a value-synthesizing construct, is this different from the likely needs of FOR-EACH or similar?  Does "I made a block, or if I couldn't NULL" make more sense than "I made a block, or if I couldn't VOID"?</p>
+<p>I'll add that the existence of MAYBE being able to turn NULL to void offers a good way to turn "I couldn't do it" to "I don't care"</p>
+<pre><code>all [
+    ...
+    maybe map-each x (maybe some long expression) [...]
+    ...
+]
+</code></pre>
+<h3><a name="p-7616-perhaps-void-in-null-out-should-be-heeded-for-loops-too-2" class="anchor" href="https://rebol.metaeducation.com#p-7616-perhaps-void-in-null-out-should-be-heeded-for-loops-too-2"></a>Perhaps VOID-in-NULL-out should be heeded for loops, too</h3>
+<p>It conflates void input with BREAK.  But since BLANK! acts the same way as empty series, you have that other choice if you want to generate a VOID out of something like a FOR-EACH.</p>
+<p>I think I'm going to stick with NULL as the answer for void input, for now.  I'll keep an eye out for how well it is working.</p>
+          <p><a href="https://rebol.metaeducation.com/t/the-simple-yet-powerful-magic-of-the-loop-result-protocol/609/11">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/the-simple-yet-powerful-magic-of-the-loop-result-protocol/609/11</link>
+        <pubDate>Tue, 10 Sep 2024 14:49:45 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-609-11</guid>
+        <source url="https://rebol.metaeducation.com/t/the-simple-yet-powerful-magic-of-the-loop-result-protocol/609.rss">The Simple-yet-Powerful Magic of The Loop Result Protocol</source>
+      </item>
+      <item>
+        <title>The Simple-yet-Powerful Magic of The Loop Result Protocol</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <h2><a name="p-4616-what-do-rebol2-and-red-do-here-1" class="anchor" href="https://rebol.metaeducation.com#p-4616-what-do-rebol2-and-red-do-here-1"></a>What Do Rebol2 and Red Do Here?</h2>
+<p>Rebol2 used NONE:</p>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">rebol2&gt;&gt; none? while [false] []
+== true
+</code></pre>
+<p>But Red is using UNSET! when a loop doesn't run its body:</p>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">red&gt;&gt; unset? while [false] []
+== true
+</code></pre>
+<p><a href="https://github.com/red/red/issues/1706#issuecomment-660306764">This GitHub ticket has an inventory of Red's compiled and interpreted behaviors</a>.</p>
+<p>Boris says:</p>
+<blockquote>
+<p>I haven't found any explanation of why Rebol chose that <code>loop 0 [1]</code> (and other non-evaluated loops) returns <code>none</code> rather than <code>unset</code> . I have however found numerous examples of relying on loops returning last result of their body evaluation. And that makes <code>none</code> more helpful than <code>unset</code> as we can chain loops into <code>if</code> s like <code>unless result: loop n [stuff] [handle empty case]</code> .</p>
+</blockquote>
+<p>Gregg says:</p>
+<blockquote>
+<p>Agreed on returning <code>none</code> consistently where the body is not processed.</p>
+</blockquote>
+<hr>
+<p><strong>Note: Their GitHub issue is from 2016, and still open in 2024...</strong></p>
+          <p><a href="https://rebol.metaeducation.com/t/the-simple-yet-powerful-magic-of-the-loop-result-protocol/609/10">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/the-simple-yet-powerful-magic-of-the-loop-result-protocol/609/10</link>
+        <pubDate>Mon, 25 Jan 2021 09:09:23 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-609-10</guid>
+        <source url="https://rebol.metaeducation.com/t/the-simple-yet-powerful-magic-of-the-loop-result-protocol/609.rss">The Simple-yet-Powerful Magic of The Loop Result Protocol</source>
+      </item>
+      <item>
+        <title>The Simple-yet-Powerful Magic of The Loop Result Protocol</title>
+        <dc:creator><![CDATA[IngoHohmann]]></dc:creator>
+        <description><![CDATA[
+            <p>I must admit I felt a bit uneasy about "barification", so I like the new turn [of putting null in a pack, and having THEN consider a packed null a branch trigger].</p>
+          <p><a href="https://rebol.metaeducation.com/t/the-simple-yet-powerful-magic-of-the-loop-result-protocol/609/6">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/the-simple-yet-powerful-magic-of-the-loop-result-protocol/609/6</link>
+        <pubDate>Mon, 11 Jun 2018 14:17:50 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-609-6</guid>
+        <source url="https://rebol.metaeducation.com/t/the-simple-yet-powerful-magic-of-the-loop-result-protocol/609.rss">The Simple-yet-Powerful Magic of The Loop Result Protocol</source>
+      </item>
+      <item>
+        <title>The Simple-yet-Powerful Magic of The Loop Result Protocol</title>
+        <dc:creator><![CDATA[BlackATTR]]></dc:creator>
+        <description><![CDATA[
+            <p>I really like it. I'm curious to see what others have to say about it. I'm not the most clever ren-c coder, but I definitely see some of these new constructs enabling me to sidestep some of the bulkier expressions I often write.</p>
+          <p><a href="https://rebol.metaeducation.com/t/the-simple-yet-powerful-magic-of-the-loop-result-protocol/609/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/the-simple-yet-powerful-magic-of-the-loop-result-protocol/609/2</link>
+        <pubDate>Tue, 08 May 2018 20:42:28 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-609-2</guid>
+        <source url="https://rebol.metaeducation.com/t/the-simple-yet-powerful-magic-of-the-loop-result-protocol/609.rss">The Simple-yet-Powerful Magic of The Loop Result Protocol</source>
+      </item>
+      <item>
+        <title>The Simple-yet-Powerful Magic of The Loop Result Protocol</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <h2><a name="p-2128-loops-return-null-if-and-only-if-they-break-1" class="anchor" href="https://rebol.metaeducation.com#p-2128-loops-return-null-if-and-only-if-they-break-1"></a>Loops return null if-and-only-if they break</h2>
+<p>One very good reason this rule exists is to make it easy to build custom loop constructs out of several other loop constructs.  You can tell "from the outside" whether one of your sub-loops was BREAK'd...this way the the higher level construct is aware it shouldn't run any more of its component loop phases.</p>
+<p><em>(If this rule did not exist, then implementing a loop out of several other loops would have to invasively hook and rebind BREAK in each loop body to its own, and handle that.  Even if it were possible--which it probably should be--this would be complex and inefficient.  So the simpler rule is better!)</em></p>
+<p>To distinguish this case from normal loop results, a NULL loop body evaluation will be turned into a "boxed" NULL, e.g. a null isotope in a parameter pack:</p>
+<pre><code>&gt;&gt; for-each x [1 2 3] [null]
+; first in pack of length 1
+== ~null~  ; anti
+
+&gt;&gt; meta for-each x [1 2 3] [null]
+== ~[~null~]~  ; anti
+</code></pre>
+<p>Parameter packs containing NULL cannot be stored in variables, and will "decay" to a normal NULL when assigned to a variable.</p>
+<h2><a name="p-2128-many-common-loops-return-void-if-the-body-never-ran-2" class="anchor" href="https://rebol.metaeducation.com#p-2128-many-common-loops-return-void-if-the-body-never-ran-2"></a>...many common loops return void if the body never ran</h2>
+<pre><code>&gt;&gt; repeat 0 [&lt;unreturned&gt;]
+== ~[]~  ; anti
+
+&gt;&gt; for-each x [] [&lt;unreturned&gt;]
+== ~[]~  ; anti
+</code></pre>
+<p>Though unlike the return of pure null "if and only if" there was a break, returning void does not guarantee the body never ran.</p>
+<pre><code>&gt;&gt; repeat 1 [elide print "might run, but produce nothing..."]
+might run, but produce nothing...
+== ~[]~  ; anti
+</code></pre>
+<p>Note that some loops do not fit this pattern...e.g. an empty MAP-EACH gives an empty block:</p>
+<pre><code>&gt;&gt; map-each x [] [print "never runs"]
+== []
+</code></pre>
+<h2><a name="p-2128-reacting-to-breaks-is-easy-3" class="anchor" href="https://rebol.metaeducation.com#p-2128-reacting-to-breaks-is-easy-3"></a>Reacting to BREAKs is easy!</h2>
+<p>Loop aggregators aren't the only place that benefits from being able to tell what happened with a loop from its result.   Plain user code reaps the benefits as well.</p>
+<p>If you want to know if a loop BREAK'd, then ELSE is the ticket:</p>
+<pre><code>for-each x block [
+   if some-test x [break]
+] else [
+    ; This code runs only if the loop breaks
+    ; ...so it still runs even if block is empty
+]
+</code></pre>
+<p>You can combine that with THEN to segregate code when the loop <em>doesn't</em> break:</p>
+<pre><code>for-each x block [
+   if some-test x [break]
+] then [
+    ; This code runs only if the loop doesn't break
+] else [
+    ; This code runs only if the loop breaks
+]
+</code></pre>
+<h3><a name="p-2128-practical-example-4" class="anchor" href="https://rebol.metaeducation.com#p-2128-practical-example-4"></a>Practical example?</h3>
+<p>Here's a very cool real world case from the console code:</p>
+<pre><code>pos: molded: mold:limit :v 2048
+repeat 20 [
+    pos: next of any [find pos newline, break]
+] then [
+    insert clear pos "..."
+]
+</code></pre>
+<p>You have up to 2048 characters of data coming back from the mold, ok. Now you want just the first 20 lines of that.  If truncation is necessary, put an ellipsis on the end.</p>
+<p>FIND will return NULL if it can't find the thing you asked it, so the ANY will run the break when you can't get the position.  If it makes it up to 20 without breaking, the THEN clause runs.</p>
+<p>So there you go.  The first 20 lines of the first 2048 characters of a mold, truncating with "..."  I think the THEN really follows the idea of <em>completion</em>, it makes sense (to me) that a BREAK would bypass a THEN (or an ALSO, which is similar) clause.</p>
+<p>I encourage people to get creative, to look at ways to use this to write clearer/shorter/better code.</p>
+          <p><a href="https://rebol.metaeducation.com/t/the-simple-yet-powerful-magic-of-the-loop-result-protocol/609/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/the-simple-yet-powerful-magic-of-the-loop-result-protocol/609/1</link>
+        <pubDate>Tue, 08 May 2018 18:56:24 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-609-1</guid>
+        <source url="https://rebol.metaeducation.com/t/the-simple-yet-powerful-magic-of-the-loop-result-protocol/609.rss">The Simple-yet-Powerful Magic of The Loop Result Protocol</source>
+      </item>
+  </channel>
+</rss>

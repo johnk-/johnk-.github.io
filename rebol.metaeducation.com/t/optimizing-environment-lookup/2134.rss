@@ -1,0 +1,243 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Optimizing Environment Lookup</title>
+    <link>https://rebol.metaeducation.com/t/optimizing-environment-lookup/2134</link>
+    <description>## Object Storage (OBJECT!, FRAME!, PORT!, ERROR!)
+
+Rebol objects were designed as two parallel arrays, which we can call the &quot;keylist&quot; and the &quot;varlist&quot;.  Originally these were entire cells, like this:
+
+    obj: make object! [a: 10 b: 20]
+    
+                0     1     2
+    KEYLIST  [     |  a  |  b  ]   ; 4 platform pointers per cell
+
+                0     1     2
+    VARLIST  [self |  10 |  20 ]   ; 4 platform pointers per cell
+
+The idea is that the `[0]`th cell of the varlist contains an instance of the object itself.  This means if the implementation has a pointer to the varlist in its hand, it also has a cell instance of the object.  This also means you can find out from just the varlist what subtype it is (ERROR!, FRAME!, PORT!, etc.)
+
+R3-Alpha used full 4-platform-pointer-sized WORD! cells for each element in the keylist, and left the [0]th cell empty.
+
+Ren-C optimized this to just point to symbols.  So keylists are arrays of single pointers, and there is no [0]th element.
+
+                      0     1 
+    KEYLIST        [  a  |  b  ]   ; 1 platform pointer per cell
+
+                0     1     2
+    VARLIST  [self |  10 |  20 ]   ; 4 platform pointers per cell
+
+Keylists are shared among objects that are used as prototypes for each other, e.g. **obj2: make obj [...]**.  They will become un-shared if any of the objects are expanded.
+
+(Object expansion is allowed in R3-Alpha and Ren-C, but not Rebol2 or Red).
+
+## Module Storage (MODULE!)
+
+R3-Alpha used the same layout for modules containing hundreds of items as it did for objects.
+
+Ren-C instead allocates small variable &quot;stubs&quot; for each variable in a module.  Each stub is 8 platform pointers in size.
+
+* 4 of those platform pointers are for the cell of the variable&#39;s value
+* 1 pointer is for the symbol of the variable
+* 1 pointer is to the module the variable is for
+* 1 pointer to the next stub with the same symbol for another module
+* 1 pointer-sized slot unused at this time
+
+These form a linked list of all the same-named variable instances in modules.  This list is pointed to by the symbol itself.
+
+If we want to check if a WORD! cell has a variable in a module, the cell contains a pointer to the word&#39;s symbol.  We follow that, and get to the list of variables.  We can walk that list and see if there is an instance matching the module we are looking for.
+
+## LET Variables
+
+At the moment, LET variables are similar to the stubs holding variables for a module... except they don&#39;t have an associated module.
+
+## Specifier Chains Are Linked Lists Of Contexts -or- Containers
+
+Things like FRAME! or OBJECT! or MODULE! have one pointer for their &quot;parent specifier&quot;.  So when you do something like:
+
+     let x: 10
+     obj: make object! [y: x + 10, z: x + 20]
+
+The BLOCK! that object receives has a specifier put onto it... in this case, it will be a LET variable.  That LET variable presumably points up to something else (an enclosing function frame, or a module, or whatever).
+
+The object creates its varlist, and then that varlist has a pointer to the LET.  It uses this as the edited specifier when running the body block of the object.
+
+But if you later try to leverage that object elsewhere e.g. with **overbind obj [...]**, it wants to chain that object onto some other specifier.  However its parent link is already in use for the other chain.  So this means a little stub USE container is needed... which points at the object and provides a new slot to put a pointer in.
+
+## Looking Up An Unbound Word Walks This Chain
+
+[quote=&quot;bradrn, post:12, topic:1751&quot;]
+Though I do spy one low-hanging fruit…
+
+[quote=&quot;hostilefork, post:11, topic:1751&quot;]
+a linked list of objects
+[/quote]
+
+Might it not be quicker to use a hashmap or similar data structure?
+[/quote]
+
+It&#39;s not entirely obvious what to hash, here.  And it&#39;s not so much that any particular lookup is all that slow.  It&#39;s just that there&#39;s lots of them, and you can&#39;t reliably cache the answer between runs.
+
+[One thing I cited to exploit](https://rebol.metaeducation.com/t/semantics-and-optimization-of-copying-function-bodies/2119/2?u=hostilefork) was the fact that when you copy a function body, you tend to wind up with elements that look up either in a module or in the frame of that function.
+
+* Module lookup is relatively fast because there aren&#39;t all that many redundant names (e.g. there&#39;s typically only one APPEND and it&#39;s in LIB.)
+
+* Function frames are not allowed to expand.
+
+* You can use the space in the unbound elements to give an answer to something knowable--like &quot;this isn&#39;t defined in the frame for function X&quot; or &quot;this is defined in the frame for function X at offset Y&quot;, that can let you skip along to searching in the module or beeline for the pointer to what you want in the frame.
+
+I&#39;m sure this will help.  Will have to see how much.
+
+## GC Load Is A Big Problem
+
+Ren-C&#39;s garbage collector has some interesting points, but it&#39;s still a mark-and-sweep strategy.
+
+These specifier chains are being allowed to leak out, with every function call producing tons of them... and function frames have to be GC&#39;d because you can&#39;t assume there are no extant references.  (Natives are an exception, they will free their frames when they end, but you can&#39;t do that with usermode functions because they use frames as specifiers in the blocks they run... and you don&#39;t know what happens to that block).
+
+LETs are pretty bad too... a LET inside a loop creates a little piece of junk each time that needs to get cleaned up.
+
+I think reference counting would be helpful, because most of these aren&#39;t referenced very long and aren&#39;t involved in cycles.  So reaching a 0 refcount would be a moment the memory could be reclaimed.  My guess is it would outweigh the cost of the reference counting by a fair bit.  But it&#39;s difficult to do reference counting correctly in C-like code (although having a C++ build variant it could be double-checked).</description>
+    
+    <lastBuildDate>Thu, 25 Jan 2024 03:37:22 +0000</lastBuildDate>
+    <category>Optimization</category>
+    <atom:link href="https://rebol.metaeducation.com/t/optimizing-environment-lookup/2134.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Optimizing Environment Lookup</title>
+        <dc:creator><![CDATA[bradrn]]></dc:creator>
+        <description><![CDATA[
+            <p>OK, that makes more sense now, thanks!</p>
+          <p><a href="https://rebol.metaeducation.com/t/optimizing-environment-lookup/2134/4">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/optimizing-environment-lookup/2134/4</link>
+        <pubDate>Thu, 25 Jan 2024 03:37:22 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2134-4</guid>
+        <source url="https://rebol.metaeducation.com/t/optimizing-environment-lookup/2134.rss">Optimizing Environment Lookup</source>
+      </item>
+      <item>
+        <title>Optimizing Environment Lookup</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>The keylist contains pointers to symbols.</p>
+<p>Symbols are interned once, and there's already a hash for going from UTF-8 string text to a symbol (used during LOAD / TRANSCODE / TO WORD! of a string, but not needed otherwise).</p>
+<p>Searching the keylist of an object and matching a pointer is pretty fast.  Your object would have to be pretty big before a more complex structure would beat a linear search of the keylist.</p>
+<p>We don't have many objects that big, now that modules are done a different way.</p>
+          <p><a href="https://rebol.metaeducation.com/t/optimizing-environment-lookup/2134/3">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/optimizing-environment-lookup/2134/3</link>
+        <pubDate>Thu, 25 Jan 2024 03:36:02 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2134-3</guid>
+        <source url="https://rebol.metaeducation.com/t/optimizing-environment-lookup/2134.rss">Optimizing Environment Lookup</source>
+      </item>
+      <item>
+        <title>Optimizing Environment Lookup</title>
+        <dc:creator><![CDATA[bradrn]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="2134">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>It's not entirely obvious what to hash, here.</p>
+</blockquote>
+</aside>
+<p>The names of the words, I was thinking. So instead of a keylist and a varlist, it would be a hashmap from keys to values. Unless I’m missing something and the keylist contains things other than words?</p>
+          <p><a href="https://rebol.metaeducation.com/t/optimizing-environment-lookup/2134/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/optimizing-environment-lookup/2134/2</link>
+        <pubDate>Thu, 25 Jan 2024 03:32:28 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2134-2</guid>
+        <source url="https://rebol.metaeducation.com/t/optimizing-environment-lookup/2134.rss">Optimizing Environment Lookup</source>
+      </item>
+      <item>
+        <title>Optimizing Environment Lookup</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <h2><a name="p-7029-object-storage-object-frame-port-error-1" class="anchor" href="https://rebol.metaeducation.com#p-7029-object-storage-object-frame-port-error-1"></a>Object Storage (OBJECT!, FRAME!, PORT!, ERROR!)</h2>
+<p>Rebol objects were designed as two parallel arrays, which we can call the "keylist" and the "varlist".  Originally these were entire cells, like this:</p>
+<pre><code>obj: make object! [a: 10 b: 20]
+
+            0     1     2
+KEYLIST  [     |  a  |  b  ]   ; 4 platform pointers per cell
+
+            0     1     2
+VARLIST  [self |  10 |  20 ]   ; 4 platform pointers per cell
+</code></pre>
+<p>The idea is that the <code>[0]</code>th cell of the varlist contains an instance of the object itself.  This means if the implementation has a pointer to the varlist in its hand, it also has a cell instance of the object.  This also means you can find out from just the varlist what subtype it is (ERROR!, FRAME!, PORT!, etc.)</p>
+<p>R3-Alpha used full 4-platform-pointer-sized WORD! cells for each element in the keylist, and left the [0]th cell empty.</p>
+<p>Ren-C optimized this to just point to symbols.  So keylists are arrays of single pointers, and there is no [0]th element.</p>
+<pre><code>                  0     1 
+KEYLIST        [  a  |  b  ]   ; 1 platform pointer per cell
+
+            0     1     2
+VARLIST  [self |  10 |  20 ]   ; 4 platform pointers per cell
+</code></pre>
+<p>Keylists are shared among objects that are used as prototypes for each other, e.g. <strong>obj2: make obj [...]</strong>.  They will become un-shared if any of the objects are expanded.</p>
+<p>(Object expansion is allowed in R3-Alpha and Ren-C, but not Rebol2 or Red).</p>
+<h2><a name="p-7029-module-storage-module-2" class="anchor" href="https://rebol.metaeducation.com#p-7029-module-storage-module-2"></a>Module Storage (MODULE!)</h2>
+<p>R3-Alpha used the same layout for modules containing hundreds of items as it did for objects.</p>
+<p>Ren-C instead allocates small variable "stubs" for each variable in a module.  Each stub is 8 platform pointers in size.</p>
+<ul>
+<li>4 of those platform pointers are for the cell of the variable's value</li>
+<li>1 pointer is for the symbol of the variable</li>
+<li>1 pointer is to the module the variable is for</li>
+<li>1 pointer to the next stub with the same symbol for another module</li>
+<li>1 pointer-sized slot unused at this time</li>
+</ul>
+<p>These form a linked list of all the same-named variable instances in modules.  This list is pointed to by the symbol itself.</p>
+<p>If we want to check if a WORD! cell has a variable in a module, the cell contains a pointer to the word's symbol.  We follow that, and get to the list of variables.  We can walk that list and see if there is an instance matching the module we are looking for.</p>
+<h2><a name="p-7029-let-variables-3" class="anchor" href="https://rebol.metaeducation.com#p-7029-let-variables-3"></a>LET Variables</h2>
+<p>At the moment, LET variables are similar to the stubs holding variables for a module... except they don't have an associated module.</p>
+<h2><a name="p-7029-specifier-chains-are-linked-lists-of-contexts-or-containers-4" class="anchor" href="https://rebol.metaeducation.com#p-7029-specifier-chains-are-linked-lists-of-contexts-or-containers-4"></a>Specifier Chains Are Linked Lists Of Contexts -or- Containers</h2>
+<p>Things like FRAME! or OBJECT! or MODULE! have one pointer for their "parent specifier".  So when you do something like:</p>
+<pre><code> let x: 10
+ obj: make object! [y: x + 10, z: x + 20]
+</code></pre>
+<p>The BLOCK! that object receives has a specifier put onto it... in this case, it will be a LET variable.  That LET variable presumably points up to something else (an enclosing function frame, or a module, or whatever).</p>
+<p>The object creates its varlist, and then that varlist has a pointer to the LET.  It uses this as the edited specifier when running the body block of the object.</p>
+<p>But if you later try to leverage that object elsewhere e.g. with <strong>overbind obj [...]</strong>, it wants to chain that object onto some other specifier.  However its parent link is already in use for the other chain.  So this means a little stub USE container is needed... which points at the object and provides a new slot to put a pointer in.</p>
+<h2><a name="p-7029-looking-up-an-unbound-word-walks-this-chain-5" class="anchor" href="https://rebol.metaeducation.com#p-7029-looking-up-an-unbound-word-walks-this-chain-5"></a>Looking Up An Unbound Word Walks This Chain</h2>
+<aside class="quote no-group quote-modified" data-username="bradrn" data-post="12" data-topic="1751">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/bradrn/48/365_2.png" class="avatar"><a href="https://rebol.metaeducation.com/t/rebol-and-scopes-well-why-not/1751/12">Rebol And Scopes: Well, Why Not?</a></div>
+<blockquote>
+<p>Though I do spy one low-hanging fruit…</p>
+<aside class="quote no-group" data-username="hostilefork" data-post="11" data-topic="1751">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"><a href="https://rebol.metaeducation.com/t/rebol-and-scopes-well-why-not/1751/11">Rebol And Scopes: Well, Why Not?</a></div>
+<blockquote>
+<p>a linked list of objects</p>
+</blockquote>
+</aside>
+<p>Might it not be quicker to use a hashmap or similar data structure?</p>
+</blockquote>
+</aside>
+<p>It's not entirely obvious what to hash, here.  And it's not so much that any particular lookup is all that slow.  It's just that there's lots of them, and you can't reliably cache the answer between runs.</p>
+<p><a href="https://rebol.metaeducation.com/t/semantics-and-optimization-of-copying-function-bodies/2119/2">One thing I cited to exploit</a> was the fact that when you copy a function body, you tend to wind up with elements that look up either in a module or in the frame of that function.</p>
+<ul>
+<li>
+<p>Module lookup is relatively fast because there aren't all that many redundant names (e.g. there's typically only one APPEND and it's in LIB.)</p>
+</li>
+<li>
+<p>Function frames are not allowed to expand.</p>
+</li>
+<li>
+<p>You can use the space in the unbound elements to give an answer to something knowable--like "this isn't defined in the frame for function X" or "this is defined in the frame for function X at offset Y", that can let you skip along to searching in the module or beeline for the pointer to what you want in the frame.</p>
+</li>
+</ul>
+<p>I'm sure this will help.  Will have to see how much.</p>
+<h2><a name="p-7029-gc-load-is-a-big-problem-6" class="anchor" href="https://rebol.metaeducation.com#p-7029-gc-load-is-a-big-problem-6"></a>GC Load Is A Big Problem</h2>
+<p>Ren-C's garbage collector has some interesting points, but it's still a mark-and-sweep strategy.</p>
+<p>These specifier chains are being allowed to leak out, with every function call producing tons of them... and function frames have to be GC'd because you can't assume there are no extant references.  (Natives are an exception, they will free their frames when they end, but you can't do that with usermode functions because they use frames as specifiers in the blocks they run... and you don't know what happens to that block).</p>
+<p>LETs are pretty bad too... a LET inside a loop creates a little piece of junk each time that needs to get cleaned up.</p>
+<p>I think reference counting would be helpful, because most of these aren't referenced very long and aren't involved in cycles.  So reaching a 0 refcount would be a moment the memory could be reclaimed.  My guess is it would outweigh the cost of the reference counting by a fair bit.  But it's difficult to do reference counting correctly in C-like code (although having a C++ build variant it could be double-checked).</p>
+          <p><a href="https://rebol.metaeducation.com/t/optimizing-environment-lookup/2134/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/optimizing-environment-lookup/2134/1</link>
+        <pubDate>Thu, 25 Jan 2024 03:27:25 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2134-1</guid>
+        <source url="https://rebol.metaeducation.com/t/optimizing-environment-lookup/2134.rss">Optimizing Environment Lookup</source>
+      </item>
+  </channel>
+</rss>

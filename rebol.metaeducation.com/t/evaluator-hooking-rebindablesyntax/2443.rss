@@ -1,0 +1,452 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Evaluator Hooking (&quot;RebindableSyntax&quot;)</title>
+    <link>https://rebol.metaeducation.com/t/evaluator-hooking-rebindablesyntax/2443</link>
+    <description>After debating the topic for some time, **[I decided FENCE! should indeed be evaluative.](https://rebol.metaeducation.com/t/uses-of-fence-in-dialecting/1728)**
+
+But rather than setting what it does in stone... let&#39;s imagine that what FENCE! does when it evaluates is actually to pass the fence to a function you can redefine in the environment.
+
+    demo: func [] [
+        let fence!-EVAL: func [fence] [
+            print &quot;I got a fence of length&quot; length of fence
+            return try second fence
+        ]
+        return {a b c}
+    ]
+
+    &gt;&gt; fence!-EVAL: identity/  ; inside DEMO has a LET of its own choice
+
+    &gt;&gt; demo
+    I got a fence of length 3
+    == b
+
+    &gt;&gt; {x: 10 y: 20}
+    == {x: 10 y: 20}  ; ...!
+
+By allowing FENCE! to be evaluative, you can even allow it to be *unevaluative* if you choose, in a context:
+
+:exploding_head: 
+
+**That&#39;s an idea so powerful...that having `block!-EVAL`, `group!-EVAL`, etc. functions all being looked up and run seems like it needs to be done *right now*.**  Whatever optimizations are needed to make it not slow in the general non-overridden case can be attended to.
+
+Since FENCE! doesn&#39;t do anything at all yet, it&#39;s a perfect guinea pig for the technique.
+
+## The Default Evaluation Should Be Likely Be Dialected &quot;MAKE&quot;
+
+I think I like the idea that CONSTRUCT is actually is what FENCE! does by default, and you can direct it to make something that&#39;s not an object with some special notation (perhaps just something that looks up to a DATATYPE! in the first slot?)
+
+    &gt;&gt; string: &quot;0201&quot;
+
+    &gt;&gt; {integer! reverse string}
+    == 1020
+
+I&#39;ve proposed this before.  *But that was before pure virtual binding.*  Now the parts are here, and it&#39;s right within reach.
+
+It&#39;s time to go for it, because this is what the whole thing is supposed to be about.  :rocket:
+
+---
+
+## 20 Minutes Later...
+
+*It works.*  :slight_smile: 
+
+    &gt;&gt; {x: 10 y: 20}
+    == #[object! [
+        x: 10
+        y: 20
+    ]]
+
+    &gt;&gt; fence!-EVAL: func [f] [print [&quot;Length is&quot; length of f]]
+
+    &gt;&gt; {x: 10 y: 20}
+    Length is 4
+
+    &gt;&gt; fence!-EVAL: construct/
+
+    &gt;&gt; {x: 10 y: 20}
+    == #[object! [
+        x: 10
+        y: 20
+    ]]
+
+Years to ponder, minutes to implement.  :hourglass_done:   *(Of course, it hinges on the blood sweat and tears of pure virtual binding.)*
+
+---
+Despite being extensible... *IT&#39;S FASTER THAN MAKE OBJECT!* because instead of looking up MAKE and looking up OBJECT! and building a frame and all that, it calls a native arity-1 intrinsically, with no frame at all!  So you&#39;re paying for fewer word lookups and not even making a frame the resulting function (if you are using an intrinsic, which CONSTRUCT is, and presumably whatever other default maker would be too).  :racing_car:
+
+But crucially here...you should always have fallbacks for doing the creation without needing to use the lexical form.  So you can use FENCE! creatively, however you like... but still have MAKE OBJECT! (or whatever) passed blocks to get the behavior if you need it.
+
+And if there&#39;s only hookpoints for BLOCK!, FENCE! and GROUP!... but not their variations.. you&#39;ll always have quoted &#39;[blocks] and $(groups) etc to fall back on if necessary.
+
+## Wild Example #1 : Progressive Parsing
+
+Let&#39;s say you wanted to do a parse, but not all at once... rather continuing it a little piece at a time with handling code.
+
+    data: [
+        The Sharp Gray @Fork &quot;Quantum Leaped&quot; Over The Lazy @Red
+    ]
+
+    f: lambda [rule [block!]] [
+        parse data [accept [rule, elide data: &lt;here&gt;]]
+    ]
+
+The short (meaningless) name gets things about as brief as you can get in &quot;historical&quot; code:
+
+    designer: f [some word!, one]
+    assert [designer = @Fork]
+
+    occurrence: f [text!, elide &#39;Over]
+    assert [occurrence = &quot;Quantum Leaped&quot;]
+
+    other: f [collect [
+        keep one, keep (&#39;Intellectually) keep spread across to &lt;end&gt;
+    ]]
+    assert [other = [The Intellectually Lazy @Red]] 
+
+**But what if you wanted to do it so that a FENCE! was an implicit call to the parse steps?**
+
+    fence!-EVAL: lambda [rule [fence!]] [
+        rule: as block! rule
+        parse data [accept [rule, elide data: &lt;here&gt;]]
+    ]
+
+Then your calls could look like this:
+
+    designer: {some word!, one}
+    assert [designer = @Fork]
+
+    occurrence: {text!, elide &#39;Over}
+    assert [occurrence = &quot;Quantum Leaped&quot;]
+
+    other: {collect [
+        keep one, keep (&#39;Intellectually) keep spread across to &lt;end&gt;
+    ]}
+    assert [other = [The Intellectually Lazy @Red]] 
+
+**Yes, it works!**
+
+:open_mouth: 
+
+## Is It THAT Different Than Using A Function?  YES.
+
+*The difference is significant, and more than just cosmetic.*
+
+We&#39;ve seen arguments against &quot;more parts&quot; before... e.g. saying that GROUP! is not necessary if you have BLOCK! (or vice-versa) because you can always split your intent up into multiple tokens.  But it&#39;s very Turing Tar-Pit to say &quot;oh it&#39;s all the same&quot;... *because it is not the same*.  :pouting_cat: 
+
+When the FENCE! can encode itself in one value vs. needing a word-and-a-value, you get better compositional properties.  You have smoother meta-analysis when building higher level things that the fences are composed into (vs. WORD!+BLOCK!)
+
+## *I see mountains of potential here.*
+
+:mountain: :man_climbing:</description>
+    
+    <lastBuildDate>Sat, 21 Jun 2025 21:08:22 +0000</lastBuildDate>
+    <category>Semantics</category>
+    <atom:link href="https://rebol.metaeducation.com/t/evaluator-hooking-rebindablesyntax/2443.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Evaluator Hooking (&quot;RebindableSyntax&quot;)</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="4" data-topic="2443">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>why not make it easier to bind a block to some altered evaluators and just run it, vs. accomplishing the same goal with FOR-EACH or PARSE and having to worry about all the binding manually?</p>
+<p>Not fit for all purposes</p>
+</blockquote>
+</aside>
+<p>I was contemplating the idea of having things like FIND pick up on your operating idea of equality:</p>
+<pre><code>&gt;&gt; find [a b c] 'B
+== /~null~/  ; antiform
+
+&gt;&gt; eval [
+       let equal?: lib.lax-equal?/
+
+       find [a b c] 'B
+   ]
+== [b c]
+</code></pre>
+<p>That's appealing--in terms of letting people make their own choices.</p>
+<p>...BUT... it doesn't work if you call a function that wraps find.  Imagine something that searches 2 lists:</p>
+<p>Let's say you're using some library and it defines FIND2:</p>
+<pre><code>find2: lambda [list1 list2 thing] [  ; &lt;-- gets EQUAL? from this block's binding
+    any [
+        find list1 thing
+        find list2 thing
+    ]
+]
+</code></pre>
+<p>If you use that FIND2, then it will use whatever notion of binding was on the block it received for its body.</p>
+<p><strong>But this isn't any kind of profound or novel problem...and it's not unique to this language</strong>.  It's not like having an argument to pass to FIND gets you any further.</p>
+<p>If you call somebody who calls something else, the something else won't get your parameterization unless they explicitly account for it in some way.</p>
+<p>Though in Ren-C, if you do something like specialize FIND, then it will still fundamentally be a call to find... and (for better or worse) that specialization would still use the callsite's notion of EQUAL?</p>
+<p>We could make it possible to say "using caller's notion of..." in functions... hand waving a bit but something like:</p>
+<pre><code>find2: lambda [list1 list2 thing &lt;caller-environment&gt; env] [
+    let equal?: env.equal?/
+    any [
+        find list1 thing
+        find list2 thing
+    ]
+]
+</code></pre>
+<p>Anyway... it's still a new idea to be able to do this kind of thing at all, so I don't really know what the applications will be.</p>
+          <p><a href="https://rebol.metaeducation.com/t/evaluator-hooking-rebindablesyntax/2443/5">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/evaluator-hooking-rebindablesyntax/2443/5</link>
+        <pubDate>Sat, 21 Jun 2025 18:03:16 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2443-5</guid>
+        <source url="https://rebol.metaeducation.com/t/evaluator-hooking-rebindablesyntax/2443.rss">Evaluator Hooking (&quot;RebindableSyntax&quot;)</source>
+      </item>
+      <item>
+        <title>Evaluator Hooking (&quot;RebindableSyntax&quot;)</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="bradrn" data-post="3" data-topic="2443">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/bradrn/48/365_2.png" class="avatar"> bradrn:</div>
+<blockquote>
+<p>This reminds me strongly of <a href="https://downloads.haskell.org/ghc/latest/docs/users_guide/exts/rebindable_syntax.html"><code>RebindableSyntax</code></a> in Haskell.</p>
+</blockquote>
+</aside>
+<p>That does indeed look to be very much in the same spirit:</p>
+<ul>
+<li>
+<p><em>"So the RebindableSyntax extension causes the following pieces of built-in syntax to refer to <strong>whatever is in scope</strong>, not the Prelude versions"</em></p>
+</li>
+<li>
+<p><em>"An integer literal <code>368</code> means <code>fromInteger (368::Integer)</code>, rather than <code>Prelude.fromInteger (368::Integer)</code>"</em>.</p>
+</li>
+</ul>
+<p>(Perhaps similar enough that calling it "Rebindable Syntax" might be a good idea.  I hate making up new names for things that already have serviceable names.)</p>
+<aside class="quote no-group quote-modified" data-username="hostilefork" data-post="4" data-topic="1728">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"><a href="https://rebol.metaeducation.com/t/uses-of-fence-in-dialecting/1728/4">Uses of FENCE! In Dialecting</a></div>
+<blockquote>
+<p>And if there's only hookpoints for BLOCK!, FENCE! and GROUP!... but not their variations.. you'll always have quoted '[blocks] and $(groups) etc to fall back on if necessary.</p>
+</blockquote>
+</aside>
+<p>So I called the FENCE! hook "<strong>fence!-EVAL</strong>" based on the idea that you wouldn't want to redefine the natives that perform the actions.  But given that you can call LIB/XXX versions, maybe you <em>do</em> want to redefine the natives?</p>
+<p>e.g. perhaps it should have been CONSTRUCT instead.  <em>"Want to redefine FENCE!'s behavior?  Redefine CONSTRUCT."</em></p>
+<p>If that pattern extended, quoted things would run UNQUOTE, I guess?</p>
+<pre><code>&gt;&gt; unquote: func [x] [reduce [lib/unquote x]]
+
+&gt;&gt; 'x
+== [x]
+
+&gt;&gt; '''{a}
+== [''{a}]
+</code></pre>
+<p>GROUP!s could run EVALUATE.  EVAL might be rethought as an <em>alias</em> for EVALUATE, e.g. look up whatever EVALUATE is defined as in the current context and run that, vs. a hard reference to LIB.EVALUATE.  Although you'd want LIB/EVAL to run LIB/EVALUATE, I guess the aliasing would need to take where it was being run from into account.</p>
+<p>BLOCK!s could run... uh...  I dunno. <strong><a href="https://www.youtube.com/watch?v=jofNR_WkoCE">What does the [<img src="https://rebol.metaeducation.com/images/emoji/twitter/fox.png?v=14" title=":fox:" class="emoji" alt=":fox:" loading="lazy" width="20" height="20">] say?</a></strong></p>
+<h2><a name="p-8247-er-nevermind-xxx-eval-is-better-1" class="anchor" href="https://rebol.metaeducation.com#p-8247-er-nevermind-xxx-eval-is-better-1"></a>Er, Nevermind... xxx!-EVAL is Better</h2>
+<p>Not knowing what the BLOCK!'s corresponding native is kind of drives that home.</p>
+<p>And think I like that <strong><code>fence!-EVAL</code></strong> stands out enough to make people go "something weird is going on here", and you don't have to corrupt the meanings of natives to get it.  You can call CONSTRUCT from inside your fence!-EVAL instead of having to call LIB/CONSTRUCT.</p>
+<p>But I got on this track when crossed my mind that the hooking could call regular looking functions... this was particularly because I'm thinking about being able to redefine SET and GET.</p>
+<pre><code>&gt;&gt; set-EVAL: func [var ^value] [print ["var is" mold var "value is" value]]
+
+&gt;&gt; x: 1000 + 20
+var is x value is '1020
+</code></pre>
+<p>But it's probably for the best you have to say something like <strong><code>set-EVAL</code></strong> instead of requiring you to override <strong><code>set</code></strong>.  Again: probably the first thing you're going to be reaching for in implementing your SET customization is... SET.</p>
+<aside class="quote no-group quote-modified" data-username="bradrn" data-post="3" data-topic="2443">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/bradrn/48/365_2.png" class="avatar"> bradrn:</div>
+<blockquote>
+<p>[RebindableSyntax in Haskell is] not used very much, because Haskellers prefer other means for extending the language, plus variable shadowing is frowned upon. In Ren-C, of course, those aren’t problems — and, besides, this feels like the natural conclusion of dialecting as a paradigm.</p>
+</blockquote>
+</aside>
+<p>It does seem that if you buy into Rebol's odd bargain enough to use the language in the first place, then this shouldn't raise eyebrows.  You'd be doing these alterations of behavior anyway in a dialect.  So why not make it easier to bind a block to some altered evaluators and just run it, vs. accomplishing the same goal with FOR-EACH or PARSE and having to worry about all the binding manually?</p>
+<p>Not fit for all purposes.  But when every invocation of something like IF is making a function call... well, you might as well be getting something for your money.</p>
+<p>                    <a href="https://www.explainxkcd.com/wiki/images/5/52/communicating.png" target="_blank" rel="noopener" class="onebox">
+            <img src="https://www.explainxkcd.com/wiki/images/5/52/communicating.png" width="303" height="435">
+          </a>
+
+</p>
+          <p><a href="https://rebol.metaeducation.com/t/evaluator-hooking-rebindablesyntax/2443/4">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/evaluator-hooking-rebindablesyntax/2443/4</link>
+        <pubDate>Sun, 11 May 2025 09:20:11 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2443-4</guid>
+        <source url="https://rebol.metaeducation.com/t/evaluator-hooking-rebindablesyntax/2443.rss">Evaluator Hooking (&quot;RebindableSyntax&quot;)</source>
+      </item>
+      <item>
+        <title>Evaluator Hooking (&quot;RebindableSyntax&quot;)</title>
+        <dc:creator><![CDATA[bradrn]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group quote-modified" data-username="hostilefork" data-post="4" data-topic="1728">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"><a href="https://rebol.metaeducation.com/t/uses-of-fence-in-dialecting/1728/4">Uses of FENCE! In Dialecting</a></div>
+<blockquote>
+<p><strong>That's an idea so powerful...that having <code>block!-EVAL</code>, <code>group!-EVAL</code>, etc. functions all being looked up and run seems like it needs to be done <em>right now</em>.</strong> Whatever optimizations are needed to make it not slow in the general non-overridden case can be attended to.</p>
+</blockquote>
+</aside>
+<p>This reminds me strongly of <a href="https://downloads.haskell.org/ghc/latest/docs/users_guide/exts/rebindable_syntax.html"><code>RebindableSyntax</code></a> in Haskell. It’s not used very much, because Haskellers prefer other means for extending the language, plus variable shadowing is frowned upon. In Ren-C, of course, those aren’t problems — and, besides, this feels like the natural conclusion of dialecting as a paradigm.</p>
+          <p><a href="https://rebol.metaeducation.com/t/evaluator-hooking-rebindablesyntax/2443/3">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/evaluator-hooking-rebindablesyntax/2443/3</link>
+        <pubDate>Sun, 11 May 2025 05:41:11 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2443-3</guid>
+        <source url="https://rebol.metaeducation.com/t/evaluator-hooking-rebindablesyntax/2443.rss">Evaluator Hooking (&quot;RebindableSyntax&quot;)</source>
+      </item>
+      <item>
+        <title>Evaluator Hooking (&quot;RebindableSyntax&quot;)</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="2443">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p><strong>But what if you wanted to do it so that a FENCE! was an implicit call to the parse steps?</strong></p>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">fence!-EVAL: lambda [rule [fence!]] [
+    rule: as block! rule
+    parse data [accept [rule, elide data: &lt;here&gt;]]
+]
+</code></pre>
+</blockquote>
+</aside>
+<p>That method makes multiple calls to PARSE, updating the position of a data variable as it goes.</p>
+<p>I'll just point out you could do this with a YIELDER (GENERATOR that takes parameters on each call).  That avoids having to update DATA's position...the PARSE just gets suspended on the stack but with the parse state preserving the current position, all as part of a single operation:</p>
+<pre><code>fence!-EVAL: yielder [rule [fence!]] [
+    rule: as block! rule
+    parse data [opt some [let ^result: rule (yield ^result)]]
+]
+</code></pre>
+<p>And if you use the <a href="https://rebol.metaeducation.com/t/if-action-combinators-dont-impress-what-will/1608">ACTION! combinator</a> you can avoid the temporary variable:</p>
+<pre><code>fence!-EVAL: yielder [rule [fence!]] [
+    rule: as block! rule
+    parse data [opt some /yield rule]]
+]
+</code></pre>
+          <p><a href="https://rebol.metaeducation.com/t/evaluator-hooking-rebindablesyntax/2443/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/evaluator-hooking-rebindablesyntax/2443/2</link>
+        <pubDate>Sat, 10 May 2025 21:14:40 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2443-2</guid>
+        <source url="https://rebol.metaeducation.com/t/evaluator-hooking-rebindablesyntax/2443.rss">Evaluator Hooking (&quot;RebindableSyntax&quot;)</source>
+      </item>
+      <item>
+        <title>Evaluator Hooking (&quot;RebindableSyntax&quot;)</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>After debating the topic for some time, <strong><a href="https://rebol.metaeducation.com/t/uses-of-fence-in-dialecting/1728">I decided FENCE! should indeed be evaluative.</a></strong></p>
+<p>But rather than setting what it does in stone... let's imagine that what FENCE! does when it evaluates is actually to pass the fence to a function you can redefine in the environment.</p>
+<pre><code>demo: func [] [
+    let fence!-EVAL: func [fence] [
+        print "I got a fence of length" length of fence
+        return try second fence
+    ]
+    return {a b c}
+]
+
+&gt;&gt; fence!-EVAL: identity/  ; inside DEMO has a LET of its own choice
+
+&gt;&gt; demo
+I got a fence of length 3
+== b
+
+&gt;&gt; {x: 10 y: 20}
+== {x: 10 y: 20}  ; ...!
+</code></pre>
+<p>By allowing FENCE! to be evaluative, you can even allow it to be <em>unevaluative</em> if you choose, in a context:</p>
+<p><img src="https://rebol.metaeducation.com/images/emoji/twitter/exploding_head.png?v=14" title=":exploding_head:" class="emoji only-emoji" alt=":exploding_head:" loading="lazy" width="20" height="20"></p>
+<p><strong>That's an idea so powerful...that having <code>block!-EVAL</code>, <code>group!-EVAL</code>, etc. functions all being looked up and run seems like it needs to be done <em>right now</em>.</strong>  Whatever optimizations are needed to make it not slow in the general non-overridden case can be attended to.</p>
+<p>Since FENCE! doesn't do anything at all yet, it's a perfect guinea pig for the technique.</p>
+<h2><a name="p-8240-the-default-evaluation-should-be-likely-be-dialected-make-1" class="anchor" href="https://rebol.metaeducation.com#p-8240-the-default-evaluation-should-be-likely-be-dialected-make-1"></a>The Default Evaluation Should Be Likely Be Dialected "MAKE"</h2>
+<p>I think I like the idea that CONSTRUCT is actually is what FENCE! does by default, and you can direct it to make something that's not an object with some special notation (perhaps just something that looks up to a DATATYPE! in the first slot?)</p>
+<pre><code>&gt;&gt; string: "0201"
+
+&gt;&gt; {integer! reverse string}
+== 1020
+</code></pre>
+<p>I've proposed this before.  <em>But that was before pure virtual binding.</em>  Now the parts are here, and it's right within reach.</p>
+<p>It's time to go for it, because this is what the whole thing is supposed to be about.  <img src="https://rebol.metaeducation.com/images/emoji/twitter/rocket.png?v=14" title=":rocket:" class="emoji" alt=":rocket:" loading="lazy" width="20" height="20"></p>
+<hr>
+<h2><a name="p-8240-h-20-minutes-later-2" class="anchor" href="https://rebol.metaeducation.com#p-8240-h-20-minutes-later-2"></a>20 Minutes Later...</h2>
+<p><em>It works.</em>  <img src="https://rebol.metaeducation.com/images/emoji/twitter/slight_smile.png?v=14" title=":slight_smile:" class="emoji" alt=":slight_smile:" loading="lazy" width="20" height="20"></p>
+<pre><code>&gt;&gt; {x: 10 y: 20}
+== #[object! [
+    x: 10
+    y: 20
+]]
+
+&gt;&gt; fence!-EVAL: func [f] [print ["Length is" length of f]]
+
+&gt;&gt; {x: 10 y: 20}
+Length is 4
+
+&gt;&gt; fence!-EVAL: construct/
+
+&gt;&gt; {x: 10 y: 20}
+== #[object! [
+    x: 10
+    y: 20
+]]
+</code></pre>
+<p>Years to ponder, minutes to implement.  <img src="https://rebol.metaeducation.com/images/emoji/twitter/hourglass_done.png?v=14" title=":hourglass_done:" class="emoji" alt=":hourglass_done:" loading="lazy" width="20" height="20">   <em>(Of course, it hinges on the blood sweat and tears of pure virtual binding.)</em></p>
+<hr>
+<p>Despite being extensible... <em>IT'S FASTER THAN MAKE OBJECT!</em> because instead of looking up MAKE and looking up OBJECT! and building a frame and all that, it calls a native arity-1 intrinsically, with no frame at all!  So you're paying for fewer word lookups and not even making a frame the resulting function (if you are using an intrinsic, which CONSTRUCT is, and presumably whatever other default maker would be too).  <img src="https://rebol.metaeducation.com/images/emoji/twitter/racing_car.png?v=14" title=":racing_car:" class="emoji" alt=":racing_car:" loading="lazy" width="20" height="20"></p>
+<p>But crucially here...you should always have fallbacks for doing the creation without needing to use the lexical form.  So you can use FENCE! creatively, however you like... but still have MAKE OBJECT! (or whatever) passed blocks to get the behavior if you need it.</p>
+<p>And if there's only hookpoints for BLOCK!, FENCE! and GROUP!... but not their variations.. you'll always have quoted '[blocks] and $(groups) etc to fall back on if necessary.</p>
+<h2><a name="p-8240-wild-example-1-progressive-parsing-3" class="anchor" href="https://rebol.metaeducation.com#p-8240-wild-example-1-progressive-parsing-3"></a>Wild Example <span class="hashtag-raw">#1</span> : Progressive Parsing</h2>
+<p>Let's say you wanted to do a parse, but not all at once... rather continuing it a little piece at a time with handling code.</p>
+<pre><code>data: [
+    The Sharp Gray @Fork "Quantum Leaped" Over The Lazy @Red
+]
+
+f: lambda [rule [block!]] [
+    parse data [accept [rule, elide data: &lt;here&gt;]]
+]
+</code></pre>
+<p>The short (meaningless) name gets things about as brief as you can get in "historical" code:</p>
+<pre><code>designer: f [some word!, one]
+assert [designer = @Fork]
+
+occurrence: f [text!, elide 'Over]
+assert [occurrence = "Quantum Leaped"]
+
+other: f [collect [
+    keep one, keep ('Intellectually) keep spread across to &lt;end&gt;
+]]
+assert [other = [The Intellectually Lazy @Red]] 
+</code></pre>
+<p><strong>But what if you wanted to do it so that a FENCE! was an implicit call to the parse steps?</strong></p>
+<pre><code>fence!-EVAL: lambda [rule [fence!]] [
+    rule: as block! rule
+    parse data [accept [rule, elide data: &lt;here&gt;]]
+]
+</code></pre>
+<p>Then your calls could look like this:</p>
+<pre><code>designer: {some word!, one}
+assert [designer = @Fork]
+
+occurrence: {text!, elide 'Over}
+assert [occurrence = "Quantum Leaped"]
+
+other: {collect [
+    keep one, keep ('Intellectually) keep spread across to &lt;end&gt;
+]}
+assert [other = [The Intellectually Lazy @Red]] 
+</code></pre>
+<p><strong>Yes, it works!</strong></p>
+<p><img src="https://rebol.metaeducation.com/images/emoji/twitter/open_mouth.png?v=14" title=":open_mouth:" class="emoji only-emoji" alt=":open_mouth:" loading="lazy" width="20" height="20"></p>
+<h2><a name="p-8240-is-it-that-different-than-using-a-function-yes-4" class="anchor" href="https://rebol.metaeducation.com#p-8240-is-it-that-different-than-using-a-function-yes-4"></a>Is It THAT Different Than Using A Function?  YES.</h2>
+<p><em>The difference is significant, and more than just cosmetic.</em></p>
+<p>We've seen arguments against "more parts" before... e.g. saying that GROUP! is not necessary if you have BLOCK! (or vice-versa) because you can always split your intent up into multiple tokens.  But it's very Turing Tar-Pit to say "oh it's all the same"... <em>because it is not the same</em>.  <img src="https://rebol.metaeducation.com/images/emoji/twitter/pouting_cat.png?v=14" title=":pouting_cat:" class="emoji" alt=":pouting_cat:" loading="lazy" width="20" height="20"></p>
+<p>When the FENCE! can encode itself in one value vs. needing a word-and-a-value, you get better compositional properties.  You have smoother meta-analysis when building higher level things that the fences are composed into (vs. WORD!+BLOCK!)</p>
+<h2><a name="p-8240-i-see-mountains-of-potential-here-5" class="anchor" href="https://rebol.metaeducation.com#p-8240-i-see-mountains-of-potential-here-5"></a><em>I see mountains of potential here.</em></h2>
+<p><img src="https://rebol.metaeducation.com/images/emoji/twitter/mountain.png?v=14" title=":mountain:" class="emoji only-emoji" alt=":mountain:" loading="lazy" width="20" height="20"> <img src="https://rebol.metaeducation.com/images/emoji/twitter/man_climbing.png?v=14" title=":man_climbing:" class="emoji only-emoji" alt=":man_climbing:" loading="lazy" width="20" height="20"></p>
+          <p><a href="https://rebol.metaeducation.com/t/evaluator-hooking-rebindablesyntax/2443/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/evaluator-hooking-rebindablesyntax/2443/1</link>
+        <pubDate>Sat, 10 May 2025 14:17:30 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2443-1</guid>
+        <source url="https://rebol.metaeducation.com/t/evaluator-hooking-rebindablesyntax/2443.rss">Evaluator Hooking (&quot;RebindableSyntax&quot;)</source>
+      </item>
+  </channel>
+</rss>

@@ -1,0 +1,116 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Boot Footprint: Giant String Literal vs. Encap?</title>
+    <link>https://rebol.metaeducation.com/t/boot-footprint-giant-string-literal-vs-encap/1977</link>
+    <description>One thing you can do with C is embed literal data.  This is how R3-Alpha ships with its mezzanine functions &quot;built in&quot;, the prep process stores everything in a big compressed array of bytes called (misleadingly) **`Native_Specs`**:
+
+   https://github.com/rebol/rebol/blob/25033f897b2bd466068d7663563cd3ff64740b94/src/core/b-init.c#L166
+
+The name being `Native_Specs` might suggest it was the contents of [%natives.r](https://github.com/rebol/rebol/blob/25033f897b2bd466068d7663563cd3ff64740b94/src/boot/natives.r).  But it&#39;s actually a lot more, with glued-together source code... including all of the contents of the [%base-xxx.r, %sys-xxx.r, and %mezz-xxx.r](https://github.com/rebol/rebol/tree/master/src/mezz) files.  So I renamed it to `Boot_Block_Compressed`.
+
+But it doesn&#39;t embed the files as-is... it LOADs them and SAVEs them using an already-built version of R3.  This round-tripping removes the comments and normalizes the spacing.  It also actually scrambled it with CLOAK for whatever reason--a waste of time because you could read all the code with SOURCE if you felt like it.  :-/
+
+*(Ren-C doesn&#39;t use an old-R3&#39;s LOAD+SAVE to strip out comments, because it would lock down the format.  Your hands would be tied on adding or changing lexical forms in the sys/base/mezzanine.  So it has its own STRIPLOAD function that does a light stripping out of comments and spaces for this glue-files-together purpose)*
+
+## Is Embedding Big Fat C Constants Supported By The Standard?
+
+C compilers are only *required* to allow you to build in string literals that are [509 characters in C89, and 4095 characters in C99](https://stackoverflow.com/a/11488687).  They can allow more, but don&#39;t have to.
+
+So I recall R3-Alpha having problems when you turn up `--pedantic` warning levels by using a syntax like:
+
+    const char Native_Specs[] = &quot;\x01\x02\x03...&quot;;
+
+That warning went away when I changed it to:
+
+    const unsigned char Boot_Block_Compressed[] = { 0x01, 0x02, 0x03 ...};
+
+Regarding the problem of hitting length limits, Ren-C actually breaks things up a bit more...because each extension has its own constant declaration like this for its Rebol portion.
+
+Because this code is decompressed and scanned once--and then tossed--there&#39;s probably a number of experiments that could be done.  What if the blob were loaded as mutable data, and then used as some kind of buffer for another purpose?  Is there some way to help hint to the OS that you really are only going to use the information only once so it will throw out the page from memory?  Or will the right thing happen to scan it and use it just once?
+
+Long story short--it hasn&#39;t been a problem, even with the TCC build.  So it has been taken for granted that it works acceptably.
+
+## But Would Encapping Be Better?
+
+One vision of how the boot would work is that it would only load enough to get de-encapping working.  Then the de-encapping would be how all the blobs for the &quot;built-in&quot; extensions were extracted.
+
+*This seems like an interesting vision,* because if someone gave you a big fat Ren-C and you wanted any skinnier version, you could basically ask it to cut everything out you don&#39;t want and give you a new EXE.  You could roll it up with any customizations you like.
+
+But if you&#39;re using any &quot;real&quot; form of encapping (e.g. manipulating the resource portions of a Linux ELF file or a Windows PE file) this gets complicated.  And Ren-C&#39;s encap facilities are [written in usermode](https://github.com/metaeducation/ren-c/blob/master/scripts/encap.reb)...so that expects things like file I/O and PARSE of a BINARY!, etc.  I also assume that unzip facilities would be part of encapping.  So you need a reasonably runnable system just to get to that point.
+
+**I&#39;ve punted on worrying too much about this, because of the focus on the web build.**
+
+It would be a bad investment of limited resources to handwrite and maintain encapping code in C, just so that encapping can be the means by which more of the bootstrap can be done with encap.
+
+## Script Code Is Easy to Encap, EXE/DLL Code Is Not
+
+So the &quot;easy&quot; part would be changing the build to go in two steps.
+
+The first step would make an r3-one.exe that is capable of augmenting itself with encapped data.  The second step would ask that r3 to fold in various scripts and resources to make an r3-two.exe that had more things in it...such as a console.
+
+This isn&#39;t that far out to accomplish.  **The hard part is when what you&#39;re encapping isn&#39;t script data, but compiled and executable C code...like bits from a DLL.**  e.g. encapping &quot;extensions&quot;.
+
+What some people do in this situation is to actually glue the DLL file into the executable, but extract it to the filesystem and load the extracted version.  If you Google around for &quot;using a DLL as an embedded resource&quot; you&#39;ll find people who&#39;ve done such things...but the answers you find will be from over a decade ago, because no one cares about how they ship such things anymore.
+
+## Making Encap A Dependency Is Probably Unwise...
+
+It isn&#39;t going to be a terribly big win for bootstrap if it can&#39;t be used to pull out or put in extensions.
+
+I don&#39;t think it&#39;s wise to pursue handcrafted C de-encapping.  In fact there&#39;s no way I&#39;d be writing any kind of encap code right now if it weren&#39;t already made.  Kind of the only reason we have the usermode encapping around is because Atronix was using it, but I was trying to keep the feature but cut it out of the C.  It hasn&#39;t been tossed entirely because it functions as test code.
+
+We *could* make a token two-step build (the phase one executable, that uses the phase one to build a phase two with encapped data in it).
+
+But it seems what we might want more is an easy option to not build in encapping whatsoever, and have more control over options at build time than the current list of extensions.
+
+For the limited audience looking at desktop builds--I imagine the answer will be that if you want a differently-sized r3.exe, you do it with a C compiler and ticking different boxes.  Or you build everything as a DLL and accept it&#39;s not all one file.</description>
+    
+    <lastBuildDate>Sun, 25 Sep 2022 00:58:10 +0000</lastBuildDate>
+    <category>Optimization</category>
+    <atom:link href="https://rebol.metaeducation.com/t/boot-footprint-giant-string-literal-vs-encap/1977.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Boot Footprint: Giant String Literal vs. Encap?</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>One thing you can do with C is embed literal data.  This is how R3-Alpha ships with its mezzanine functions "built in", the prep process stores everything in a big compressed array of bytes called (misleadingly) <strong><code>Native_Specs</code></strong>:</p>
+<p><a href="https://github.com/rebol/rebol/blob/25033f897b2bd466068d7663563cd3ff64740b94/src/core/b-init.c#L166" class="inline-onebox">rebol/src/core/b-init.c at 25033f897b2bd466068d7663563cd3ff64740b94 · rebol/rebol · GitHub</a></p>
+<p>The name being <code>Native_Specs</code> might suggest it was the contents of <a href="https://github.com/rebol/rebol/blob/25033f897b2bd466068d7663563cd3ff64740b94/src/boot/natives.r">%natives.r</a>.  But it's actually a lot more, with glued-together source code... including all of the contents of the <a href="https://github.com/rebol/rebol/tree/master/src/mezz">%base-xxx.r, %sys-xxx.r, and %mezz-xxx.r</a> files.  So I renamed it to <code>Boot_Block_Compressed</code>.</p>
+<p>But it doesn't embed the files as-is... it LOADs them and SAVEs them using an already-built version of R3.  This round-tripping removes the comments and normalizes the spacing.  It also actually scrambled it with CLOAK for whatever reason--a waste of time because you could read all the code with SOURCE if you felt like it.  :-/</p>
+<p><em>(Ren-C doesn't use an old-R3's LOAD+SAVE to strip out comments, because it would lock down the format.  Your hands would be tied on adding or changing lexical forms in the sys/base/mezzanine.  So it has its own STRIPLOAD function that does a light stripping out of comments and spaces for this glue-files-together purpose)</em></p>
+<h2><a name="p-6438-is-embedding-big-fat-c-constants-supported-by-the-standard-1" class="anchor" href="https://rebol.metaeducation.com#p-6438-is-embedding-big-fat-c-constants-supported-by-the-standard-1"></a>Is Embedding Big Fat C Constants Supported By The Standard?</h2>
+<p>C compilers are only <em>required</em> to allow you to build in string literals that are <a href="https://stackoverflow.com/a/11488687">509 characters in C89, and 4095 characters in C99</a>.  They can allow more, but don't have to.</p>
+<p>So I recall R3-Alpha having problems when you turn up <code>--pedantic</code> warning levels by using a syntax like:</p>
+<pre><code>const char Native_Specs[] = "\x01\x02\x03...";
+</code></pre>
+<p>That warning went away when I changed it to:</p>
+<pre><code>const unsigned char Boot_Block_Compressed[] = { 0x01, 0x02, 0x03 ...};
+</code></pre>
+<p>Regarding the problem of hitting length limits, Ren-C actually breaks things up a bit more...because each extension has its own constant declaration like this for its Rebol portion.</p>
+<p>Because this code is decompressed and scanned once--and then tossed--there's probably a number of experiments that could be done.  What if the blob were loaded as mutable data, and then used as some kind of buffer for another purpose?  Is there some way to help hint to the OS that you really are only going to use the information only once so it will throw out the page from memory?  Or will the right thing happen to scan it and use it just once?</p>
+<p>Long story short--it hasn't been a problem, even with the TCC build.  So it has been taken for granted that it works acceptably.</p>
+<h2><a name="p-6438-but-would-encapping-be-better-2" class="anchor" href="https://rebol.metaeducation.com#p-6438-but-would-encapping-be-better-2"></a>But Would Encapping Be Better?</h2>
+<p>One vision of how the boot would work is that it would only load enough to get de-encapping working.  Then the de-encapping would be how all the blobs for the "built-in" extensions were extracted.</p>
+<p><em>This seems like an interesting vision,</em> because if someone gave you a big fat Ren-C and you wanted any skinnier version, you could basically ask it to cut everything out you don't want and give you a new EXE.  You could roll it up with any customizations you like.</p>
+<p>But if you're using any "real" form of encapping (e.g. manipulating the resource portions of a Linux ELF file or a Windows PE file) this gets complicated.  And Ren-C's encap facilities are <a href="https://github.com/metaeducation/ren-c/blob/master/scripts/encap.reb">written in usermode</a>...so that expects things like file I/O and PARSE of a BINARY!, etc.  I also assume that unzip facilities would be part of encapping.  So you need a reasonably runnable system just to get to that point.</p>
+<p><strong>I've punted on worrying too much about this, because of the focus on the web build.</strong></p>
+<p>It would be a bad investment of limited resources to handwrite and maintain encapping code in C, just so that encapping can be the means by which more of the bootstrap can be done with encap.</p>
+<h2><a name="p-6438-script-code-is-easy-to-encap-exedll-code-is-not-3" class="anchor" href="https://rebol.metaeducation.com#p-6438-script-code-is-easy-to-encap-exedll-code-is-not-3"></a>Script Code Is Easy to Encap, EXE/DLL Code Is Not</h2>
+<p>So the "easy" part would be changing the build to go in two steps.</p>
+<p>The first step would make an r3-one.exe that is capable of augmenting itself with encapped data.  The second step would ask that r3 to fold in various scripts and resources to make an r3-two.exe that had more things in it...such as a console.</p>
+<p>This isn't that far out to accomplish.  <strong>The hard part is when what you're encapping isn't script data, but compiled and executable C code...like bits from a DLL.</strong>  e.g. encapping "extensions".</p>
+<p>What some people do in this situation is to actually glue the DLL file into the executable, but extract it to the filesystem and load the extracted version.  If you Google around for "using a DLL as an embedded resource" you'll find people who've done such things...but the answers you find will be from over a decade ago, because no one cares about how they ship such things anymore.</p>
+<h2><a name="p-6438-making-encap-a-dependency-is-probably-unwise-4" class="anchor" href="https://rebol.metaeducation.com#p-6438-making-encap-a-dependency-is-probably-unwise-4"></a>Making Encap A Dependency Is Probably Unwise...</h2>
+<p>It isn't going to be a terribly big win for bootstrap if it can't be used to pull out or put in extensions.</p>
+<p>I don't think it's wise to pursue handcrafted C de-encapping.  In fact there's no way I'd be writing any kind of encap code right now if it weren't already made.  Kind of the only reason we have the usermode encapping around is because Atronix was using it, but I was trying to keep the feature but cut it out of the C.  It hasn't been tossed entirely because it functions as test code.</p>
+<p>We <em>could</em> make a token two-step build (the phase one executable, that uses the phase one to build a phase two with encapped data in it).</p>
+<p>But it seems what we might want more is an easy option to not build in encapping whatsoever, and have more control over options at build time than the current list of extensions.</p>
+<p>For the limited audience looking at desktop builds--I imagine the answer will be that if you want a differently-sized r3.exe, you do it with a C compiler and ticking different boxes.  Or you build everything as a DLL and accept it's not all one file.</p>
+          <p><a href="https://rebol.metaeducation.com/t/boot-footprint-giant-string-literal-vs-encap/1977/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/boot-footprint-giant-string-literal-vs-encap/1977/1</link>
+        <pubDate>Sat, 24 Sep 2022 01:57:39 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1977-1</guid>
+        <source url="https://rebol.metaeducation.com/t/boot-footprint-giant-string-literal-vs-encap/1977.rss">Boot Footprint: Giant String Literal vs. Encap?</source>
+      </item>
+  </channel>
+</rss>

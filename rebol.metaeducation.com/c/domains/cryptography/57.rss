@@ -1,0 +1,601 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:discourse="http://www.discourse.org/" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Cryptography - AltRebol</title>
+    <link>https://rebol.metaeducation.com/c/domains/cryptography/57</link>
+    <description>Topics in the &#39;Cryptography&#39; category Discussion of things related to cryptography, which includes low level primitives (ciphers, hashes, and key exchange) as well as higher-level protocols such as TLS.</description>
+    
+      <lastBuildDate>Fri, 13 May 2022 01:17:30 +0000</lastBuildDate>
+      <atom:link href="https://rebol.metaeducation.com/c/domains/cryptography/57.rss" rel="self" type="application/rss+xml" />
+        <item>
+          <title>Asymmetric Encryption/Decryption in Ren-C</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Cryptography</category>
+          <description><![CDATA[
+            <p>The most easily recognized form of encryption is symmetric, where the same password is used to encrypt something as to decrypt it.</p>
+<p>But a weirder form is <strong>asymmetric encryption</strong>, <em>where the key used to encrypt is different from the one used to decrypt</em>.</p>
+<h2><a name="p-5828-ren-c-supports-rsa-publicprivate-encryption-1" class="anchor" href="https://rebol.metaeducation.com#p-5828-ren-c-supports-rsa-publicprivate-encryption-1"></a>Ren-C Supports RSA Public/Private Encryption</h2>
+<p>You generate your keys in a pair, which come back via multiple return results.  You must specify a size for the public key (in <em>bits</em>, not <em>bytes</em>...<a href="https://crypto.stackexchange.com/questions/58124/">because that's the convention</a>)</p>
+<p>We'll start using [raw] RSA encryption:</p>
+<pre><code>; use /INSECURE to override errors that tell you the key is too small
+; (makes examples more readable)
+
+&gt;&gt; [public-key private-key]: rsa-generate-keypair/padding/insecure 128 [raw]
+== make object! [
+    padding: [raw]
+    n: #{C097238C34E7191561DD7D30BBB77C65}
+    e: #{010001}
+]
+
+&gt;&gt; length of public-key.n
+== 16  ; 16 bytes is 128 bits
+</code></pre>
+<p>When you use raw mode encryption, the data you encrypt must be <em>exactly the same size</em> as the key you made.  We'll show how to work around this later, but for now let's just deal with it.</p>
+<pre><code>&gt;&gt; data: #{0123456789ABCDEFFEDCBA9876543210}
+
+&gt;&gt; length of data
+== 16  ; same size as our key
+
+&gt;&gt; encrypted: rsa-encrypt data public-key
+== #{3F7E8ACD2DEE61D09B7A6FC914E22295}
+
+&gt;&gt; length of encrypted
+== 16  ; also same length as key
+</code></pre>
+<p>Now, decryption is done with the private key:</p>
+<pre><code>&gt;&gt; rsa-decrypt encrypted private-key
+== #{0123456789ABCDEFFEDCBA9876543210}
+</code></pre>
+<h2><a name="p-5828-but-raw-makes-the-same-message-every-time-2" class="anchor" href="https://rebol.metaeducation.com#p-5828-but-raw-makes-the-same-message-every-time-2"></a>But <code>[raw]</code> Makes The Same Message Every Time...</h2>
+<p>Raw RSA doesn't waste any space (e.g. 4096 bytes in means 4096 bytes out).  <strong>But a given output always produces the same output with raw RSA</strong>:</p>
+<pre><code>&gt;&gt; rsa-encrypt data public-key
+== #{3F7E8ACD2DEE61D09B7A6FC914E22295}
+
+&gt;&gt; rsa-encrypt data public-key
+== #{3F7E8ACD2DEE61D09B7A6FC914E22295}
+</code></pre>
+<p>This can make it easy (or at least, easier) for someone who doesn't have the private key to do some factoring with the public key, and see if they can generate input that produces that output...effectively defeating the encryption.</p>
+<p>Also since it requires exactly the keysize of data coming in, you're likely going to have a lot of cases where you have to throw in some padding.  But naive answers to padding also create security problems:</p>
+<ul>
+<li>
+<p><strong>It would be bad to pad the data block with zeros (or whatever)</strong>, because such predictable behavior generally makes it easier to guess what the encrypted information might be.</p>
+</li>
+<li>
+<p><strong>It would be bad to just put random data in the padding</strong>, because the person doing the decryption wouldn't know if the gibberish they got when decrypting was the same gibberish you put in.</p>
+<ul>
+<li>Attackers could leverage this random tolerance to forge data in the non-padded portions, then forging the padding in a way that compensated.</li>
+</ul>
+</li>
+</ul>
+<p><strong><a href="https://security.stackexchange.com/a/183330">Real-World problems motivated the tricks that are used to resist attacks.</a></strong>  You can read about them if you want...or just don't use <code>[raw]</code> and you'll get a sensible default.</p>
+<pre><code>&gt;&gt; [public-a private-a]: rsa-generate-keypair/insecure 128
+== make object! [
+    padding: [pkcs1-v15]
+    n: #{A9EE9282744CC0FC6765824EB2B87539}
+    e: #{010001}
+]
+
+&gt;&gt; one: rsa-encrypt #{DECAFBAD} public-a  ; Note: shorter input than key
+== #{13C14811A3B1CD95100BA4F3273F0962}
+
+&gt;&gt; two: rsa-encrypt #{DECAFBAD} public-a
+== #{3245179A18C6B488FD39CDE7B4F5E3EC}  ; different!
+
+&gt;&gt; rsa-decrypt one private-a
+== #{DECAFBAD}
+
+&gt;&gt; rsa-decrypt two private-a
+== #{DECAFBAD}
+</code></pre>
+<h2><a name="p-5828-that-encrypts-smaller-than-the-keybut-what-about-bigger-3" class="anchor" href="https://rebol.metaeducation.com#p-5828-that-encrypts-smaller-than-the-keybut-what-about-bigger-3"></a>That Encrypts Smaller Than The Key...But What About Bigger?</h2>
+<p>A fundamental issue with RSA encryption/decryption is it is relatively S-L-O-W.  And if you want to futureproof a key to use with big file sizes, those keys would also be B-I-G!</p>
+<p><strong>But you can use a smaller asymmetric key as a stepping stone to providing a symmetric key.</strong></p>
+<p>It's easy!  Let's say someone has published their 4096-bit public key and you want to send them a 100 megabyte file that only they will know how to open.  Follow these steps:</p>
+<ol>
+<li>
+<p>Generate a random string that's less than 4096 bits, and encrypt <em>that</em> with their public key</p>
+</li>
+<li>
+<p>Encrypt the file using a faster symmetric algorithm, with that random string as the password</p>
+</li>
+<li>
+<p>Send the recipient both the asymmetrically-encrypted random string and the symmetrically-encrypted 100mb file</p>
+</li>
+<li>
+<p>Your recipient uses their private key to decrypt the one-off password you randomly generated, and decrypts the symmetrically encrypted file with it.</p>
+</li>
+</ol>
+<h2><a name="p-5828-its-all-new-so-help-design-the-interface-4" class="anchor" href="https://rebol.metaeducation.com#p-5828-its-all-new-so-help-design-the-interface-4"></a>It's All New, So Help Design the Interface...</h2>
+<p>The original motivation to research mbedTLS was so that <a class="mention" href="https://rebol.metaeducation.com/u/gchiu">@gchiu</a> didn't have to call out to external utilities to generate RSA keys.</p>
+<p>But the generation abilities weren't actually written until now.  And honestly, I'm not sure the RSA stuff was even working at all.  :-/  <strong><a href="https://github.com/metaeducation/ren-c/blob/master/extensions/crypt/tests/rsa.test.reb">Now there's at least a minimal amount of testing.</a></strong></p>
+<p>I think the multiple return values are a good start on making it clear, but it's certainly a good time for feedback if anyone has any.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/asymmetric-encryption-decryption-in-ren-c/1812">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/asymmetric-encryption-decryption-in-ren-c/1812</link>
+          <pubDate>Fri, 13 May 2022 01:17:30 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-1812</guid>
+          <source url="https://rebol.metaeducation.com/t/asymmetric-encryption-decryption-in-ren-c/1812.rss">Asymmetric Encryption/Decryption in Ren-C</source>
+        </item>
+        <item>
+          <title>Transitioning from mbedTLS 2 to mbedTLS 3: Promise and Peril</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Cryptography</category>
+          <description><![CDATA[
+            <p>Historically R3-Alpha had its few pieces of crypto math cobbled together from generally unknown sources on the Internet...</p>
+<ul>
+<li>
+<p>My understanding is that Rebol2's support for talking to a limited set of HTTPS sites was written entirely in C.  It's never been open-sourced, so we don't know much about it--such as whether it was original code or done with some early TLS library of the time.</p>
+</li>
+<li>
+<p>Saphirion chose to split out the code for the Transport-Layer-Security protocol and make it usermode Rebol.  Only the foundational cryptographic primitives like <a href="https://rebol.metaeducation.com/t/checksums-and-secure-hashes-in-ren-c/1808">Secure Hashes</a> or <a href="https://rebol.metaeducation.com/t/key-exchange-methods-in-ren-c/1809">Key Exchange</a> were written in C.</p>
+<ul>
+<li>
+<p><strong>Many of R3-Alpha's C cryptography bits seemed to come from the (one-man?) effort known as <a href="http://axtls.sourceforge.net/">Axolotl TLS (AxTLS)</a></strong></p>
+</li>
+<li>
+<p>The Rebol parts were written by Cyphre (Richard Smolak)</p>
+</li>
+</ul>
+</li>
+</ul>
+<h2><a name="p-5826-i-was-initially-very-skeptical-of-continuing-saphirions-strategy-1" class="anchor" href="https://rebol.metaeducation.com#p-5826-i-was-initially-very-skeptical-of-continuing-saphirions-strategy-1"></a>I Was Initially Very Skeptical of Continuing Saphirion's Strategy...</h2>
+<p>If a change ever rippled into affecting the TLS file, it was a voodoo nightmare to figure out how to fix it.  I didn't understand why limited efforts should be stretched into involvement with "something the language wasn't really good for".</p>
+<p><em>My impression was also that the %prot-tls.r implementation was bad.</em>  But when I got to looking at the details, the most insidious problems weren't so much the fault of the protocol code.  It more-or-less followed the spec, in a pretty literate way (that I <a href="https://rebol.metaeducation.com/t/dissecting-the-tls-emit-dialect/1498">improved with some dialecting</a>).</p>
+<p>The main frustrations regarding prot-tls came from the fact that <a href="https://rebol.metaeducation.com/t/the-weirdness-of-wait/1703">R3-Alpha's asynchronous port model made no sense</a>.  When I rewrote it to use the "seemingly-synchronous" model (which aims to parallel the Go language), it became more clear.</p>
+<p><strong>Through the process of implementing TLS 1.2, I began to get the impression that such protocols may actually be a fitting domain for a language like Rebol.</strong></p>
+<p>Today's %prot-tls.r is an aggressive and practical test of dialecting.  If it continues to be enhanced may be a case of exposing the workings of an important protocol to the layperson.</p>
+<h2><a name="p-5826-we-needed-more-cryptography-and-mbedtls-fit-the-bill-2" class="anchor" href="https://rebol.metaeducation.com#p-5826-we-needed-more-cryptography-and-mbedtls-fit-the-bill-2"></a>We Needed More Cryptography, and mbedTLS Fit the Bill</h2>
+<p>Adding TLS 1.2 wasn't going to do any good without also providing some of the newer exotic cipher suites that are demanded these days.  That meant getting things like elliptic curve key exchange, or SHA512, or anything else the future may demand.</p>
+<p>When I found mbedTLS it was much "cleaner" than OpenSSL, and seemed perfect:</p>
+<ul>
+<li>
+<p>It was targeting embedded processors, with <a href="https://github.com/Mbed-TLS/mbedtls/blob/42650260a9109f53d2058f82e1133205545fd65b/include/mbedtls/mbedtls_config.h">incredibly granular controls</a> for doing things like using smaller/slower algorithms vs. bigger/faster ones.</p>
+<ul>
+<li>
+<p>Pure C code, that could be compiled even by TCC.</p>
+</li>
+<li>
+<p>This meant the conference demo of bootstrap could still work, with a TCC-built R3-WITH-TCC having enough cryptography in it to download its own source from an HTTPS GitHub link.</p>
+</li>
+</ul>
+</li>
+<li>
+<p>The cryptography primitives could be lifted out "a la carte" from the C-based TLS protocol code; the files seemed completely separate:</p>
+<ul>
+<li>
+<p>If we wanted to, we could have a C-based mbedTLS extension option instead of using %prot-tls.r, and it could reuse the same cryptography.</p>
+</li>
+<li>
+<p>(We may at some point have to resort to this, if keeping %prot-tls.r up to date with the times proves impractical.)</p>
+</li>
+</ul>
+</li>
+<li>
+<p>The interfaces for every cipher and hash supported streaming, so we'd have the ability to incrementally do cryptography on large files or network connections (assuming we figured out how to expose that).</p>
+</li>
+</ul>
+<p><strong>And critically, all of it was under the umbrella of a working group at ARM which would hopefully ensure that it was kept up to date, and being vetted for problems.</strong></p>
+<p>All of it made this seem like a no-brainer to build on, which <a href="https://github.com/metaeducation/ren-c/commit/06e110235efb68500700fead3478a3216899d780">I did in April of 2020</a>:</p>
+<blockquote>
+<p>The mbedTLS library is an embedded-focused set of cryptography hashes,<br>
+key exchanges, block ciphers, and other tools.  Its components range<br>
+from lower-level facilities like BigNum arithmetic, to higher-level<br>
+services like TLS negotiation and certificate validation.  Its<br>
+facilities are well-factored such that each piece can be used with only<br>
+its dependencies:</p>
+<p><a href="https://tls.mbed.org/">https://tls.mbed.org/</a></p>
+<p>Because of its fine-grained control, it's possible to use its basic<br>
+tools while still keeping higher-level negotiations as spec-driven<br>
+usermode Rebol (e.g. the TLS protocol itself) to facilitate more<br>
+hooking and understanding.  And because it offers a consistent set of<br>
+vetted and active code, it can replace the "hodgepodge" of cut-and-paste<br>
+snippets for cryptography (originating from axTLS, internet sources,<br>
+custom code, edited OpenSSL, etc.) where there are problems like not<br>
+being written to a common BigNum implementation.</p>
+<p>Additionally--due to the factoring, it is hoped that this code could be<br>
+used as the basis for implementing BigNum arithmetic in the interpreter<br>
+core itself...which would be naturally reused in the implementation<br>
+of these C algorithms when cryptographic extensions are loaded.</p>
+</blockquote>
+<p>Possibly inspired by this--or just his own coming to the same conclusions--<a href="https://github.com/Oldes/Rebol3/commit/77515519655a579fbef99f7e185a27a4451718d7">Oldes changed his hashes to use mbedTLS in January 2021</a></p>
+<h2><a name="p-5826-and-then-version-30-came-dragon-3" class="anchor" href="https://rebol.metaeducation.com#p-5826-and-then-version-30-came-dragon-3"></a>...and Then, Version 3.0 Came... <img src="https://rebol.metaeducation.com/images/emoji/twitter/dragon.png?v=14" title=":dragon:" class="emoji" alt=":dragon:" loading="lazy" width="20" height="20"></h2>
+<p><em>I probably should have been paying more attention to what mbedTLS was planning in their future branches.</em></p>
+<p>What I've gathered is that ARM (or someone) was pointing out that mbedTLS not only needed to implement TLS 1.3, but that it wasn't sufficiently fast vs. the competition.</p>
+<p>A somewhat-sensible approach to optimization is to first tighten the control over your data structures, making them more opaque to clients.  By limiting the APIs you can use to access those structures, you can know more about the states they are in...and take more for granted.  Your functions can then make optimizations which leverage these rules--adding or rearranging fields in more clever ways.</p>
+<p><strong>But I didn't want cleverness, I just wanted the math.</strong>  I liked that our objects for things like Diffie-Hellman showed you the true cryptographic parameters, and wasn't some kind of "black box".  If we were closed off from that, everything would be a HANDLE! and you would have limited ways of extracting parameters from it.</p>
+<p>Not only did they close off access to the structure members, many APIs they offered were TLS-specific!</p>
+<ul>
+<li>
+<p>If a cryptographic primitive depended on parameters X and Y and produced Z, they'd offer a function that takes in a blob of data representing X and Y <em>in the specific format that TLS messages encode them</em>.</p>
+</li>
+<li>
+<p>If you were building some protocol that <em>wasn't</em> TLS using that basic crypto primitive, the only way offered to load the parameters was to make a TLS-format message buffer and pass it.</p>
+</li>
+<li>
+<p>The TLS-specific functions were creeping into what were supposed to be the "a la carte" cryptography files, adding bloat at compile time (if not also runtime) if you weren't using them.</p>
+</li>
+</ul>
+<p>One can imagine that this seems good from the point of view of speeding up their C TLS protocol, but bad for anyone trying to use the underlying cryptography.</p>
+<p>There was an announcement I missed that it would be split into two libraries: "mbed crypto" and "mbedTLS", to serve the two different audiences for the code.  But that seemed to be short-lived, and "mbed crypto" was reabsorbed into the mbedTLS codebase.  Not before the damage had been done to the layering and generality.</p>
+<p>So now mbedTLS seems to be playing catch-up on serving the audience that wanted the crypto primitives.  But functionality that had an endorsed method to do in mbedTLS 2 now requires hacking beneath the approved API to accomplish.</p>
+<h2><a name="p-5826-on-the-bright-side-4" class="anchor" href="https://rebol.metaeducation.com#p-5826-on-the-bright-side-4"></a>On the bright side...</h2>
+<p>Since the re-absorption of "mbed crypto", mbedTLS seems amenable to having answers for the a-la-carte crypto crowd.  <a href="https://github.com/Mbed-TLS/mbedtls/issues/5818">A request I made is at least marked medium importance</a>.</p>
+<p>Also, the API becoming more formalized is pointing out some weird mistakes that were made before in the code...filling structure parameters that were unused, for instance.  Having to call each of these things into question is a good vetting of the code.</p>
+<p>And although I had to use hacks to do it, we now can run https on top of mbedTLS 3.  I've been a little on the fence of whether to stick with mbedTLS 2 (support ending in 2024) or find some other library.  But writing about cryptography has made me realize it's a bit of a red herring on the importance scale, and I think we're better off rolling with the punches of mbedTLS 3 than going it some other route.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/transitioning-from-mbedtls-2-to-mbedtls-3-promise-and-peril/1810">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/transitioning-from-mbedtls-2-to-mbedtls-3-promise-and-peril/1810</link>
+          <pubDate>Tue, 10 May 2022 14:47:25 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-1810</guid>
+          <source url="https://rebol.metaeducation.com/t/transitioning-from-mbedtls-2-to-mbedtls-3-promise-and-peril/1810.rss">Transitioning from mbedTLS 2 to mbedTLS 3: Promise and Peril</source>
+        </item>
+        <item>
+          <title>Key Exchange Methods in Ren-C</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Cryptography</category>
+          <description><![CDATA[
+            <p>Having given a summary of <a href="https://rebol.metaeducation.com/t/checksums-and-secure-hashes-in-ren-c/1808/">Checksums and Secure Hashes</a>, I thought I'd follow up with a quick description of something you're likely not as familiar with: <strong>Key Exchanges</strong>.</p>
+<p>There's old quote I like (but can't find a source for):</p>
+<blockquote>
+<p>"The shared secret is capital.  We may spend it or squander it."</p>
+</blockquote>
+<p>An example of taking advantage of a shared secret is when people want to share an encrypted .ZIP file.  If you and your friend both know the encryption password that no one else knows...then you could put the file on a public server for your friend to download.  If you trust the encryption, the fact it was public would not matter.</p>
+<p><strong>But what if the situation is that your friend has a password that only they know... and you have a password that only you know?</strong>  That wouldn't seem to help with the .ZIP file scenario, because it expects the same password to decrypt as was used to encrypt it.</p>
+<p>Key Exchange is a way of taking your individual "passwords" and coming to an agreement on a third "password" that only the two of you know.  Amazingly enough, you can carry out the conversation where you establish the shared password in public.</p>
+<h2><a name="p-5824-creating-one-shared-secret-from-two-non-shared-secrets-1" class="anchor" href="https://rebol.metaeducation.com#p-5824-creating-one-shared-secret-from-two-non-shared-secrets-1"></a>Creating one Shared Secret from two Non-Shared Secrets</h2>
+<p>For educational purposes, people use paint-mixing as an analogy for key exchange.  It's really "multiplying big prime numbers" instead of mixing paint, but it's visual and easy to see.</p>
+<p></p><div class="lightbox-wrapper"><a class="lightbox" href="https://rebol.metaeducation.com/uploads/default/original/1X/184fa9035c24ffa1250e324b61acaa3915f7757e.png" data-download-href="https://rebol.metaeducation.com/uploads/default/184fa9035c24ffa1250e324b61acaa3915f7757e" title="image"><img src="https://rebol.metaeducation.com/uploads/default/optimized/1X/184fa9035c24ffa1250e324b61acaa3915f7757e_2_345x500.png" alt="image" data-base62-sha1="3t485Do7kYfAw6HMsMv5klePtsq" width="345" height="500" srcset="https://rebol.metaeducation.com/uploads/default/optimized/1X/184fa9035c24ffa1250e324b61acaa3915f7757e_2_345x500.png, https://rebol.metaeducation.com/uploads/default/original/1X/184fa9035c24ffa1250e324b61acaa3915f7757e.png 1.5x, https://rebol.metaeducation.com/uploads/default/original/1X/184fa9035c24ffa1250e324b61acaa3915f7757e.png 2x" data-dominant-color="EAE8DF"></a></div><p></p>
+<p>This assumes everyone in the world has some kind of weird "common paint".  This paint isn't white (because if you mixed it with something that would be too easy to guess at the precise shade you had mixed it with).  And it isn't black (because mixing might just get you something too dark to measure well).</p>
+<p>But the key point to absorb is what the diagram says: <strong>we assume that mixture separation is expensive</strong>.  Once you've mixed the common paint with your secret color, it produces a new shade that no one else knows how to make exactly.</p>
+<p>When you and your friend exchange your mixtures you cleverly go to your private lairs and each add your secret color to the other's mixture.  <strong>Now both of you have the same weird color, and this is a secret you share.</strong></p>
+<h2><a name="p-5824-ren-c-supports-diffie-hellman-key-exchange-2" class="anchor" href="https://rebol.metaeducation.com#p-5824-ren-c-supports-diffie-hellman-key-exchange-2"></a>Ren-C Supports Diffie-Hellman Key Exchange</h2>
+<p>I oversimplified this by saying you each start with a "password"...because that made it sound like you could just pick a phrase out of your head.  In reality, choosing your secret involves some tricky math...to make sure your secret paint color is a <em>good</em> secret paint color.  You don't pick these--you ask the computer to generate it.</p>
+<p>To get the ball rolling, you need to specify what kind of "common paint" to use.  You make that by picking two suitable prime numbers, a modulus and a base.  Then you can ask for a unique random secret to be generated.</p>
+<p>For the sake of education, I've made it possible to use <em>relatively bad</em> paint mixes with the /INSECURE refinement.  It won't allow numbers that are so broken the process won't work (for instance: non-primes, or primes that don't meet the basic requirements of the algorithm).  This lets you work with small enough numbers that you can see for yourself what's going on more easily.</p>
+<p>So let's use a modulus of 9 and a base of 3:</p>
+<pre><code>&gt;&gt; mine: dh-generate-keypair/insecure #{09} #{05}
+== make object! [
+    modulus: #{09}
+    generator: #{05}
+    private-key: #{07}
+    public-key: #{05}
+]
+
+&gt;&gt; theirs: dh-generate-keypair/insecure #{09} #{05}
+== make object! [
+    modulus: #{09}
+    generator: #{05}
+    private-key: #{05}
+    public-key: #{02}
+]
+</code></pre>
+<p>So privately, my secret is 7... and their secret is 5.  But we want to come to an agreement on a new number while only sharing with the public my "mixture" of 5 and their mixture of 2.</p>
+<pre><code>&gt;&gt; my-shared: dh-compute-secret mine theirs.public-key
+== #{02}
+
+&gt;&gt; their-shared: dh-compute-secret theirs mine.public-key
+== #{02}
+</code></pre>
+<p>So here you see each of us could come to a common agreement of 2.  You can follow through the math on the <a href="https://en.wikipedia.org/wiki/Diffie%E2%80%93Hellman_key_exchange">Wikipedia page</a> if you want...but it's enough to know that it works.</p>
+<p>What makes for a good (big!) modulus and base to use?  You don't really need to come up with them yourself, although <a href="https://security.stackexchange.com/a/103924">there are algorithms for it</a>.  There are papers that publish some good choices--and we should probably provide a way to default to well-known ones, like maybe accept either an object or an ISSUE!</p>
+<pre><code>&gt;&gt; dh-generate-keypair #RFC-3526
+; ...or...
+&gt;&gt; dh-generate-keypair make object [base: ..., modulus: ...]
+</code></pre>
+<p>But the main thing to know is that <strong>both sides have to agree on the "common paint" to use</strong>, in order to come to the same conclusion.  So <code>dh-compute-secret</code> won't work unless the same numbers were used here.</p>
+<h2><a name="p-5824-we-also-support-elliptic-curve-key-exchange-echde-3" class="anchor" href="https://rebol.metaeducation.com#p-5824-we-also-support-elliptic-curve-key-exchange-echde-3"></a>We Also Support Elliptic Curve Key Exchange (ECHDE)</h2>
+<p>Modern Internet Transport Security has moved on from traditional Diffie Hellman to trickier math.  But the premise is the same.</p>
+<p>In the interface, we only support two "common paints" for this method: "secp256r1" and "curve25519".  There's no option for small answers here:</p>
+<pre><code>&gt;&gt; mine: ecc-generate-keypair 'curve25519
+== make object! [
+    public-key: make object! [
+        x: #{121413C34DC265025F24CBEBBA6065B9
+             75F1BFA6E493D07A0F4776FAE03DC245}
+        y: #{00000000000000000000000000000000
+             00000000000000000000000000000000}
+    ]
+    private-key: #{610A8D99A72500B3A2E8A1FD714FA412
+                   17F0A0EA5EDFC9CFBDAE0425E199DC70}
+]
+
+&gt;&gt; theirs: ecc-generate-keypair 'curve25519
+== make object! [
+    public-key: make object! [
+        x: #{10D65366D8C9229591C99903D3B5EB0F
+             57709AD27E37989E4782050D2B9B2B93}
+        y: #{00000000000000000000000000000000
+             00000000000000000000000000000000}
+    ]
+    private-key: #{7C3262BF6028B049EEDC6C37E37A8261
+                   EA4DF31F16E4D534D92A7EF11D974618}
+]
+</code></pre>
+<p>But it works the same way; you come to the same conclusion when combining your partner's public portion with your private portion:</p>
+<pre><code>&gt;&gt; my-secret: (
+    ecdh-shared-secret 'curve25519 mine.private-key theirs.public-key
+)
+== #{E27891074A60250580B8F2C7CB2448A9AA491C97161D7C8D381348D90E438025}
+
+&gt;&gt; their-secret: (
+    ecdh-shared-secret 'curve25519 mine.private-key theirs.public-key
+)
+== #{E27891074A60250580B8F2C7CB2448A9AA491C97161D7C8D381348D90E438025}
+
+&gt;&gt; my-secret = their-secret
+== #[true]
+</code></pre>
+<h2><a name="p-5824-would-average-users-ever-need-key-exchange-functions-4" class="anchor" href="https://rebol.metaeducation.com#p-5824-would-average-users-ever-need-key-exchange-functions-4"></a>Would Average Users Ever Need Key Exchange Functions?</h2>
+<p>Right now, the main reason most people would care whether the language has these key exchanges is because without them you can't do TLS.  So no reading or writing over HTTPS.</p>
+<p>You really only need key exchanges when protocols are trying to establish private channels of communication.  So notably, some cryptographic protocols (like Bitcoin) don't need key exchanges...because they're carrying out their work in public.</p>
+<ul>
+<li>
+<p><strong>It would be neat if we could democratize the creation of cryptographic protocols</strong>.  I think giving people easier and more transparent access to these kinds of things could foster some grassroots innovation, where people would build <em>exactly the security they needed</em> into a program's design...no more and no less.</p>
+<ul>
+<li>This would stand in contrast to today's methods, where "security" is accomplished by standing on top of a mountain of protocols (using a literal zoo of cryptographic algorithms) to tunnel and log in somewhere that they are "safe"...and putting more data than they need to in that place.</li>
+</ul>
+</li>
+<li>
+<p><strong>But even "simple" cryptography is tricky to reason about, and people are lazy.</strong>  I myself am pretty guilty of doing things like falling back on my GitHub password and resetting my keys instead of doing a good job of filing them in safe places.</p>
+<ul>
+<li>Convincing people their programs should be "organic and locally sourced"... by tailor-making the protocols and asking their users to keep track of files, is going to be a hard sell to those who are happy to use OAuth and leave this all up to Google.</li>
+</ul>
+</li>
+</ul>
+<p>So pessimistically speaking, I don't know that we're going to be able to market easy-to-use key exchange to anyone as a killer feature.  It's a nice thought, and I certainly like having it available to tinker with.  But I'd be surprised if anyone reading this has an idea how to use it in something they're working on.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/key-exchange-methods-in-ren-c/1809">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/key-exchange-methods-in-ren-c/1809</link>
+          <pubDate>Mon, 09 May 2022 18:20:50 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-1809</guid>
+          <source url="https://rebol.metaeducation.com/t/key-exchange-methods-in-ren-c/1809.rss">Key Exchange Methods in Ren-C</source>
+        </item>
+        <item>
+          <title>Checksums and Secure Hashes in Ren-C</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Cryptography</category>
+          <description><![CDATA[
+            <p>I thought I'd write up a quick post about algorithms that take in a bunch of bytes--like a BINARY!--and produce a (usually) shorter "fingerprint" of that data.</p>
+<ul>
+<li>
+<p>It's not hard to make an <em>insecure</em> hash...like taking the first couple of letters of a string: <code>"DICKENS" =&gt; DI</code>.  That might be useful if you're trying to divide book authors into drawers of an old-fashioned library card catalog.</p>
+</li>
+<li>
+<p>But it's easy to find another string that would make the same "DI" fingerprint, like "DIABOLICAL" or "DIR^/FORMAT C:"</p>
+</li>
+<li>
+<p>If you were using a fingerprint to trust something was what it was supposed to be, the easiness of generating these "collisions" is a liability!! <img src="https://rebol.metaeducation.com/images/emoji/twitter/skull_and_crossbones.png?v=14" title=":skull_and_crossbones:" class="emoji" alt=":skull_and_crossbones:" loading="lazy" width="20" height="20"></p>
+</li>
+<li>
+<p>Secure hashes do complicated "one-way functions" in math to make it <em>really hard</em> on today's computers to fabricate any binary sequence--even garbage--that will give you the same fingerprint as any other input.</p>
+</li>
+</ul>
+<p>You've certainly seen web pages that redirect you off to download a file, but beforehand give you some bytes of what the file should securely hash to.  <sub>(And you've probably never checked to make sure they match.)</sub></p>
+<h2><a name="p-5821-if-the-fingerprint-is-shorter-than-the-data-collisions-existhttpsenwikipediaorgwikipigeonhole_principle-1" class="anchor" href="https://rebol.metaeducation.com#p-5821-if-the-fingerprint-is-shorter-than-the-data-collisions-existhttpsenwikipediaorgwikipigeonhole_principle-1"></a>If the Fingerprint is Shorter than the data, <a href="https://en.wikipedia.org/wiki/Pigeonhole_principle">COLLISIONS EXIST!</a></h2>
+<p>You obviously can't give every 500mb file in the universe a unique fingerprint that's 32-bits, 128-bits, 512-bits, 2048-bits etc.</p>
+<p>So the concept behind a secure hash is just supposed to be you can't find a collision until we're all dead and no one cares.  Less grimly: we might pair a hash with an expiration date to say not to trust a hash after a very conservative guess at how long it would take for computers to advance enough to break it.</p>
+<p>When this hope falls apart (e.g. if any researcher can show two inputs that generate the same fingerprint) it's generally considered that the "secure" part of that hash is broken...for the purposes of whatever time-bubble you're living in.</p>
+<h2><a name="p-5821-we-have-four-secure-hashes-in-the-box-right-now-2" class="anchor" href="https://rebol.metaeducation.com#p-5821-we-have-four-secure-hashes-in-the-box-right-now-2"></a>We Have Four Secure Hashes in the Box Right Now...</h2>
+<p>It shouldn't be surprising that longer fingerprints correlate with being harder to find collisions:</p>
+<pre><code>&gt;&gt; checksum/method {DICKENS} 'md5
+== #{3717A787E2F16310EA51DC0308E88803}  ; considered vulnerable
+
+&gt;&gt; checksum/method {DICKENS} 'sha1
+== #{DFE5DD61B2B19C319DBC4F44328CDF8D24366F88}  ; considered vulnerable
+
+&gt;&gt; checksum/method {DICKENS} 'sha256
+== #{52A095CF1F0319EF44FF9134AAD2EF5E2BFE1A48307DCB0AD0408F1CE393C950}
+
+&gt;&gt; checksum/method {DICKENS} 'sha512
+== #{
+E8DBC26DE28FAA1BC2A6A3E1BC6DD22C1ECB3FD0D5FCBBFB69BC63C6AAC6A9CE
+FB76294EFFB0522D4C90A5E5829233FC5BC5B811AE6684A6EA632ECB3FF88DA1
+}
+
+&gt;&gt; checksum/method {DICKENS} 'ripemd160         ; bitcoin uses this one
+== #{ADC86945BE4CEF31F0CFCAF66775E1DA5160F877}  ; ...no one knows why
+</code></pre>
+<p>But longer isn't <em>intrinsically</em> better...there might be a weakness to exploit in the method used by a longer hash which isn't present in shorter ones.  However, a bunch of mathematicians look at this stuff and we would generally hope that we'd be getting what we pay for--more bytes meaning more security (unless they're from the NSA and trying to punk us).</p>
+<h2><a name="p-5821-we-also-have-three-insecure-hashes-3" class="anchor" href="https://rebol.metaeducation.com#p-5821-we-also-have-three-insecure-hashes-3"></a>We Also Have Three <em>Insecure</em> Hashes...</h2>
+<p>These are fine when you're doing something that is not supposed to be protecting against adversarial attacks.  They're smaller to store and much cheaper to calculate...but it's trivial to find other input data that would produces the same 32-bit result:</p>
+<pre><code>&gt;&gt; checksum/method {DICKENS} 'crc32
+== #{FB05F0BC}  ; used to verify gzip files (among other places)
+
+&gt;&gt; checksum/method {DICKENS} 'adler32
+== #{0202D207}  ; used by zlib deflate and inflate
+</code></pre>
+<p>If you want a <em>really</em> cheapskate insecure checksum, we include the one that is in TCP packets on the internet:</p>
+<pre><code>&gt;&gt; checksum/method {DICKENS} 'tcp
+== #{CA32}
+</code></pre>
+<hr>
+<blockquote>
+<p><strong>Fun Corner</strong>: Let's find a collision!</p>
+<pre><code>&gt;&gt; until [
+    string: copy {}
+    repeat (random 10) [append string make char! 64 + random 26]
+    #{CA32} = checksum/method string 'tcp
+]
+== #[true]
+
+&gt;&gt; print string
+AOGTDDN
+
+&gt;&gt; checksum/method {AOGTDDN} 'tcp
+== #{CA32}
+</code></pre>
+<p>That wasn't so hard, but... if you can find collisions for any of the <em>secure</em> hashes above (even the relatively-weak MD5 or SHA1) <em>you will be famous!</em></p>
+</blockquote>
+<h2><a name="p-5821-were-primed-to-make-streaming-secure-or-insecure-hashes-4" class="anchor" href="https://rebol.metaeducation.com#p-5821-were-primed-to-make-streaming-secure-or-insecure-hashes-4"></a>We're Primed To Make <strong>STREAMING</strong> Secure (or Insecure) Hashes !</h2>
+<p>R3-Alpha did not have fancy modern hashes like SHA256 or SHA512.  But also the code it used was copy-pasted out of a library that required you to have all the data at once.</p>
+<p>Hence if you have a multi-gigabyte DVD .iso file that you want to checksum, you have to read that into a multi-gigabyte BINARY! to process it.</p>
+<p>But since Ren-C is leveraging the cryptography of the <a href="https://github.com/Mbed-TLS/mbedtls">pure C library known as mbedTLS</a>, the foundations are there to stream in little blobs at a time...and it is generalized so we can just flip on or off any hashes we care about.  <a href="https://rebol.metaeducation.com/t/what-is-a-port/617/5">If we only knew how to express streaming with PORT!s (or whatever)</a>.</p>
+<p>And also, the CRC32 and ADLER32 algorithms we have "for free" by including Zlib are now set up in a way that the insecure hashes can be streamed too.</p>
+<h2><a name="p-5821-globe_with_meridians-how-does-this-tie-into-the-web-repl-story-globe_with_meridians-5" class="anchor" href="https://rebol.metaeducation.com#p-5821-globe_with_meridians-how-does-this-tie-into-the-web-repl-story-globe_with_meridians-5"></a><img src="https://rebol.metaeducation.com/images/emoji/twitter/globe_with_meridians.png?v=14" title=":globe_with_meridians:" class="emoji" alt=":globe_with_meridians:" loading="lazy" width="20" height="20"> <em>"How Does This Tie Into The Web Repl Story"?</em> <img src="https://rebol.metaeducation.com/images/emoji/twitter/globe_with_meridians.png?v=14" title=":globe_with_meridians:" class="emoji" alt=":globe_with_meridians:" loading="lazy" width="20" height="20"></h2>
+<p>I really want to have a laser focus on whether investing effort into something is going to be something that pays off or not, and to me a part of that payoff question is "will people using the web build care".</p>
+<p><strong>Right now the web build does not include the CHECKSUM function at all.</strong>  <img src="https://rebol.metaeducation.com/images/emoji/twitter/frowning.png?v=14" title=":frowning:" class="emoji" alt=":frowning:" loading="lazy" width="20" height="20"></p>
+<p>That is too bad, because I do believe that putting secure hashes into the hands of users at the Web Repl prompt (as well as other basic crypto parts) would be a great playground.</p>
+<p>But it would be rather heavyweight to push secure hashing into the default .wasm being pulled down on every site if it didn't use it.  This is why I really want to get "Wasm extensions" working, that can be dynamically loaded.  There's something called "side modules" that I have meant to explore but haven't.</p>
+<p>Anyway, I hope this summary gives a little insight into where this is at, and perhaps educational for those who don't have experience with the difference between secure/insecure hashing.</p>
+            <p><small>3 posts - 2 participants</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/checksums-and-secure-hashes-in-ren-c/1808">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/checksums-and-secure-hashes-in-ren-c/1808</link>
+          <pubDate>Mon, 09 May 2022 04:04:00 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-1808</guid>
+          <source url="https://rebol.metaeducation.com/t/checksums-and-secure-hashes-in-ren-c/1808.rss">Checksums and Secure Hashes in Ren-C</source>
+        </item>
+        <item>
+          <title>Dropping RC4 Support from the Crypto Extension</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Cryptography</category>
+          <description><![CDATA[
+            <p>I pretty sure no one out there is using it, but the RC4 cipher has been deprecated for a pretty long time now.  Per Wikipedia:</p>
+<blockquote>
+<p>In <a href="https://en.wikipedia.org/wiki/Cryptography">cryptography</a>, <strong>RC4</strong> (Rivest Cipher 4 also known as <strong>ARC4</strong> or <strong>ARCFOUR</strong> meaning Alleged RC4, see below) is a <a href="https://en.wikipedia.org/wiki/Stream_cipher">stream cipher</a>. While it is remarkable for its simplicity and speed in software, multiple vulnerabilities have been discovered in RC4, rendering it insecure.</p>
+</blockquote>
+<p>The insecurity of RC4 led the IETF to <a href="https://tools.ietf.org/html/rfc7465">prohibit RC4 for TLS use in 2015</a></p>
+<p>However, the original cryptography code (mostly from AxTLS) had an RC4 function, and it was in mbedTLS 2.  So I went ahead and kept it working.</p>
+<p>It is now dropped from mbedTLS 3.  So in the scheme of things, time to let it go.</p>
+<h2><a name="p-5820-code-being-dropped-1" class="anchor" href="https://rebol.metaeducation.com#p-5820-code-being-dropped-1"></a>Code Being Dropped</h2>
+<p>The files arc4.h and arc4.c from mbedTLS are now gone, and this was the crypt module code for supporting it:</p>
+<pre><code>static void cleanup_rc4_ctx(const REBVAL *v)
+{
+    struct mbedtls_arc4_context *ctx
+        = VAL_HANDLE_POINTER(struct mbedtls_arc4_context, v);
+    mbedtls_arc4_free(ctx);
+    FREE(struct mbedtls_arc4_context, ctx);
+}
+
+
+//
+//  export rc4-key: native [
+//
+//  "Encrypt/decrypt data (modifies) using RC4 algorithm."
+//
+//      return: [handle!]
+//      key [binary!]
+//  ]
+//
+REBNATIVE(rc4_key)
+//
+// !!! RC4 was originally included for use with TLS.  However, the insecurity
+// of RC4 led the IETF to prohibit RC4 for TLS use in 2015:
+//
+// https://tools.ietf.org/html/rfc7465
+//
+// So it is not in use at the moment.  It isn't much code, but could probably
+// be moved to its own extension so it could be selected to build in or not,
+// which is how cryptography methods should probably be done.
+{
+    CRYPT_INCLUDE_PARAMS_OF_RC4_KEY;
+
+    struct mbedtls_arc4_context *ctx = TRY_ALLOC(struct mbedtls_arc4_context);
+    mbedtls_arc4_init(ctx);
+
+    REBSIZ key_len;
+    const REBYTE *key = VAL_BINARY_SIZE_AT(&amp;key_len, ARG(key));
+    mbedtls_arc4_setup(ctx, key, key_len);
+
+    return Init_Handle_Cdata_Managed(
+        D_OUT,
+        ctx,
+        sizeof(struct mbedtls_arc4_context),
+        &amp;cleanup_rc4_ctx
+    );
+}
+
+
+//
+//  export rc4-stream: native [
+//
+//  "Encrypt/decrypt data (modifies) using RC4 algorithm."
+//
+//      return: &lt;none&gt;
+//      ctx "Stream cipher context"
+//          [handle!]
+//      data "Data to encrypt/decrypt (modified)"
+//          [binary!]
+//  ]
+//
+REBNATIVE(rc4_stream)
+{
+    CRYPT_INCLUDE_PARAMS_OF_RC4_STREAM;
+
+    REBVAL *data = ARG(data);
+
+    if (VAL_HANDLE_CLEANER(ARG(ctx)) != cleanup_rc4_ctx)
+        rebJumps ("fail [{Not a RC4 Context:}", ARG(ctx), "]");
+
+    struct mbedtls_arc4_context *ctx
+        = VAL_HANDLE_POINTER(struct mbedtls_arc4_context, ARG(ctx));
+
+    REBVAL *error = nullptr;
+
+    REBSIZ length;
+    REBYTE *output = VAL_BINARY_SIZE_AT_ENSURE_MUTABLE(&amp;length, data);
+    const REBYTE *input = output;
+    IF_NOT_0(cleanup, error, mbedtls_arc4_crypt(
+        ctx,
+        length,
+        input,  // input "message"
+        output  // output (same, since it modifies)
+    ));
+
+  cleanup:
+     if (error)
+        rebJumps ("fail", error);
+
+    return rebNone();
+}
+</code></pre>
+<p>...and here is the very basic test, also being removed...</p>
+<pre><code>ctx: rc4-key as binary! "Deprecated Algorithm"
+data: as binary! "But Implemented Anyway"
+rc4-stream ctx data
+data = #{0C4E2F3BD157EA7214C33F280BE4D9DF1DFB580563A6}
+</code></pre>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/dropping-rc4-support-from-the-crypto-extension/1807">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/dropping-rc4-support-from-the-crypto-extension/1807</link>
+          <pubDate>Mon, 09 May 2022 01:32:56 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-1807</guid>
+          <source url="https://rebol.metaeducation.com/t/dropping-rc4-support-from-the-crypto-extension/1807.rss">Dropping RC4 Support from the Crypto Extension</source>
+        </item>
+        <item>
+          <title>About the Cryptography category</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Cryptography</category>
+          <description><![CDATA[
+            <p>Discussion of things related to cryptography, which includes low level primitives (ciphers, hashes, and key exchange) as well as higher-level protocols such as TLS.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/about-the-cryptography-category/1806">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/about-the-cryptography-category/1806</link>
+          <pubDate>Mon, 09 May 2022 01:11:25 +0000</pubDate>
+          <discourse:topicPinned>Yes</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-1806</guid>
+          <source url="https://rebol.metaeducation.com/t/about-the-cryptography-category/1806.rss">About the Cryptography category</source>
+        </item>
+  </channel>
+</rss>

@@ -1,0 +1,183 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Make Your Own Safety?</title>
+    <link>https://rebol.metaeducation.com/t/make-your-own-safety/1118</link>
+    <description>At times it seems like Rebol can&#39;t decide if it&#39;s an extremely high-level language, or some kind of assembly language.  It&#39;s subject to interpretation *(pun possibly intended)*.
+
+Certain unchecked assumptions seem like disasters ready to happen.  For instance, if GET of a TUPLE! allows evaluation:
+
+    &gt;&gt; o: make object! [x: 10 y: 20]
+
+    &gt;&gt; value: $o.(print &quot;Boo!&quot;, either condition &#39;x &#39;y, elide condition: false)
+    &gt;&gt; condition: true
+
+    &gt;&gt; get value
+    Boo!
+    == 10
+
+    &gt;&gt; get value
+    Boo!
+    == 20
+
+The word GET does not really seem like it would have side-effects.  You may not think to check that value is a TUPLE!.  You may expect two GETs in a row to return the same thing.  Etc. etc.
+
+But if you put code as a TUPLE! in source, it wouldn&#39;t seem so uncomfortable:
+
+    &gt;&gt; o.(print &quot;Boo!&quot; &#39;x)
+    Boo!  ; Well, I told it to say that at this exact callsite, must have meant it...
+    == 10  
+
+Ren-C has tried to straddle the line, by allowing it in the TUPLE! and SET-TUPLE!, but not in the GET and SET native operations.  But this starts creating a drift to where GET of a TUPLE! is not the same as a TUPLE!.  That gets tangled up pretty fast...refinements here don&#39;t line up with choices there, it feels asymmetrical and unkempt.
+
+Is it worth the tangle?  Isn&#39;t everyone just one step away from assuming that **do compose [(value): ...]** will work the same as if you said SET VALUE?  Is there really such a difference between the &quot;English&quot; **get $foo** and **foo** in the first place?
+
+## Rebol is for customization, should people build their own safety?
+
+One hates to pass the buck and say *&quot;well, the user can do it&quot;*.  But if you&#39;re making a system that&#39;s small enough to [Put The Personal Back Into Personal Computing](https://rebol.metaeducation.com/t/back-to-personal-computing/186), maybe you don&#39;t want to second guess things like what everyone would want from SET.  You might guess wrong.
+
+Ren-C&#39;s pursuit is Power to the People to address the pain points that specifically peeve *them*.  They don&#39;t have to wait for any language implementer to do it.  e.g.
+
+    set: adapt set/ [
+        if any-sequence? target [
+            for-each &#39;x target [if group? x [fail &quot;GROUP! in ANY-PATH!&quot;]]
+        ]
+        ; fall through to normal SET behavior
+    ]
+
+The SET as used by the mezzanine will keep on working.  The goal is that this definition applies in whatever place you were doing your work.
+
+They didn&#39;t have to redefine the function interface, or rewrite the HELP unless they want to.  This is the essence of what we&#39;re going for.  And there are ways to make it more efficient, you can implement that check as native code against the internal API if you wanted.
+
+So is the main value consistent behavior between XXX and GET $XXX?  Then have a GET:HARD which doesn&#39;t evaluate groups and uses them as data (e.g. **`set:hard $my-map.(1 + 2) &lt;sum&gt;`** would actually consider the GROUP! `(1 + 2)` to be the key.  There are other reasons this ability is important besides maps, like avoiding double-evaluations in constructs like DEFAULT that have to both GET a left hand path and SET it, and don&#39;t want to run0 groups twice.)
+
+## So in the end, what should SET do on PATH!s with GROUP!s?
+
+I actually was going to go ahead and bias it so that SET goes ahead and runs GROUP!s in the path.  Looking at the reality of the code is giving me some cold feet.  As is often the case, the process of trying to reverse a change that was put in for a reason is a reminder of the motivations.
+
+I&#39;m going to keep thinking about it.  But still, the point I raise here is a valid one.  There may be a general principle that we be very selective about where we make our safety pushes--being mindful of the question of *how difficult it would be for a user to customize the feature for themselves*.  The harder it would be, the more attention that issue should get.</description>
+    
+    <lastBuildDate>Wed, 15 Jan 2025 20:09:13 +0000</lastBuildDate>
+    <category>Philosophy</category>
+    <atom:link href="https://rebol.metaeducation.com/t/make-your-own-safety/1118.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Make Your Own Safety?</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>It's been a while since I've talked about the pain-point of GROUP! evaluations being done automatically by GET:</p>
+<aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="1118">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<pre><code>&gt;&gt; get value
+Boo!
+== 10
+
+&gt;&gt; get value
+Boo!
+== 20
+</code></pre>
+</blockquote>
+</aside>
+<p>To try and make situations like this be more intentional, I'd been saying you'd get an error with normal GET, and would have to use GET:GROUPS.  So this would play out like:</p>
+<pre><code>&gt;&gt; get value
+** Error: use GET:GROUPS to allow evaluations in sequences
+
+&gt;&gt; get:groups value
+Boo!
+== 10
+
+&gt;&gt; get:groups value
+Boo!
+== 20
+</code></pre>
+<p>I thought I was happy with that.  But there are epicycles of the problem.</p>
+<p>For instance: UNSET? was implemented as a usermode function:</p>
+<pre><code>unset?: func [
+    "Determine if a variable looks up to a `~` antiform"
+    return: [logic?]
+    var [word! path! tuple!]
+][
+    return nothing? get:any var
+]
+</code></pre>
+<p>And then, I had some reasonable-looking code like this:</p>
+<pre><code>for-each 'key f [
+    if unset? $f.(key) [
+        f.(key): value
+        break
+    ]
+]
+</code></pre>
+<p>I'm considering resurrecting the non-GROUP! evaluative way of saying this, as <strong><code>$f.@key</code></strong> although that's perhaps uglier than the historical <strong><code>'f.:key</code></strong> (beauty is in the eye of the beholder, I guess...)</p>
+<p>But does this mean you should have to say UNSET?:GROUPS... e.g. any operation that builds on top of GET-ting needs to expose the :GROUPS switch?  <img src="https://rebol.metaeducation.com/images/emoji/twitter/pouting_cat.png?v=14" title=":pouting_cat:" class="emoji" alt=":pouting_cat:" loading="lazy" width="20" height="20"></p>
+<p>It's easier to do this if UNSET? itself was implemented differently:</p>
+<pre><code> unset?: cascade [get:any/ nothing?/]
+</code></pre>
+<p>More briefly:</p>
+<pre><code> unset?: nothing?/get:any/
+</code></pre>
+<p>This would automatically expose the :GROUPS switch.</p>
+<h2><a name="p-8013-groups-has-generally-been-an-improvement-1" class="anchor" href="https://rebol.metaeducation.com#p-8013-groups-has-generally-been-an-improvement-1"></a>:GROUPS Has Generally Been An Improvement...</h2>
+<p>While this shows an awkward situation, I do feel that by and large the :GROUPS switch has been an improvement in terms of helping keep things under control.</p>
+<p>It's also now tougher to implement yourself than it was.  When there was only PATH! you could look for the groups, but now you've got the potential of a TUPLE! inside a CHAIN! inside a PATH!...so it would be a deep walk to vet a generic target of GET for evaluations.</p>
+          <p><a href="https://rebol.metaeducation.com/t/make-your-own-safety/1118/4">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/make-your-own-safety/1118/4</link>
+        <pubDate>Wed, 15 Jan 2025 20:09:13 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1118-4</guid>
+        <source url="https://rebol.metaeducation.com/t/make-your-own-safety/1118.rss">Make Your Own Safety?</source>
+      </item>
+      <item>
+        <title>Make Your Own Safety?</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>At times it seems like Rebol can't decide if it's an extremely high-level language, or some kind of assembly language.  It's subject to interpretation <em>(pun possibly intended)</em>.</p>
+<p>Certain unchecked assumptions seem like disasters ready to happen.  For instance, if GET of a TUPLE! allows evaluation:</p>
+<pre><code>&gt;&gt; o: make object! [x: 10 y: 20]
+
+&gt;&gt; value: $o.(print "Boo!", either condition 'x 'y, elide condition: false)
+&gt;&gt; condition: true
+
+&gt;&gt; get value
+Boo!
+== 10
+
+&gt;&gt; get value
+Boo!
+== 20
+</code></pre>
+<p>The word GET does not really seem like it would have side-effects.  You may not think to check that value is a TUPLE!.  You may expect two GETs in a row to return the same thing.  Etc. etc.</p>
+<p>But if you put code as a TUPLE! in source, it wouldn't seem so uncomfortable:</p>
+<pre><code>&gt;&gt; o.(print "Boo!" 'x)
+Boo!  ; Well, I told it to say that at this exact callsite, must have meant it...
+== 10  
+</code></pre>
+<p>Ren-C has tried to straddle the line, by allowing it in the TUPLE! and SET-TUPLE!, but not in the GET and SET native operations.  But this starts creating a drift to where GET of a TUPLE! is not the same as a TUPLE!.  That gets tangled up pretty fast...refinements here don't line up with choices there, it feels asymmetrical and unkempt.</p>
+<p>Is it worth the tangle?  Isn't everyone just one step away from assuming that <strong>do compose [(value): ...]</strong> will work the same as if you said SET VALUE?  Is there really such a difference between the "English" <strong>get $foo</strong> and <strong>foo</strong> in the first place?</p>
+<h2><a name="p-3156-rebol-is-for-customization-should-people-build-their-own-safety-1" class="anchor" href="https://rebol.metaeducation.com#p-3156-rebol-is-for-customization-should-people-build-their-own-safety-1"></a>Rebol is for customization, should people build their own safety?</h2>
+<p>One hates to pass the buck and say <em>"well, the user can do it"</em>.  But if you're making a system that's small enough to <a href="https://rebol.metaeducation.com/t/back-to-personal-computing/186">Put The Personal Back Into Personal Computing</a>, maybe you don't want to second guess things like what everyone would want from SET.  You might guess wrong.</p>
+<p>Ren-C's pursuit is Power to the People to address the pain points that specifically peeve <em>them</em>.  They don't have to wait for any language implementer to do it.  e.g.</p>
+<pre><code>set: adapt set/ [
+    if any-sequence? target [
+        for-each 'x target [if group? x [fail "GROUP! in ANY-PATH!"]]
+    ]
+    ; fall through to normal SET behavior
+]
+</code></pre>
+<p>The SET as used by the mezzanine will keep on working.  The goal is that this definition applies in whatever place you were doing your work.</p>
+<p>They didn't have to redefine the function interface, or rewrite the HELP unless they want to.  This is the essence of what we're going for.  And there are ways to make it more efficient, you can implement that check as native code against the internal API if you wanted.</p>
+<p>So is the main value consistent behavior between XXX and GET $XXX?  Then have a GET:HARD which doesn't evaluate groups and uses them as data (e.g. <strong><code>set:hard $my-map.(1 + 2) &lt;sum&gt;</code></strong> would actually consider the GROUP! <code>(1 + 2)</code> to be the key.  There are other reasons this ability is important besides maps, like avoiding double-evaluations in constructs like DEFAULT that have to both GET a left hand path and SET it, and don't want to run0 groups twice.)</p>
+<h2><a name="p-3156-so-in-the-end-what-should-set-do-on-paths-with-groups-2" class="anchor" href="https://rebol.metaeducation.com#p-3156-so-in-the-end-what-should-set-do-on-paths-with-groups-2"></a>So in the end, what should SET do on PATH!s with GROUP!s?</h2>
+<p>I actually was going to go ahead and bias it so that SET goes ahead and runs GROUP!s in the path.  Looking at the reality of the code is giving me some cold feet.  As is often the case, the process of trying to reverse a change that was put in for a reason is a reminder of the motivations.</p>
+<p>I'm going to keep thinking about it.  But still, the point I raise here is a valid one.  There may be a general principle that we be very selective about where we make our safety pushes--being mindful of the question of <em>how difficult it would be for a user to customize the feature for themselves</em>.  The harder it would be, the more attention that issue should get.</p>
+          <p><a href="https://rebol.metaeducation.com/t/make-your-own-safety/1118/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/make-your-own-safety/1118/1</link>
+        <pubDate>Sat, 16 Mar 2019 16:34:01 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1118-1</guid>
+        <source url="https://rebol.metaeducation.com/t/make-your-own-safety/1118.rss">Make Your Own Safety?</source>
+      </item>
+  </channel>
+</rss>

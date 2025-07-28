@@ -1,0 +1,252 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Can VOID, GHOST!, ACTION! Be More Decay-Friendly?</title>
+    <link>https://rebol.metaeducation.com/t/can-void-ghost-action-be-more-decay-friendly/2515</link>
+    <description>I wrote about a [small but important tweak to the behavior of multi-returns](https://rebol.metaeducation.com/t/re-imagining-do-next-as-eval-step/767/3?u=hostilefork), which allowed changing:
+
+    [pos :result]: eval:step pos
+
+Into just:
+
+    [pos result]: eval:step pos
+
+I mention that I believe that that multi-returns with too few values unsetting the variables (vs. panic&#39;ing in the moment) was better in the long run.  e.g. if EVAL:STEP returns just NULL and not a PACK!, then setting POS to NULL and **unsetting** RESULT was an overall win.
+
+*(Absorbing this requires understanding what modern &quot;unsetness&quot; is...variables truly holding no value, not even TRASH!, and what the implications of this so-called &quot;dual state&quot; are.)*
+
+I also mention that in practice, it would often be necessary for the result variable to be ^META.  Because if it&#39;s not, any non-decayable values would panic.  This wouldn&#39;t just happen for ERROR! antiforms (which there&#39;s a reasonable probability you&#39;d want to just panic anyway).  It would also happen for GHOST!
+
+    ; this would panic -&gt; can&#39;t decay GHOST! to ordinary result, need ^result
+    [pos result]: eval:step [comment &quot;hi&quot; ...]
+
+I&#39;ll point out that there&#39;s rules about ACTION!s as well, which are that you can&#39;t assign actions to plain variables unless they are deemed &quot;unsurprising&quot; (kind of a dicey concept, still being hammered out)
+
+    ; this would panic -&gt; can&#39;t assign ACTION! to plain WORD!, need ^result
+    [pos result]: eval:step [if okay [lambda [x] [x]] ...]  ; &quot;surprising&quot; action
+
+We know the new rules for decay of VOID, which is to unset the variable, but what are the implications of that here?
+
+    [pos result]: eval:step [foo: void ...]
+
+That will unset `foo`, [because that&#39;s now legitimate](https://rebol.metaeducation.com/t/should-void-assigns-mean-fully-remove-a-key/2431).
+
+But we&#39;re in a bit of an unfortunate position, because if we allow this decay it undermines one of my ideas *a little*... of saying that the unset state isn&#39;t an evaluative result.  (It&#39;s still true, in the sense that using `^result` would expose that the real evaluative state was void...but it feels like a shaky conflation.)
+
+## Question On The Table: Can This Be Easier/Better?
+
+Lots to tackle here, but...
+
+I&#39;ll start by mentioning an old trick, which was to say that by default EVAL would by default keep stepping to not show you the GHOST!s.
+
+    &gt;&gt; [pos result]: eval:step [comment &quot;hello&quot; elide print &quot;world&quot; 10 + 20 ...]
+    world
+    == \~[&#39;[...] &#39;30]~\  ; antiform
+
+In that one step, it zoomed you past the GHOST!-producing steps and took you right to the first real result (if any).
+
+That may seem convenient, but it means you need a refinement like :GHOSTABLE to ask to see the invisibles.  I&#39;m kind of annoyed by it.
+
+Another thought would be to give back something &quot;innocuous&quot; as a proxy for invisibility, under the assumption that the default would be not to care:
+
+    &gt;&gt; [pos result]: eval:step [comment &quot;hello&quot; elide print &quot;world&quot; 10 + 20 ...]
+    == \~[&#39;[elide print &quot;world&quot; 10 + 20 ...] ~#ghost~]~\  ; antiform
+
+There you&#39;re getting back a TRASH! that&#39;s a stable antiform, and it&#39;s labeled &quot;#ghost&quot; which cues you to knowing it was a ghost (though it&#39;s a conflation, as it could have been a trash that said ghost).  That may be interesting to you for your purposes or it may not--maybe you don&#39;t have any particular difference in treatment in your particular evaluator client for things that return ghosts vs. a random thing that produced TRASH!.
+
+So my concept here is: if you were already writing handling for TRASH!, maybe whatever you&#39;re doing for trash works well enough for ghosts too.
+
+If we were to lean in this direction, I think it would support the idea that TRASH! is treated like no vote in things like ANY and ALL.  ([Right now it&#39;s truthy](https://rebol.metaeducation.com/t/the-truthiness-of-trash/2180/5?u=hostilefork), but the idea of being no vote is in the same ballpark and has been considered.)
+
+And it might provide an escape hatch for the not-so-nice void problem as well:
+
+    &gt;&gt; [pos result]: eval:step [foo: void ...]
+    == \~[&#39;[...] ~#void~]~\  ; antiform
+
+**This would be SET-BLOCK saying that when it unpacks VOID and GHOST! into variables that are non-^META, it doesn&#39;t go through &quot;standard decay&quot;... because it doesn&#39;t want to conflate no pack item with pack item that&#39;s void or ghost.**
+
+If we then made things like ANY and ALL treat TRASH! the same as voids/ghosts and just ignore it, then you can see a somewhat coherent plan taking shape, allowing you to get meaningful work done without having to invoke the ^META convention.  *&quot;It&#39;s all trash to me&quot;*, unless you have a reason to discern it.
+
+## But, What About ACTION!s...?
+
+This question about &quot;how much lying is acceptable&quot; gets us into the weeds a bit here with ACTION!.
+
+I&#39;m trying to narrow down the cases where plain word assignments are allowed to put ACTION!s into words, because of the significant burden that it creates to not know whether variables contain actions or not.
+
+Right now, saying you have to use ^META variables is that tool:
+
+    [pos ^result]: eval:step [bar: lambda [x] [x] ...]
+
+All the lying to make trash out of ghosts and voids wouldn&#39;t help a case for generalized eval-stepping if you couldn&#39;t step over that.
+
+What could it do?  Return a TRASH! that says just `~#action~`  ?  Degrade it into a plain FRAME!, instead of an antiform one?
+
+Between those two options, it seems to me producing TRASH! is the better plan.  As with ghost and void, if you find this is in-band of something you truly care about, you could deal with it.
+
+Unfortunately, ACTION!s are truthy.  So we can&#39;t really square that with something that&#39;s trying to blend with TRASH!
+
+## Conclusions (?)
+
+It may just be that if you&#39;re doing EVAL:STEP and you aren&#39;t completely sure what you&#39;re processing, you have to use ^META for the result.
+
+I&#39;m not 100% thrilled with the idea of not being able to distinguish:
+
+    [x y]: pack [1 + 2 void]  ; will unset y
+
+    [x y]: pack [1 + 2]  ; will unset y
+
+And only being able to tell the difference if you write:
+
+    [x ^y]: pack [1 + 2 void]  ; ^y will hold void
+
+    [x ^y]: pack [1 + 2]  ; will unset y
+
+But if it does that, is there any good reason for GHOST! not to do it too, so that at least if you think they both should be handled the same way that you only have to write one set of handling?
+
+    &gt;&gt; x: comment &quot;hi&quot;
+    == \~,~\  ; antiform
+
+    &gt;&gt; unset? $x
+    == \~okay~\  ; antiform
+
+Or is GHOST! &lt;=&gt; TRASH! conflation better?
+
+    &gt;&gt; x: comment &quot;hi&quot;
+    == \~,~\  ; antiform
+
+    &gt;&gt; trash? ^x
+    == \~okay~\  ; antiform
+
+## [*&quot;Calm down people... it was just a little lie...&quot;*](https://www.youtube.com/watch?v=jUEcqo7Rz7c)
+
+**This is tough, because plain ol&#39; panic was comforting.**
+
+But that first lie of saying non-^META assignments of VOID would unset variables led to a generalized principle that PACK!s that are too short to fulfill all their assignments would unset variables.  **Yes it&#39;s a lie, but I&#39;ve thought about this from a lot of angles now, and pretty sure that is the right choice.**
+
+That lie wasn&#39;t made to stop people from having to ^META variables in packs, it was to stop them from having to `:OPTIONALIZE` them... which created a conflation.
+
+With this new rule in place, there&#39;s the issue of whether these must be equivalent in terms of the effect on X:
+
+     x: ...expr...  &lt;=&gt;    [x]: pack [...expr...]
+
+    ^x: ...expr...  &lt;=&gt;   [^x]: pack [...expr...]
+
+*(The appealingness of the ^X case seems like a pretty strong argument for PACK to accept ERROR! by default, [I think I&#39;m realizing that it is misguided to panic on them and the safety problem should be addressed other ways](https://rebol.metaeducation.com/t/packs-decaying-to-first-item-when-others-are-error/2514).)*
+
+If this rule needs to be true (and I think it does) then a VOID in a pack has to do what a void not in a pack would do... so if the variable is not ^META, it needs to unset it.
+
+**Maybe that&#39;s the only lie, and we don&#39;t need to become pathological liars because of it.**
+
+If GHOST! and ACTION! just panic for now when used in non-^META assignments, it just means people processing arbitrary code need to use ^META assignments, and that&#39;s basically futureproof (as much as anything here is).
+
+If experience comes to show that more lies have value, we can  cross that bridge when we come to it.</description>
+    
+    <lastBuildDate>Fri, 25 Jul 2025 15:53:47 +0000</lastBuildDate>
+    <category>Semantics</category>
+    <atom:link href="https://rebol.metaeducation.com/t/can-void-ghost-action-be-more-decay-friendly/2515.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Can VOID, GHOST!, ACTION! Be More Decay-Friendly?</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>I wrote about a <a href="https://rebol.metaeducation.com/t/re-imagining-do-next-as-eval-step/767/3">small but important tweak to the behavior of multi-returns</a>, which allowed changing:</p>
+<pre><code>[pos :result]: eval:step pos
+</code></pre>
+<p>Into just:</p>
+<pre><code>[pos result]: eval:step pos
+</code></pre>
+<p>I mention that I believe that that multi-returns with too few values unsetting the variables (vs. panic'ing in the moment) was better in the long run.  e.g. if EVAL:STEP returns just NULL and not a PACK!, then setting POS to NULL and <strong>unsetting</strong> RESULT was an overall win.</p>
+<p><em>(Absorbing this requires understanding what modern "unsetness" is...variables truly holding no value, not even TRASH!, and what the implications of this so-called "dual state" are.)</em></p>
+<p>I also mention that in practice, it would often be necessary for the result variable to be ^META.  Because if it's not, any non-decayable values would panic.  This wouldn't just happen for ERROR! antiforms (which there's a reasonable probability you'd want to just panic anyway).  It would also happen for GHOST!</p>
+<pre><code>; this would panic -&gt; can't decay GHOST! to ordinary result, need ^result
+[pos result]: eval:step [comment "hi" ...]
+</code></pre>
+<p>I'll point out that there's rules about ACTION!s as well, which are that you can't assign actions to plain variables unless they are deemed "unsurprising" (kind of a dicey concept, still being hammered out)</p>
+<pre><code>; this would panic -&gt; can't assign ACTION! to plain WORD!, need ^result
+[pos result]: eval:step [if okay [lambda [x] [x]] ...]  ; "surprising" action
+</code></pre>
+<p>We know the new rules for decay of VOID, which is to unset the variable, but what are the implications of that here?</p>
+<pre><code>[pos result]: eval:step [foo: void ...]
+</code></pre>
+<p>That will unset <code>foo</code>, <a href="https://rebol.metaeducation.com/t/should-void-assigns-mean-fully-remove-a-key/2431">because that's now legitimate</a>.</p>
+<p>But we're in a bit of an unfortunate position, because if we allow this decay it undermines one of my ideas <em>a little</em>... of saying that the unset state isn't an evaluative result.  (It's still true, in the sense that using <code>^result</code> would expose that the real evaluative state was void...but it feels like a shaky conflation.)</p>
+<h2><a name="p-8555-question-on-the-table-can-this-be-easierbetter-1" class="anchor" href="https://rebol.metaeducation.com#p-8555-question-on-the-table-can-this-be-easierbetter-1"></a>Question On The Table: Can This Be Easier/Better?</h2>
+<p>Lots to tackle here, but...</p>
+<p>I'll start by mentioning an old trick, which was to say that by default EVAL would by default keep stepping to not show you the GHOST!s.</p>
+<pre><code>&gt;&gt; [pos result]: eval:step [comment "hello" elide print "world" 10 + 20 ...]
+world
+== \~['[...] '30]~\  ; antiform
+</code></pre>
+<p>In that one step, it zoomed you past the GHOST!-producing steps and took you right to the first real result (if any).</p>
+<p>That may seem convenient, but it means you need a refinement like :GHOSTABLE to ask to see the invisibles.  I'm kind of annoyed by it.</p>
+<p>Another thought would be to give back something "innocuous" as a proxy for invisibility, under the assumption that the default would be not to care:</p>
+<pre><code>&gt;&gt; [pos result]: eval:step [comment "hello" elide print "world" 10 + 20 ...]
+== \~['[elide print "world" 10 + 20 ...] ~#ghost~]~\  ; antiform
+</code></pre>
+<p>There you're getting back a TRASH! that's a stable antiform, and it's labeled "<span class="hashtag-raw">#ghost</span>" which cues you to knowing it was a ghost (though it's a conflation, as it could have been a trash that said ghost).  That may be interesting to you for your purposes or it may not--maybe you don't have any particular difference in treatment in your particular evaluator client for things that return ghosts vs. a random thing that produced TRASH!.</p>
+<p>So my concept here is: if you were already writing handling for TRASH!, maybe whatever you're doing for trash works well enough for ghosts too.</p>
+<p>If we were to lean in this direction, I think it would support the idea that TRASH! is treated like no vote in things like ANY and ALL.  (<a href="https://rebol.metaeducation.com/t/the-truthiness-of-trash/2180/5">Right now it's truthy</a>, but the idea of being no vote is in the same ballpark and has been considered.)</p>
+<p>And it might provide an escape hatch for the not-so-nice void problem as well:</p>
+<pre><code>&gt;&gt; [pos result]: eval:step [foo: void ...]
+== \~['[...] ~#void~]~\  ; antiform
+</code></pre>
+<p><strong>This would be SET-BLOCK saying that when it unpacks VOID and GHOST! into variables that are non-^META, it doesn't go through "standard decay"... because it doesn't want to conflate no pack item with pack item that's void or ghost.</strong></p>
+<p>If we then made things like ANY and ALL treat TRASH! the same as voids/ghosts and just ignore it, then you can see a somewhat coherent plan taking shape, allowing you to get meaningful work done without having to invoke the ^META convention.  <em>"It's all trash to me"</em>, unless you have a reason to discern it.</p>
+<h2><a name="p-8555-but-what-about-actions-2" class="anchor" href="https://rebol.metaeducation.com#p-8555-but-what-about-actions-2"></a>But, What About ACTION!s...?</h2>
+<p>This question about "how much lying is acceptable" gets us into the weeds a bit here with ACTION!.</p>
+<p>I'm trying to narrow down the cases where plain word assignments are allowed to put ACTION!s into words, because of the significant burden that it creates to not know whether variables contain actions or not.</p>
+<p>Right now, saying you have to use ^META variables is that tool:</p>
+<pre><code>[pos ^result]: eval:step [bar: lambda [x] [x] ...]
+</code></pre>
+<p>All the lying to make trash out of ghosts and voids wouldn't help a case for generalized eval-stepping if you couldn't step over that.</p>
+<p>What could it do?  Return a TRASH! that says just <code>~#action~</code>  ?  Degrade it into a plain FRAME!, instead of an antiform one?</p>
+<p>Between those two options, it seems to me producing TRASH! is the better plan.  As with ghost and void, if you find this is in-band of something you truly care about, you could deal with it.</p>
+<p>Unfortunately, ACTION!s are truthy.  So we can't really square that with something that's trying to blend with TRASH!</p>
+<h2><a name="p-8555-conclusions-3" class="anchor" href="https://rebol.metaeducation.com#p-8555-conclusions-3"></a>Conclusions (?)</h2>
+<p>It may just be that if you're doing EVAL:STEP and you aren't completely sure what you're processing, you have to use ^META for the result.</p>
+<p>I'm not 100% thrilled with the idea of not being able to distinguish:</p>
+<pre><code>[x y]: pack [1 + 2 void]  ; will unset y
+
+[x y]: pack [1 + 2]  ; will unset y
+</code></pre>
+<p>And only being able to tell the difference if you write:</p>
+<pre><code>[x ^y]: pack [1 + 2 void]  ; ^y will hold void
+
+[x ^y]: pack [1 + 2]  ; will unset y
+</code></pre>
+<p>But if it does that, is there any good reason for GHOST! not to do it too, so that at least if you think they both should be handled the same way that you only have to write one set of handling?</p>
+<pre><code>&gt;&gt; x: comment "hi"
+== \~,~\  ; antiform
+
+&gt;&gt; unset? $x
+== \~okay~\  ; antiform
+</code></pre>
+<p>Or is GHOST! &lt;=&gt; TRASH! conflation better?</p>
+<pre><code>&gt;&gt; x: comment "hi"
+== \~,~\  ; antiform
+
+&gt;&gt; trash? ^x
+== \~okay~\  ; antiform
+</code></pre>
+<h2><a name="p-8555-calm-down-people-it-was-just-a-little-liehttpswwwyoutubecomwatchvjuecqo7rz7c-4" class="anchor" href="https://rebol.metaeducation.com#p-8555-calm-down-people-it-was-just-a-little-liehttpswwwyoutubecomwatchvjuecqo7rz7c-4"></a><a href="https://www.youtube.com/watch?v=jUEcqo7Rz7c"><em>"Calm down people... it was just a little lie..."</em></a></h2>
+<p><strong>This is tough, because plain ol' panic was comforting.</strong></p>
+<p>But that first lie of saying non-^META assignments of VOID would unset variables led to a generalized principle that PACK!s that are too short to fulfill all their assignments would unset variables.  <strong>Yes it's a lie, but I've thought about this from a lot of angles now, and pretty sure that is the right choice.</strong></p>
+<p>That lie wasn't made to stop people from having to ^META variables in packs, it was to stop them from having to <code>:OPTIONALIZE</code> them... which created a conflation.</p>
+<p>With this new rule in place, there's the issue of whether these must be equivalent in terms of the effect on X:</p>
+<pre><code> x: ...expr...  &lt;=&gt;    [x]: pack [...expr...]
+
+^x: ...expr...  &lt;=&gt;   [^x]: pack [...expr...]
+</code></pre>
+<p><em>(The appealingness of the ^X case seems like a pretty strong argument for PACK to accept ERROR! by default, <a href="https://rebol.metaeducation.com/t/packs-decaying-to-first-item-when-others-are-error/2514">I think I'm realizing that it is misguided to panic on them and the safety problem should be addressed other ways</a>.)</em></p>
+<p>If this rule needs to be true (and I think it does) then a VOID in a pack has to do what a void not in a pack would do... so if the variable is not ^META, it needs to unset it.</p>
+<p><strong>Maybe that's the only lie, and we don't need to become pathological liars because of it.</strong></p>
+<p>If GHOST! and ACTION! just panic for now when used in non-^META assignments, it just means people processing arbitrary code need to use ^META assignments, and that's basically futureproof (as much as anything here is).</p>
+<p>If experience comes to show that more lies have value, we can  cross that bridge when we come to it.</p>
+          <p><a href="https://rebol.metaeducation.com/t/can-void-ghost-action-be-more-decay-friendly/2515/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/can-void-ghost-action-be-more-decay-friendly/2515/1</link>
+        <pubDate>Fri, 25 Jul 2025 15:53:47 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2515-1</guid>
+        <source url="https://rebol.metaeducation.com/t/can-void-ghost-action-be-more-decay-friendly/2515.rss">Can VOID, GHOST!, ACTION! Be More Decay-Friendly?</source>
+      </item>
+  </channel>
+</rss>

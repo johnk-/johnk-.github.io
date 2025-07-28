@@ -1,0 +1,301 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Parsing Giant Streams Without Consuming Tons of Memory: How?</title>
+    <link>https://rebol.metaeducation.com/t/parsing-giant-streams-without-consuming-tons-of-memory-how/1698</link>
+    <description>I&#39;ve mentioned that before I go through optimizing UPARSE I wanted to make it good at one thing that&#39;s been a bit of a pet wish of mine...
+
+...and that&#39;s to be able to PARSE a giant file or network stream without needing to read it all into memory at once.
+
+There are two levels of goal here:
+
+1. **Big Crazy Goal:** To have something like a long network stream of data *(that you can&#39;t seek backwards in)* and be able to have records in it parsed discretely one at a time.  Even if the stream is 100GB in size, you&#39;d only use a fixed amount of memory to do your processing.
+
+2. **More Modest Goal:** To let the PARSE be woven in with the read process, so it can start processing and reacting without waiting for all the data to be read...even if it ultimately isn&#39;t able to avoid reading the whole stream of data into a buffer.
+
+Getting 2 to work is the easier of these.  -But- let me be clear that given the lack of existence of &quot;streams&quot; in historical Rebol, it by no means *easy*!
+
+1 is the more tricky and interesting one to my tastes, so I&#39;ll start by talking about that.
+
+## If Combinators Inform Us, Then (1) *Seems* Tractable :tractor: 
+
+Let&#39;s say we&#39;re trying to parse lines with just the letters A and B, and count them as we go:
+
+    p: open %giant-file.txt
+
+    count: 0
+
+    parse p [
+       some [some [&quot;A&quot; | &quot;B&quot;] newline (count: count + 1)]
+    ]
+    then [
+        print [&quot;Your giant file had&quot; count &quot;lines of ABs&quot;]
+    else [
+        print [&quot;Giant file wasn&#39;t just lines of ABs&quot;]
+    ]
+
+Our intuition tells us that we can can do this one line at a time, throwing it out as you go.  But how might PARSE know that?
+
+It builds a SOME combinator and can see that&#39;s the last thing in the rule block.  Assuming the user doesn&#39;t capture any positions with **`&lt;here&gt;`** or do any **`SEEK`**, there is no way that the SOME will ever backtrack from the point where it started.  Each iteration can throw out the ability to backtrack.
+
+*But right now SOME is a black box;* doing whatever it wants until it finally returns a result.  From PARSE&#39;s perspective there&#39;s nothing from the outside that differentiates it from something called SOME-HALF that will repeat a rule some number of times, and then jump back in time to the halfway point of the match:
+
+    &gt;&gt; parse &quot;abababab&quot; [some-half &quot;ab&quot;, return &lt;here&gt;]
+    == &quot;abab&quot;
+
+    &gt;&gt; parse &quot;abababababab&quot; [some-half &quot;ab&quot;, return &lt;here&gt;]
+    == &quot;ababab&quot;
+
+Without some additional information, the system doesn&#39;t know that SOME won&#39;t make a decision like SOME-HALF would.  It has to let it run until it is finished.
+
+## How Can Combinators Tell PARSE About Backtrack Needs?
+
+One way of looking at this is that the combinator itself becomes responsible for storing any memory that it requires for backtracking.
+
+That is to say that it pulls information out of the stream...and if it wants to backtrack it pushes it back in.
+
+    &gt;&gt; parse &quot;aaab&quot; [some [&quot;a&quot;] &quot;b&quot;]    
+
+* SOME combinator grabs an &quot;a&quot; from stream, matches the &quot;a&quot;
+* SOME combinator grabs an &quot;a&quot; from stream, matches the &quot;a&quot;
+* SOME combinator grabs an &quot;a&quot; from stream, matches the &quot;a&quot;
+* SOME combinator grabs a &quot;b&quot; from stream, doesn&#39;t like it, pushes it back and ends
+* TEXT! combinator grabs a &quot;b&quot; from the stream, matches the &quot;b&quot;
+
+If the SOME becomes responsible for pushing back any input it doesn&#39;t like, then the stream can just discard everything as it goes (in cases where it doesn&#39;t see any potential for some rule down the line to request backtrack).  This means offering some kind of &quot;push back into stream&quot; operator that combinators can use if they need to back out.
+
+**This concept of putting back the character is actually how many things like this work.**
+
+* In C++ iostreams there is [istream::putback() and istream::unget()](https://stackoverflow.com/questions/6769416/difference-between-putback-and-unget) 
+
+* In Haskell&#39;s Data.Stream, there is [unRead](https://hackage.haskell.org/package/io-streams-1.5.2.1/docs/System-IO-Streams.html#v:unRead)
+
+In C++, unget() requires you give what you read in.  By doing so, then if the data is no longer in a buffer and you&#39;re reading from a file...it doesn&#39;t need to do anything but push its file offset backwards.  Haskell&#39;s unRead and C++ putback() let you push back something different than what you read...and considers that a feature *(we&#39;ll assume it does a similar optimization to unget() if you were reading from a file and it noticed what you pushed back was the same as the data in the buffer?)*
+
+## &quot;Going Unit-By-Unit Sounds Laborious, and *Slow*...?&quot;
+
+It may seem laborious on the surface, but as far as I can tell this is the way streams work.
+
+I was just working on an implementation of READ-LINE for standard input.  And all the prescribed methods of reading one line at a time from a file in C would go one character at a time.  That sounds like a lot of I/O requests, but the thing is that basically all I/O systems have buffering in them...if you ask to read a character from a file, it isn&#39;t going to your hard drive or making a network request for that one character.  It buffers it--and if you try to buffer it yourself you&#39;re likely just going to be adding complexity/code/memory and making things worse.
+
+**Unfortunately [libuv() streams](http://docs.libuv.org/en/v1.x/stream.html) don&#39;t have any putback() or ungetc() ability.**  There&#39;s no going back in time with them.  :-/
+
+And as it turns out Boost.ASIO doesn&#39;t have it either.  (Which surprises me.)
+
+This means if we were building combinators on top of an ungetc()-type logic...and want to go back in time to read a file and not have it fully in memory...we&#39;d have to be using the raw file API if we wanted to keep sync&#39;d to the data that&#39;s already on disk and be able to use it instead of keeping the full buffer contents.
+
+That&#39;s a bit depressing.  But if there&#39;s any good news, it&#39;s that Rebol datatypes are optimized specifically for &quot;unget&quot;.  If the buffers are BLOCK!s or BINARY!s or TEXT!s then when you &quot;NEXT&quot; them the data is still there, and you just BACK it to do an ungetc.
+
+Plus, we&#39;d have to have our own layer for managing this if we were going to seek back in time using **[HTTP Range Requests](https://developer.mozilla.org/en-US/docs/Web/HTTP/Range_requests)** on networks.
+
+I guess I&#39;ll just experiment and see what I can work out.  :-/</description>
+    
+    <lastBuildDate>Sun, 15 Jun 2025 01:48:06 +0000</lastBuildDate>
+    <category>Parsing</category>
+    <atom:link href="https://rebol.metaeducation.com/t/parsing-giant-streams-without-consuming-tons-of-memory-how/1698.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Parsing Giant Streams Without Consuming Tons of Memory: How?</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="bradrn" data-post="4" data-topic="1698">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/bradrn/48/365_2.png" class="avatar"> bradrn:</div>
+<blockquote>
+<p>I suggest having a look at <code>attoparsec</code>.</p>
+</blockquote>
+</aside>
+<p>Thanks!  I've seen it, there's some complexity:</p>
+<p><a href="https://ae1020.github.io/incremental-streaming-haskell-parse/" class="inline-onebox">Parsing Huge Simulated Streams In Attoparsec | AE1020: Lazy Notebook</a></p>
+<p>To get some forward motion and be able to start working on performance, I think I've made peace with the idea that it's better to build UPARSE coherently on top of the basic natives like FIND etc. and vet them on plain old series... making sure those primitives are rock solid.</p>
+<p>As I've previously mentioned:</p>
+<aside class="quote no-group" data-username="hostilefork" data-post="4" data-topic="1914">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"><a href="https://rebol.metaeducation.com/t/calling-combinators-decoders-as-normal-functions/1914/4">Calling Combinators (Decoders?) as Normal Functions</a></div>
+<blockquote>
+<p>I will point out that UPARSE builds on basics in ways that e.g. Red PARSE does not. Consider:</p>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">red&gt;&gt; find "abcd" ""
+== none
+
+red&gt;&gt; parse "abcd" ["" "abcd"]
+== true
+</code></pre>
+<p>Is there a <strong><code>""</code></strong> at the beginning of <strong><code>"abcd"</code></strong> or is there not? They have different answers because they don't run through a common code path.</p>
+<p>UPARSE actually builds on FIND, and for this reason has a consistent answer:</p>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">&gt;&gt; find "abcd" ""
+; first in pack of length 2
+== "abcd"
+
+&gt;&gt; parse "abcd" ["" "abcd"]
+== "abcd"
+</code></pre>
+</blockquote>
+</aside>
+          <p><a href="https://rebol.metaeducation.com/t/parsing-giant-streams-without-consuming-tons-of-memory-how/1698/5">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/parsing-giant-streams-without-consuming-tons-of-memory-how/1698/5</link>
+        <pubDate>Sun, 15 Jun 2025 01:48:06 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1698-5</guid>
+        <source url="https://rebol.metaeducation.com/t/parsing-giant-streams-without-consuming-tons-of-memory-how/1698.rss">Parsing Giant Streams Without Consuming Tons of Memory: How?</source>
+      </item>
+      <item>
+        <title>Parsing Giant Streams Without Consuming Tons of Memory: How?</title>
+        <dc:creator><![CDATA[bradrn]]></dc:creator>
+        <description><![CDATA[
+            <p>If you want to see a practical implementation of streaming parser combinators, I suggest having a look at <a><code>attoparsec</code></a>.</p>
+          <p><a href="https://rebol.metaeducation.com/t/parsing-giant-streams-without-consuming-tons-of-memory-how/1698/4">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/parsing-giant-streams-without-consuming-tons-of-memory-how/1698/4</link>
+        <pubDate>Sat, 14 Jun 2025 05:05:48 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1698-4</guid>
+        <source url="https://rebol.metaeducation.com/t/parsing-giant-streams-without-consuming-tons-of-memory-how/1698.rss">Parsing Giant Streams Without Consuming Tons of Memory: How?</source>
+      </item>
+      <item>
+        <title>Parsing Giant Streams Without Consuming Tons of Memory: How?</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="1698">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>I've mentioned that before I go through optimizing UPARSE I wanted to make it good at one thing that's been a bit of a pet wish of mine...</p>
+<p>...and that's to be able to PARSE a giant file or network stream without needing to read it all into memory at once.</p>
+</blockquote>
+</aside>
+<p>So I guess I'm ready to accept that the "minimum viable product" of UPARSE doesn't have this capability, and that it's something that other parse implementations can tackle in the future.</p>
+<aside class="quote no-group" data-username="hostilefork" data-post="2" data-topic="1698">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>All this may sound too tricky to be worth it, but this is a topic that interests me...and I have to stay interested, right? <img src="https://rebol.metaeducation.com/images/emoji/twitter/slight_smile.png?v=14" title=":slight_smile:" class="emoji" alt=":slight_smile:" loading="lazy" width="20" height="20"></p>
+</blockquote>
+</aside>
+<p>I've managed to find enough other things to be interesting, and I think UPARSE has enough of a "wow" factor as it is to inspire someone (or some AI) to take a crack at a streaming version.</p>
+<p>It's also likely that the current PARSE3 implementation will stick around and evolve into a less-featured-but-fast subset of the default combinators in UPARSE.</p>
+<p>Having different parsing implementations for different needs isn't a bad thing.  And I think it's time to get to work on nativizing UPARSE so it's not unusably slow.  So it's time to more-or-less freeze the spec.</p>
+          <p><a href="https://rebol.metaeducation.com/t/parsing-giant-streams-without-consuming-tons-of-memory-how/1698/3">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/parsing-giant-streams-without-consuming-tons-of-memory-how/1698/3</link>
+        <pubDate>Fri, 13 Jun 2025 10:07:50 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1698-3</guid>
+        <source url="https://rebol.metaeducation.com/t/parsing-giant-streams-without-consuming-tons-of-memory-how/1698.rss">Parsing Giant Streams Without Consuming Tons of Memory: How?</source>
+      </item>
+      <item>
+        <title>Parsing Giant Streams Without Consuming Tons of Memory: How?</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <h2><a name="p-5456-an-additional-note-on-the-practicality-of-discarding-input-1" class="anchor" href="https://rebol.metaeducation.com#p-5456-an-additional-note-on-the-practicality-of-discarding-input-1"></a>An Additional Note On the Practicality Of Discarding Input</h2>
+<p>I painted a picture above of how SOME could become more participatory in helping PARSE avoid being responsible for keeping around all the past input in a parse stream for all time.</p>
+<p>The rule I was examining looked like this:</p>
+<pre><code>parse p [
+    some [some ["A" | "B"] newline (count: count + 1)]
+]
+</code></pre>
+<p>What if your rule was instead:</p>
+<pre><code>parse p [
+    some [
+        some ["A" | "B"] newline
+        (count: count + 1)
+    ]
+    |
+    some-other-rule
+]
+</code></pre>
+<p>The SOME may know it's never going back after a match it makes, for each line.  And it may effectively communicate that through its input consumption (with the promise it will be responsible for giving back any input it decides it does not like).</p>
+<p>But since there's an alternate rule coming up, the PARSE can't use that knowledge to let the information go that the SOME claims to be done with (or responsible for giving back).  Because the "some other rule" could run if the SOME ultimately doesn't match...requiring backtrack all the way to the beginning state before the SOME.</p>
+<p>This points out that <strong>|</strong> in a BLOCK! rule is basically a SEEK operation.  It's a <em>"seek the position before the last alternate grouping"</em> rule.  If the block rule is at a position and wants to know if it can throw out data it's streamed before the current point, it only needs to look forward and see if there are any | in the block ahead of it, and if so... it can't throw out the data.</p>
+<p>But coming to the rescue is <strong>||</strong>...which I have called the <strong><a href="https://rebol.metaeducation.com/t/as-an-inline-sequencing-operator-for-uparse/1594">inline sequencing operator</a></strong>.  If the BLOCK! combinator looks ahead and sees one of those, then it knows any <strong>|</strong> after it aren't relevant to whether it can throw out the past.  The current rule will have to complete on the input it is given or things will fail.</p>
+<p>All this may sound too tricky to be worth it, but this is a topic that interests me...and I have to stay interested, right?  <img src="https://rebol.metaeducation.com/images/emoji/twitter/slight_smile.png?v=14" title=":slight_smile:" class="emoji" alt=":slight_smile:" loading="lazy" width="20" height="20"></p>
+          <p><a href="https://rebol.metaeducation.com/t/parsing-giant-streams-without-consuming-tons-of-memory-how/1698/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/parsing-giant-streams-without-consuming-tons-of-memory-how/1698/2</link>
+        <pubDate>Thu, 02 Sep 2021 05:37:23 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1698-2</guid>
+        <source url="https://rebol.metaeducation.com/t/parsing-giant-streams-without-consuming-tons-of-memory-how/1698.rss">Parsing Giant Streams Without Consuming Tons of Memory: How?</source>
+      </item>
+      <item>
+        <title>Parsing Giant Streams Without Consuming Tons of Memory: How?</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>I've mentioned that before I go through optimizing UPARSE I wanted to make it good at one thing that's been a bit of a pet wish of mine...</p>
+<p>...and that's to be able to PARSE a giant file or network stream without needing to read it all into memory at once.</p>
+<p>There are two levels of goal here:</p>
+<ol>
+<li>
+<p><strong>Big Crazy Goal:</strong> To have something like a long network stream of data <em>(that you can't seek backwards in)</em> and be able to have records in it parsed discretely one at a time.  Even if the stream is 100GB in size, you'd only use a fixed amount of memory to do your processing.</p>
+</li>
+<li>
+<p><strong>More Modest Goal:</strong> To let the PARSE be woven in with the read process, so it can start processing and reacting without waiting for all the data to be read...even if it ultimately isn't able to avoid reading the whole stream of data into a buffer.</p>
+</li>
+</ol>
+<p>Getting 2 to work is the easier of these.  -But- let me be clear that given the lack of existence of "streams" in historical Rebol, it by no means <em>easy</em>!</p>
+<p>1 is the more tricky and interesting one to my tastes, so I'll start by talking about that.</p>
+<h2><a name="p-5455-if-combinators-inform-us-then-1-seems-tractable-tractor-1" class="anchor" href="https://rebol.metaeducation.com#p-5455-if-combinators-inform-us-then-1-seems-tractable-tractor-1"></a>If Combinators Inform Us, Then (1) <em>Seems</em> Tractable <img src="https://rebol.metaeducation.com/images/emoji/twitter/tractor.png?v=14" title=":tractor:" class="emoji" alt=":tractor:" loading="lazy" width="20" height="20"></h2>
+<p>Let's say we're trying to parse lines with just the letters A and B, and count them as we go:</p>
+<pre><code>p: open %giant-file.txt
+
+count: 0
+
+parse p [
+   some [some ["A" | "B"] newline (count: count + 1)]
+]
+then [
+    print ["Your giant file had" count "lines of ABs"]
+else [
+    print ["Giant file wasn't just lines of ABs"]
+]
+</code></pre>
+<p>Our intuition tells us that we can can do this one line at a time, throwing it out as you go.  But how might PARSE know that?</p>
+<p>It builds a SOME combinator and can see that's the last thing in the rule block.  Assuming the user doesn't capture any positions with <strong><code>&lt;here&gt;</code></strong> or do any <strong><code>SEEK</code></strong>, there is no way that the SOME will ever backtrack from the point where it started.  Each iteration can throw out the ability to backtrack.</p>
+<p><em>But right now SOME is a black box;</em> doing whatever it wants until it finally returns a result.  From PARSE's perspective there's nothing from the outside that differentiates it from something called SOME-HALF that will repeat a rule some number of times, and then jump back in time to the halfway point of the match:</p>
+<pre><code>&gt;&gt; parse "abababab" [some-half "ab", return &lt;here&gt;]
+== "abab"
+
+&gt;&gt; parse "abababababab" [some-half "ab", return &lt;here&gt;]
+== "ababab"
+</code></pre>
+<p>Without some additional information, the system doesn't know that SOME won't make a decision like SOME-HALF would.  It has to let it run until it is finished.</p>
+<h2><a name="p-5455-how-can-combinators-tell-parse-about-backtrack-needs-2" class="anchor" href="https://rebol.metaeducation.com#p-5455-how-can-combinators-tell-parse-about-backtrack-needs-2"></a>How Can Combinators Tell PARSE About Backtrack Needs?</h2>
+<p>One way of looking at this is that the combinator itself becomes responsible for storing any memory that it requires for backtracking.</p>
+<p>That is to say that it pulls information out of the stream...and if it wants to backtrack it pushes it back in.</p>
+<pre><code>&gt;&gt; parse "aaab" [some ["a"] "b"]    
+</code></pre>
+<ul>
+<li>SOME combinator grabs an "a" from stream, matches the "a"</li>
+<li>SOME combinator grabs an "a" from stream, matches the "a"</li>
+<li>SOME combinator grabs an "a" from stream, matches the "a"</li>
+<li>SOME combinator grabs a "b" from stream, doesn't like it, pushes it back and ends</li>
+<li>TEXT! combinator grabs a "b" from the stream, matches the "b"</li>
+</ul>
+<p>If the SOME becomes responsible for pushing back any input it doesn't like, then the stream can just discard everything as it goes (in cases where it doesn't see any potential for some rule down the line to request backtrack).  This means offering some kind of "push back into stream" operator that combinators can use if they need to back out.</p>
+<p><strong>This concept of putting back the character is actually how many things like this work.</strong></p>
+<ul>
+<li>
+<p>In C++ iostreams there is <a href="https://stackoverflow.com/questions/6769416/difference-between-putback-and-unget">istream::putback() and istream::unget()</a></p>
+</li>
+<li>
+<p>In Haskell's Data.Stream, there is <a href="https://hackage.haskell.org/package/io-streams-1.5.2.1/docs/System-IO-Streams.html#v:unRead">unRead</a></p>
+</li>
+</ul>
+<p>In C++, unget() requires you give what you read in.  By doing so, then if the data is no longer in a buffer and you're reading from a file...it doesn't need to do anything but push its file offset backwards.  Haskell's unRead and C++ putback() let you push back something different than what you read...and considers that a feature <em>(we'll assume it does a similar optimization to unget() if you were reading from a file and it noticed what you pushed back was the same as the data in the buffer?)</em></p>
+<h2><a name="p-5455-going-unit-by-unit-sounds-laborious-and-slow-3" class="anchor" href="https://rebol.metaeducation.com#p-5455-going-unit-by-unit-sounds-laborious-and-slow-3"></a>"Going Unit-By-Unit Sounds Laborious, and <em>Slow</em>...?"</h2>
+<p>It may seem laborious on the surface, but as far as I can tell this is the way streams work.</p>
+<p>I was just working on an implementation of READ-LINE for standard input.  And all the prescribed methods of reading one line at a time from a file in C would go one character at a time.  That sounds like a lot of I/O requests, but the thing is that basically all I/O systems have buffering in them...if you ask to read a character from a file, it isn't going to your hard drive or making a network request for that one character.  It buffers it--and if you try to buffer it yourself you're likely just going to be adding complexity/code/memory and making things worse.</p>
+<p><strong>Unfortunately <a href="http://docs.libuv.org/en/v1.x/stream.html">libuv() streams</a> don't have any putback() or ungetc() ability.</strong>  There's no going back in time with them.  :-/</p>
+<p>And as it turns out Boost.ASIO doesn't have it either.  (Which surprises me.)</p>
+<p>This means if we were building combinators on top of an ungetc()-type logic...and want to go back in time to read a file and not have it fully in memory...we'd have to be using the raw file API if we wanted to keep sync'd to the data that's already on disk and be able to use it instead of keeping the full buffer contents.</p>
+<p>That's a bit depressing.  But if there's any good news, it's that Rebol datatypes are optimized specifically for "unget".  If the buffers are BLOCK!s or BINARY!s or TEXT!s then when you "NEXT" them the data is still there, and you just BACK it to do an ungetc.</p>
+<p>Plus, we'd have to have our own layer for managing this if we were going to seek back in time using <strong><a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Range_requests">HTTP Range Requests</a></strong> on networks.</p>
+<p>I guess I'll just experiment and see what I can work out.  :-/</p>
+          <p><a href="https://rebol.metaeducation.com/t/parsing-giant-streams-without-consuming-tons-of-memory-how/1698/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/parsing-giant-streams-without-consuming-tons-of-memory-how/1698/1</link>
+        <pubDate>Thu, 02 Sep 2021 05:17:04 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1698-1</guid>
+        <source url="https://rebol.metaeducation.com/t/parsing-giant-streams-without-consuming-tons-of-memory-how/1698.rss">Parsing Giant Streams Without Consuming Tons of Memory: How?</source>
+      </item>
+  </channel>
+</rss>

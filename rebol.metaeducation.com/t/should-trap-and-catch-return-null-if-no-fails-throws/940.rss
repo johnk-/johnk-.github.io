@@ -1,0 +1,296 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Should TRAP and CATCH return null if no fails/throws?</title>
+    <link>https://forum.rebol.info/t/should-trap-and-catch-return-null-if-no-fails-throws/940</link>
+    <description>R3-Alpha&#39;s TRY added a refinement /EXCEPT for passing in a block or function to act as a handler in the case of an error being raised.  It struck me as a clunky attempt to parrot existing terminology.
+
+TRAP was created to be a seemingly better name than &quot;TRY&quot;.  It appeared to have more parity with CATCH, and TRAP/WITH paralleled CATCH/WITH.
+
+I think the name is an improvement.  And it paved the way for the short word TRY to fill another important role.
+
+But there&#39;s a pattern in both of these constructs which is that they return a result whether something is caught or trapped or not.
+
+    &gt;&gt; catch [10 + 20]
+    == 30
+
+    &gt;&gt; error? trap [make error! &quot;this is *not* a trapped error&quot;]
+    == #[true]
+
+That particular behavior of trap is particularly tricky because many cases check if a result is an ERROR? and use that as a detection of if a FAIL ran...and here we see that&#39;s not actually happening.
+
+So if you&#39;re trying to write truly &quot;correct&quot; code that uses a TRAP or a CATCH, you pretty much wind up writing a TRAP/WITH or a CATCH/WITH...providing a function taking an error.
+
+But I&#39;ve been questioning the value of this mixing-up-of-return-results.  If you want to get a value out of the block, why not do that by setting a variable?  You&#39;re usually trying to set a variable anyway, e.g. `value: trap [...]`, what&#39;s wrong with moving it into the code?
+
+     trap [
+         value: some-calculation-that-may-fail ...
+     ] then func [e] [
+         ... code to handle the error ...
+     ] else [
+         ... stuff to do if there was no error ...
+         ... assume value is good ...
+     ]
+
+This cleanly separates out the code paths, allowing usage of null-sensitive constructs.  So it means getting rid of the /WITH refinement on TRAP and CATCH, instead using normal THEN/ELSE/etc. constructs with them:
+
+    &gt;&gt; catch [10 + 20]
+    == ~null~  ; anti
+
+    &gt;&gt; trap [make error! &quot;not a thrown error&quot;]
+    == ~null~  ; anti
+
+In the case of CATCH, you can always just throw your final result, to get it to conflate with an ordinary throw (this is inexpensive.)
+
+TRAP can&#39;t do that (since it would only be able to return errors).  Though you could piggy-back on CATCH if you really wanted to avoid variable declaration with a TRAP...just throw your result:
+
+     catch [trap [... throw result] then e -&gt; [e]]
+
+I&#39;m not opposed to the idea of code-golf-friendly constructs which could go ahead and do this squashing of results together.  (CATCH-DO, TRAP-DO?)  But the clean expression with only returning the caught or trapped thing--and null otherwise--seems quite appealing to me for the primitive building block.
+
+## Also note: the existence of ENTRAP
+
+I made ENTRAP to address the problem of distinguishing errors from other values, by returning the meta form of the value in the case of no errors.  So if your result is QUOTED! or QUASIFORM!, then you know it succeeded and all you have to do is unmeta it to get the result.  ERROR! is the only plain value returned...so it is an unambiguous signal of a trapped failure.
+
+    &gt;&gt; entrap [null]
+    == ~null~
+
+    &gt;&gt; entrap [10 + 20]
+    == &#39;30
+
+    &gt;&gt; error? entrap [1 / 0]
+    == ~true~  ; anti  (it&#39;s just a plain ERROR! value, not quoted or quasi)
+
+    &gt;&gt; quoted? entrap [make error! &quot;abc&quot;]
+    == ~true~  ; anti  (quoted error, since it wasn&#39;t RAISE&#39;d)
+
+I don&#39;t know how that fits into the naming and scheme of things, but mentioning it.</description>
+    
+    <lastBuildDate>Thu, 29 Aug 2024 12:11:06 +0000</lastBuildDate>
+    <category>Internals</category>
+    <atom:link href="https://forum.rebol.info/t/should-trap-and-catch-return-null-if-no-fails-throws/940.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Should TRAP and CATCH return null if no fails/throws?</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="6" data-topic="940">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>Looks like we may get the best of both worlds now, with <a href="https://forum.rebol.info/t/forward-to-multiple-return-values-and-return-value-forwarding/1271/2">multiple returns</a>! The TRAP and CATCH could offer a second output which is the value that "falls out" of the evaluation.</p>
+</blockquote>
+</aside>
+<h2><a name="p-6571-throwing-multi-returns-is-very-useful-1" class="anchor" href="https://forum.rebol.info#p-6571-throwing-multi-returns-is-very-useful-1"></a>Throwing Multi-Returns Is Very Useful</h2>
+<p>So there's a competing application for multi-returns, which is the ability to throw a multi-return... which is more useful:</p>
+<pre><code>&gt;&gt; [x fallthrough?]: catch [
+       if false [throw pack [1 false]]
+       throw pack [2 true]
+   ]
+== 2
+
+&gt;&gt; x
+== 2
+
+&gt;&gt; fallthrough?
+== ~true~  ; isotope
+</code></pre>
+<p>This seems like a much better use of the multi-return ability.  And to my mind, that tips the scales to where you should do a THROW as the last line if you want "the block's result".</p>
+<p>Then if you want to detect whether a result came from the end of the block or somewhere inside it, you can do as I did above and encode that as an extra parameter.</p>
+<h3><a name="p-6571-what-about-named-throws-how-to-know-the-name-2" class="anchor" href="https://forum.rebol.info#p-6571-what-about-named-throws-how-to-know-the-name-2"></a>What About Named Throws... How to Know The Name?</h3>
+<p><em>Hmmm.</em></p>
+<p>I'll start by saying I've personally felt a bit skeptical of named throws, compared with "definitional throws".  :-/  In systems like C++ that support throwing, you can actually say what <em>types</em> of throws you want to receive.  Then you receive an object, potentially re-throwing it.</p>
+<p>But in any case, if you catch a named throw you might want to know its name.  Though I notice that Red does not tell you:</p>
+<pre><code>red&gt;&gt; catch/name [throw/name 304 'red] [red blue]
+== 304  ; no indication of if blue or red was caught
+</code></pre>
+<p>If we imagine you did want to know which name you caught, then here we have another competing interest for the multi-return ability... the /NAME of the throw.</p>
+<p>I think CATCH/NAME would have to shift it so that the caught value becomes the second result.  (You don't want the primary slot in multi-return sequences to be itself able to be a multi-return, as that creates error-prone ambiguity.  You essentially always have to receive the multi-return as a pack.)  Throws wouldn't be allowed to have NULL names because that would conflate with the pure null from nothing caught.  So the name would have to be TRASH or BLANK.  (Probably a good use for blank.)</p>
+          <p><a href="https://forum.rebol.info/t/should-trap-and-catch-return-null-if-no-fails-throws/940/8">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/should-trap-and-catch-return-null-if-no-fails-throws/940/8</link>
+        <pubDate>Wed, 01 Feb 2023 11:01:08 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-940-8</guid>
+        <source url="https://forum.rebol.info/t/should-trap-and-catch-return-null-if-no-fails-throws/940.rss">Should TRAP and CATCH return null if no fails/throws?</source>
+      </item>
+      <item>
+        <title>Should TRAP and CATCH return null if no fails/throws?</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="IngoHohmann" data-post="3" data-topic="940">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/ingohohmann/48/195_2.png" class="avatar"> IngoHohmann:</div>
+<blockquote>
+<p>Being able to use then/else is great, but I don't particularly like having to move assignments into the code.</p>
+</blockquote>
+</aside>
+<p>Looks like we may get the best of both worlds now, with <a href="https://forum.rebol.info/t/the-history-of-multi-return-in-ren-c/1134">multiple returns</a>!  The TRAP and CATCH could offer a second output which is the value that "falls out" of the evaluation.</p>
+<pre><code>&gt;&gt; [error value]: trap [1 + 1]
+== ~null~  ; anti
+
+&gt;&gt; error
+== ~null~  ; anti
+
+&gt;&gt; value
+== 2
+
+&gt;&gt; [~ value]: trap [1 + 1] then [print "error!"]
+
+&gt;&gt; value
+== 2
+
+&gt;&gt; [~ value]: trap [1 / 0] then [print "error!"]
+error!
+</code></pre>
+<p>How slick is that??  Very...</p>
+          <p><a href="https://forum.rebol.info/t/should-trap-and-catch-return-null-if-no-fails-throws/940/6">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/should-trap-and-catch-return-null-if-no-fails-throws/940/6</link>
+        <pubDate>Thu, 09 Apr 2020 15:43:49 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-940-6</guid>
+        <source url="https://forum.rebol.info/t/should-trap-and-catch-return-null-if-no-fails-throws/940.rss">Should TRAP and CATCH return null if no fails/throws?</source>
+      </item>
+      <item>
+        <title>Should TRAP and CATCH return null if no fails/throws?</title>
+        <dc:creator><![CDATA[IngoHohmann]]></dc:creator>
+        <description><![CDATA[
+            <p>It seems, that my comment wasn't completely thought through.<br>
+You have convinced me.</p>
+          <p><a href="https://forum.rebol.info/t/should-trap-and-catch-return-null-if-no-fails-throws/940/5">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/should-trap-and-catch-return-null-if-no-fails-throws/940/5</link>
+        <pubDate>Tue, 04 Dec 2018 15:50:34 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-940-5</guid>
+        <source url="https://forum.rebol.info/t/should-trap-and-catch-return-null-if-no-fails-throws/940.rss">Should TRAP and CATCH return null if no fails/throws?</source>
+      </item>
+      <item>
+        <title>Should TRAP and CATCH return null if no fails/throws?</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group quote-modified" data-username="IngoHohmann" data-post="3" data-topic="940">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="24" height="24" src="https://forum.rebol.info/user_avatar/forum.rebol.info/ingohohmann/48/195_2.png" class="avatar"> IngoHohmann:</div>
+<blockquote>
+<p>Makes it clear, that this is an assignment, which, by the way, may error so I’m handling this.</p>
+</blockquote>
+</aside>
+<p>Compare:</p>
+<pre><code>if error? data: trap [	              
+    inflate/max data uncompressed-size	           
+][
+    info "^- -&gt; failed [deflate]^/"
+    throw blank
+]
+</code></pre>
+<p>With:</p>
+<pre><code>trap [	              
+    data: inflate/max data uncompressed-size	           
+] then [
+    info "^- -&gt; failed [deflate]^/"
+    throw blank
+]
+</code></pre>
+<p>What makes the assignment clearer?  I think the second case, in particular because it doesn't conflate <code>data</code> as a variable which "may hold an error, or may hold the data".  If you wanted to be "clear" you'd have to call it <code>data-or-error</code>, which is too wordy.</p>
+<p>It seems to me the second way puts the <code>data:</code> closer to what's being assigned to it, instead of separating it in an awkward and artificial way.  The first case doesn't make it that obvious that <code>inflate/max</code> returns a value at all--maybe only TRAP does?  The only hint you have that you're not just capturing an error is the misleading name "data".  If you mix up the data with the error that means you're going to need a test, and <code>if error? data: trap</code> is a lot of noise to see through.</p>
+<p>(And that's a simple case that doesn't mention the specific error when it probably should.  You could use ATTEMPT ... ELSE for this, which would just give you a null if it was an error otherwise the value.  But I worry about today's ATTEMPT because it can make typographical errors or other changes hard to find, so it seems it should be improved to at least not scuttle some common errors of words not being bound.)</p>
+<p>More complicated examples which are trapping a section of code that doesn't just do a single assignment are even better.</p>
+<p>What makes me feel better about it as a primitive is that it prevents mistakes in generic code like:</p>
+<pre><code>if error? item: trap [
+    someone-elses-array: get-array-may-fail x y z
+    pick someone-elses-array index
+][
+     ; may be an ERROR! value that just was in someone-elses-array
+]
+</code></pre>
+<p>Again--I don't object to there existing some construct that conflates raised errors with plain error values, and has all the concerns which go with that.  But it seems the best way is to give a solid routine with no holes in it to build on.  Then let people do what they like with that.</p>
+<p>Being able to get rid of TRAP/WITH is clean, and you can also use use ELSE to provide clauses easily for the non-erroring case.  I think it's an improvement.</p>
+          <p><a href="https://forum.rebol.info/t/should-trap-and-catch-return-null-if-no-fails-throws/940/4">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/should-trap-and-catch-return-null-if-no-fails-throws/940/4</link>
+        <pubDate>Tue, 04 Dec 2018 09:22:29 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-940-4</guid>
+        <source url="https://forum.rebol.info/t/should-trap-and-catch-return-null-if-no-fails-throws/940.rss">Should TRAP and CATCH return null if no fails/throws?</source>
+      </item>
+      <item>
+        <title>Should TRAP and CATCH return null if no fails/throws?</title>
+        <dc:creator><![CDATA[IngoHohmann]]></dc:creator>
+        <description><![CDATA[
+            <p>I am not sure I like this. Being able to use then/else is great, but I don't particularly like having to move assignments into the code.</p>
+<pre><code>var: trap [...]
+</code></pre>
+<p>Makes it clear, that this is an assignment, which, by the way, may error so I'm handling this.</p>
+<pre><code>trap [var: ...]
+</code></pre>
+<p>looks like it is mostly error handling code, and the assignment is easily overlooked.</p>
+          <p><a href="https://forum.rebol.info/t/should-trap-and-catch-return-null-if-no-fails-throws/940/3">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/should-trap-and-catch-return-null-if-no-fails-throws/940/3</link>
+        <pubDate>Tue, 04 Dec 2018 06:14:57 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-940-3</guid>
+        <source url="https://forum.rebol.info/t/should-trap-and-catch-return-null-if-no-fails-throws/940.rss">Should TRAP and CATCH return null if no fails/throws?</source>
+      </item>
+      <item>
+        <title>Should TRAP and CATCH return null if no fails/throws?</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>R3-Alpha's TRY added a refinement /EXCEPT for passing in a block or function to act as a handler in the case of an error being raised.  It struck me as a clunky attempt to parrot existing terminology.</p>
+<p>TRAP was created to be a seemingly better name than "TRY".  It appeared to have more parity with CATCH, and TRAP/WITH paralleled CATCH/WITH.</p>
+<p>I think the name is an improvement.  And it paved the way for the short word TRY to fill another important role.</p>
+<p>But there's a pattern in both of these constructs which is that they return a result whether something is caught or trapped or not.</p>
+<pre><code>&gt;&gt; catch [10 + 20]
+== 30
+
+&gt;&gt; error? trap [make error! "this is *not* a trapped error"]
+== #[true]
+</code></pre>
+<p>That particular behavior of trap is particularly tricky because many cases check if a result is an ERROR? and use that as a detection of if a FAIL ran...and here we see that's not actually happening.</p>
+<p>So if you're trying to write truly "correct" code that uses a TRAP or a CATCH, you pretty much wind up writing a TRAP/WITH or a CATCH/WITH...providing a function taking an error.</p>
+<p>But I've been questioning the value of this mixing-up-of-return-results.  If you want to get a value out of the block, why not do that by setting a variable?  You're usually trying to set a variable anyway, e.g. <code>value: trap [...]</code>, what's wrong with moving it into the code?</p>
+<pre><code> trap [
+     value: some-calculation-that-may-fail ...
+ ] then func [e] [
+     ... code to handle the error ...
+ ] else [
+     ... stuff to do if there was no error ...
+     ... assume value is good ...
+ ]
+</code></pre>
+<p>This cleanly separates out the code paths, allowing usage of null-sensitive constructs.  So it means getting rid of the /WITH refinement on TRAP and CATCH, instead using normal THEN/ELSE/etc. constructs with them:</p>
+<pre><code>&gt;&gt; catch [10 + 20]
+== ~null~  ; anti
+
+&gt;&gt; trap [make error! "not a thrown error"]
+== ~null~  ; anti
+</code></pre>
+<p>In the case of CATCH, you can always just throw your final result, to get it to conflate with an ordinary throw (this is inexpensive.)</p>
+<p>TRAP can't do that (since it would only be able to return errors).  Though you could piggy-back on CATCH if you really wanted to avoid variable declaration with a TRAP...just throw your result:</p>
+<pre><code> catch [trap [... throw result] then e -&gt; [e]]
+</code></pre>
+<p>I'm not opposed to the idea of code-golf-friendly constructs which could go ahead and do this squashing of results together.  (CATCH-DO, TRAP-DO?)  But the clean expression with only returning the caught or trapped thing--and null otherwise--seems quite appealing to me for the primitive building block.</p>
+<h2>
+<a name="also-note-the-existence-of-entrap-1" class="anchor" href="https://forum.rebol.info#also-note-the-existence-of-entrap-1"></a>Also note: the existence of ENTRAP</h2>
+<p>I made ENTRAP to address the problem of distinguishing errors from other values, by returning the meta form of the value in the case of no errors.  So if your result is QUOTED! or QUASIFORM!, then you know it succeeded and all you have to do is unmeta it to get the result.  ERROR! is the only plain value returned...so it is an unambiguous signal of a trapped failure.</p>
+<pre><code>&gt;&gt; entrap [null]
+== ~null~
+
+&gt;&gt; entrap [10 + 20]
+== '30
+
+&gt;&gt; error? entrap [1 / 0]
+== ~true~  ; anti  (it's just a plain ERROR! value, not quoted or quasi)
+
+&gt;&gt; quoted? entrap [make error! "abc"]
+== ~true~  ; anti  (quoted error, since it wasn't RAISE'd)
+</code></pre>
+<p>I don't know how that fits into the naming and scheme of things, but mentioning it.</p>
+          <p><a href="https://forum.rebol.info/t/should-trap-and-catch-return-null-if-no-fails-throws/940/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/should-trap-and-catch-return-null-if-no-fails-throws/940/1</link>
+        <pubDate>Mon, 03 Dec 2018 18:04:50 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-940-1</guid>
+        <source url="https://forum.rebol.info/t/should-trap-and-catch-return-null-if-no-fails-throws/940.rss">Should TRAP and CATCH return null if no fails/throws?</source>
+      </item>
+  </channel>
+</rss>

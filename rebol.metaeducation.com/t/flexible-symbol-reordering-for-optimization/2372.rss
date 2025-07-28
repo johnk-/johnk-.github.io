@@ -1,0 +1,321 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Flexible Symbol Reordering for Optimization</title>
+    <link>https://rebol.metaeducation.com/t/flexible-symbol-reordering-for-optimization/2372</link>
+    <description>In the original formulation of building the symbol table, it kept a running count of the current symbol ID, and incremented it as it went.
+
+The order wasn&#39;t always random.  For instance, one of the optimizations based on ordering was that the symbols for R3-Alpha&#39;s PARSE keywords [were in a particular order](https://github.com/rebol/rebol/blob/25033f897b2bd466068d7663563cd3ff64740b94/src/boot/words.r#L101), which was specified in `%words.r`
+
+    ; Parse: - These words must not reserved above!!
+    parse
+    |	 ; must be first
+    ; prep words:
+    set  
+    copy
+    some
+    any
+    opt
+    not
+    and
+    then
+    remove
+    insert
+    change
+    if
+    fail
+    reject
+    while
+    return
+    limit
+    ??
+    accept
+    break
+    ; match words:
+    skip
+    to
+    thru
+    quote
+    do
+    into
+    only
+    end  ; must be last
+
+By putting these in such an order, when PARSE3 was processing a rule it could do a [quick check of whether or not something was a keyword](https://github.com/rebol/rebol/blob/25033f897b2bd466068d7663563cd3ff64740b94/src/core/u-parse.c#L65):
+
+    #define GET_CMD(n) (((n) &gt;= SYM_OR_BAR &amp;&amp; (n) &lt;= SYM_END) ? (n) : 0)
+
+And then further it divided the range based on which phase the rule was in... [either &quot;pre-match&quot; or &quot;match&quot;](https://github.com/rebol/rebol/blob/25033f897b2bd466068d7663563cd3ff64740b94/src/core/u-parse.c#L692):
+
+    if (cmd = VAL_CMD(item)) {
+        if (!IS_WORD(item))
+            Trap1(RE_PARSE_COMMAND, item); // SET or GET not allowed
+
+            if (cmd &lt;= SYM_BREAK) { // optimization
+                switch (cmd) {...}
+            ...
+
+Though this is a bit brittle, and hard to be sure you&#39;re adjusting all the dependencies if you change it (more on that later...)
+
+## Wanting To Find LENGTH-OF Quickly From LENGTH
+
+I had a stroke of inspiration when I realized that modern binding made it possible that the **OF** function could be declared as infix with only a left hand side, and then it could effectively retrigger **`length of`** to act the same as **`length-of`**, and do that for any **`xxx of`** to run a function it dynamically looks up as **`xxx-of`**:
+
+  https://rebol.metaeducation.com/t/squaring-the-circle-of-length-and-length-of/385/8?u=hostilefork
+
+This is a breakthrough powered by modern binding.  However, one of the things it needs to do is to somehow navigate from the `Symbol` pointer for **`xxx`** to **`xxx-of`**... and that&#39;s not exactly free.  You have to build a UTF-8 buffer which has the &quot;-of&quot; variant, and hash it to look it up in the symbol table.
+
+But I had an idea :light_bulb: 
+
+[quote=&quot;hostilefork, post:8, topic:385&quot;]
+I&#39;m going to give it a shot. There&#39;s probably some easy optimizations for linking symbols like WHATEVER to be able to navigate to the symbol for WHATEVER-OF rapidly so you don&#39;t have to do any hashing to find it... at least for builtin symbols (e.g. put them sequentially in the SymId table).
+[/quote]
+
+Hence I reworked the code that builds the symbol table.  Instead of pinning down the symbol numbers permanently as it goes, it waits to assign the numbers until all the symbols have been added.  This permits reorganization.
+
+So if it sees the symbol for LENGTH-OF, it goes through and looks to see if a symbol for LENGTH was already added.  If it was, it goes back and inserts LENGTH-OF right after LENGTH.  If it hasn&#39;t been added yet, then it goes ahead and adds both LENGTH and LENGTH-OF.
+
+This way you get sequential symbol IDs, and it&#39;s trivial and fast to get to LENGTH-OF if you have LENGTH in your hand.  This works for any built-in symbol, so we&#39;re getting good performance for super common operations like **`type of`**
+
+## But It Needs Exceptions...
+
+There are some places you can&#39;t disrupt the ordering, for instance the datatype symbols are expected to be in a certain fixed order.  So the reordering logic checks to make sure you&#39;re not disrupting those cases.  So far there are only two exceptions that need to be made: **sigil** and **file**, which have operations **sigil of** and **file of**
+
+    &gt;&gt; sigil of first [$hello world]
+    == $
+
+    &gt;&gt; sigil of second [$hello world]
+    == ~null~  ; anti
+
+    &gt;&gt; data: load %something.r
+    == [a [b c] d]
+
+    &gt;&gt; second data
+    == [b c]
+
+    &gt;&gt; file of second data
+    == %something.r
+
+The design point of keeping type symbols in order is too important, so `SYM_SIGIL` can&#39;t be followed by `SYM_SIGIL_OF` and `SYM_FILE` can&#39;t be followed by `SYM_FILE_OF`.  But these were the only two exceptions, and handling them is trivial!
+
+    Option(SymId) id = Symbol_Id(sym);
+    if (id) {  // built-in symbols w/-OF variations, optimized positions
+        if (id == SYM_SIGIL)
+            sym_of = CANON(SIGIL_OF);  // needs exception
+        else if (id == SYM_FILE)
+            sym_of = CANON(FILE_OF);  // needs exception
+        else
+            sym_of = Canon_Symbol(cast(SymId, (unwrap id) + 1));
+    }
+    else {
+        ... // slower method, produce UTF-8 for &quot;-of&quot; variant, hash it
+    }
+
+The build process detects any cases where a disruption would be a problem and warns you so you know that you have to add an exception.  For instance: let&#39;s say you want to keep the PARSE3 keyword sequential trick intact.  Since there&#39;s a word there for LIMIT, it would be a problem if we added a LIMIT-OF native, and an exception would have to be added here.
+
+It&#39;s not a huge issue and I don&#39;t expect a lot of exceptions needing to be made here.  In any case, what makes this so fast is that turning a `SYM_XXX` into a `Symbol*` is trivially fast, because there&#39;s just a global array of Symbol (not even an array of Symbol*, it&#39;s the Stub structure for the symbol itself) indexed by the SYM constant.
+
+## Eliminating The Hardcoding of Symbol IDs for Ranges
+
+This was a rework that makes it easier for other ideas down the line of how to creatively use the symbol IDs.  So I made it easier to mark positions in the IDs in a way that&#39;s less likely to break.
+
+I use TAG! to put in the markers.  For instance, the PARSE3 keywords are now done as:
+
+    &lt;MIN_SYM_PARSE3&gt;  ; no &lt;/&gt; means next symbol (SYM_SOME is MIN_SYM_PARSE3)
+        some
+        opt
+        optional
+        repeat
+        ; ... etc ... 
+    &lt;MIN_SYM_PARSE3_MATCH&gt;
+        skip
+        one
+        to
+        thru
+        ; ... etc ...
+        end 
+    &lt;/MAX_SYM_PARSE3&gt;  ;  &lt;/&gt; means prior symbol (SYM_END is MAX_SYM_PARSE3)
+
+Once all the symbols have been worked out, the tags are removed and automatically turned into `#define`s by `%make-boot.r`:
+
+    /*
+     * These definitions are derived from markers added during the symbol
+     * table creation process via ADD-SYM:PLACEHOLDER (and are much better
+     * than hardcoding symbol IDs in source the way R3-Alpha did it!)
+     */
+    #define MIN_SYM_TYPESETS  253  /* blank? */
+    #define MAX_SYM_TYPESETS  407  /* any-element? */
+    #define MIN_SYM_PARSE3  427  /* some */
+    #define MIN_SYM_PARSE3_MATCH  454  /* skip */
+    #define MAX_SYM_PARSE3  461  /* end */
+    #define MIN_SYM_NATIVE  480  /* native */
+    #define MAX_SYM_LIB_PREMADE  876  /* inflate */
+    #define MIN_SYM_ERRORS  988  /* Internal */
+    #define MAX_SYM_BUILTIN  1207  /* export* */
+
+It&#39;s much less brittle, communicates what&#39;s going on, and lets you search the code for where the given trick is being used.
+
+So from now on, coming up with similar tricks will be much easier and robust!
+
+## Using More Rebol To Make Rebol Better
+
+As Ren-C&#39;s power grows, it makes more and more sense to implement more of the project using Rebol technique.
+
+I&#39;m really pleased by things like the TAG! trick for marking ranges (as I did in `%types.r`), and just how expressive you can get with things.
+
+Although the bootstrap code is a total mess, it&#39;s amazing to throw Rebol concepts at simplifying it...and as string interpolation and other magic becomes commonplace, it&#39;s really shaping up.</description>
+    
+    <lastBuildDate>Tue, 18 Mar 2025 18:26:10 +0000</lastBuildDate>
+    <category>Optimization</category>
+    <atom:link href="https://rebol.metaeducation.com/t/flexible-symbol-reordering-for-optimization/2372.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Flexible Symbol Reordering for Optimization</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>In the original formulation of building the symbol table, it kept a running count of the current symbol ID, and incremented it as it went.</p>
+<p>The order wasn't always random.  For instance, one of the optimizations based on ordering was that the symbols for R3-Alpha's PARSE keywords <a href="https://github.com/rebol/rebol/blob/25033f897b2bd466068d7663563cd3ff64740b94/src/boot/words.r#L101">were in a particular order</a>, which was specified in <code>%words.r</code></p>
+<pre><code>; Parse: - These words must not reserved above!!
+parse
+|	 ; must be first
+; prep words:
+set  
+copy
+some
+any
+opt
+not
+and
+then
+remove
+insert
+change
+if
+fail
+reject
+while
+return
+limit
+??
+accept
+break
+; match words:
+skip
+to
+thru
+quote
+do
+into
+only
+end  ; must be last
+</code></pre>
+<p>By putting these in such an order, when PARSE3 was processing a rule it could do a <a href="https://github.com/rebol/rebol/blob/25033f897b2bd466068d7663563cd3ff64740b94/src/core/u-parse.c#L65">quick check of whether or not something was a keyword</a>:</p>
+<pre><code>#define GET_CMD(n) (((n) &gt;= SYM_OR_BAR &amp;&amp; (n) &lt;= SYM_END) ? (n) : 0)
+</code></pre>
+<p>And then further it divided the range based on which phase the rule was in... <a href="https://github.com/rebol/rebol/blob/25033f897b2bd466068d7663563cd3ff64740b94/src/core/u-parse.c#L692">either "pre-match" or "match"</a>:</p>
+<pre><code>if (cmd = VAL_CMD(item)) {
+    if (!IS_WORD(item))
+        Trap1(RE_PARSE_COMMAND, item); // SET or GET not allowed
+
+        if (cmd &lt;= SYM_BREAK) { // optimization
+            switch (cmd) {...}
+        ...
+</code></pre>
+<p>Though this is a bit brittle, and hard to be sure you're adjusting all the dependencies if you change it (more on that later...)</p>
+<h2><a name="p-8040-wanting-to-find-length-of-quickly-from-length-1" class="anchor" href="https://rebol.metaeducation.com#p-8040-wanting-to-find-length-of-quickly-from-length-1"></a>Wanting To Find LENGTH-OF Quickly From LENGTH</h2>
+<p>I had a stroke of inspiration when I realized that modern binding made it possible that the <strong>OF</strong> function could be declared as infix with only a left hand side, and then it could effectively retrigger <strong><code>length of</code></strong> to act the same as <strong><code>length-of</code></strong>, and do that for any <strong><code>xxx of</code></strong> to run a function it dynamically looks up as <strong><code>xxx-of</code></strong>:</p>
+<p><a href="https://rebol.metaeducation.com/t/squaring-the-circle-of-length-and-length-of/385/8" class="inline-onebox">Squaring the circle of LENGTH? and LENGTH-OF - #8 by hostilefork</a></p>
+<p>This is a breakthrough powered by modern binding.  However, one of the things it needs to do is to somehow navigate from the <code>Symbol</code> pointer for <strong><code>xxx</code></strong> to <strong><code>xxx-of</code></strong>... and that's not exactly free.  You have to build a UTF-8 buffer which has the "-of" variant, and hash it to look it up in the symbol table.</p>
+<p>But I had an idea <img src="https://rebol.metaeducation.com/images/emoji/twitter/light_bulb.png?v=14" title=":light_bulb:" class="emoji" alt=":light_bulb:" loading="lazy" width="20" height="20"></p>
+<aside class="quote no-group" data-username="hostilefork" data-post="8" data-topic="385">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"><a href="https://rebol.metaeducation.com/t/squaring-the-circle-of-length-and-length-of/385/8">Squaring the circle of LENGTH? and LENGTH-OF</a></div>
+<blockquote>
+<p>I'm going to give it a shot. There's probably some easy optimizations for linking symbols like WHATEVER to be able to navigate to the symbol for WHATEVER-OF rapidly so you don't have to do any hashing to find it... at least for builtin symbols (e.g. put them sequentially in the SymId table).</p>
+</blockquote>
+</aside>
+<p>Hence I reworked the code that builds the symbol table.  Instead of pinning down the symbol numbers permanently as it goes, it waits to assign the numbers until all the symbols have been added.  This permits reorganization.</p>
+<p>So if it sees the symbol for LENGTH-OF, it goes through and looks to see if a symbol for LENGTH was already added.  If it was, it goes back and inserts LENGTH-OF right after LENGTH.  If it hasn't been added yet, then it goes ahead and adds both LENGTH and LENGTH-OF.</p>
+<p>This way you get sequential symbol IDs, and it's trivial and fast to get to LENGTH-OF if you have LENGTH in your hand.  This works for any built-in symbol, so we're getting good performance for super common operations like <strong><code>type of</code></strong></p>
+<h2><a name="p-8040-but-it-needs-exceptions-2" class="anchor" href="https://rebol.metaeducation.com#p-8040-but-it-needs-exceptions-2"></a>But It Needs Exceptions...</h2>
+<p>There are some places you can't disrupt the ordering, for instance the datatype symbols are expected to be in a certain fixed order.  So the reordering logic checks to make sure you're not disrupting those cases.  So far there are only two exceptions that need to be made: <strong>sigil</strong> and <strong>file</strong>, which have operations <strong>sigil of</strong> and <strong>file of</strong></p>
+<pre><code>&gt;&gt; sigil of first [$hello world]
+== $
+
+&gt;&gt; sigil of second [$hello world]
+== ~null~  ; anti
+
+&gt;&gt; data: load %something.r
+== [a [b c] d]
+
+&gt;&gt; second data
+== [b c]
+
+&gt;&gt; file of second data
+== %something.r
+</code></pre>
+<p>The design point of keeping type symbols in order is too important, so <code>SYM_SIGIL</code> can't be followed by <code>SYM_SIGIL_OF</code> and <code>SYM_FILE</code> can't be followed by <code>SYM_FILE_OF</code>.  But these were the only two exceptions, and handling them is trivial!</p>
+<pre><code>Option(SymId) id = Symbol_Id(sym);
+if (id) {  // built-in symbols w/-OF variations, optimized positions
+    if (id == SYM_SIGIL)
+        sym_of = CANON(SIGIL_OF);  // needs exception
+    else if (id == SYM_FILE)
+        sym_of = CANON(FILE_OF);  // needs exception
+    else
+        sym_of = Canon_Symbol(cast(SymId, (unwrap id) + 1));
+}
+else {
+    ... // slower method, produce UTF-8 for "-of" variant, hash it
+}
+</code></pre>
+<p>The build process detects any cases where a disruption would be a problem and warns you so you know that you have to add an exception.  For instance: let's say you want to keep the PARSE3 keyword sequential trick intact.  Since there's a word there for LIMIT, it would be a problem if we added a LIMIT-OF native, and an exception would have to be added here.</p>
+<p>It's not a huge issue and I don't expect a lot of exceptions needing to be made here.  In any case, what makes this so fast is that turning a <code>SYM_XXX</code> into a <code>Symbol*</code> is trivially fast, because there's just a global array of Symbol (not even an array of Symbol*, it's the Stub structure for the symbol itself) indexed by the SYM constant.</p>
+<h2><a name="p-8040-eliminating-the-hardcoding-of-symbol-ids-for-ranges-3" class="anchor" href="https://rebol.metaeducation.com#p-8040-eliminating-the-hardcoding-of-symbol-ids-for-ranges-3"></a>Eliminating The Hardcoding of Symbol IDs for Ranges</h2>
+<p>This was a rework that makes it easier for other ideas down the line of how to creatively use the symbol IDs.  So I made it easier to mark positions in the IDs in a way that's less likely to break.</p>
+<p>I use TAG! to put in the markers.  For instance, the PARSE3 keywords are now done as:</p>
+<pre><code>&lt;MIN_SYM_PARSE3&gt;  ; no &lt;/&gt; means next symbol (SYM_SOME is MIN_SYM_PARSE3)
+    some
+    opt
+    optional
+    repeat
+    ; ... etc ... 
+&lt;MIN_SYM_PARSE3_MATCH&gt;
+    skip
+    one
+    to
+    thru
+    ; ... etc ...
+    end 
+&lt;/MAX_SYM_PARSE3&gt;  ;  &lt;/&gt; means prior symbol (SYM_END is MAX_SYM_PARSE3)
+</code></pre>
+<p>Once all the symbols have been worked out, the tags are removed and automatically turned into <code>#define</code>s by <code>%make-boot.r</code>:</p>
+<pre><code>/*
+ * These definitions are derived from markers added during the symbol
+ * table creation process via ADD-SYM:PLACEHOLDER (and are much better
+ * than hardcoding symbol IDs in source the way R3-Alpha did it!)
+ */
+#define MIN_SYM_TYPESETS  253  /* blank? */
+#define MAX_SYM_TYPESETS  407  /* any-element? */
+#define MIN_SYM_PARSE3  427  /* some */
+#define MIN_SYM_PARSE3_MATCH  454  /* skip */
+#define MAX_SYM_PARSE3  461  /* end */
+#define MIN_SYM_NATIVE  480  /* native */
+#define MAX_SYM_LIB_PREMADE  876  /* inflate */
+#define MIN_SYM_ERRORS  988  /* Internal */
+#define MAX_SYM_BUILTIN  1207  /* export* */
+</code></pre>
+<p>It's much less brittle, communicates what's going on, and lets you search the code for where the given trick is being used.</p>
+<p>So from now on, coming up with similar tricks will be much easier and robust!</p>
+<h2><a name="p-8040-using-more-rebol-to-make-rebol-better-4" class="anchor" href="https://rebol.metaeducation.com#p-8040-using-more-rebol-to-make-rebol-better-4"></a>Using More Rebol To Make Rebol Better</h2>
+<p>As Ren-C's power grows, it makes more and more sense to implement more of the project using Rebol technique.</p>
+<p>I'm really pleased by things like the TAG! trick for marking ranges (as I did in <code>%types.r</code>), and just how expressive you can get with things.</p>
+<p>Although the bootstrap code is a total mess, it's amazing to throw Rebol concepts at simplifying it...and as string interpolation and other magic becomes commonplace, it's really shaping up.</p>
+          <p><a href="https://rebol.metaeducation.com/t/flexible-symbol-reordering-for-optimization/2372/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/flexible-symbol-reordering-for-optimization/2372/1</link>
+        <pubDate>Tue, 18 Mar 2025 12:58:51 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2372-1</guid>
+        <source url="https://rebol.metaeducation.com/t/flexible-symbol-reordering-for-optimization/2372.rss">Flexible Symbol Reordering for Optimization</source>
+      </item>
+  </channel>
+</rss>

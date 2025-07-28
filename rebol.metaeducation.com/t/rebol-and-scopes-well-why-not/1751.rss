@@ -1,0 +1,801 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Rebol And Scopes: Well, Why Not?</title>
+    <link>https://rebol.metaeducation.com/t/rebol-and-scopes-well-why-not/1751</link>
+    <description>It&#39;s frequently said that Rebol &quot;doesn&#39;t have scope&quot;.  Early examples of that premise might point to something like a block of:
+
+    [x x x y y y]
+
+Then people might say that the Xs and Ys can all resolve to something different.
+
+    &gt;&gt; print [x x x y y y]
+    10 20 &quot;foo&quot; 30 40 &quot;bar&quot;
+
+I find it personally frustrating when this is pronounced with glee (as per Red Gitter *&quot;there is no spoon!&quot;*)...vs. acknowledging that this should seem very alarming.  When you do something weird the burden of proof is on you to prove its benefit.
+
+## Were Scopes Rejected Because They&#39;re Somehow Bad?
+
+No.
+
+*It&#39;s because Rebol&#39;s dynamic nature means there isn&#39;t a clear moment in time where code can be holistically analyzed to determine scopes*.  Code structures are always getting cobbled together from pieces...from disparate locations in the codebase, or sometimes fabricated from thin air with *no* context.
+
+So it hasn&#39;t had scopes because it hasn&#39;t been able to.
+
+BUT with the prototypes I&#39;ve done with string interning, it integrates something like &quot;scopes&quot;.
+
+    &gt;&gt; print interpolate {Scopes? $x $x $x $y $y $y}
+    Scopes? 10 10 10 foo foo foo
+
+When a string carries along a &quot;binding&quot;, it only carries one.  And that effectively captures some map from words to values.  So the answer to &quot;what is X&quot; and &quot;what is Y&quot; will be the same each time you ask that mapping referenced by that string.
+
+If that&#39;s not a &quot;scope&quot;, what is it?  And is there a reason the system as a whole should not use them?
+
+## Historical Rebol Used Mutable Binding
+
+Historical Rebol&#39;s idea of binding is that ANY-WORD!s get bits in the cell representing an object they are looked up in.  This process of gluing on bindings was done &quot;every now and again&quot; by code that walks around--usually deeply--and mutably changes data it is given.
+
+**On the plus side: programmability.**  If you received a BLOCK! and wanted to go through and say that every SET-WORD! that starts with a vowel is going to be bound to some new object, but others will be left as-is, you can do that.  You can examine not only the properties of the structure, but also make decisions on what the previous binding was...selecting to override some references of the same named variable while leaving others alone.
+
+(Note: Some binding queries didn&#39;t give useful information.  If you asked for the binding of a word linked to a function argument or local, it would just say &quot;true&quot;.)
+
+**On the plus side: performance.**  If you&#39;re dealing with a concept of binding that wants to freeze in time at the moment you run a bind pass, you can cache the notion of which object and which index in that object a word will be found at.  Although...
+
+...**On the minus side: requires lots of copies (adversely affects performance, and it&#39;s not clear when to make them).** If you assume every value has a binding it can mutably disrupt, this complicates situations where a piece of code needs to be viewed in more than one way.  Just one example is the idea that every method in an object would need to be copied deeply so that its code could be rebound to that object&#39;s instance variables.
+
+**Also on the minus side: no reaction to changes.**  For instance, you might bind some code into a place like the LIB context...but later add a new declaration to LIB.  The addition will not be seen.
+
+
+## Ren-C Began To &quot;Virtualize&quot; Binding
+
+A big focus in Ren-C has been experimenting with binding forms that don&#39;t a-priori walk deeply at the outset, but that trickle down and spread as you descend into array structures...each step propagating something called a &quot;specifier&quot;.
+
+One of the first instances was when you run a function body, a specifier would be added that would be the FRAME! of that function&#39;s variables.  It starts propagating by slipping a pointer into an extracted block cell for the body when it gets a DO at the top level.  That pointer travels along through nested blocks, so those become aware of the function instance it relates to...one extraction at a time.  Similar techniques allow object instance methods to be differentiated while running the same code used in other objects...the function bodies are the same arrays, but the specifier facilitates finding the object instance.
+
+There are various incarnations of this technique of having binding be a &quot;view&quot; on an array of values, without having to actually touch the bits in arrays.  But the general name for these techniques I&#39;ve adopted is **virtual binding**.
+
+## String Interpolation Tries *Fully Virtualized Binding*
+
+At first specifiers were just for functions and methods.  But the concept of making specifiers accrue a more complete map of a persistent binding environment is very tempting, allowing things like [binding lookup in strings](https://rebol.metaeducation.com/t/could-strings-have-context/587/10?u=hostilefork).
+
+The idea behind the prototype that lets you look up a map from WORD! =&gt; value on strings is that specifiers compound together in chains.  A new link is added each time something new to consider is added.
+
+So let&#39;s look at that model of operation for something like:
+
+     global: 10
+     x: &lt;not an integer&gt;
+
+     foo: func [x] [
+         let local: 20
+         return interpolate {The sum is $(x + local)}
+     ]
+
+     foo 30
+
+The virtual bind chain starts out with a module context that has `global`, `x`, and `foo` in it.  This is all there is to stick on the BLOCK!s that gets passed to FUNC.  So the spec and body are blocks with a module as the specifier.
+
+FUNC stows the body block away in an ACTION! that it generates.  Later when it gets invoked, it creates a FRAME! with `return` and `x` in it...and puts that in a chain *with* the module context.  So upon entry to the function body, that body is being executed with a specifier that looks in the frame first (would find that x) and then in the module second (would find `global` and `foo`).  This compound specifier is what the evaluator state initially has for that body block.
+
+The module inherits from the LIB context, so things like LET and INTERPOLATE will be found by means of that inheritance.  So then LET runs...using a special ability to add another link in the chain to the specifier that the evaluator is using, for the word `local`.
+
+Finally we get to the RETURN (it&#39;s in the frame) and INTERPOLATE (falling through to the module) and the whole specifier chain is stuck onto the string.  Because the specifier has snowballed all the information *the string could look up anything* (except the X in the module that&#39;s hidden).
+
+**In simple cases like this, it&#39;s essentially just like scope.**   There are no situations that introduce contention.  The flow of context is from the top to the bottom, and there&#39;s no parts being unplugged from one place and into another.
+
+## But What If You Did Unplug and Replug Things?
+
+Let&#39;s just look at a *super simple* example of throwing a COMPOSE into the mix.  So instead of calling INTERPOLATE directly, you made a call to another function, WRAPPER:
+
+     global: 10
+     x: &lt;not an integer&gt;
+
+     wrapper: func [string] [
+         return do compose [interpolate (string)]
+     ]
+
+     foo: func [x] [
+         let local: 20
+         return wrapper {The sum is $(x + local)}
+     ]
+
+     foo 30
+
+When wrapper runs, the same basic logic applies to how &quot;scopes&quot; are gathered...and applied to the body of the function when it executes.  But that COMPOSE is splicing in a string that already has a binding on it.  How does the specifier flowing downward (which has the module&#39;s X) interact with the specifier already on that string (which has FOO&#39;s X overriding the module&#39;s X)?
+
+**A simple thought is a default of leaving bindings alone if they already have one.** This seems obviously better than blindly overwriting, because it gives you a simple choice if you want overwriting to happen... you could just unbind the string:
+
+     wrapper: func [string] [
+         return do compose [interpolate (unbind string)]
+     ]
+
+But all-or-nothing doesn&#39;t cover a lot of scenarios.  If you&#39;re dynamically creating a function with some block material you got &quot;from somewhere else&quot;, that material may have been written with the express knowledge that certain words were supposed to be overridden by the place it&#39;s being substituted, with others left alone.
+
+Also, what if you had a rule like *&quot;I want all the GROUP!s in this code to be bound to FOO but only inside the GROUP!s&quot;*?
+
+## Could Binding Be Functional?
+
+If you want a programmable sense of binding that doesn&#39;t resort to deep walking the structure and mutating it directly... you could allow the binding &quot;specifier&quot; to be (at least conceptually) a function.  That function could be passed the existing binding as an argument, and make a decision based on that of how to resolve it.
+
+This would result in a kind of &quot;programmable specifier&quot;, that only injects its influence *if and when* a descent into a block with the desire to execute it occurs.
+
+Whether you could *actually* provide a function, or just speak in a &quot;mini dialect&quot; of merge and override instructions that behaved as a function, I don&#39;t know.  A real usermode function doing the bind merge logic sounds expensive (but would it be worse than deep walking and selectively binding a tree of code?  Who knows.)
+
+## Pure Virtual Binding Has No Obvious Way To Cache
+
+One advantage to storing the &quot;scope chain&quot; is that if contexts in that chain have things added or removed, the evaluation can pick up the change...
+
+...but a *disadvantage* is that it&#39;s hard to see any way to efficiently remember where to look up bindings.  Where you found a word on the last lookup might not be the same place that you would on the next lookup, if any objects/modules in the chain have changed.  Thinking of binding as some sort of black box function makes this even more intractable than it already is.
+
+**But I really feel the deep walking with putting bindings on things is a dead end.**  That just makes it feel like the focus needs to be on figuring out this means of dialecting the resolution of scopes at the merge points.  There needs to be a richer language than just &quot;unbind&quot; and &quot;no-op&quot; for what you do at these points...but I don&#39;t think walking the blocks and pasting bindings on particular items is viable.
+
+## I Think &quot;Scopes&quot; Have To Come Into Play
+
+Rebol&#39;s word soup for binding has always been [DWIM technology](https://en.wikipedia.org/wiki/DWIM).  (&quot;do what I mean&quot;)  So there&#39;s no schematic for how to do this.  It&#39;s fundamentally based on wishful thinking.
+
+The concept of having a fully granular ability to go down to the WORD!-level in a structure of code and declare what *that one word* points to may seem like it puts all the power in your hands.  But that power has proven difficult or impossible to wield in non-trivial situations... runs afoul of blocks that are imaged multiple places in the source... and winds up leaving code stale and oblivious to when new declarations arise at moments they don&#39;t expect.
+
+**What puts me over the top in thinking we need &quot;scopes&quot; is bindings in strings.**  Features based on string interpolation are so undeniably useful that once the possibilities are seen, they can&#39;t be unseen.
+
+But also, what about debuggers that might want to show you lists of what variables are &quot;in scope&quot; at a certain point of execution?  There are a lot of reasons to have a running tally of which contexts and declarations are visible.
+
+**Yet it&#39;s important to realize this is kind of just kicking the can down the road a bit: There&#39;s no rigorous way to give meaning to word soup being arranged haphazardly.**  What has been able to succeed in Rebol so far (to the extent you can call existing binding &quot;success&quot;) is really just the by-product of fairly unambitious code.  &quot;It looks like it works because nothing difficult is being tried.&quot;
+
+Eliminating mutable binding and asking lookup to be accomplished by some nebulous &quot;scope merging&quot; language doesn&#39;t have an obvious magic to it.  Beyond that, I don&#39;t know how to cache it.  **So this is a radical idea that may just lead to frustration and the slow death of the project.**  :skull_and_crossbones: 
+
+But I have said that before about other things that worked out okay.  :man_shrugging: 
+
+We&#39;ll see.</description>
+    
+    <lastBuildDate>Thu, 01 Feb 2024 06:03:06 +0000</lastBuildDate>
+    <category>Binding</category>
+    <atom:link href="https://rebol.metaeducation.com/t/rebol-and-scopes-well-why-not/1751.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Rebol And Scopes: Well, Why Not?</title>
+        <dc:creator><![CDATA[bradrn]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="16" data-topic="1751">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>Splices pretty much have to be agnostic. The question of "hardening" bindings raises the question of whose idea of hardening to use (e.g. the evaluator's, should quoted material get bound?)</p>
+</blockquote>
+</aside>
+<p>This is fair, though slightly disappointing. I guess one can always do <code>spread harden-bindings […]</code> if that behaviour is really desirable.</p>
+<aside class="quote no-group" data-username="hostilefork" data-post="16" data-topic="1751">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>There were no environments in the model being compared with, and no merging.</p>
+</blockquote>
+</aside>
+<p>Ah, I’d got the impression the change was from non-pure virtual binding to pure virtual binding, rather than from binding-to-words to pure virtual binding. (If that makes sense.)</p>
+          <p><a href="https://rebol.metaeducation.com/t/rebol-and-scopes-well-why-not/1751/17">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/rebol-and-scopes-well-why-not/1751/17</link>
+        <pubDate>Thu, 01 Feb 2024 06:03:06 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1751-17</guid>
+        <source url="https://rebol.metaeducation.com/t/rebol-and-scopes-well-why-not/1751.rss">Rebol And Scopes: Well, Why Not?</source>
+      </item>
+      <item>
+        <title>Rebol And Scopes: Well, Why Not?</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="bradrn" data-post="15" data-topic="1751">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/bradrn/48/365_2.png" class="avatar"> bradrn:</div>
+<blockquote>
+<p>what did you end up doing with splices?</p>
+</blockquote>
+</aside>
+<p>Splices pretty much have to be agnostic.  The question of "hardening" bindings raises the question of whose idea of hardening to use (e.g. the evaluator's, should quoted material get bound?)</p>
+<aside class="quote no-group" data-username="bradrn" data-post="15" data-topic="1751">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/bradrn/48/365_2.png" class="avatar"> bradrn:</div>
+<blockquote>
+<p>I’d have expected an increase in speed, since there’s no need to merge environments any more.</p>
+</blockquote>
+</aside>
+<p>There were no environments in the model being compared with, and no merging.</p>
+<p>During the transcode of the input source string into structure, every word was "attachment" bound to the module it was being scanned on behalf of.</p>
+<p>Then whatever waves of binding based on walking that structure would overwrite those bindings.  e.g. copying a function body would relativize any words in it to the function's argument indicies and an archetypal pointer to that function.</p>
+<p>Ren-C had a limited amount of "searching a chain" for LETs and FOR-EACH variables etc., similar to what is done today.</p>
+<p>Now--as I've said--every time a function's body is visited, it's essentially unbound material.  So things that want to be bound to LIB, like say APPEND, have to go through the "environment" in the specifier and find out if they are in the function frame... or in a LET... walking down to the module and then falling through to lib at the end of the chain.</p>
+          <p><a href="https://rebol.metaeducation.com/t/rebol-and-scopes-well-why-not/1751/16">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/rebol-and-scopes-well-why-not/1751/16</link>
+        <pubDate>Thu, 01 Feb 2024 05:46:26 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1751-16</guid>
+        <source url="https://rebol.metaeducation.com/t/rebol-and-scopes-well-why-not/1751.rss">Rebol And Scopes: Well, Why Not?</source>
+      </item>
+      <item>
+        <title>Rebol And Scopes: Well, Why Not?</title>
+        <dc:creator><![CDATA[bradrn]]></dc:creator>
+        <description><![CDATA[
+            <p>Great to hear!</p>
+<p>If I may ask: what did you end up doing with splices? Do they harden their bindings when spliced, or do they do something else?</p>
+<aside class="quote no-group" data-username="hostilefork" data-post="14" data-topic="1751">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>I tinkered some things to get performance parity with the pre-pure-virtual executable, though they would have made that executable even faster. Just trying to keep the overall experience from getting intractably slow.</p>
+</blockquote>
+</aside>
+<p>I’m surprised to hear that this modification makes Ren-C slower in general. If anything, I’d have expected an increase in speed, since there’s no need to merge environments any more.</p>
+          <p><a href="https://rebol.metaeducation.com/t/rebol-and-scopes-well-why-not/1751/15">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/rebol-and-scopes-well-why-not/1751/15</link>
+        <pubDate>Thu, 01 Feb 2024 05:37:59 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1751-15</guid>
+        <source url="https://rebol.metaeducation.com/t/rebol-and-scopes-well-why-not/1751.rss">Rebol And Scopes: Well, Why Not?</source>
+      </item>
+      <item>
+        <title>Rebol And Scopes: Well, Why Not?</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="11" data-topic="1751">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>I'm aiming to commit this to GitHub soon-ish.</p>
+</blockquote>
+</aside>
+<p>All right... in the last moments before February 1st, I've committed it.  So now we're running in a much more unbound world than before!</p>
+<ul>
+<li>
+<p>The <a href="https://rebol.metaeducation.com/t/repurposing-the-xxx-xxx-for-undecorated-values/2135">change so that @XXX produces bound material</a> is a big help, and it makes the places that need changes a lot less ugly.</p>
+</li>
+<li>
+<p>For now, the calls to <strong>IN</strong> are <strong>INSIDE</strong>.  This makes it easier to find, and also I think having it be an abbreviation is a good idea so that code that isn't binding-focused can use IN as a variable name if it feels like, and then for the occasional binding call use INSIDE or LIB.IN.</p>
+</li>
+<li>
+<p>I tinkered some things to get performance parity with the pre-pure-virtual executable, though they would have made that executable even faster.  Just trying to keep the overall experience from getting intractably slow.</p>
+</li>
+<li>
+<p>Some quoting functions depend on getting binding information from the callsite applied to their arguments.  Prominently, the @ operator in <strong><code>@ XXX</code></strong> does this, but also things like <strong>foo and (baz bar)</strong> which short circuits the evaluation of baz bar by quoting the group... and I've mentioned I don't want that to be done as <strong>foo and [baz bar]</strong>.  How these exceptions work <a href="https://rebol.metaeducation.com/t/functions-that-capture-the-current-evaluation-environment/2122">need to be considered carefully</a>.</p>
+</li>
+</ul>
+<p>There's tons of open questions, but I just feel the old way was such a dead end that the sooner we move away from it the better.</p>
+          <p><a href="https://rebol.metaeducation.com/t/rebol-and-scopes-well-why-not/1751/14">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/rebol-and-scopes-well-why-not/1751/14</link>
+        <pubDate>Thu, 01 Feb 2024 04:34:12 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1751-14</guid>
+        <source url="https://rebol.metaeducation.com/t/rebol-and-scopes-well-why-not/1751.rss">Rebol And Scopes: Well, Why Not?</source>
+      </item>
+      <item>
+        <title>Rebol And Scopes: Well, Why Not?</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="bradrn" data-post="12" data-topic="1751">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/bradrn/48/365_2.png" class="avatar"> bradrn:</div>
+<blockquote>
+<p>Deeply impressive work! It’s amazing that you’ve managed to get so much working so quickly.</p>
+</blockquote>
+</aside>
+<p>Thanks!  Ren-C is a mess in lots of ways...but it's held together by some fairly robust defensive coding strategies, and bends pretty well to new ideas.</p>
+<p>I had actually forgotten how much of the first attempt had been committed in bits and pieces as groundwork.  Thought I was going to have to go back to the old branch to merge bits in, but everything uncontroversial was already merged in some form.</p>
+<aside class="quote no-group" data-username="bradrn" data-post="12" data-topic="1751">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/bradrn/48/365_2.png" class="avatar"> bradrn:</div>
+<blockquote>
+<p>I wonder how other interpreted languages deal with this problem? After all, most languages use scopes in one way or another. It may be worth looking at how R implements it</p>
+</blockquote>
+</aside>
+<p>Seems reasonable to see if there's any insights.  In the past I've briefly looked at stuff like <a href="https://v8.dev/blog/fast-properties">Hidden Classes in V8</a>, and there's a lot to consider if you are looking for speed at the cost of other things.</p>
+<p>Though one goal is to try and keep the implementation as simple as possible.  It's painful to write something like this in pure C and not have things like the C++ standard library... but it makes you think about alternative ways of solving problems.</p>
+<aside class="quote no-group" data-username="bradrn" data-post="12" data-topic="1751">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/bradrn/48/365_2.png" class="avatar"> bradrn:</div>
+<blockquote>
+<p>Might it not be quicker to use a hashmap or similar data structure?</p>
+</blockquote>
+</aside>
+<p>Moved discussion to <a href="https://rebol.metaeducation.com/t/optimizing-environment-lookup/2134">Optimizing Environment Lookup</a></p>
+          <p><a href="https://rebol.metaeducation.com/t/rebol-and-scopes-well-why-not/1751/13">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/rebol-and-scopes-well-why-not/1751/13</link>
+        <pubDate>Thu, 25 Jan 2024 07:44:36 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1751-13</guid>
+        <source url="https://rebol.metaeducation.com/t/rebol-and-scopes-well-why-not/1751.rss">Rebol And Scopes: Well, Why Not?</source>
+      </item>
+      <item>
+        <title>Rebol And Scopes: Well, Why Not?</title>
+        <dc:creator><![CDATA[bradrn]]></dc:creator>
+        <description><![CDATA[
+            <p>Deeply impressive work! It’s amazing that you’ve managed to get so much working so quickly.</p>
+<aside class="quote no-group" data-username="hostilefork" data-post="11" data-topic="1751">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>Performance Is An Issue</p>
+</blockquote>
+</aside>
+<p>I’m a little surprised to see this, though in retrospect it makes sense. I wonder how other interpreted languages deal with this problem? After all, most languages use scopes in one way or another. It may be worth looking at how R implements it, since variable lookup there also requires searching through environment lists.</p>
+<p>Though I do spy one low-hanging fruit…</p>
+<aside class="quote no-group" data-username="hostilefork" data-post="11" data-topic="1751">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>a linked list of objects</p>
+</blockquote>
+</aside>
+<p>Might it not be quicker to use a hashmap or similar data structure?</p>
+          <p><a href="https://rebol.metaeducation.com/t/rebol-and-scopes-well-why-not/1751/12">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/rebol-and-scopes-well-why-not/1751/12</link>
+        <pubDate>Thu, 25 Jan 2024 01:41:56 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1751-12</guid>
+        <source url="https://rebol.metaeducation.com/t/rebol-and-scopes-well-why-not/1751.rss">Rebol And Scopes: Well, Why Not?</source>
+      </item>
+      <item>
+        <title>Rebol And Scopes: Well, Why Not?</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="9" data-topic="1751">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>I think the proposals have evolved to where the answers are clear enough to make a prototype to explore further.</p>
+</blockquote>
+</aside>
+<p>Here we are a mere two weeks later, and I have managed to put together <strong>"Pure Virtual Binding II"</strong>.  It actually didn't take but a couple of days to get it booting.  But this time, I've pushed through getting it to run a non-trivial set of things:</p>
+<ul>
+<li>UPARSE (now with a LET combinator!)</li>
+<li>the Whitespace Interpreter (including the Redbol emulated old version)</li>
+<li>the ODBC dialect</li>
+<li><a class="mention" href="https://rebol.metaeducation.com/u/rgchris">@rgchris</a>'s HTTPD Server</li>
+<li><a class="mention" href="https://rebol.metaeducation.com/u/blackattr">@BlackATTR</a>'s Query dialect</li>
+<li>bootstrap via Rebmake</li>
+</ul>
+<p>Changes were needed to the usermode code.  But most of the time taken was more about figuring out what to change.  The total number of edits needed were actually smaller than I would have thought.</p>
+<h2><a name="p-7027-whats-different-this-time-1" class="anchor" href="https://rebol.metaeducation.com#p-7027-whats-different-this-time-1"></a>What's Different This Time</h2>
+<ul>
+<li>
+<p><strong>No attempt to propagate binding through structural operations.</strong></p>
+<p>Now you can say <strong>do [print "Hello"]</strong> and have it work fine, yet if you say <strong>get first [print "Hello"]</strong> it will say that the PRINT is unbound.  Propagating the binding from the block to its elements is done implicitly by the evaluator, but everywhere else you need to do explicit lookup.</p>
+<p>It was very useful here to have <a href="https://rebol.metaeducation.com/t/block-creation-vs-evaluation/2098">@bradrn's fresh perspective, to advocate for this behavior</a>. My bias to running existing code hadn't quite absorbed that working with unbound material isn't that bad, if environments to do lookup in are at hand.  So I had tried to bake the binding propagation into structural operations like PICK and FOR-EACH.</p>
+</li>
+<li>
+<p><strong>QUOTED! values lose a quote level under evaluation, but their binding is not affected.</strong></p>
+<p>This is something that <a href="https://rebol.metaeducation.com/t/breaking-make-object-into-component-operations/1442/3">I'd suspected would be needed</a>, but again <a class="mention" href="https://rebol.metaeducation.com/u/bradrn">@bradrn</a>'s no-baggage perspective helped push the behavior...regardless of what it broke!</p>
+<p>While I conceived this more for shielding a value's binding state, it can also be used to easily generate unbound material.  Unbound material is more useful than it has been in the past, as you can compose it into places that provide the needed context and it will run as if it were written there to start with.  As best practices emerge, we may see people making data-oriented lists as <strong><code> '[apple banana pear]</code></strong> to avoid generating spurious bindings.</p>
+<p>But because unbound code doesn't have a lot of historical usage, the main consequence of this change was to break code where you try to pass a function a variable as <strong><code>'var</code></strong>.  That function won't be able to GET or SET the unbound word.  The simplest workaround for this at the moment is to pass <strong><code>(in [] 'var)</code></strong> which uses a dummy block to capture the evaluator's current concept of environment.</p>
+<p><em>(Note you can't do this as <strong><code>first [var]</code></strong>, because as mentioned, even though the block is bound the things you pick out of it structurally are not.)</em></p>
+</li>
+<li>
+<p><strong>Strings don't carry binding (but you can--for instance--wrap them in a block).</strong></p>
+<p>I wound up being kind of uncomfortable with strings carrying a hidden capture of the entire environment they came from.  It might not seem like such a big deal--given that we're saying any random block can do that--and blocks are everywhere.  But I'm much more relaxed about this change by limiting the environment capture to arrays.</p>
+<p>One benefit is you can use the case of a string not being wrapped in a block as an optimization... to say "this string doesn't have any escapes in it".  (I actually did this with the CSCAPE interpolation: if you pass the emitter a raw string, it just outputs it as-is and doesn't parse it.)</p>
+</li>
+</ul>
+<h2><a name="p-7027-put-another-way-2" class="anchor" href="https://rebol.metaeducation.com#p-7027-put-another-way-2"></a>Put Another Way...</h2>
+<ol>
+<li>
+<p><strong>The system only does "automatic" binding inheritance in evaluated code</strong> <em>(PICKs and such do not count)</em></p>
+<pre><code>&gt;&gt; x: 10
+
+&gt;&gt; code: [x + 1]
+== [x + 1]  ; block visit during assignment bound its *tip*
+
+&gt;&gt; eval code
+== 11  ; the EVAL propagated block's tip binding to X inside
+
+&gt;&gt; get first code
+** Error: x is not bound  ; FIRST isn't evaluative, it's structural
+</code></pre>
+</li>
+<li>
+<p><strong>Once a binding is on something, the system won't override it except at clearly specified points</strong> <em>(something has to BIND or UNBIND things, typically immutably)</em></p>
+<pre><code>&gt;&gt; x: 10
+
+&gt;&gt; code: [x + 1]
+== [x + 1]  ; block bound at tip
+
+&gt;&gt; inner: lambda [x] compose* [eval (code)]
+
+&gt;&gt; inner 100
+== 11  ; nested block did not have binding overridden
+
+&gt;&gt; outer: lambda [x] code
+
+&gt;&gt; outer 100
+== 101  ; LAMBDA and FUNC inject their binding at body tip only
+</code></pre>
+</li>
+<li>
+<p><strong>Even when evaluated, quoted material retains whatever binding it had</strong> <em>(which the majority of the time means it will be unbound)</em></p>
+<pre><code>&gt;&gt; x: 10
+
+&gt;&gt; word: 'x
+== x  ; unbound
+
+&gt;&gt; get word
+** Error: x is not bound
+
+&gt;&gt; word: $x
+== x  ; bound ($... can be used to get bound material)
+
+&gt;&gt; get word
+== 10
+
+&gt;&gt; code: '[x + 1]
+== [x + 1]  ; unbound (quoting suppresses tip binding under evaluation)
+
+&gt;&gt; eval code 
+** Error: x is not bound
+</code></pre>
+</li>
+</ol>
+<p>Let me be clear: coding within this new model is not trivial.  It requires writing dialects that perform composition with a conscious awareness of binding at each step.</p>
+<p><strong>But it's much better than spraying meaningless bindings on code...in the hopes that a meaningful one will ultimately "win" as deep walks of mutable binding are applied in waves.</strong></p>
+<p>Not finding yourself in a situation where it's too late for you to bind code is empowering across the board.  Again: I don't have all the answers, but it makes about as much sense as I think this can make.</p>
+<h2><a name="p-7027-overall-impression-its-the-way-forward-3" class="anchor" href="https://rebol.metaeducation.com#p-7027-overall-impression-its-the-way-forward-3"></a>Overall Impression: It's The Way Forward</h2>
+<p>I've said before that this is important, because it offers means for things people have always wanted to do.  Like looking up variables to do string interpolation.  Or more generally: <em>"treat this unbound code as if it had been written here"</em>.</p>
+<p>But a crucial aspect is that <strong>this has much more of a feeling of things being under control</strong>.</p>
+<p>There is a sanity and a logic to diagnosing binding problems.  You have the compounded binding environment in your hands, in the moment.  Previously you could only sift through the scattershot results of however many binding waves that happened before.</p>
+<p>It does require a new way of thinking about what you're doing, but <em>at least you can think</em>.</p>
+<h2><a name="p-7027-performance-is-an-issue-4" class="anchor" href="https://rebol.metaeducation.com#p-7027-performance-is-an-issue-4"></a>Performance Is An Issue</h2>
+<p>Historical binding did have one thing going for it: gluing the binding onto things meant you knew where to look up words without having to search through a linked list of objects every time.</p>
+<p>But we're talking about bound values only coming into existence under evaluation.  This means that the entire body of a function is effectively unbound at the start of each run.</p>
+<p>I haven't done any optimization yet, and empirically it seems to be about 25% slower.  That's actually not bad considering that I haven't put any attention on performance...but I do feel like there's going to be limits to how good it can be.</p>
+<p>UPDATE: Adding the optimization of caching in function bodies <a href="https://rebol.metaeducation.com/t/semantics-and-optimization-of-copying-function-bodies/2119/2">whether a word is in that function or not</a> brings it more to approximately 10%.  Lots more to look at, but that's encouraging.</p>
+<h2><a name="p-7027-working-through-a-few-things-before-committing-this-5" class="anchor" href="https://rebol.metaeducation.com#p-7027-working-through-a-few-things-before-committing-this-5"></a>Working Through A Few Things Before Committing This</h2>
+<p>I'm aiming to commit this to GitHub soon-ish.  But I have a few more things to look at:</p>
+<ul>
+<li>
+<p>The tests.  I got the test runner to work, and it ran to the end without crashing.  But there were still 300 failures, after I'd just gotten that number down to like a dozen after facing a similar number of issues in the year-of-isotopes.  I felt like looking at real code first...and I'll probably be pushing this out before all the minutiae of thought experiments get rethought.</p>
+</li>
+<li>
+<p>Get some more clarity on <a href="https://rebol.metaeducation.com/t/caching-binding-lookup-and-attachment-binding/2128/5">attachment binding</a>.  It's a sketchy concept, but is required for the system to run at the moment.  It's bothersome because it creates a "neither bound nor unbound" state that complicates code that wants a more definitive answer on whether words are bound or unbound--that doesn't change out from ounder them.</p>
+</li>
+<li>
+<p>Cleanup old unnecessary code, e.g. the code for propagating bindings through structural operations (which is still there, just deactivated).</p>
+</li>
+<li>
+<p>Do at least a little bit of looking into what can be done about performance.</p>
+</li>
+</ul>
+<p>But overall, it feels about as right as I think it's going to feel.  So that's a win!</p>
+          <p><a href="https://rebol.metaeducation.com/t/rebol-and-scopes-well-why-not/1751/11">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/rebol-and-scopes-well-why-not/1751/11</link>
+        <pubDate>Thu, 25 Jan 2024 01:36:55 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1751-11</guid>
+        <source url="https://rebol.metaeducation.com/t/rebol-and-scopes-well-why-not/1751.rss">Rebol And Scopes: Well, Why Not?</source>
+      </item>
+      <item>
+        <title>Rebol And Scopes: Well, Why Not?</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>A post was split to a new topic: <a href="https://rebol.metaeducation.com/t/different-environment-lookup-for-word-vs-set-word/2115">Different Environment Lookup for WORD! vs. SET-WORD!</a></p>
+          <p><a href="https://rebol.metaeducation.com/t/rebol-and-scopes-well-why-not/1751/6">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/rebol-and-scopes-well-why-not/1751/6</link>
+        <pubDate>Sat, 13 Jan 2024 01:12:11 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1751-6</guid>
+        <source url="https://rebol.metaeducation.com/t/rebol-and-scopes-well-why-not/1751.rss">Rebol And Scopes: Well, Why Not?</source>
+      </item>
+      <item>
+        <title>Rebol And Scopes: Well, Why Not?</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>2 posts were merged into an existing topic: <a href="https://rebol.metaeducation.com/t/what-dialects-need-from-binding/2111/6">What Dialects Need From Binding</a></p>
+          <p><a href="https://rebol.metaeducation.com/t/rebol-and-scopes-well-why-not/1751/10">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/rebol-and-scopes-well-why-not/1751/10</link>
+        <pubDate>Fri, 12 Jan 2024 23:09:56 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1751-10</guid>
+        <source url="https://rebol.metaeducation.com/t/rebol-and-scopes-well-why-not/1751.rss">Rebol And Scopes: Well, Why Not?</source>
+      </item>
+      <item>
+        <title>Rebol And Scopes: Well, Why Not?</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="bradrn" data-post="7" data-topic="1751">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/bradrn/48/365_2.png" class="avatar"> bradrn:</div>
+<blockquote>
+<p>I’m not sure I’ve fully understood this post…</p>
+</blockquote>
+</aside>
+<p>Hopefully it makes sense now in retrospect.</p>
+<p>Your example of making INTERPOLATE an argument does show another form of "contention".  But in that contention, people would be biased to thinking that the preservation of the original binding is the obvious answer.</p>
+<p>My point was that based on the contract between the caller and callee it could be either intent:</p>
+<ul>
+<li>
+<p>Maybe <strong>wrapper</strong> is supposed to supply the meaning for X... e.g. X is something you take for granted that it will know what that is, not mix it up with some local you incidentally called X</p>
+</li>
+<li>
+<p>Maybe <strong>wrapper</strong> is not supposed to disrupt X</p>
+</li>
+</ul>
+<p>Anyhow, I think the proposals have evolved to where the answers are clear enough to make a prototype to explore further.</p>
+<aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="1751">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>A big focus in Ren-C has been experimenting with binding forms that don't a-priori walk deeply at the outset, but that trickle down and spread as you descend into array structures...each step propagating something called a "specifier".</p>
+</blockquote>
+</aside>
+<p>I believe I managed to pinpoint where "fully virtualized binding" went wrong, while writing thoughts on the thread <a href="https://rebol.metaeducation.com/t/what-dialects-need-from-binding/2111/2">"What Dialects Need From Binding"</a>.</p>
+<ul>
+<li>
+<p><strong>It started the same way as what we are now discussing...with everything being unbound, and binding spreading down from the "tip"</strong></p>
+</li>
+<li>
+<p><strong>But specifiers were trying to automatically propagate binding information in primitive operations (such as PICK and FOR-EACH), by making that propagation part of the underlying mechanics of manipulating array structure.</strong></p>
+</li>
+<li>
+<p><strong>This was so that the "world is unbound" model could keep supporting a coding style of dialects that wanted to make assumptions about bindings being available and "magically working" when using structural operations, despite the lack of deep pre-pass walk to add those bindings:</strong></p>
+<pre><code>double-assigner: func [block] [
+    for-each [sw i] block [
+        assert [(set-word? sw) (integer? i)]
+        set sw 2 * i  ; historically assumes X: and Y: are bound
+    ]
+]
+
+double-assigner [x: 10 y: 20]
+</code></pre>
+</li>
+<li>
+<p><strong>That's a broken idea!  Unbound material (which merely acts bound under evaluation) must be structurally extracted as unbound.  "Automatic" specifier propagation should have been limited to the evaluator, and the stepwise propagation that is needed by dialects must be the responsibility of the dialect author (or the abstractions they use)...and tuned where applicable</strong></p>
+<pre><code>double-assigner: func [block] [
+    for-each [sw i] block [
+        assert [(set-word? sw) (integer? i)]  ; both SW and I are *unbound*
+        set (in block sw) 2 * i  ; &lt;-- the IN BLOCK makes all the difference
+   ]
+]
+
+double-assigner [x: 10 y: 20]
+</code></pre>
+</li>
+</ul>
+<h2><a name="p-6951-the-good-news-is-the-core-mechanics-are-fine-1" class="anchor" href="https://rebol.metaeducation.com#p-6951-the-good-news-is-the-core-mechanics-are-fine-1"></a>The Good News Is: The Core Mechanics Are Fine</h2>
+<p>All the cell structures--with specifiers in blocks, and linked chains and everything--were basically done right (or "well enough for now").</p>
+<p>There's a little twist that we want special instructions in the specifier chain related to "overbinding" to be swapped out with instructions related to "hole punching".  This will affect some things here and there.</p>
+<p>But this doesn't actually need to be changed on day one.  Overbinding works with the code we have today.  Switching to hole punching can be a separate step.</p>
+<p>What will be different is just that you won't get the influences of overbinding from things like FOR-EACH or PICK of a structure carrying it, unless you merge it to what you extract explicitly using IN.</p>
+<h2><a name="p-6951-the-bad-news-is-nearly-every-dialect-needs-rewriting-2" class="anchor" href="https://rebol.metaeducation.com#p-6951-the-bad-news-is-nearly-every-dialect-needs-rewriting-2"></a>The Bad News Is: Nearly Every Dialect Needs Rewriting</h2>
+<p>Where before people could FOR-EACH or PICK and get bound things back, they'll now be getting unbound things back nearly all of the time.</p>
+<p>Dialect authors will have to get used to a programming style of running an IN operation each time they extract structure that they expect to look things up in later.  (Hence choosing such a short name.)</p>
+<p>So if you pick a block out of a block, you (usually) won't be able to do lookups inside that block unless you do a binding operation (possibly IN the block you just extracted from... or maybe somewhere else).  And this process continues recursively down structure as you go.</p>
+<pre><code> nested-double-assigner: func [block] [
+     for-each group block [
+         group: in block group
+         sw: in group group.1
+         set sw 2 * group.2
+     ]
+ ]
+ 
+ nested-double-assigner [(x: 10) (y: 20)]
+</code></pre>
+<p>You might ask why if FOR-EACH is just going to look everything up IN the block, why not do that automatically?  But (a) there's a cost to running IN, and (b) it's not going to always be what you want.<br>
+Obvious example: if you were implementing your own version of the evaluator, you'd need QUOTED! items as-is, so you didn't conflate an unbound item in the block with something bound into it's environment.</p>
+<h2><a name="p-6951-some-people-red_square-will-say-that-cant-be-the-answer-3" class="anchor" href="https://rebol.metaeducation.com#p-6951-some-people-red_square-will-say-that-cant-be-the-answer-3"></a>Some People <img src="https://rebol.metaeducation.com/images/emoji/twitter/red_square.png?v=14" title=":red_square:" class="emoji" alt=":red_square:" loading="lazy" width="20" height="20"> Will Say <em>"That can't be the answer!"</em></h2>
+<p>But... I actually think it might be.</p>
+<p>This is what the system has been doing internally.  But it simply can't promise that it's doing the binding wiring correctly.  Structural operations extracting unbound values have to give back unbound values, and trying to do otherwise will inevitably do the wrong thing.</p>
+<p>Hopefully this can lead to areas of innovation in ways of making this simpler, when it can be.  I've mused a bit about parameterizing the evaluator so it's easier to use parts of it a la carte.  It may be that getting what you want out of a dialect using a set of "evaluators" (instead of tailoring parse with a particular set of "combinators") could save you the trouble of doing the binding propagation that comes from manual descent into structure.</p>
+          <p><a href="https://rebol.metaeducation.com/t/rebol-and-scopes-well-why-not/1751/9">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/rebol-and-scopes-well-why-not/1751/9</link>
+        <pubDate>Fri, 12 Jan 2024 08:53:54 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1751-9</guid>
+        <source url="https://rebol.metaeducation.com/t/rebol-and-scopes-well-why-not/1751.rss">Rebol And Scopes: Well, Why Not?</source>
+      </item>
+      <item>
+        <title>Rebol And Scopes: Well, Why Not?</title>
+        <dc:creator><![CDATA[bradrn]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="1751">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>But that COMPOSE is splicing in a string that already has a binding on it. How does the specifier flowing downward (which has the module's X) interact with the specifier already on that string (which has FOO's X overriding the module's X)?</p>
+</blockquote>
+</aside>
+<p>I’m not sure I’ve fully understood this post… so let me ask a question to double-check my understanding: Is it correct to say that the problem with <code>compose [interpolate (string)]</code> is that <code>(string)</code> would have a <em>different</em> scope to <code>[interpolate …]</code>? With ‘definitional scoping’ that wouldn’t be an issue, since each word! can have a completely different binding, no problem. But with scopes it doesn’t work so well, since each block! can have only one scope.</p>
+<p>If I’ve understood correctly, perhaps this might be a more immediate demonstration of the problem:</p>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext"> wrapper: func [string] [
+     return do compose [interpolate (string)]
+ ]
+
+ foo: func [interpolate] [
+     return wrapper {Inner value: $(interpolate)}
+ ]
+
+ foo 30
+</code></pre>
+<p>In this case, <code>compose [interpolate (string)]</code> reduces to <code>[interpolate {Inner value: $(interpolate)}]</code>, where the two <code>interpolate</code>s are completely unrelated!</p>
+          <p><a href="https://rebol.metaeducation.com/t/rebol-and-scopes-well-why-not/1751/7">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/rebol-and-scopes-well-why-not/1751/7</link>
+        <pubDate>Sat, 30 Dec 2023 15:09:04 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1751-7</guid>
+        <source url="https://rebol.metaeducation.com/t/rebol-and-scopes-well-why-not/1751.rss">Rebol And Scopes: Well, Why Not?</source>
+      </item>
+      <item>
+        <title>Rebol And Scopes: Well, Why Not?</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="Brett" data-post="3" data-topic="1751">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/brett/48/177_2.png" class="avatar"> Brett:</div>
+<blockquote>
+<p>I have useful evaluation techniques that have relied on that ability to rebinding the words of a series into different contexts as desired (nothing earth shattering, just useful).</p>
+</blockquote>
+</aside>
+<p>With what I'm thinking of, going down to the word level and binding individual words (or strings) should still be possible in a pinch...even in a model that is based fully on compounding scopes.</p>
+<p>But rather than BIND itself doing some kind of deep walk, you'd have to do something like:</p>
+<pre><code>obj: make object! [b: 10]
+block: [a [b] c]
+change (second block) bind (pick block 1) obj
+</code></pre>
+<p>And if you didn't have mutable access to the block, you'd have to copy it..deeply in this case.</p>
+<aside class="quote no-group" data-username="Brett" data-post="3" data-topic="1751">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/brett/48/177_2.png" class="avatar"> Brett:</div>
+<blockquote>
+<p>The obvious open and wishful thinking question is "Can we choose a binding policy when we want to?", like for dialects or foreign syntaxes, where we know we're dealing with a less-than-general language situation.</p>
+</blockquote>
+</aside>
+<p>The best we can hope for is a "you get what you pay for" attitude.  The more obscure your situation, the more likely it is you'll have to go to the level of copying everything and binding manually...and the less likely it will compose in any meaningful way with previously unknown dialects or functions or combinators.</p>
+<p>Kind of reminds me of the saying "every model is broken, but some are useful".</p>
+<p>But demanding binding on strings really is a tough new constraint in the game.  It pushing a little away from "glue bindings on destructively and bear the consequences of ordering problems" and a little more "be like synthesized/inherited attribute grammar rules".  I just feel like having looked at how good other languages are at expressing things that a text-based language without features in the spirit of string interpolation will be non-competitive.</p>
+<p>Tough, tough!  But bring forward your binding examples to have in the set of "things we aim to support" and will see what can be done.</p>
+          <p><a href="https://rebol.metaeducation.com/t/rebol-and-scopes-well-why-not/1751/4">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/rebol-and-scopes-well-why-not/1751/4</link>
+        <pubDate>Fri, 05 Nov 2021 19:50:32 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1751-4</guid>
+        <source url="https://rebol.metaeducation.com/t/rebol-and-scopes-well-why-not/1751.rss">Rebol And Scopes: Well, Why Not?</source>
+      </item>
+      <item>
+        <title>Rebol And Scopes: Well, Why Not?</title>
+        <dc:creator><![CDATA[Brett]]></dc:creator>
+        <description><![CDATA[
+            <p>Kudos for such an effective and thought provoking piece on binding.</p>
+<p>It's an interesting journey - the how, the when and the why of binding behaviour, leading to the question of whether this can be implemented like a programmable function, of "scopes" and the representation of what is, or what happened.</p>
+<p>Going down to the word level in a structure and pasting binding on things has allowed us to do some interesting things with binding in user code, without access to the evaluator. Still chasing the "relative expression" idea - I have useful evaluation techniques that have relied on that ability to rebinding the words of a series into different contexts as desired (nothing earth shattering, just useful). It has been frustrating too, for all the problems you have pointed out. It has limits in flexibility, sometimes I've just wanted to idly experiment ideas like having a word bound to two contexts at once (part of multiple active sets, not hierarchical) with some policy to decide the lookup between them depending on situation or what they sit next to - just to see where it leads. Realisation hits that it's hard and there's still all the existing binding problems, so it doesn't get tried. I'd wondered if one day, that lookup process could be user code accessible.</p>
+<p>The paste binding on code idea, despite it's problems, has always been for me something special about Rebol. It has been nice to drag in structured data, rewrite it into expressions, maybe paint on some bindings, be able to evaluate it and spit out some commands into another system or whatever - solve an ad-hoc problem without having to conform to the rigors of some general language or limited shell. Admittedly though ad-hoc is never really ad-hoc, one usually wants to be able to reuse code/expressions sometime later, but only do the minimum required now.</p>
+<p>You point out that each binding behaviour, i'll call it a policy here, has it's pro and cons.  The obvious open and wishful thinking question is "Can we choose a binding policy when we want to?", like for dialects or foreign syntaxes, where we know we're dealing with a less-than-general language situation.</p>
+<p><a href="https://en.wikipedia.org/wiki/Po_(lateral_thinking)">Po:</a> Could dialects be a bit more first class by specifying an evaluator and/or binding policy (are those even separable?) by series?</p>
+<p>I don't expect answers to these questions. I can see it's hard enough to pin down the questions you're already wrestling with for the main language. I was inspired to comment on your piece as perhaps any of us that have attempted to write a non-trivial user code dialect would.</p>
+          <p><a href="https://rebol.metaeducation.com/t/rebol-and-scopes-well-why-not/1751/3">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/rebol-and-scopes-well-why-not/1751/3</link>
+        <pubDate>Thu, 28 Oct 2021 01:50:10 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1751-3</guid>
+        <source url="https://rebol.metaeducation.com/t/rebol-and-scopes-well-why-not/1751.rss">Rebol And Scopes: Well, Why Not?</source>
+      </item>
+      <item>
+        <title>Rebol And Scopes: Well, Why Not?</title>
+        <dc:creator><![CDATA[IngoHohmann]]></dc:creator>
+        <description><![CDATA[
+            <p>I'll count on your ability to find something better, if you run into a dead-end.</p>
+          <p><a href="https://rebol.metaeducation.com/t/rebol-and-scopes-well-why-not/1751/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/rebol-and-scopes-well-why-not/1751/2</link>
+        <pubDate>Wed, 27 Oct 2021 12:38:44 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1751-2</guid>
+        <source url="https://rebol.metaeducation.com/t/rebol-and-scopes-well-why-not/1751.rss">Rebol And Scopes: Well, Why Not?</source>
+      </item>
+      <item>
+        <title>Rebol And Scopes: Well, Why Not?</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>It's frequently said that Rebol "doesn't have scope".  Early examples of that premise might point to something like a block of:</p>
+<pre><code>[x x x y y y]
+</code></pre>
+<p>Then people might say that the Xs and Ys can all resolve to something different.</p>
+<pre><code>&gt;&gt; print [x x x y y y]
+10 20 "foo" 30 40 "bar"
+</code></pre>
+<p>I find it personally frustrating when this is pronounced with glee (as per Red Gitter <em>"there is no spoon!"</em>)...vs. acknowledging that this should seem very alarming.  When you do something weird the burden of proof is on you to prove its benefit.</p>
+<h2><a name="p-5621-were-scopes-rejected-because-theyre-somehow-bad-1" class="anchor" href="https://rebol.metaeducation.com#p-5621-were-scopes-rejected-because-theyre-somehow-bad-1"></a>Were Scopes Rejected Because They're Somehow Bad?</h2>
+<p>No.</p>
+<p><em>It's because Rebol's dynamic nature means there isn't a clear moment in time where code can be holistically analyzed to determine scopes</em>.  Code structures are always getting cobbled together from pieces...from disparate locations in the codebase, or sometimes fabricated from thin air with <em>no</em> context.</p>
+<p>So it hasn't had scopes because it hasn't been able to.</p>
+<p>BUT with the prototypes I've done with string interning, it integrates something like "scopes".</p>
+<pre><code>&gt;&gt; print interpolate {Scopes? $x $x $x $y $y $y}
+Scopes? 10 10 10 foo foo foo
+</code></pre>
+<p>When a string carries along a "binding", it only carries one.  And that effectively captures some map from words to values.  So the answer to "what is X" and "what is Y" will be the same each time you ask that mapping referenced by that string.</p>
+<p>If that's not a "scope", what is it?  And is there a reason the system as a whole should not use them?</p>
+<h2><a name="p-5621-historical-rebol-used-mutable-binding-2" class="anchor" href="https://rebol.metaeducation.com#p-5621-historical-rebol-used-mutable-binding-2"></a>Historical Rebol Used Mutable Binding</h2>
+<p>Historical Rebol's idea of binding is that ANY-WORD!s get bits in the cell representing an object they are looked up in.  This process of gluing on bindings was done "every now and again" by code that walks around--usually deeply--and mutably changes data it is given.</p>
+<p><strong>On the plus side: programmability.</strong>  If you received a BLOCK! and wanted to go through and say that every SET-WORD! that starts with a vowel is going to be bound to some new object, but others will be left as-is, you can do that.  You can examine not only the properties of the structure, but also make decisions on what the previous binding was...selecting to override some references of the same named variable while leaving others alone.</p>
+<p>(Note: Some binding queries didn't give useful information.  If you asked for the binding of a word linked to a function argument or local, it would just say "true".)</p>
+<p><strong>On the plus side: performance.</strong>  If you're dealing with a concept of binding that wants to freeze in time at the moment you run a bind pass, you can cache the notion of which object and which index in that object a word will be found at.  Although...</p>
+<p>...<strong>On the minus side: requires lots of copies (adversely affects performance, and it's not clear when to make them).</strong> If you assume every value has a binding it can mutably disrupt, this complicates situations where a piece of code needs to be viewed in more than one way.  Just one example is the idea that every method in an object would need to be copied deeply so that its code could be rebound to that object's instance variables.</p>
+<p><strong>Also on the minus side: no reaction to changes.</strong>  For instance, you might bind some code into a place like the LIB context...but later add a new declaration to LIB.  The addition will not be seen.</p>
+<h2><a name="p-5621-ren-c-began-to-virtualize-binding-3" class="anchor" href="https://rebol.metaeducation.com#p-5621-ren-c-began-to-virtualize-binding-3"></a>Ren-C Began To "Virtualize" Binding</h2>
+<p>A big focus in Ren-C has been experimenting with binding forms that don't a-priori walk deeply at the outset, but that trickle down and spread as you descend into array structures...each step propagating something called a "specifier".</p>
+<p>One of the first instances was when you run a function body, a specifier would be added that would be the FRAME! of that function's variables.  It starts propagating by slipping a pointer into an extracted block cell for the body when it gets a DO at the top level.  That pointer travels along through nested blocks, so those become aware of the function instance it relates to...one extraction at a time.  Similar techniques allow object instance methods to be differentiated while running the same code used in other objects...the function bodies are the same arrays, but the specifier facilitates finding the object instance.</p>
+<p>There are various incarnations of this technique of having binding be a "view" on an array of values, without having to actually touch the bits in arrays.  But the general name for these techniques I've adopted is <strong>virtual binding</strong>.</p>
+<h2><a name="p-5621-string-interpolation-tries-fully-virtualized-binding-4" class="anchor" href="https://rebol.metaeducation.com#p-5621-string-interpolation-tries-fully-virtualized-binding-4"></a>String Interpolation Tries <em>Fully Virtualized Binding</em></h2>
+<p>At first specifiers were just for functions and methods.  But the concept of making specifiers accrue a more complete map of a persistent binding environment is very tempting, allowing things like <a href="https://rebol.metaeducation.com/t/could-strings-have-context/587/10">binding lookup in strings</a>.</p>
+<p>The idea behind the prototype that lets you look up a map from WORD! =&gt; value on strings is that specifiers compound together in chains.  A new link is added each time something new to consider is added.</p>
+<p>So let's look at that model of operation for something like:</p>
+<pre><code> global: 10
+ x: &lt;not an integer&gt;
+
+ foo: func [x] [
+     let local: 20
+     return interpolate {The sum is $(x + local)}
+ ]
+
+ foo 30
+</code></pre>
+<p>The virtual bind chain starts out with a module context that has <code>global</code>, <code>x</code>, and <code>foo</code> in it.  This is all there is to stick on the BLOCK!s that gets passed to FUNC.  So the spec and body are blocks with a module as the specifier.</p>
+<p>FUNC stows the body block away in an ACTION! that it generates.  Later when it gets invoked, it creates a FRAME! with <code>return</code> and <code>x</code> in it...and puts that in a chain <em>with</em> the module context.  So upon entry to the function body, that body is being executed with a specifier that looks in the frame first (would find that x) and then in the module second (would find <code>global</code> and <code>foo</code>).  This compound specifier is what the evaluator state initially has for that body block.</p>
+<p>The module inherits from the LIB context, so things like LET and INTERPOLATE will be found by means of that inheritance.  So then LET runs...using a special ability to add another link in the chain to the specifier that the evaluator is using, for the word <code>local</code>.</p>
+<p>Finally we get to the RETURN (it's in the frame) and INTERPOLATE (falling through to the module) and the whole specifier chain is stuck onto the string.  Because the specifier has snowballed all the information <em>the string could look up anything</em> (except the X in the module that's hidden).</p>
+<p><strong>In simple cases like this, it's essentially just like scope.</strong>   There are no situations that introduce contention.  The flow of context is from the top to the bottom, and there's no parts being unplugged from one place and into another.</p>
+<h2><a name="p-5621-but-what-if-you-did-unplug-and-replug-things-5" class="anchor" href="https://rebol.metaeducation.com#p-5621-but-what-if-you-did-unplug-and-replug-things-5"></a>But What If You Did Unplug and Replug Things?</h2>
+<p>Let's just look at a <em>super simple</em> example of throwing a COMPOSE into the mix.  So instead of calling INTERPOLATE directly, you made a call to another function, WRAPPER:</p>
+<pre><code> global: 10
+ x: &lt;not an integer&gt;
+
+ wrapper: func [string] [
+     return do compose [interpolate (string)]
+ ]
+
+ foo: func [x] [
+     let local: 20
+     return wrapper {The sum is $(x + local)}
+ ]
+
+ foo 30
+</code></pre>
+<p>When wrapper runs, the same basic logic applies to how "scopes" are gathered...and applied to the body of the function when it executes.  But that COMPOSE is splicing in a string that already has a binding on it.  How does the specifier flowing downward (which has the module's X) interact with the specifier already on that string (which has FOO's X overriding the module's X)?</p>
+<p><strong>A simple thought is a default of leaving bindings alone if they already have one.</strong> This seems obviously better than blindly overwriting, because it gives you a simple choice if you want overwriting to happen... you could just unbind the string:</p>
+<pre><code> wrapper: func [string] [
+     return do compose [interpolate (unbind string)]
+ ]
+</code></pre>
+<p>But all-or-nothing doesn't cover a lot of scenarios.  If you're dynamically creating a function with some block material you got "from somewhere else", that material may have been written with the express knowledge that certain words were supposed to be overridden by the place it's being substituted, with others left alone.</p>
+<p>Also, what if you had a rule like <em>"I want all the GROUP!s in this code to be bound to FOO but only inside the GROUP!s"</em>?</p>
+<h2><a name="p-5621-could-binding-be-functional-6" class="anchor" href="https://rebol.metaeducation.com#p-5621-could-binding-be-functional-6"></a>Could Binding Be Functional?</h2>
+<p>If you want a programmable sense of binding that doesn't resort to deep walking the structure and mutating it directly... you could allow the binding "specifier" to be (at least conceptually) a function.  That function could be passed the existing binding as an argument, and make a decision based on that of how to resolve it.</p>
+<p>This would result in a kind of "programmable specifier", that only injects its influence <em>if and when</em> a descent into a block with the desire to execute it occurs.</p>
+<p>Whether you could <em>actually</em> provide a function, or just speak in a "mini dialect" of merge and override instructions that behaved as a function, I don't know.  A real usermode function doing the bind merge logic sounds expensive (but would it be worse than deep walking and selectively binding a tree of code?  Who knows.)</p>
+<h2><a name="p-5621-pure-virtual-binding-has-no-obvious-way-to-cache-7" class="anchor" href="https://rebol.metaeducation.com#p-5621-pure-virtual-binding-has-no-obvious-way-to-cache-7"></a>Pure Virtual Binding Has No Obvious Way To Cache</h2>
+<p>One advantage to storing the "scope chain" is that if contexts in that chain have things added or removed, the evaluation can pick up the change...</p>
+<p>...but a <em>disadvantage</em> is that it's hard to see any way to efficiently remember where to look up bindings.  Where you found a word on the last lookup might not be the same place that you would on the next lookup, if any objects/modules in the chain have changed.  Thinking of binding as some sort of black box function makes this even more intractable than it already is.</p>
+<p><strong>But I really feel the deep walking with putting bindings on things is a dead end.</strong>  That just makes it feel like the focus needs to be on figuring out this means of dialecting the resolution of scopes at the merge points.  There needs to be a richer language than just "unbind" and "no-op" for what you do at these points...but I don't think walking the blocks and pasting bindings on particular items is viable.</p>
+<h2><a name="p-5621-i-think-scopes-have-to-come-into-play-8" class="anchor" href="https://rebol.metaeducation.com#p-5621-i-think-scopes-have-to-come-into-play-8"></a>I Think "Scopes" Have To Come Into Play</h2>
+<p>Rebol's word soup for binding has always been <a href="https://en.wikipedia.org/wiki/DWIM">DWIM technology</a>.  ("do what I mean")  So there's no schematic for how to do this.  It's fundamentally based on wishful thinking.</p>
+<p>The concept of having a fully granular ability to go down to the WORD!-level in a structure of code and declare what <em>that one word</em> points to may seem like it puts all the power in your hands.  But that power has proven difficult or impossible to wield in non-trivial situations... runs afoul of blocks that are imaged multiple places in the source... and winds up leaving code stale and oblivious to when new declarations arise at moments they don't expect.</p>
+<p><strong>What puts me over the top in thinking we need "scopes" is bindings in strings.</strong>  Features based on string interpolation are so undeniably useful that once the possibilities are seen, they can't be unseen.</p>
+<p>But also, what about debuggers that might want to show you lists of what variables are "in scope" at a certain point of execution?  There are a lot of reasons to have a running tally of which contexts and declarations are visible.</p>
+<p><strong>Yet it's important to realize this is kind of just kicking the can down the road a bit: There's no rigorous way to give meaning to word soup being arranged haphazardly.</strong>  What has been able to succeed in Rebol so far (to the extent you can call existing binding "success") is really just the by-product of fairly unambitious code.  "It looks like it works because nothing difficult is being tried."</p>
+<p>Eliminating mutable binding and asking lookup to be accomplished by some nebulous "scope merging" language doesn't have an obvious magic to it.  Beyond that, I don't know how to cache it.  <strong>So this is a radical idea that may just lead to frustration and the slow death of the project.</strong>  <img src="https://rebol.metaeducation.com/images/emoji/twitter/skull_and_crossbones.png?v=14" title=":skull_and_crossbones:" class="emoji" alt=":skull_and_crossbones:" loading="lazy" width="20" height="20"></p>
+<p>But I have said that before about other things that worked out okay.  <img src="https://rebol.metaeducation.com/images/emoji/twitter/man_shrugging.png?v=14" title=":man_shrugging:" class="emoji" alt=":man_shrugging:" loading="lazy" width="20" height="20"></p>
+<p>We'll see.</p>
+          <p><a href="https://rebol.metaeducation.com/t/rebol-and-scopes-well-why-not/1751/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/rebol-and-scopes-well-why-not/1751/1</link>
+        <pubDate>Wed, 27 Oct 2021 03:57:01 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1751-1</guid>
+        <source url="https://rebol.metaeducation.com/t/rebol-and-scopes-well-why-not/1751.rss">Rebol And Scopes: Well, Why Not?</source>
+      </item>
+  </channel>
+</rss>

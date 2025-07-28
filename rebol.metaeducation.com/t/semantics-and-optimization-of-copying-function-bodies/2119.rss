@@ -1,0 +1,263 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Semantics and Optimization of Copying Function Bodies</title>
+    <link>https://rebol.metaeducation.com/t/semantics-and-optimization-of-copying-function-bodies/2119</link>
+    <description>Part of Rebol&#39;s design is that every execution frame has an order to its arguments, represented by an integer.
+
+So for instance with IF:
+
+* the CONDITION would be in frame `cell[1]`
+* the BRANCH would be in frame `cell[2]`
+
+## NATIVE Functions Use The Ordering
+
+Natives don&#39;t have to walk the keys of a frame, e.g. to find a slot that matches the symbol &quot;BRANCH&quot;.  They are hardcoded to look directly at the index it should be in.
+
+*(R3-Alpha hardcoded these indices, and you can see that as [D_ARG(1) and D_ARG(2)](https://github.com/rebol/rebol/blob/25033f897b2bd466068d7663563cd3ff64740b94/src/core/n-control.c#L620) in the implementation of IF.  Ren-C puts the native specs in comments, processed during the build to make macros.  These macros like [ARG(condition) and ARG(branch)](https://github.com/metaeducation/ren-c/blob/0d2d7c39733f21e1088240ab2e5c7614072c8059/src/core/n-control.c#L151) resolve to the integers at compile-time.)*
+
+## Interpreted FUNC Functions Use Indices Too, But Differently
+
+When a FUNC is being generated, a table is made that maps from symbols for the arguments and locals to the integer for that symbol in the frame.
+
+Then the BLOCK! passed as a body is walked through to find ANY-WORD!s that reference the arguments and locals, and the index is poked into the cells for those words.  Then, the binding pointer in the cell is set to point at the function definition.
+
+That isn&#39;t enough information to look up the word--because the binding is relative to a function that is not running.  Hence it&#39;s called **relative binding**.  You need to somehow connect this to an instance of the function that is running and has its argument and local cells filled.
+
+Historical Rebol &amp; Red make this connection dynamically by climbing the stack and looking for an instance of the function seen in the binding.  Clearly that doesn&#39;t permit indefinite extent (closure) over a local or argument, because when the function isn&#39;t running its variables can no longer be found.  But it also can be wrong if recursions interact with material bound to various instances of the same function.
+
+Ren-C uses a better mechanism of [Specific Binding](https://rebol.metaeducation.com/t/relative-binding-and-frame-internals/1344), where information is slipped through instances of BLOCK!s and other arrays, saying which frame that view of the array is executing on behalf of.
+
+## Conflict With New Policy of &quot;Leave Binding Alone&quot;
+
+The bias in the new proposal of binding is that any WORD!s already bound will be left-as is, with only some minor surgery on environments of blocks done by things like FUNC or FOR-EACH, to inject some new variables at the head of the lookup.
+
+That may make it sound like these words which are bound relatively inside function bodies are more trouble than they are worth.  In the model, they&#39;re actually supposed to be thought of as unbound--so if they carry a secret binding, that could only be used as an optimization when they are actually intentionally combined with the right frame.
+
+## The Optimization is Actually Not Minor
+
+Ren-C function frames are unusual, in that a single frame can be reused for several &quot;phases&quot; of a function composition.  e.g. you can ADAPT and SPECIALIZE and AUGMENT a function--even a native--and all these just reuse the same frame.  But during the phase, it only sees the fields of the frame it is supposed to be able to see.
+
+For instance, if you specialize out the VALUE from append (e.g. by making it always append 5) and then try to ADAPT the resulting function, you won&#39;t even know that APPEND has a VALUE at all.  It will seem like it only has a series.
+
+Being strict about enforcing this information hiding permits you to do unusual things, like once the VALUE is shielded in the inner function... you can AUGMENT the resulting functions with another argument named VALUE.  This process can proceed indefinitely.  There could be dozens of fields named VALUE in the frame, but only one visible at a time.
+
+So checking whether a value is visible in the frame is more involved than just walking a list of symbols and comparing them (which isn&#39;t necessarily fast in and of itself).  The parameter definitions must be consulted also, to see if they line up with the running phase of the function in order to determine the visibility.
+
+The time of function creation is a good moment to do this work, instead of going through it on every lookup.  And squeaking performance out of pure virtual binding is going to be hard... we need all the tricks we can get.
+
+## Copying The Function Body
+
+R3-Alpha actually had a trick during bootstrap, where while loading the library functions it would use a special version of FUNC that did not copy the function body blocks.  It assumed none of them were composed out of parts that were exposed or would change, and if there were exceptions the library authors were supposed to be sophisticated enough to COPY or COPY/DEEP where needed.
+
+(IIRC, it would contaminate these blocks by putting the relative binding information in them, so they would be seen as corrupt if anyone managed to get access to them.)
+
+But after bootstrap was over, it would replace FUNC with a version that deeply copied the bodies.
+
+It invites a lot of accidents in the historical world to have a FUNC that doesn&#39;t copy its body deeply.  But there are some new possibilities that might be able to avoid accidents while still covering a lot of cases.  For instance, it could deeply protect the blocks and make them immutable.  This way, if a user ever found themselves bit by it they could add in their own COPY or COPY/DEEP at the relevant places.  But 95% or more of the time, you&#39;d not need to and the system could speed up.
+
+In any case, it&#39;s interesting that the relative binding information wouldn&#39;t be corrupting the binding information any longer, because it&#39;s just an optimization for unbound values... and any PICKs or FOR-EACHs would see relatively bound words as unbound.</description>
+    
+    <lastBuildDate>Thu, 19 Jun 2025 07:42:59 +0000</lastBuildDate>
+    <category>Optimization</category>
+    <atom:link href="https://rebol.metaeducation.com/t/semantics-and-optimization-of-copying-function-bodies/2119.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Semantics and Optimization of Copying Function Bodies</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>This optimization has to be rethought in light of <a href="https://rebol.metaeducation.com/t/should-word-capture-the-whole-binding-environment/2494">$word binding to environments</a>.</p>
+<p>Here's a code fragment for assigning the properties:</p>
+<pre><code>REBINT n = maybe Try_Get_Binder_Index(
+    unwrap binder, Cell_Word_Symbol(v)
+);
+CELL_WORD_INDEX_I32(v) = -(n);  // negative or zero signals unbound [2]
+Tweak_Cell_Relative_Binding(v, unwrap relative);
+</code></pre>
+<p>For deciphering it:</p>
+<pre><code>// there's an attempted acceleration of the search by caching a
+// function's identity in WORD! cells and a negative index that tells
+// you where to find the variable if that word is searched in a frame
+// for that function.
+
+if (
+    CTX_TYPE(vlist) == TYPE_FRAME
+    and binding  // word has a cache for if it's in an action frame
+    and Is_Stub_Details(binding)
+    and Action_Is_Base_Of(
+        cast(Phase*, binding),
+        cast(ParamList*, vlist)
+    )
+){
+    assert(CELL_WORD_INDEX_I32(any_word) &lt;= 0);
+    if (CELL_WORD_INDEX_I32(any_word) == 0)
+        goto next_context;
+    *index_out = -(CELL_WORD_INDEX_I32(any_word));
+    return vlist;
+}
+</code></pre>
+<p>Something from caching that slowed things down and was disabled:</p>
+<pre><code>// Note: if frame, caching here seems to slow things down?
+if (CTX_TYPE(vlist) == TYPE_FRAME) {
+    if (CELL_WORD_INDEX_I32(any_word) &lt;= 0) {  // cache in unbounds
+        CELL_WORD_INDEX_I32(
+            m_cast(Cell*, any_word)
+        ) = -(maybe index);
+        Tweak_Cell_Binding(
+            m_cast(Cell*, any_word),
+            Phase_Details(vlist)
+        );
+    }
+}
+</code></pre>
+          <p><a href="https://rebol.metaeducation.com/t/semantics-and-optimization-of-copying-function-bodies/2119/4">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/semantics-and-optimization-of-copying-function-bodies/2119/4</link>
+        <pubDate>Thu, 19 Jun 2025 07:42:59 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2119-4</guid>
+        <source url="https://rebol.metaeducation.com/t/semantics-and-optimization-of-copying-function-bodies/2119.rss">Semantics and Optimization of Copying Function Bodies</source>
+      </item>
+      <item>
+        <title>Semantics and Optimization of Copying Function Bodies</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="2" data-topic="2119">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>If this optimization is going to work, then it also needs a complement to the <em>"unbounds optimized to find their membership in the frame, if you ask"</em>... which is <em>"unbounds optimized to NOT find their membership in the frame, if you ask"</em>.</p>
+</blockquote>
+</aside>
+<p>I did a quick implementation of this and it does have significant effect.</p>
+<p>Prior to the new binding model, just starting up the system and shutting it down was clocked at 480,631,721 "events"</p>
+<p>After the first implementation with no optimizations, it was 598,362,973... so around 25% slower.</p>
+<p>Just adding this optimization brought it to 524,280,372.  So more like 10% slower.</p>
+<p>The startup-shutdown test is just an easy thing to do, and more profiling would be necessary... but that's an encouraging result.</p>
+          <p><a href="https://rebol.metaeducation.com/t/semantics-and-optimization-of-copying-function-bodies/2119/3">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/semantics-and-optimization-of-copying-function-bodies/2119/3</link>
+        <pubDate>Thu, 25 Jan 2024 07:25:12 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2119-3</guid>
+        <source url="https://rebol.metaeducation.com/t/semantics-and-optimization-of-copying-function-bodies/2119.rss">Semantics and Optimization of Copying Function Bodies</source>
+      </item>
+      <item>
+        <title>Semantics and Optimization of Copying Function Bodies</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="2119">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>The bias in the new proposal of binding is that any WORD!s already bound will be left-as is, with only some minor surgery on environments of blocks done by things like FUNC or FOR-EACH, to inject some new variables at the head of the lookup.</p>
+<p>That may make it sound like these words which are bound relatively inside function bodies are more trouble than they are worth. In the model, they're actually supposed to be thought of as unbound--so if they carry a secret binding, that could only be used as an optimization when they are actually intentionally combined with the right frame.</p>
+</blockquote>
+</aside>
+<p>If this optimization is going to work, then it also needs a complement to the <em>"unbounds optimized to find their membership in the frame, if you ask"</em>... which is <em>"unbounds optimized to NOT find their membership in the frame, if you ask"</em>.</p>
+<p>Consider this:</p>
+<pre><code> y: &lt;something&gt;
+
+ foo: func [x &lt;local&gt; a b c d e f g h i j ...] [  ; imagine costly to lookup
+     code: copy [add x]
+     append code to word! "x"
+     do code
+ ]
+</code></pre>
+<p>The <strong>[add x]</strong> block gets bound to the environment before it is passed to COPY.  That environment can find X and Y and ADD and whatever else.</p>
+<p>What we're talking about in the optimization is that when the function body was copied, the X of [add x] got a binding pasted on it to say <em>"if you try and look X up in a frame instance for the foo function, here's the index of X...you don't have to look"</em>.  The index and the pointer to the function definition can fit in the cell.</p>
+<p>But that X is conceptually unbound.  There's no reason the other appended X that has no binding whatsoever shouldn't be found just as legitimately as it.  (I used TO WORD! "X" here instead of just 'X because quoted things would need to be labeled with the lookup optimization too...or at least not labeled with the negative optimization.  Again, it's conceptually still unbound.  But if you convert a string to a word at runtime, there's no optimization there.)</p>
+<p>By extension, <em>all</em> unbound material needs to be considered in the search when the frame is in the specifier.  You can't rule out looking to see if ADD is in the frame just because it doesn't have the optimization applied, for the same reason you can't rule out looking for the no-optimized-binding X.</p>
+<p>So that's why I mention the negative hint.  All unbound material that's <em>not</em> in the frame during the copy would be tagged with the action definition to say "don't bother looking me up in the environment for a frame instance of this action".</p>
+<p>Dynamic material run with the frame context applied that's unbound won't have this information.  But if it's unbound, there's no harm in having the lookup cache the information about whether the lookup succeeded or not.  Only one frame lookup can win, so it would either need to be sticky with the first lookup done or re-cache (based on last lookup, or maybe if a frame comes along that's bigger than the one cached...)</p>
+<p>Note that what this is replacing was a model by which bindings would be fully "hardened" inside the function body during the copy.  So everything in the body would point directly (or relatively) at what it needed to look up to, giving speed in future runs (modulo the various "overbindings" that would override bindings for things like loop variables during a FOR-EACH, etc.)</p>
+<p>So the example I cite would not work (it would work if you used <strong>'x</strong> instead of <strong>to word! "x"</strong>):</p>
+<pre><code> foo: func [x] [
+     code: copy [add x]
+     append code to word! "x"
+     do code
+ ]
+
+&gt;&gt; foo 10
+** Script Error: x word is not bound to a context
+</code></pre>
+<p>Should be able to make it work in the new model, without needing to explicitly bind the word to the frame instance.</p>
+<p>Keeping the body mostly unbound across every run has nice properties, but it'll be slow without some tricks like this optimization in play.</p>
+<h2><a name="p-7000-another-argument-for-the-member-selection-notation-1" class="anchor" href="https://rebol.metaeducation.com#p-7000-another-argument-for-the-member-selection-notation-1"></a>...Another Argument For The <strong><code>.member</code></strong> Selection Notation</h2>
+<p>With binding being purely virtual, there's competition not just from multiple frames (e.g. nested functions) over the same cell's cache, but also lookups for object members.</p>
+<p>This seems to make an interesting case for being able to tell from the value itself if it needs to be looked up in an object.</p>
+<p>Without that:</p>
+<pre><code> o: make object! [
+     field1: &lt;one&gt;
+     field2: &lt;two&gt;
+     ...  ; imagine a non-trivial number of fields
+     foo: method [arg1 arg2] [
+         return reduce [arg1 field1 arg2 field2]
+     ]
+ ]
+</code></pre>
+<p>When that method runs, it gets a specifier for the object instance and for the frame of FOO.  So if we label everything in the body that gets copied as either "unbound, but findable in foo frames" or "unbound, and NOT findable in foo frames"... that's used up all the cache space in the cells.</p>
+<p>But if we know that <strong>.xxx</strong> will never look up to a function argument, but only in the members, the caching can be saved relative to the object prototype.</p>
+<pre><code> o: new object [  ; something where FIELD1 and FIELD2 don't bind deeply
+     field1: &lt;one&gt;
+     field2: &lt;two&gt;
+     ...  ; imagine a non-trivial number of fields
+     foo: method [arg1 arg2] [
+         return reduce [arg1 .field1 arg2 .field2]
+     ]
+ ]
+</code></pre>
+<p>This is on top of the benefit I've already mentioned of "giving you some chance of figuring out what is going on".</p>
+<h2><a name="p-7000-note-module-lookup-is-already-sort-of-optimized-2" class="anchor" href="https://rebol.metaeducation.com#p-7000-note-module-lookup-is-already-sort-of-optimized-2"></a>Note: Module Lookup Is Already (Sort Of) Optimized</h2>
+<p>The way module lookup works is that words hold a symbol, and that symbol points to a linked list of variable stubs--one for each module that defines that variable.</p>
+<p>This wouldn't scale well for objects (think 10000 objects which all had a field "X", searching that list would be slow).  But for modules it's fairly fast, as few modules define the same symbol.  Also, once a word becomes bound it points directly to the stub for the variable.</p>
+<p>(Just mentioning in case you were wondering why I'm fretting over lookup in frames and objects but not the cost of lookup in modules.)</p>
+          <p><a href="https://rebol.metaeducation.com/t/semantics-and-optimization-of-copying-function-bodies/2119/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/semantics-and-optimization-of-copying-function-bodies/2119/2</link>
+        <pubDate>Thu, 18 Jan 2024 14:56:52 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2119-2</guid>
+        <source url="https://rebol.metaeducation.com/t/semantics-and-optimization-of-copying-function-bodies/2119.rss">Semantics and Optimization of Copying Function Bodies</source>
+      </item>
+      <item>
+        <title>Semantics and Optimization of Copying Function Bodies</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>Part of Rebol's design is that every execution frame has an order to its arguments, represented by an integer.</p>
+<p>So for instance with IF:</p>
+<ul>
+<li>the CONDITION would be in frame <code>cell[1]</code></li>
+<li>the BRANCH would be in frame <code>cell[2]</code></li>
+</ul>
+<h2><a name="p-6984-native-functions-use-the-ordering-1" class="anchor" href="https://rebol.metaeducation.com#p-6984-native-functions-use-the-ordering-1"></a>NATIVE Functions Use The Ordering</h2>
+<p>Natives don't have to walk the keys of a frame, e.g. to find a slot that matches the symbol "BRANCH".  They are hardcoded to look directly at the index it should be in.</p>
+<p><em>(R3-Alpha hardcoded these indices, and you can see that as <a href="https://github.com/rebol/rebol/blob/25033f897b2bd466068d7663563cd3ff64740b94/src/core/n-control.c#L620">D_ARG(1) and D_ARG(2)</a> in the implementation of IF.  Ren-C puts the native specs in comments, processed during the build to make macros.  These macros like <a href="https://github.com/metaeducation/ren-c/blob/0d2d7c39733f21e1088240ab2e5c7614072c8059/src/core/n-control.c#L151">ARG(condition) and ARG(branch)</a> resolve to the integers at compile-time.)</em></p>
+<h2><a name="p-6984-interpreted-func-functions-use-indices-too-but-differently-2" class="anchor" href="https://rebol.metaeducation.com#p-6984-interpreted-func-functions-use-indices-too-but-differently-2"></a>Interpreted FUNC Functions Use Indices Too, But Differently</h2>
+<p>When a FUNC is being generated, a table is made that maps from symbols for the arguments and locals to the integer for that symbol in the frame.</p>
+<p>Then the BLOCK! passed as a body is walked through to find ANY-WORD!s that reference the arguments and locals, and the index is poked into the cells for those words.  Then, the binding pointer in the cell is set to point at the function definition.</p>
+<p>That isn't enough information to look up the word--because the binding is relative to a function that is not running.  Hence it's called <strong>relative binding</strong>.  You need to somehow connect this to an instance of the function that is running and has its argument and local cells filled.</p>
+<p>Historical Rebol &amp; Red make this connection dynamically by climbing the stack and looking for an instance of the function seen in the binding.  Clearly that doesn't permit indefinite extent (closure) over a local or argument, because when the function isn't running its variables can no longer be found.  But it also can be wrong if recursions interact with material bound to various instances of the same function.</p>
+<p>Ren-C uses a better mechanism of <a href="https://rebol.metaeducation.com/t/relative-binding-and-frame-internals/1344">Specific Binding</a>, where information is slipped through instances of BLOCK!s and other arrays, saying which frame that view of the array is executing on behalf of.</p>
+<h2><a name="p-6984-conflict-with-new-policy-of-leave-binding-alone-3" class="anchor" href="https://rebol.metaeducation.com#p-6984-conflict-with-new-policy-of-leave-binding-alone-3"></a>Conflict With New Policy of "Leave Binding Alone"</h2>
+<p>The bias in the new proposal of binding is that any WORD!s already bound will be left-as is, with only some minor surgery on environments of blocks done by things like FUNC or FOR-EACH, to inject some new variables at the head of the lookup.</p>
+<p>That may make it sound like these words which are bound relatively inside function bodies are more trouble than they are worth.  In the model, they're actually supposed to be thought of as unbound--so if they carry a secret binding, that could only be used as an optimization when they are actually intentionally combined with the right frame.</p>
+<h2><a name="p-6984-the-optimization-is-actually-not-minor-4" class="anchor" href="https://rebol.metaeducation.com#p-6984-the-optimization-is-actually-not-minor-4"></a>The Optimization is Actually Not Minor</h2>
+<p>Ren-C function frames are unusual, in that a single frame can be reused for several "phases" of a function composition.  e.g. you can ADAPT and SPECIALIZE and AUGMENT a function--even a native--and all these just reuse the same frame.  But during the phase, it only sees the fields of the frame it is supposed to be able to see.</p>
+<p>For instance, if you specialize out the VALUE from append (e.g. by making it always append 5) and then try to ADAPT the resulting function, you won't even know that APPEND has a VALUE at all.  It will seem like it only has a series.</p>
+<p>Being strict about enforcing this information hiding permits you to do unusual things, like once the VALUE is shielded in the inner function... you can AUGMENT the resulting functions with another argument named VALUE.  This process can proceed indefinitely.  There could be dozens of fields named VALUE in the frame, but only one visible at a time.</p>
+<p>So checking whether a value is visible in the frame is more involved than just walking a list of symbols and comparing them (which isn't necessarily fast in and of itself).  The parameter definitions must be consulted also, to see if they line up with the running phase of the function in order to determine the visibility.</p>
+<p>The time of function creation is a good moment to do this work, instead of going through it on every lookup.  And squeaking performance out of pure virtual binding is going to be hard... we need all the tricks we can get.</p>
+<h2><a name="p-6984-copying-the-function-body-5" class="anchor" href="https://rebol.metaeducation.com#p-6984-copying-the-function-body-5"></a>Copying The Function Body</h2>
+<p>R3-Alpha actually had a trick during bootstrap, where while loading the library functions it would use a special version of FUNC that did not copy the function body blocks.  It assumed none of them were composed out of parts that were exposed or would change, and if there were exceptions the library authors were supposed to be sophisticated enough to COPY or COPY/DEEP where needed.</p>
+<p>(IIRC, it would contaminate these blocks by putting the relative binding information in them, so they would be seen as corrupt if anyone managed to get access to them.)</p>
+<p>But after bootstrap was over, it would replace FUNC with a version that deeply copied the bodies.</p>
+<p>It invites a lot of accidents in the historical world to have a FUNC that doesn't copy its body deeply.  But there are some new possibilities that might be able to avoid accidents while still covering a lot of cases.  For instance, it could deeply protect the blocks and make them immutable.  This way, if a user ever found themselves bit by it they could add in their own COPY or COPY/DEEP at the relevant places.  But 95% or more of the time, you'd not need to and the system could speed up.</p>
+<p>In any case, it's interesting that the relative binding information wouldn't be corrupting the binding information any longer, because it's just an optimization for unbound values... and any PICKs or FOR-EACHs would see relatively bound words as unbound.</p>
+          <p><a href="https://rebol.metaeducation.com/t/semantics-and-optimization-of-copying-function-bodies/2119/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/semantics-and-optimization-of-copying-function-bodies/2119/1</link>
+        <pubDate>Tue, 16 Jan 2024 09:00:09 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2119-1</guid>
+        <source url="https://rebol.metaeducation.com/t/semantics-and-optimization-of-copying-function-bodies/2119.rss">Semantics and Optimization of Copying Function Bodies</source>
+      </item>
+  </channel>
+</rss>

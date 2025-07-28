@@ -1,0 +1,253 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>When Should Evaluative Constructs Return ERROR! ?</title>
+    <link>https://rebol.metaeducation.com/t/when-should-evaluative-constructs-return-error/2506</link>
+    <description>**[Definitional failures](https://rebol.metaeducation.com/t/panic-vs-return-fail-the-age-of-definitional-errors/1852)** have been critical in moving to a robust model of error handling.
+
+They&#39;re an ergonomic concept something like Rust&#39;s **`Result&lt;...&gt;`**, because they effectively multiplex errors onto a function&#39;s return value.  You&#39;re expected to triage errors at the moment they happen at a callsite or they promote to divergent panics...which are [not generally intended to be reacted to](https://rebol.metaeducation.com/t/discouraging-the-interception-of-abrupt-failures/1871)--your program is conceptually terminated.  To make triage easier there is [TRAP, the error propagator](https://rebol.metaeducation.com/t/virtual-binding-based-error-propagation-operator/2389).
+
+**Compared with R3-Alpha and Red&#39;s error-handling, this is night and day.**  They are fundamentally broken/useless.  *(Curiously: [Rebol2 actually had a concept of &quot;hot errors&quot;](https://rebol.metaeducation.com/t/rebol2s-hot-errors-abandoned-by-r3-alpha-red/2505), that leaned in the direction of definitional errors, but that direction wasn&#39;t pushed through.)*
+
+---
+
+## Non-Terminal Eval Steps That Don&#39;t Triage Will Panic
+
+You can triage an ERROR! that&#39;s a result of an expression.  But only if it&#39;s the final step:
+
+    &gt;&gt; error? (print &quot;Error is last&quot; 1 / 0)
+    Error is last
+    == \~okay~\  ; antiform
+
+    &gt;&gt; error? (1 / 0 print &quot;Error is first&quot;)
+    ** PANIC: attempt to divide by zero
+
+Any evaluation product that comes after an ERROR! will cause a panic.
+
+GHOST! is not exempt:
+
+    &gt;&gt; error? (1 / 0 comment &quot;no free pass for ghosts&quot;)
+    ** PANIC: attempt to divide by zero
+
+The reasoning is that just because a function returns a ghost, doesn&#39;t mean it doesn&#39;t have side effects... or doesn&#39;t depend in some way on the previous operation.
+
+Currently, COMMA! isn&#39;t exempt, either:
+
+    &gt;&gt; error? (1 / 0,)
+    ** PANIC: attempt to divide by zero
+
+This is something I might be willing to bend on, if we believe that:
+
+    (
+        some expression,
+        another expression,
+        yet another expression,
+    )
+
+Absolutely has to be equivalent to:
+
+    (
+        some expression,
+        another expression,
+        yet another expression
+    )
+
+But mechanically you&#39;d have to scan ahead for any number of commas... and make sure you were at the end of the input after consuming all the commas.  :man_shrugging: 
+
+## Plain EVAL would act the same as the GROUP! above
+
+Only the last step can give an ERROR!.  Previous steps will panic.
+
+And since branching constructs like an IF or a CASE statement uses EVAL to run their branches, they similarly drop the statement out at the last step. So you can synthesize ERROR! out of branches, without causing the branching construct to panic.
+
+## &quot;EVAL:TRAP&quot; (name pending) Gives Error At Any Step
+
+I&#39;ve proposed EVAL:TRAP as a variation which can stop the evaluation at any step that produces an ERROR!:
+
+    &gt;&gt; error? eval:trap [print &quot;Error is last&quot; 1 / 0]
+    Error is last
+    == \~okay~\  ; antiform
+
+    &gt;&gt; error? (1 / 0 print &quot;Error is first&quot;)
+    == \~okay~\
+
+So the second case didn&#39;t make it to the PRINT, but it didn&#39;t PANIC.
+
+# But How About ANY and ALL...?  :roll_eyes: 
+
+The answer may be different.
+
+You&#39;re supposed to reasonably be able to rely on the idea that if ALL gives you a result, it&#39;s the result of the final expression.  You thus might be thinking that if you get an error, that error is coming by contract from that last expression.  I&#39;d say it seems reasonably clear that anything but the last expression should panic.
+
+On the other hand...ANY is not expected to necessarily evaluate all of its clauses... it&#39;s supposed to return the first thing that passes its constraint (non-null as the default constraint).  So if it hit an ERROR! early, maybe it should return it?
+
+I&#39;m not sure.  I&#39;ll have to look at use cases.
+
+# And What About Loops?  
+
+If loops are willing to return definitional errors out of their body, that makes writing loop wrappers a bit trickier.
+
+First let&#39;s ask about MAP-EACH, what should it do?
+
+    map-each &#39;x [1 2 3] [either x = 2 [fail &quot;some error&quot;] [x * 10]]
+
+You&#39;re getting behaviors that are somewhat equivalent to APPEND.  So it&#39;s like you wrote:
+
+    list: []
+    append list x * 10
+    append list fail &quot;some error&quot;
+
+APPEND doesn&#39;t propagate a failure like that.  And I don&#39;t see any reason why it should.
+
+Next, let&#39;s consider wrapping loops... e.g. [the current formulation of FOR-BOTH](https://rebol.metaeducation.com/t/demonstrating-for-both-loop-composability-for-the-win/1833):
+
+    for-both: func [var blk1 blk2 body] [
+        return unlift:lite all [
+            lift:lite for-each var blk1 body
+            lift:lite for-each var blk2 body
+        ]
+    ]
+
+At the moment, LIFT does not lift definitional errors by default, but panics on them.
+
+So if FOR-EACH is willing to return definitional errors, then you won&#39;t get an equivalence between:
+
+    for-each &#39;x [1] [fail &quot;some error&quot;]  ; definitional error result
+
+    for-both &#39;x [1] [] [fail &quot;some error&quot;]  ; panic
+
+    for-both &#39;x [] [1] [fail &quot;some error&quot;]  ; panic
+
+It might seem that given what I say about ALL above, if LIFT:LITE were willing to leave ERROR! as ERROR! (as well as NULL as NULL, and GHOST! as GHOST!) then it would correctly panic on errors that weren&#39;t the last step... BUT... consider:
+
+    all [
+        fail &quot;some error&quot;
+        comment &quot;hmmm&quot;
+    ]
+
+This runs afoul of my concept of not allowing a next step to run... producing a loophole in composition that is trying to leverage things like invisibility.
+
+**This seems to be the crux of a fairly fundamental problem, regarding the need to be psychic in order to know whether an evaluation is going to be a no-op or not.**   
+
+If you&#39;re not looking at the loop data, but tell from the outside of the FOR-EACH after-the-fact if it had evaluations or not, then there&#39;s no way to know if a failure needs to be terminal.
+
+*This suggests that loops should probably panic if the body fails.*  They&#39;d have to do so for any step except the last step anyway, and loops don&#39;t have an interface for psychically exposing if they&#39;re at the last step or not prior to execution.  It defeats composition to require otherwise, and the whole model would have to be redesigned to add this &quot;psychic&quot; aspect... which seems less easy than just saying &quot;no, loops panic if the body fails&quot;.
+
+## Overall Carry-away: There&#39;s Subtleties
+
+Decisions about definitional error propagation appear to be non-obvious.
+
+panic-ing is a conservative default, and then you can get people to explicitly CATCH and THROW the errors if they need to work around it.</description>
+    
+    <lastBuildDate>Thu, 10 Jul 2025 12:36:24 +0000</lastBuildDate>
+    <category>Errors</category>
+    <atom:link href="https://rebol.metaeducation.com/t/when-should-evaluative-constructs-return-error/2506.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>When Should Evaluative Constructs Return ERROR! ?</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p><strong><a href="https://rebol.metaeducation.com/t/panic-vs-return-fail-the-age-of-definitional-errors/1852">Definitional failures</a></strong> have been critical in moving to a robust model of error handling.</p>
+<p>They're an ergonomic concept something like Rust's <strong><code>Result&lt;...&gt;</code></strong>, because they effectively multiplex errors onto a function's return value.  You're expected to triage errors at the moment they happen at a callsite or they promote to divergent panics...which are <a href="https://rebol.metaeducation.com/t/discouraging-the-interception-of-abrupt-failures/1871">not generally intended to be reacted to</a>--your program is conceptually terminated.  To make triage easier there is <a href="https://rebol.metaeducation.com/t/virtual-binding-based-error-propagation-operator/2389">TRAP, the error propagator</a>.</p>
+<p><strong>Compared with R3-Alpha and Red's error-handling, this is night and day.</strong>  They are fundamentally broken/useless.  <em>(Curiously: <a href="https://rebol.metaeducation.com/t/rebol2s-hot-errors-abandoned-by-r3-alpha-red/2505">Rebol2 actually had a concept of "hot errors"</a>, that leaned in the direction of definitional errors, but that direction wasn't pushed through.)</em></p>
+<hr>
+<h2><a name="p-8504-non-terminal-eval-steps-that-dont-triage-will-panic-1" class="anchor" href="https://rebol.metaeducation.com#p-8504-non-terminal-eval-steps-that-dont-triage-will-panic-1"></a>Non-Terminal Eval Steps That Don't Triage Will Panic</h2>
+<p>You can triage an ERROR! that's a result of an expression.  But only if it's the final step:</p>
+<pre><code>&gt;&gt; error? (print "Error is last" 1 / 0)
+Error is last
+== \~okay~\  ; antiform
+
+&gt;&gt; error? (1 / 0 print "Error is first")
+** PANIC: attempt to divide by zero
+</code></pre>
+<p>Any evaluation product that comes after an ERROR! will cause a panic.</p>
+<p>GHOST! is not exempt:</p>
+<pre><code>&gt;&gt; error? (1 / 0 comment "no free pass for ghosts")
+** PANIC: attempt to divide by zero
+</code></pre>
+<p>The reasoning is that just because a function returns a ghost, doesn't mean it doesn't have side effects... or doesn't depend in some way on the previous operation.</p>
+<p>Currently, COMMA! isn't exempt, either:</p>
+<pre><code>&gt;&gt; error? (1 / 0,)
+** PANIC: attempt to divide by zero
+</code></pre>
+<p>This is something I might be willing to bend on, if we believe that:</p>
+<pre><code>(
+    some expression,
+    another expression,
+    yet another expression,
+)
+</code></pre>
+<p>Absolutely has to be equivalent to:</p>
+<pre><code>(
+    some expression,
+    another expression,
+    yet another expression
+)
+</code></pre>
+<p>But mechanically you'd have to scan ahead for any number of commas... and make sure you were at the end of the input after consuming all the commas.  <img src="https://rebol.metaeducation.com/images/emoji/twitter/man_shrugging.png?v=14" title=":man_shrugging:" class="emoji" alt=":man_shrugging:" loading="lazy" width="20" height="20"></p>
+<h2><a name="p-8504-plain-eval-would-act-the-same-as-the-group-above-2" class="anchor" href="https://rebol.metaeducation.com#p-8504-plain-eval-would-act-the-same-as-the-group-above-2"></a>Plain EVAL would act the same as the GROUP! above</h2>
+<p>Only the last step can give an ERROR!.  Previous steps will panic.</p>
+<p>And since branching constructs like an IF or a CASE statement uses EVAL to run their branches, they similarly drop the statement out at the last step. So you can synthesize ERROR! out of branches, without causing the branching construct to panic.</p>
+<h2><a name="p-8504-evaltrap-name-pending-gives-error-at-any-step-3" class="anchor" href="https://rebol.metaeducation.com#p-8504-evaltrap-name-pending-gives-error-at-any-step-3"></a>"EVAL:TRAP" (name pending) Gives Error At Any Step</h2>
+<p>I've proposed EVAL:TRAP as a variation which can stop the evaluation at any step that produces an ERROR!:</p>
+<pre><code>&gt;&gt; error? eval:trap [print "Error is last" 1 / 0]
+Error is last
+== \~okay~\  ; antiform
+
+&gt;&gt; error? (1 / 0 print "Error is first")
+== \~okay~\
+</code></pre>
+<p>So the second case didn't make it to the PRINT, but it didn't PANIC.</p>
+<h1><a name="p-8504-but-how-about-any-and-all-roll_eyes-4" class="anchor" href="https://rebol.metaeducation.com#p-8504-but-how-about-any-and-all-roll_eyes-4"></a>But How About ANY and ALL...?  <img src="https://rebol.metaeducation.com/images/emoji/twitter/roll_eyes.png?v=14" title=":roll_eyes:" class="emoji" alt=":roll_eyes:" loading="lazy" width="20" height="20"></h1>
+<p>The answer may be different.</p>
+<p>You're supposed to reasonably be able to rely on the idea that if ALL gives you a result, it's the result of the final expression.  You thus might be thinking that if you get an error, that error is coming by contract from that last expression.  I'd say it seems reasonably clear that anything but the last expression should panic.</p>
+<p>On the other hand...ANY is not expected to necessarily evaluate all of its clauses... it's supposed to return the first thing that passes its constraint (non-null as the default constraint).  So if it hit an ERROR! early, maybe it should return it?</p>
+<p>I'm not sure.  I'll have to look at use cases.</p>
+<h1><a name="p-8504-and-what-about-loops-5" class="anchor" href="https://rebol.metaeducation.com#p-8504-and-what-about-loops-5"></a>And What About Loops?</h1>
+<p>If loops are willing to return definitional errors out of their body, that makes writing loop wrappers a bit trickier.</p>
+<p>First let's ask about MAP-EACH, what should it do?</p>
+<pre><code>map-each 'x [1 2 3] [either x = 2 [fail "some error"] [x * 10]]
+</code></pre>
+<p>You're getting behaviors that are somewhat equivalent to APPEND.  So it's like you wrote:</p>
+<pre><code>list: []
+append list x * 10
+append list fail "some error"
+</code></pre>
+<p>APPEND doesn't propagate a failure like that.  And I don't see any reason why it should.</p>
+<p>Next, let's consider wrapping loops... e.g. <a href="https://rebol.metaeducation.com/t/demonstrating-for-both-loop-composability-for-the-win/1833">the current formulation of FOR-BOTH</a>:</p>
+<pre><code>for-both: func [var blk1 blk2 body] [
+    return unlift:lite all [
+        lift:lite for-each var blk1 body
+        lift:lite for-each var blk2 body
+    ]
+]
+</code></pre>
+<p>At the moment, LIFT does not lift definitional errors by default, but panics on them.</p>
+<p>So if FOR-EACH is willing to return definitional errors, then you won't get an equivalence between:</p>
+<pre><code>for-each 'x [1] [fail "some error"]  ; definitional error result
+
+for-both 'x [1] [] [fail "some error"]  ; panic
+
+for-both 'x [] [1] [fail "some error"]  ; panic
+</code></pre>
+<p>It might seem that given what I say about ALL above, if LIFT:LITE were willing to leave ERROR! as ERROR! (as well as NULL as NULL, and GHOST! as GHOST!) then it would correctly panic on errors that weren't the last step... BUT... consider:</p>
+<pre><code>all [
+    fail "some error"
+    comment "hmmm"
+]
+</code></pre>
+<p>This runs afoul of my concept of not allowing a next step to run... producing a loophole in composition that is trying to leverage things like invisibility.</p>
+<p><strong>This seems to be the crux of a fairly fundamental problem, regarding the need to be psychic in order to know whether an evaluation is going to be a no-op or not.</strong></p>
+<p>If you're not looking at the loop data, but tell from the outside of the FOR-EACH after-the-fact if it had evaluations or not, then there's no way to know if a failure needs to be terminal.</p>
+<p><em>This suggests that loops should probably panic if the body fails.</em>  They'd have to do so for any step except the last step anyway, and loops don't have an interface for psychically exposing if they're at the last step or not prior to execution.  It defeats composition to require otherwise, and the whole model would have to be redesigned to add this "psychic" aspect... which seems less easy than just saying "no, loops panic if the body fails".</p>
+<h2><a name="p-8504-overall-carry-away-theres-subtleties-6" class="anchor" href="https://rebol.metaeducation.com#p-8504-overall-carry-away-theres-subtleties-6"></a>Overall Carry-away: There's Subtleties</h2>
+<p>Decisions about definitional error propagation appear to be non-obvious.</p>
+<p>panic-ing is a conservative default, and then you can get people to explicitly CATCH and THROW the errors if they need to work around it.</p>
+          <p><a href="https://rebol.metaeducation.com/t/when-should-evaluative-constructs-return-error/2506/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/when-should-evaluative-constructs-return-error/2506/1</link>
+        <pubDate>Thu, 10 Jul 2025 11:39:05 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2506-1</guid>
+        <source url="https://rebol.metaeducation.com/t/when-should-evaluative-constructs-return-error/2506.rss">When Should Evaluative Constructs Return ERROR! ?</source>
+      </item>
+  </channel>
+</rss>

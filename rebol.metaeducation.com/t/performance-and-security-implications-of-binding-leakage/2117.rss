@@ -1,0 +1,230 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Performance (and Security?) Implications of Binding Leakage</title>
+    <link>https://rebol.metaeducation.com/t/performance-and-security-implications-of-binding-leakage/2117</link>
+    <description>In the model being currently brainstormed about for binding, blocks and groups will capture an exhaustive amount of context.
+
+@bradrn&#39;s suggestion is that this only happens if the blocks are not quoted.  So the following would produce a fully unbound block:
+
+     &gt;&gt; x: 10 a: &quot;a&quot; b: &quot;b&quot; c: &quot;c&quot;
+
+     &gt;&gt; foo: func [y] [
+            let z: 30
+            return &#39;[x y z]  ; quoted
+        ]
+
+     &gt;&gt; foo 20
+     == [x y z]  ; no binding
+
+By contrast the following would capture... everything:
+
+     &gt;&gt; x: 10 a: &quot;a&quot; b: &quot;b&quot; c: &quot;c&quot;
+
+     &gt;&gt; foo: func [y &lt;local&gt; alpha beta gamma] [
+            let z: 30
+            return [x y z]  ; not quoted
+        ]
+
+     &gt;&gt; foo 20
+     == [x y z]  ; knows X, Y, Z, A, B, C, ALPHA, BETA, GAMMA...
+
+In fact, so would an empty block as just **`return []`**.  You&#39;d still be able to reach everything.
+
+If you were to accidentally return one of these blocks cross module, you would be supplying the receiver with a context exposing *every definition in the module, and every local in the function* except those that are overridden.  Under some direction of the proposal, even those overridden definitions would be available through a programmatic API that let you climb the environment parent layers.
+
+Seemingly worse, we&#39;re suggesting strings would capture this information as well.  (I don&#39;t know if it&#39;s that much worse, although quoting strings seems more belabored to have to do systemically and is less pleasing, especially with using the `&quot;s&quot;` notation.)
+
+## Not A New Problem, Just an Exacerbated One
+
+&quot;Stray bindings&quot; in Rebol blocks have always been a thing.  If you make a block **[a b c]** then you clearly leak the words in it and their values--intentionally or not.  But you would also leak any contexts reachable from those words... and by extension any fields in those contexts:
+
+For instance:
+
+    rebol2&gt;&gt; o: make object! [private: &lt;secret&gt; public: 10 expr: [public * 20]]
+
+    rebol2&gt;&gt; do o/expr
+    == 200
+
+    rebol2&gt;&gt; first o/expr
+    == public
+
+    rebol2&gt;&gt; probe bind? first o/expr
+    make object! [
+        private: &lt;secret&gt;
+        public: 10
+        expr: [public * 20]
+    ]
+
+Unlike the proposed new model, an empty block in such cases won&#39;t let you get to everything the evaluation site had visible.  But you can still reach a large enough number of things that it&#39;s on the same order of magnitude... if we&#39;re just considering what&#39;s reachable.
+
+## Security In Rebol is a Lost Cause, But...
+
+If you&#39;re looking for a language for its relevance to secure programming, look somewhere else.
+
+However, it still seems like something could be done to stop the most egregious cases.  Maybe if RETURN: values would need an annotation like **`&lt;bound&gt;`** in order to return a bound value... and it would mask out the binding somehow, otherwise.
+
+*(Easy for words and strings, but would be hard for something like a mutable block with nested bindings.  Specifiers at the &quot;tip&quot; could say &quot;consider this block unbound as you descend it and only return unbound values&quot;.  Such a specifier exists today, but it only works with immutable blocks... because once you start putting bound material into such a masked structure and expect to see that as bound material in the midst of unbound material, you don&#39;t know what bindings were added before or after the mask.)*
+
+I&#39;ve often thought **a binding only lets you GET and SET, not follow the pointer to reach other variables in the containing context**.  We&#39;ve been in this situation with things like LETs, because they&#39;re a little island of one variable...so you can&#39;t even ask what object they live in...because they don&#39;t live in one.
+
+But if functions are allowed to access the evaluator&#39;s notion of &quot;current context&quot; you could subvert this by putting a capturing function in a block you received, evaluate it, and get at the information anyway.
+
+## Bigger Issue: Extreme Stress for the GC
+
+It&#39;s extremely easy to force indefinite lifetime of function frames in Ren-C.  This is already a problem:
+
+     &gt;&gt; some-function: func [x &lt;local&gt; a b c d e f g h i j ...] [
+            ... return first [(x)]
+        ]
+
+    &gt;&gt; blocks: collect [count-up i 100000 [keep maker i]]
+    == [(x) (x) (x) (x) ... ]
+
+    &gt;&gt; results: reduce blocks
+    == [1 2 3 4 .... ]
+
+Looks like a small 100000 blocks... but it&#39;s 100000 frames of arbitrary size being kept alive to preserve one binding.
+
+But... now imagine that happening for every string.
+
+The choice to keep frames reachable after execution by default was done some time ago, kind of in order to try and feature-match JavaScript:
+
+  https://rebol.metaeducation.com/t/what-happens-to-function-arguments-and-locals-when-the-call-ends/234
+
+Maybe it&#39;s a decision that needs to be revisited.  Anyway, just starting a thread for discussing binding leakage.</description>
+    
+    <lastBuildDate>Sat, 07 Sep 2024 00:38:09 +0000</lastBuildDate>
+    <category>Binding</category>
+    <atom:link href="https://rebol.metaeducation.com/t/performance-and-security-implications-of-binding-leakage/2117.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Performance (and Security?) Implications of Binding Leakage</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="2117">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p><strong>Security In Rebol is a Lost Cause, But...</strong></p>
+<p>If you're looking for a language for its relevance to secure programming, look somewhere else.</p>
+<p>However, it still seems like something could be done to stop the most egregious cases. Maybe if RETURN: values would need an annotation like <strong><code>&lt;bound&gt;</code></strong> in order to return a bound value... and it would mask out the binding somehow, otherwise.</p>
+</blockquote>
+</aside>
+<p>In terms of making use of our parameter conventions, we could say that the <strong><code>$arg</code></strong> convention means "evaluate at callsite and keep the binding", but an ordinary <strong>arg</strong> would not bring the binding along.</p>
+<p>So if you used the $...</p>
+<pre><code>machine-control: func [$instruction [word!] [
+    print ["lookup of (" instruction ") is:" get instruction]
+]
+
+on: 1  off: 0
+
+instructions: reduce [$on $off]
+
+&gt;&gt; machine-control instructions.1
+lookup of ( on ) is 1
+</code></pre>
+<p>But without the $...</p>
+<pre><code>machine-control: func [instruction [word!] [
+    print ["lookup of (" instruction ") is:" get instruction]
+]
+
+on: 1  off: 0
+
+instructions: reduce [$on $off]
+
+&gt;&gt; machine-control instructions.1
+** Error: `on` word is not bound
+</code></pre>
+<h2><a name="p-7589-would-unbound-by-default-be-too-annoying-1" class="anchor" href="https://rebol.metaeducation.com#p-7589-would-unbound-by-default-be-too-annoying-1"></a>Would Unbound By Default Be Too Annoying?</h2>
+<p>This is one of those decisions that's kind of like whether to make arguments <code>const</code> by default or not.  In that case, I feel pretty strongly that it helps to know when a function is going to mutate the thing you're passing it or not, and that a modern language should require you to say when things are mutable...not call out cases when they are const...if they happen to remember.</p>
+<p>Both cases would definitely make the code noisier (and it's already developing a lot of symbolic noise by necessity...this isn't a <em>necessity</em>).</p>
+<p>But since everything is configurable, perhaps having the core do the right thing...then let you rewrite the spec in your own FUNC version to make normal arg become $arg... that could be the way to go.</p>
+          <p><a href="https://rebol.metaeducation.com/t/performance-and-security-implications-of-binding-leakage/2117/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/performance-and-security-implications-of-binding-leakage/2117/2</link>
+        <pubDate>Sat, 07 Sep 2024 00:38:09 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2117-2</guid>
+        <source url="https://rebol.metaeducation.com/t/performance-and-security-implications-of-binding-leakage/2117.rss">Performance (and Security?) Implications of Binding Leakage</source>
+      </item>
+      <item>
+        <title>Performance (and Security?) Implications of Binding Leakage</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>In the model being currently brainstormed about for binding, blocks and groups will capture an exhaustive amount of context.</p>
+<p><a class="mention" href="https://rebol.metaeducation.com/u/bradrn">@bradrn</a>'s suggestion is that this only happens if the blocks are not quoted.  So the following would produce a fully unbound block:</p>
+<pre><code> &gt;&gt; x: 10 a: "a" b: "b" c: "c"
+
+ &gt;&gt; foo: func [y] [
+        let z: 30
+        return '[x y z]  ; quoted
+    ]
+
+ &gt;&gt; foo 20
+ == [x y z]  ; no binding
+</code></pre>
+<p>By contrast the following would capture... everything:</p>
+<pre><code> &gt;&gt; x: 10 a: "a" b: "b" c: "c"
+
+ &gt;&gt; foo: func [y &lt;local&gt; alpha beta gamma] [
+        let z: 30
+        return [x y z]  ; not quoted
+    ]
+
+ &gt;&gt; foo 20
+ == [x y z]  ; knows X, Y, Z, A, B, C, ALPHA, BETA, GAMMA...
+</code></pre>
+<p>In fact, so would an empty block as just <strong><code>return []</code></strong>.  You'd still be able to reach everything.</p>
+<p>If you were to accidentally return one of these blocks cross module, you would be supplying the receiver with a context exposing <em>every definition in the module, and every local in the function</em> except those that are overridden.  Under some direction of the proposal, even those overridden definitions would be available through a programmatic API that let you climb the environment parent layers.</p>
+<p>Seemingly worse, we're suggesting strings would capture this information as well.  (I don't know if it's that much worse, although quoting strings seems more belabored to have to do systemically and is less pleasing, especially with using the <code>"s"</code> notation.)</p>
+<h2><a name="p-6973-not-a-new-problem-just-an-exacerbated-one-1" class="anchor" href="https://rebol.metaeducation.com#p-6973-not-a-new-problem-just-an-exacerbated-one-1"></a>Not A New Problem, Just an Exacerbated One</h2>
+<p>"Stray bindings" in Rebol blocks have always been a thing.  If you make a block <strong>[a b c]</strong> then you clearly leak the words in it and their values--intentionally or not.  But you would also leak any contexts reachable from those words... and by extension any fields in those contexts:</p>
+<p>For instance:</p>
+<pre><code>rebol2&gt;&gt; o: make object! [private: &lt;secret&gt; public: 10 expr: [public * 20]]
+
+rebol2&gt;&gt; do o/expr
+== 200
+
+rebol2&gt;&gt; first o/expr
+== public
+
+rebol2&gt;&gt; probe bind? first o/expr
+make object! [
+    private: &lt;secret&gt;
+    public: 10
+    expr: [public * 20]
+]
+</code></pre>
+<p>Unlike the proposed new model, an empty block in such cases won't let you get to everything the evaluation site had visible.  But you can still reach a large enough number of things that it's on the same order of magnitude... if we're just considering what's reachable.</p>
+<h2><a name="p-6973-security-in-rebol-is-a-lost-cause-but-2" class="anchor" href="https://rebol.metaeducation.com#p-6973-security-in-rebol-is-a-lost-cause-but-2"></a>Security In Rebol is a Lost Cause, But...</h2>
+<p>If you're looking for a language for its relevance to secure programming, look somewhere else.</p>
+<p>However, it still seems like something could be done to stop the most egregious cases.  Maybe if RETURN: values would need an annotation like <strong><code>&lt;bound&gt;</code></strong> in order to return a bound value... and it would mask out the binding somehow, otherwise.</p>
+<p><em>(Easy for words and strings, but would be hard for something like a mutable block with nested bindings.  Specifiers at the "tip" could say "consider this block unbound as you descend it and only return unbound values".  Such a specifier exists today, but it only works with immutable blocks... because once you start putting bound material into such a masked structure and expect to see that as bound material in the midst of unbound material, you don't know what bindings were added before or after the mask.)</em></p>
+<p>I've often thought <strong>a binding only lets you GET and SET, not follow the pointer to reach other variables in the containing context</strong>.  We've been in this situation with things like LETs, because they're a little island of one variable...so you can't even ask what object they live in...because they don't live in one.</p>
+<p>But if functions are allowed to access the evaluator's notion of "current context" you could subvert this by putting a capturing function in a block you received, evaluate it, and get at the information anyway.</p>
+<h2><a name="p-6973-bigger-issue-extreme-stress-for-the-gc-3" class="anchor" href="https://rebol.metaeducation.com#p-6973-bigger-issue-extreme-stress-for-the-gc-3"></a>Bigger Issue: Extreme Stress for the GC</h2>
+<p>It's extremely easy to force indefinite lifetime of function frames in Ren-C.  This is already a problem:</p>
+<pre><code> &gt;&gt; some-function: func [x &lt;local&gt; a b c d e f g h i j ...] [
+        ... return first [(x)]
+    ]
+
+&gt;&gt; blocks: collect [count-up i 100000 [keep maker i]]
+== [(x) (x) (x) (x) ... ]
+
+&gt;&gt; results: reduce blocks
+== [1 2 3 4 .... ]
+</code></pre>
+<p>Looks like a small 100000 blocks... but it's 100000 frames of arbitrary size being kept alive to preserve one binding.</p>
+<p>But... now imagine that happening for every string.</p>
+<p>The choice to keep frames reachable after execution by default was done some time ago, kind of in order to try and feature-match JavaScript:</p>
+<p><a href="https://rebol.metaeducation.com/t/what-happens-to-function-arguments-and-locals-when-the-call-ends/234" class="inline-onebox">What happens to FUNCTION! arguments and locals when the call ends?</a></p>
+<p>Maybe it's a decision that needs to be revisited.  Anyway, just starting a thread for discussing binding leakage.</p>
+          <p><a href="https://rebol.metaeducation.com/t/performance-and-security-implications-of-binding-leakage/2117/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/performance-and-security-implications-of-binding-leakage/2117/1</link>
+        <pubDate>Sat, 13 Jan 2024 11:27:38 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2117-1</guid>
+        <source url="https://rebol.metaeducation.com/t/performance-and-security-implications-of-binding-leakage/2117.rss">Performance (and Security?) Implications of Binding Leakage</source>
+      </item>
+  </channel>
+</rss>

@@ -1,0 +1,624 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Implicit Execution of RETURN in functions = ...BAD (?)</title>
+    <link>https://rebol.metaeducation.com/t/implicit-execution-of-return-in-functions-bad/1656</link>
+    <description>Let&#39;s say you write something like this:
+
+    foo: func [
+        return: [integer!]
+        arg [integer! text! tag!]
+    ][
+        if integer? arg [
+            return arg + 1000
+        ]
+        if text? arg [
+            return reverse arg
+        ]
+        arg
+    ]
+
+I imagine you&#39;d expect behavior along these lines:
+
+    &gt;&gt; foo 20
+    == 1020
+
+    &gt;&gt; foo &quot;whoops&quot;
+    ** Error: FOO doesn&#39;t have RETURN enabled for values of type TEXT!
+
+    &gt;&gt; foo &lt;bomb&gt;
+    ** Error: FOO doesn&#39;t have RETURN enabled for values of type TAG!
+
+Even though the last value just &quot;falls out&quot; of the function, you presumably don&#39;t want that to mean it escapes type checking just because it did.
+
+## Mechanically, this is Non-Obvious...
+
+RETURN is not actually supposed to be a &quot;language feature&quot; per se.  It&#39;s actually a feature of the higher-level generator FUNC...and there are lower-level ways of building functions that lack RETURNs.  *(If there weren&#39;t, how could you write the RETURN function itself?)*
+
+Plus it&#39;s fully overrideable.  You can set RETURN to some random integer if you feel like it...it&#39;s just a variable in the frame.  But more frequently you&#39;d like to specialize or adapt it:
+
+    bar: function [
+        return: [integer!]
+        arg [logic!]
+    ][
+        return: adapt :return [value: value + 300]
+        if arg [
+           return 4
+        ]
+        720
+    ]
+
+    &gt;&gt; bar true
+    == 304
+
+...but here we are at an interesting question.  What do you expect to happen with **bar false**?
+
+    &gt;&gt; bar false
+    == 720  ; (A) values falling out of bottom *do not* run RETURN implicitly
+
+    &gt;&gt; bar false
+    == 1020  ; (B) values falling out of bottom *do* run RETURN implicitly
+
+A usermode implementation of FUNC has a pretty easy trick to implement either behavior.  The question is simply if it takes the body you give it and turns it into a GROUP! and passes it to RETURN or not...
+
+**&quot;real body&quot; option (A) for BAR above**
+
+    [
+        return: (make action! ...)  ; low level make return function
+        (  ; no return here, just `as group! body`
+            return: adapt :return [value: value + 300]
+            if arg [
+                return 4
+            ]
+            720
+        )
+    ]
+
+**&quot;real body&quot; option (B) for BAR above**
+
+    [
+        return: (make action! ...)  ; low level make return function
+        return (  ; automatic return injected
+            return: adapt :return [value: value + 300]
+            if arg [
+                return 4
+            ]
+            720
+        )
+    ]
+
+## Or Just Require RETURN with FUNC that has RETURN: ?
+
+**strict option (C) for BAR above**
+
+    [
+       return: (make action! ...)  ; low level make return function
+       (  ; automatic return injected
+           return: adapt :return [value: value + 300]
+           if arg [
+               return 4
+           ]
+           720
+        )
+        fail &quot;Functions which specify RETURN: must use RETURN&quot;
+    ]
+
+[I&#39;ve brought this up before](https://rebol.metaeducation.com/t/how-attached-are-we-to-functions-return-last-result/1219), and @IngoHohmann and @iArnold seemed to think &quot;dropping out the last value&quot; was somehow fundamental.
+
+But given what I say above about how the semantics get pretty sketchy on type checking and such, what if we say that functions that don&#39;t specify RETURN have no return available, and just drop out their last result?
+
+    bar1: function [
+        arg [logic!]
+    ][
+        if arg [4] else [720]
+    ]
+
+    &gt;&gt; bar true
+    == 4
+
+    &gt;&gt; bar false
+    == 720
+
+You don&#39;t get type checking so you&#39;d have to do it yourself, which will be available:
+
+    bar1-checked: function [
+        arg [logic!]
+    ][
+        let val: if arg [4] else [720]
+        ensure integer! val
+    ]
+
+However: if you specify RETURN: in the spec then you are required to use it.  This gives you type checking and guarantee of running any return hooking on all code paths:
+
+    bar2: function [
+        return: [integer!]
+        arg [logic!]
+    ][
+        return: adapt :return [value: value + 300]
+        if arg [
+           return 4
+        ]
+        return 720
+    ]
+
+    &gt;&gt; bar true
+    == 304
+
+    &gt;&gt; bar false
+    == 1020
+
+## I Think The Case for Requiring RETURN if RETURN: Is Strong
+
+**It seems rather clear when laid out like I have above that it&#39;s the right answer.**  People who hook RETURN are typically doing so because they want it on all return paths.  But I think hiding a RETURN behind the scenes is a cognitive time bomb.  Being explicit sorts that out, and it also provides a rational answer for why you get type checking...*the RETURN does the check*.
+
+*(I can tell you that without that rational answer, the internals have ugliness.  This policy will cleanse the ugliness.)*
+
+Lower-level functions that don&#39;t have RETURN have to have a way to return values.  Dropping them out the bottom seems a good way to start building up the mechanic.  It&#39;s also useful for quick and dirty &quot;macro-like&quot; functions, so I see no problem with that.
+
+## Should `return: [~]` be an Exception?
+
+The point of introducing this was to help remove concern over letting unwanted variables &quot;fall out&quot;, and being able to forego concerns about type checking.  **It&#39;s a different case**, because there is no type checking involved of the parameter passed to RETURN as it takes no parameters...and there&#39;s no need to type check what falls out the bottom because it is discarded:
+
+    something: func [
+        return: [~]
+        value [text!]
+    ][
+        if value = &quot;&quot; [return]  ; this RETURN acts as `return ~`
+        append data value
+
+        ; expectation has been that this would also yield ~
+    ]
+
+The idea was to make it painless to shield callers from seeing the returned result, and have them know there was no result they were supposed to pay attention to.
+
+What gets me concerned here is that question of whether or not a hooked or modified RETURN is implicitly run at the end of such a function.
+
+It seems to suck to have to put the RETURN there.  :-(
+
+    something: func [
+        return: [~]
+        value [text!]
+    ][
+        return: adapt :return [print &quot;I AM RETURNING!&quot;]
+        if value = &quot;&quot; [return]
+        append data value
+        return  ; with this here, it&#39;s clear you will get the PRINT to happen
+    ]
+
+But it does benefit from the explicitness.  There&#39;s no ambiguity.
+
+**Again, you have to use your imagination to think about a longer function in which there are many control paths through the function...and someone decides to hook RETURN.**  If you are working in a large codebase with long functions, wouldn&#39;t you like to know that all control paths will run your hook...and that the language has gotten everyone on the same page that is expected and possible?
+
+**My feeling in the moment is that the only answer I&#39;d consider besides erroring if there&#39;s no RETURN would be to implicitly put a RETURN at the end, so a hooked RETURN would be executed if a value drops out the bottom.**  But I&#39;ve explained that for the other cases I think that&#39;s sneaky.  It feels much more forthright to have the call at source level.
+
+Path of least resistance on this is to add the RETURN implicitly, so I&#39;m going with that.</description>
+    
+    <lastBuildDate>Tue, 12 Jul 2022 03:41:42 +0000</lastBuildDate>
+    <category>Functions</category>
+    <atom:link href="https://rebol.metaeducation.com/t/implicit-execution-of-return-in-functions-bad/1656.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Implicit Execution of RETURN in functions = ...BAD (?)</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="4" data-topic="1656">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>So I think that having LAMBDA be the baseline of something that doesn't have typechecking on its arguments--or its returns--is a useful touchstone.</p>
+<p>This makes it a bit of an <strong><a href="https://en.wikipedia.org/wiki/Lambda_calculus">"homage to lambda calculus"</a></strong> by having it be the most basic sort of function, and building all the other stuff on top of it.</p>
+</blockquote>
+</aside>
+<p>Ugh... as it turns out... <em>I might not have a choice but to allow a lambda variant with spec blocks</em>.</p>
+<p>Because without it, I don't know how to make a function which does type checking but doesn't have a RETURN.  Sometimes you need those.</p>
+<p>...and I can't think of a better name for a function without a return than LAMBDA.  All the ways of annotating a function to say it doesn't have a return kind of suck.</p>
+<p>Case in point that is triggering my backtracking: what about QUIT in Redbol?  It had a refinement called /RETURN.  How do you declare a function for that?</p>
+<pre><code>  quit: func [&lt;no-return&gt; /return [&lt;opt&gt; any-value!]] [...] 
+</code></pre>
+<p>Yuck.  And it actually does have a "return"...it's just a refinement called return.</p>
+<p>The problem is that if you don't think of it as using something lower-level than FUNC, you wind up talking about the thing you want to take away.  I think that's destined to come off badly.</p>
+<p>And as this thread says...I've said that you need a RETURN for a FUNC to return any value at all...a point of view I'm committed to now.  So a FUNC with "no-return" really couldn't return anything!</p>
+<h2><a name="p-6046-so-lambda-probably-has-to-be-it-1" class="anchor" href="https://rebol.metaeducation.com#p-6046-so-lambda-probably-has-to-be-it-1"></a>So LAMBDA Probably Has To Be It</h2>
+<p>We'll now enforce that all FUNC(TION) have RETURN.  (Previously it was possible that if you named a local or refinement RETURN then it would disable the definitional return creation.  That's getting dropped now, you'll just get an error.)</p>
+<p>If you don't want a RETURN pre-defined, use LAMBDA...and you can then choose to have arguments called RETURN if you want.  But if you use a "non-trivial" spec block you'll get type checking on that lambda.</p>
+<p>Hence I guess some more primordial building block, let's say LAMBDA*, is the form that truly lacks the type checking?  <img src="https://rebol.metaeducation.com/images/emoji/twitter/grimacing.png?v=14" title=":grimacing:" class="emoji" alt=":grimacing:" loading="lazy" width="20" height="20"></p>
+<p>It's an imperfect art, but I do think it gets better day by day.</p>
+          <p><a href="https://rebol.metaeducation.com/t/implicit-execution-of-return-in-functions-bad/1656/5">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/implicit-execution-of-return-in-functions-bad/1656/5</link>
+        <pubDate>Tue, 12 Jul 2022 03:30:19 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1656-5</guid>
+        <source url="https://rebol.metaeducation.com/t/implicit-execution-of-return-in-functions-bad/1656.rss">Implicit Execution of RETURN in functions = ...BAD (?)</source>
+      </item>
+      <item>
+        <title>Implicit Execution of RETURN in functions = ...BAD (?)</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="2" data-topic="1656">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>JavaScript gives the alternative of lambda functions, which evaluate to the body with an implicit RETURN.</p>
+<p>We would do the same. Except their lambdas have a return (you don't have to use it)...but our lambdas actually wouldn't have a RETURN of their own as an option, they'd only have a RETURN from any enclosing functions:</p>
+</blockquote>
+</aside>
+<p>So I actually tried to walk the talk here, and went around changing some functions into lambdas if I thought returning the body result was sensible.</p>
+<p>To help make that work in more cases, I actually made LAMBDA able to take spec blocks:</p>
+<pre><code>x -&gt; [print ["I am a lambda x + 20"], x + 20]
+
+lambda [x [integer!] "number to add to"] [  ; look, a spec block!
+    print "I am a lambda x + 20"
+    x + 20  ; look, the result just falls out
+]
+</code></pre>
+<p>...but since they didn't have RETURN, that meant there was no type checking on the return result.  This made me feel a bit hesitant to make these transformations, unless the function really could return anything and so the return annotation was superfluous.</p>
+<h2><a name="p-6030-i-think-this-was-a-mistake-1" class="anchor" href="https://rebol.metaeducation.com#p-6030-i-think-this-was-a-mistake-1"></a>I Think This Was A Mistake...</h2>
+<p>Part of what I've been trying to do is to build up features from the ground, in a way that someone with different ideas could build them differently.</p>
+<p>This means "reskinning" language constructs to where even foundational things like type checking are reimagined by a creative user.</p>
+<p><strong>So I think that having LAMBDA be the baseline of something that doesn't have typechecking on its arguments--or its returns--is a useful touchstone.</strong></p>
+<p>This makes it a bit of an <strong><a href="https://en.wikipedia.org/wiki/Lambda_calculus">"homage to lambda calculus"</a></strong> by having it be the most basic sort of function, and building all the other stuff on top of it.</p>
+<p>Hence it won't have RETURN, multi-return, type checking of arguments, or anything.  Just the most basic of something that takes arguments and returns what its body evaluates to.</p>
+<h2><a name="p-6030-so-pretend-i-didnt-suggest-lambda-as-a-func-alternative-2" class="anchor" href="https://rebol.metaeducation.com#p-6030-so-pretend-i-didnt-suggest-lambda-as-a-func-alternative-2"></a>So Pretend I Didn't Suggest LAMBDA as a FUNC Alternative...</h2>
+<p>If you disagree with my belief that a FUNC(TION) that doesn't have a RETURN doesn't return a useful value... then you need to redefine FUNC.  LAMBDA is being stripped back...to where it's more basic than you want!</p>
+<p>If you were to build your own FUNCTION with its own RETURN, you would build <em>that</em> on LAMBDA.</p>
+<p>But LAMBDA is the low-overhead choice you want for branches:</p>
+<pre><code> case [...] then branch-result -&gt; [print ["use to process" mold branch-result]]
+
+ case [...] then lambda [branch-result] [print ["non-infix" mold branch-result]]
+</code></pre>
+<p>Think of them more as low-level, like BLOCK!...</p>
+          <p><a href="https://rebol.metaeducation.com/t/implicit-execution-of-return-in-functions-bad/1656/4">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/implicit-execution-of-return-in-functions-bad/1656/4</link>
+        <pubDate>Sat, 09 Jul 2022 02:31:17 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1656-4</guid>
+        <source url="https://rebol.metaeducation.com/t/implicit-execution-of-return-in-functions-bad/1656.rss">Implicit Execution of RETURN in functions = ...BAD (?)</source>
+      </item>
+      <item>
+        <title>Implicit Execution of RETURN in functions = ...BAD (?)</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <h2><a name="p-5925-time-to-axe-no-argument-return-1" class="anchor" href="https://rebol.metaeducation.com#p-5925-time-to-axe-no-argument-return-1"></a>Time To Axe No-Argument RETURN</h2>
+<p>Things have evolved significantly, so I don't think I want to do this anymore:</p>
+<pre><code>something: func [
+    return: [~]
+    value [text!]
+][
+    if value = "" [return]  ; this *used* to act like `return ~`
+    append data value
+
+    ; expectation had been that this would give nothing (~ isotope)
+]
+</code></pre>
+<p>While I know the <strong><code>return: [~]</code></strong> is up at the top of the function, it makes it clear in longer functions if your RETURN statement says what you're returning.  <strong><code>return nothing</code></strong> isn't that much typing, and <strong>return ~</strong> is even less.</p>
+<h2><a name="p-5925-id-discourage-casually-specializing-return-to-take-no-value-2" class="anchor" href="https://rebol.metaeducation.com#p-5925-id-discourage-casually-specializing-return-to-take-no-value-2"></a>I'd Discourage Casually Specializing RETURN to take No Value</h2>
+<p>If someone wants to specialize RETURN with a value so it takes no arguments and call that RETURN, I guess that's up to them...but... <em>I</em> wouldn't (any more).  I'd either give it a new name, or have it still take a parameter just to say <em>"I'm returning a value...but it's something predetermined, or calculated elsewhere"</em>.</p>
+<pre><code> foo: func [x y z] [
+     return: adapt :return [
+          assert [value = &lt;calculate!&gt;]
+          value: (something x) * y + (something-else z)
+     ]
+     ...
+     return &lt;calculate!&gt;
+ ]
+</code></pre>
+<p>(Of course, the more interesting examples are where how it behaves depends on what you pass it.  But my point is just about thinking that RETURN with no parameters has a very specific meaning now.)</p>
+<h2><a name="p-5925-return-in-spec-only-hooked-on-return-3" class="anchor" href="https://rebol.metaeducation.com#p-5925-return-in-spec-only-hooked-on-return-3"></a><code>return: [~]</code> in Spec Only Hooked on RETURN</h2>
+<p>There's now an option for the lazy when it comes to "procedure-like things" that RETURN nothing.  <em>Just don't have a return spec, and don't use a return statement</em>.</p>
+<p>But once you've decorated the spec with saying you <strong><code>return: [~]</code></strong>, you've joined the non-lazy league.  You might as well go ahead and put a return on all paths, to get hookability.</p>
+<p>To recap:</p>
+<pre><code>something: func [
+    return: [~]
+    value [text!]
+][
+    return: adapt :return [print "I AM RETURNING!"]
+    if value = "" [return ~]
+    append data value
+    return ~  ; with this here, it's clear you will get the PRINT to happen
+]
+</code></pre>
+<p>I'm not all that concerned about what happens to lazy-league people if they write:</p>
+<pre><code>something: func [
+    value [text!]
+][
+    return: adapt :return [print "I AM RETURNING!"]
+    if value = "" [return ~]
+    append data value
+]
+</code></pre>
+<p>You didn't call RETURN, so you don't get a call to RETURN for the bottom drop-out... unless you have decided to do this:</p>
+<pre><code>func: adapt :lib.func [
+    body: compose [return (as group! body)]
+]
+</code></pre>
+<p>And if you do such things, then it's all up to you and your usage scenarios.  I don't really even think this needs to be an error if you put a RETURN: annotation on...but if you want to get a hooked RETURN to run on all paths you need to actually invoke the RETURN.</p>
+<h2><a name="p-5925-avoiding-weaving-tangled-webs-of-deception-in-the-core-spider_web-4" class="anchor" href="https://rebol.metaeducation.com#p-5925-avoiding-weaving-tangled-webs-of-deception-in-the-core-spider_web-4"></a>Avoiding Weaving Tangled Webs of Deception in the Core <img src="https://rebol.metaeducation.com/images/emoji/twitter/spider_web.png?v=14" title=":spider_web:" class="emoji" alt=":spider_web:" loading="lazy" width="20" height="20"></h2>
+<p>It goes beyond just aesthetics to not have "tricky" things (like the hidden RETURN).  It also makes the parts align correctly.  So if there are going to be weird alignments I'd rather people do that themselves...or have them use Redbol or some other "skin".  <em>Because there are more things that this is supposed to be able to do well than emulate Rebol2.</em></p>
+          <p><a href="https://rebol.metaeducation.com/t/implicit-execution-of-return-in-functions-bad/1656/3">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/implicit-execution-of-return-in-functions-bad/1656/3</link>
+        <pubDate>Wed, 15 Jun 2022 20:44:41 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1656-3</guid>
+        <source url="https://rebol.metaeducation.com/t/implicit-execution-of-return-in-functions-bad/1656.rss">Implicit Execution of RETURN in functions = ...BAD (?)</source>
+      </item>
+      <item>
+        <title>Implicit Execution of RETURN in functions = ...BAD (?)</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>I've been back to working on stackless, and am dead-set on getting it merged in.</p>
+<p>This puts me face to face with some tough issues surrounding function implementations and RETURN.</p>
+<h2><a name="p-5921-no-feedback-here-so-i-have-to-go-after-it-1" class="anchor" href="https://rebol.metaeducation.com#p-5921-no-feedback-here-so-i-have-to-go-after-it-1"></a>No Feedback Here So I Have To Go After It</h2>
+<p><a class="mention" href="https://rebol.metaeducation.com/u/gchiu">@gchiu</a> has been living under a rock <em>(well, in New Zealand <img src="https://rebol.metaeducation.com/images/emoji/twitter/sheep.png?v=14" title=":sheep:" class="emoji" alt=":sheep:" loading="lazy" width="20" height="20"> same difference)</em>.   So he never even noticed Ren-C supports RETURN: specs.  Hence any RETURN he's ever used has been in a FUNC[TION] without a return spec.</p>
+<p>But I think this does align with the reality that people expect FUNCTION to offer a return, out of the box...even with no return spec.</p>
+<p>Guess this kills the idea that you have to put RETURN: in the spec to get a return.  But I'm still not at ease with the idea of "hiding" a secret call to RETURN under the hood of functions to get type checking.</p>
+<h2><a name="p-5921-i-hate-to-say-it-but-man_facepalming-lets-do-what-javascript-does-2" class="anchor" href="https://rebol.metaeducation.com#p-5921-i-hate-to-say-it-but-man_facepalming-lets-do-what-javascript-does-2"></a>I Hate To Say It, But... <img src="https://rebol.metaeducation.com/images/emoji/twitter/man_facepalming.png?v=14" title=":man_facepalming:" class="emoji" alt=":man_facepalming:" loading="lazy" width="20" height="20"> Let's Do What JavaScript Does</h2>
+<p><strong>In JavaScript you don't have to put a RETURN in a function.  <em>But if you don't use RETURN, the result is undefined.</em></strong></p>
+<p>We'd do the same, except with "none" (the ~ isotope, value used to mark unset variables):</p>
+<pre><code>&gt;&gt; scrambledrop: func [str] [take reverse str]
+
+&gt;&gt; str: "Test"
+
+&gt;&gt; scrambledrop str
+
+&gt;&gt; str
+== "seT"
+</code></pre>
+<p>Because there was no RETURN, the SCRAMBLEDROP gave back nothing... e.g. not the <strong><span class="hashtag-raw">#T</span></strong> that came back from the take.  But it didn't error either.</p>
+<p><strong>JavaScript gives the alternative of lambda functions, which evaluate to the body with an implicit RETURN.</strong></p>
+<p>We would do the same.  Except their lambdas have a return (you don't have to use it)...but our lambdas actually wouldn't have a RETURN of their own as an option, they'd only have a RETURN from any enclosing functions:</p>
+<pre><code>  &gt;&gt; increment: lambda [x] [x + 1]
+
+  &gt;&gt; increment 1019
+  == 1020
+
+  &gt;&gt; decrement: x -&gt; [x - 1]
+
+  &gt;&gt; decrement 305
+  == 304
+</code></pre>
+<p><em>(Not having their own RETURN is important for lambdas used as branches of conditionals today.)</em></p>
+<h2><a name="p-5921-for-the-near-term-ill-make-func-with-no-return-raise-an-error-3" class="anchor" href="https://rebol.metaeducation.com#p-5921-for-the-near-term-ill-make-func-with-no-return-raise-an-error-3"></a>For the Near Term, I'll Make FUNC with no RETURN Raise an Error</h2>
+<p>Since people have been depending on the result "falling out", we'll have an intermediate period where no RETURN will just error.</p>
+<p>This is a good time to go through and shore up your RETURN: specs with types, because one thing RETURN gets you is typechecking.  <em>(I explain above why RETURN is the locus of typechecking, and in the implementation it will be the <em>only</em> place for typechecking.)</em></p>
+<p>And if you feel that you don't want or need a RETURN, go ahead and embrace LAMBDA.   If you really are writing something quick and dirty where all the hassle of a spec is more than you want... why not go all the way with the arrow?</p>
+<pre><code>increment: function [return: [integer!], x [integer!]] [  ; what a hassle!
+    return x + 1
+]
+
+increment: function [x] [  ; at least there's no verbose type specs
+    return x + 1
+]
+
+increment: func [x] [  ; hey, an abbreviation
+    return x + 1
+]
+
+increment: lambda [x] [  ; lost the abbreviation but at least no RETURN
+    x + 1
+]
+
+increment: x -&gt; [x + 1]  ; behold, laziness Nirvana!
+</code></pre>
+<h2><a name="p-5921-once-again-you-are-the-arbiter-of-your-experience-4" class="anchor" href="https://rebol.metaeducation.com#p-5921-once-again-you-are-the-arbiter-of-your-experience-4"></a>Once Again, You Are The Arbiter of Your Experience...</h2>
+<p>Because I want to emulate Rebol2 and Red, I'm going to always look to make sure there are ways for everyone to get what they want.  And when you can take module isolation for granted as working properly... you should still be able to interoperate with other codebases--even if you pick something fundamentally different.</p>
+<p>So if you wind up wanting it, you can say:</p>
+<pre><code>func: adapt :func [
+    body: compose [return (as group! body)]
+]
+</code></pre>
+<p>With this, you'll get these semantics:</p>
+<pre><code>bar: function [
+    return: [integer!]
+    arg [logic!]
+][
+    return: adapt :return [value: value + 300]
+    if arg [
+       return 4
+    ]
+    720
+]
+
+&gt;&gt; bar true
+== 304
+
+&gt;&gt; bar false
+== 1020  ; the injected RETURN ran behind the scenes
+</code></pre>
+<p><a class="mention" href="https://rebol.metaeducation.com/u/gchiu">@gchiu</a> seemed to think that was sensible.</p>
+<p>But I like things being less sneaky, I'd be more in favor of:</p>
+<pre><code>func: adapt :func [
+    any [
+         find spec [return: &lt;none&gt;]
+         find spec [return: &lt;void&gt;]
+    ] else [
+        body: compose [
+            (as group! body)
+            fail "HEY YOU FORGOT YOUR RETURN!"
+        ]
+    ]
+]
+</code></pre>
+<p><strong>But this is where the adaptability is the great strength.</strong>  I make the core coherent and work.  Then you configure it how you like.</p>
+<p>I think not erroring--but not letting a result drop out--is a good compromise.  It lets people who want to write "procedure"-like things do so without being forced to put in a RETURN they don't want.</p>
+          <p><a href="https://rebol.metaeducation.com/t/implicit-execution-of-return-in-functions-bad/1656/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/implicit-execution-of-return-in-functions-bad/1656/2</link>
+        <pubDate>Wed, 15 Jun 2022 08:50:33 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1656-2</guid>
+        <source url="https://rebol.metaeducation.com/t/implicit-execution-of-return-in-functions-bad/1656.rss">Implicit Execution of RETURN in functions = ...BAD (?)</source>
+      </item>
+      <item>
+        <title>Implicit Execution of RETURN in functions = ...BAD (?)</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>Let's say you write something like this:</p>
+<pre><code>foo: func [
+    return: [integer!]
+    arg [integer! text! tag!]
+][
+    if integer? arg [
+        return arg + 1000
+    ]
+    if text? arg [
+        return reverse arg
+    ]
+    arg
+]
+</code></pre>
+<p>I imagine you'd expect behavior along these lines:</p>
+<pre><code>&gt;&gt; foo 20
+== 1020
+
+&gt;&gt; foo "whoops"
+** Error: FOO doesn't have RETURN enabled for values of type TEXT!
+
+&gt;&gt; foo &lt;bomb&gt;
+** Error: FOO doesn't have RETURN enabled for values of type TAG!
+</code></pre>
+<p>Even though the last value just "falls out" of the function, you presumably don't want that to mean it escapes type checking just because it did.</p>
+<h2><a name="p-5315-mechanically-this-is-non-obvious-1" class="anchor" href="https://rebol.metaeducation.com#p-5315-mechanically-this-is-non-obvious-1"></a>Mechanically, this is Non-Obvious...</h2>
+<p>RETURN is not actually supposed to be a "language feature" per se.  It's actually a feature of the higher-level generator FUNC...and there are lower-level ways of building functions that lack RETURNs.  <em>(If there weren't, how could you write the RETURN function itself?)</em></p>
+<p>Plus it's fully overrideable.  You can set RETURN to some random integer if you feel like it...it's just a variable in the frame.  But more frequently you'd like to specialize or adapt it:</p>
+<pre><code>bar: function [
+    return: [integer!]
+    arg [logic!]
+][
+    return: adapt :return [value: value + 300]
+    if arg [
+       return 4
+    ]
+    720
+]
+
+&gt;&gt; bar true
+== 304
+</code></pre>
+<p>...but here we are at an interesting question.  What do you expect to happen with <strong>bar false</strong>?</p>
+<pre><code>&gt;&gt; bar false
+== 720  ; (A) values falling out of bottom *do not* run RETURN implicitly
+
+&gt;&gt; bar false
+== 1020  ; (B) values falling out of bottom *do* run RETURN implicitly
+</code></pre>
+<p>A usermode implementation of FUNC has a pretty easy trick to implement either behavior.  The question is simply if it takes the body you give it and turns it into a GROUP! and passes it to RETURN or not...</p>
+<p><strong>"real body" option (A) for BAR above</strong></p>
+<pre><code>[
+    return: (make action! ...)  ; low level make return function
+    (  ; no return here, just `as group! body`
+        return: adapt :return [value: value + 300]
+        if arg [
+            return 4
+        ]
+        720
+    )
+]
+</code></pre>
+<p><strong>"real body" option (B) for BAR above</strong></p>
+<pre><code>[
+    return: (make action! ...)  ; low level make return function
+    return (  ; automatic return injected
+        return: adapt :return [value: value + 300]
+        if arg [
+            return 4
+        ]
+        720
+    )
+]
+</code></pre>
+<h2><a name="p-5315-or-just-require-return-with-func-that-has-return-2" class="anchor" href="https://rebol.metaeducation.com#p-5315-or-just-require-return-with-func-that-has-return-2"></a>Or Just Require RETURN with FUNC that has RETURN: ?</h2>
+<p><strong>strict option (C) for BAR above</strong></p>
+<pre><code>[
+   return: (make action! ...)  ; low level make return function
+   (  ; automatic return injected
+       return: adapt :return [value: value + 300]
+       if arg [
+           return 4
+       ]
+       720
+    )
+    fail "Functions which specify RETURN: must use RETURN"
+]
+</code></pre>
+<p><a href="https://rebol.metaeducation.com/t/how-attached-are-we-to-functions-return-last-result/1219">I've brought this up before</a>, and <a class="mention" href="https://rebol.metaeducation.com/u/ingohohmann">@IngoHohmann</a> and <a class="mention" href="https://rebol.metaeducation.com/u/iarnold">@iArnold</a> seemed to think "dropping out the last value" was somehow fundamental.</p>
+<p>But given what I say above about how the semantics get pretty sketchy on type checking and such, what if we say that functions that don't specify RETURN have no return available, and just drop out their last result?</p>
+<pre><code>bar1: function [
+    arg [logic!]
+][
+    if arg [4] else [720]
+]
+
+&gt;&gt; bar true
+== 4
+
+&gt;&gt; bar false
+== 720
+</code></pre>
+<p>You don't get type checking so you'd have to do it yourself, which will be available:</p>
+<pre><code>bar1-checked: function [
+    arg [logic!]
+][
+    let val: if arg [4] else [720]
+    ensure integer! val
+]
+</code></pre>
+<p>However: if you specify RETURN: in the spec then you are required to use it.  This gives you type checking and guarantee of running any return hooking on all code paths:</p>
+<pre><code>bar2: function [
+    return: [integer!]
+    arg [logic!]
+][
+    return: adapt :return [value: value + 300]
+    if arg [
+       return 4
+    ]
+    return 720
+]
+
+&gt;&gt; bar true
+== 304
+
+&gt;&gt; bar false
+== 1020
+</code></pre>
+<h2><a name="p-5315-i-think-the-case-for-requiring-return-if-return-is-strong-3" class="anchor" href="https://rebol.metaeducation.com#p-5315-i-think-the-case-for-requiring-return-if-return-is-strong-3"></a>I Think The Case for Requiring RETURN if RETURN: Is Strong</h2>
+<p><strong>It seems rather clear when laid out like I have above that it's the right answer.</strong>  People who hook RETURN are typically doing so because they want it on all return paths.  But I think hiding a RETURN behind the scenes is a cognitive time bomb.  Being explicit sorts that out, and it also provides a rational answer for why you get type checking...<em>the RETURN does the check</em>.</p>
+<p><em>(I can tell you that without that rational answer, the internals have ugliness.  This policy will cleanse the ugliness.)</em></p>
+<p>Lower-level functions that don't have RETURN have to have a way to return values.  Dropping them out the bottom seems a good way to start building up the mechanic.  It's also useful for quick and dirty "macro-like" functions, so I see no problem with that.</p>
+<h2><a name="p-5315-should-return-be-an-exception-4" class="anchor" href="https://rebol.metaeducation.com#p-5315-should-return-be-an-exception-4"></a>Should <code>return: [~]</code> be an Exception?</h2>
+<p>The point of introducing this was to help remove concern over letting unwanted variables "fall out", and being able to forego concerns about type checking.  <strong>It's a different case</strong>, because there is no type checking involved of the parameter passed to RETURN as it takes no parameters...and there's no need to type check what falls out the bottom because it is discarded:</p>
+<pre><code>something: func [
+    return: [~]
+    value [text!]
+][
+    if value = "" [return]  ; this RETURN acts as `return ~`
+    append data value
+
+    ; expectation has been that this would also yield ~
+]
+</code></pre>
+<p>The idea was to make it painless to shield callers from seeing the returned result, and have them know there was no result they were supposed to pay attention to.</p>
+<p>What gets me concerned here is that question of whether or not a hooked or modified RETURN is implicitly run at the end of such a function.</p>
+<p>It seems to suck to have to put the RETURN there.  <img src="https://rebol.metaeducation.com/images/emoji/twitter/frowning.png?v=14" title=":frowning:" class="emoji" alt=":frowning:" loading="lazy" width="20" height="20"></p>
+<pre><code>something: func [
+    return: [~]
+    value [text!]
+][
+    return: adapt :return [print "I AM RETURNING!"]
+    if value = "" [return]
+    append data value
+    return  ; with this here, it's clear you will get the PRINT to happen
+]
+</code></pre>
+<p>But it does benefit from the explicitness.  There's no ambiguity.</p>
+<p><strong>Again, you have to use your imagination to think about a longer function in which there are many control paths through the function...and someone decides to hook RETURN.</strong>  If you are working in a large codebase with long functions, wouldn't you like to know that all control paths will run your hook...and that the language has gotten everyone on the same page that is expected and possible?</p>
+<p><strong>My feeling in the moment is that the only answer I'd consider besides erroring if there's no RETURN would be to implicitly put a RETURN at the end, so a hooked RETURN would be executed if a value drops out the bottom.</strong>  But I've explained that for the other cases I think that's sneaky.  It feels much more forthright to have the call at source level.</p>
+<p>Path of least resistance on this is to add the RETURN implicitly, so I'm going with that.</p>
+          <p><a href="https://rebol.metaeducation.com/t/implicit-execution-of-return-in-functions-bad/1656/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/implicit-execution-of-return-in-functions-bad/1656/1</link>
+        <pubDate>Thu, 12 Aug 2021 19:00:01 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1656-1</guid>
+        <source url="https://rebol.metaeducation.com/t/implicit-execution-of-return-in-functions-bad/1656.rss">Implicit Execution of RETURN in functions = ...BAD (?)</source>
+      </item>
+  </channel>
+</rss>

@@ -1,0 +1,235 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Rebol2&#39;s &quot;Hot Errors&quot; (Abandoned by R3-Alpha, Red)</title>
+    <link>https://rebol.metaeducation.com/t/rebol2s-hot-errors-abandoned-by-r3-alpha-red/2505</link>
+    <description>Rebol2 had a concept which had the inklings of [definitional errors](https://rebol.metaeducation.com/t/panic-vs-return-fail-the-age-of-definitional-errors/1852), in the sense that if you would RETURN an ERROR! value, it would escalate itself to an exception if not triaged with special functions at the callsite:
+
+    rebol2&gt;&gt; foo: func [] [return make error! &quot;Boom&quot;]
+
+    rebol2&gt;&gt; foo
+    ** User Error: Boom
+    ** Near: return make error! &quot;Boom&quot;
+
+    rebol2&gt;&gt; type? foo
+    == error!
+
+    rebol2&gt;&gt; (foo) print &quot;No triage, this won&#39;t print&quot;
+    ** User Error: Boom
+    ** Near: return make error! &quot;Boom&quot;
+
+    rebol2&gt;&gt; (disarm foo) print &quot;Triaged, so this will print&quot;
+    Triaged, so this will print
+
+    rebol2&gt;&gt; disarm foo
+
+    rebol2&gt;&gt; probe disarm foo
+    make object! [
+        code: 800
+        type: &#39;user
+        id: &#39;message
+        arg1: &quot;Boom&quot;
+        arg2: none
+        arg3: none
+        near: [return make error! &quot;Boom&quot;]
+        where: none
+    ]
+
+## Why Was This Abandoned?
+
+**[According to Carl](http://www.rebol.net/r3blogs/0007.html):**
+
+&gt; *&quot;Prior versions of REBOL used &#39;hot&#39; errors. That is, you had to treat error values in a special way or they would automatically trigger error processing. This behavior was originally implemented to keep errors from propagating too far from their origins (the principle was to preserve as much as possible the locality of the error).&quot;*
+&gt;
+&gt; *&quot;These hot errors turned out to be overkill, and the benefit of error locality was offset by the difficulty of handling error values in general. (See the articles of [Ladislav Mecir](https://web.archive.org/web/20060101045815/http://www.fm.vslib.cz/~ladislav/rebol/) who wrote excellent notes on this subject). It could be quite tricky at times.&quot;*
+
+I&#39;m not sure what articles he&#39;s referring to from Ladislav.  The link he provides has an error section where Ladislav points out some bugs and says *&quot;any Rebol value should be obtainable as a result of an expression, a result of a parenthesized expression, a result of a block evaluation and a result of a function evaluation&quot;*, which seems pretty uncontroversial.
+
+## So... What Was The Problem?
+
+One big ergonomic problem is that TRY intercepted errors, but didn&#39;t disarm them.  :frowning: 
+
+    rebol2&gt;&gt; foo: func [] [return make error! &quot;Boom&quot;]
+
+    rebol2&gt;&gt; caught: try [foo]
+    ** User Error: Boom
+    ** Near: return make error! &quot;Boom&quot;
+   
+    rebol2&gt;&gt; caught/id
+    ** User Error: Boom
+    ** Near: return make error! &quot;Boom&quot;
+
+That&#39;s incredibly inconvenient.  So why didn&#39;t TRY do a DISARM?
+
+The problem is &quot;hotness&quot; was a property of all values of ERROR! type, and when you disarm them they&#39;d become OBJECT!.  If TRY were to DISARM the error it wouldn&#39;t be an ERROR! anymore, so you couldn&#39;t test to see if your expression had produced an error or not.
+
+You get this because you&#39;re trying to pack too much information into one return result.  It could have been addressed by having you write your TRY as arity-2 with an EXCEPT.
+
+    rebol2&gt;&gt; try-except: func [code handler /local e] [
+                 return either error? e: try code [handler disarm :e] [:e]
+             ]
+
+    rebol2&gt;&gt; try-except [foo] func [e] [probe e/arg1]
+    &quot;Boom&quot;
+
+    rebol2&gt;&gt; try-except [1 + 2] func [e] [probe e/arg1]
+    == 3
+
+Ren-C gives you this with infix, and you can use an arrow function, so it&#39;s more pleasing:
+
+    foo except e -&gt; [probe e.arg1]
+
+## Hot Errors Would Have Been Only Half The Story
+
+It seems Rebol2 was on the right track by having a state you could carry in a function&#39;s return result, that would promote to a divergent panic if not triaged at the callsite.
+
+But for it to gel, you need to draw a sharp line between divergent panics and ERROR!, and not mix up their interception (in fact, [you should practically never intercept divergent panics](https://rebol.metaeducation.com/t/discouraging-the-interception-of-abrupt-failures/1871)).
+
+Rebol2&#39;s TRY was a one-size-fits-none construct, considering any typo or deeply nested errors to be on par with one that was &quot;RETURN&#39;d&quot; directly from the function you were calling:
+
+    rebol2&gt;&gt; probe disarm try [read %nonexistent.txt]
+    make object! [
+        code: 500
+        type: &#39;access
+        id: &#39;cannot-open
+        arg1: &quot;/C/Projects/rebol2/nonexistent.txt&quot;
+        arg2: none
+        arg3: none
+        near: [read %nonexistent.txt]
+        where: &#39;halt-view
+    ]
+
+    rebol2&gt;&gt; probe disarm try [rread %nonexistent.txt]
+    make object! [
+        code: 300
+        type: &#39;script
+        id: &#39;no-value
+        arg1: &#39;rread
+        arg2: none
+        arg3: none
+        near: [rread %nonexistent.txt]
+        where: &#39;halt-view
+    ]
+
+This makes it nigh impossible to act upon the information reliably.
+
+## The Wayward Drift To All-Errors-Are-Exceptions...
+
+Despite Rebol2 being on the cusp of meaningful error handling, R3-Alpha went the way of the exception fallacy.  Jumping across arbitrary levels of stack running arbitrary code in order to handle an error in stack levels above is something that the software industry has pretty much debunked.
+
+For the most part, exceptions need to be reserved for things that should basically *never* happen.  The rare systems that do handle them should be when it&#39;s required for mitigating damage or corruption that might occur if cleanup code doesn&#39;t get run.  Exceptions are not what you want to use to deliver garden variety errors...you need direct contracts between caller and callee.</description>
+    
+    <lastBuildDate>Thu, 10 Jul 2025 12:18:50 +0000</lastBuildDate>
+    <category>Redbol</category>
+    <atom:link href="https://rebol.metaeducation.com/t/rebol2s-hot-errors-abandoned-by-r3-alpha-red/2505.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Rebol2&#39;s &quot;Hot Errors&quot; (Abandoned by R3-Alpha, Red)</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>Rebol2 had a concept which had the inklings of <a href="https://rebol.metaeducation.com/t/panic-vs-return-fail-the-age-of-definitional-errors/1852">definitional errors</a>, in the sense that if you would RETURN an ERROR! value, it would escalate itself to an exception if not triaged with special functions at the callsite:</p>
+<pre><code>rebol2&gt;&gt; foo: func [] [return make error! "Boom"]
+
+rebol2&gt;&gt; foo
+** User Error: Boom
+** Near: return make error! "Boom"
+
+rebol2&gt;&gt; type? foo
+== error!
+
+rebol2&gt;&gt; (foo) print "No triage, this won't print"
+** User Error: Boom
+** Near: return make error! "Boom"
+
+rebol2&gt;&gt; (disarm foo) print "Triaged, so this will print"
+Triaged, so this will print
+
+rebol2&gt;&gt; disarm foo
+
+rebol2&gt;&gt; probe disarm foo
+make object! [
+    code: 800
+    type: 'user
+    id: 'message
+    arg1: "Boom"
+    arg2: none
+    arg3: none
+    near: [return make error! "Boom"]
+    where: none
+]
+</code></pre>
+<h2><a name="p-8502-why-was-this-abandoned-1" class="anchor" href="https://rebol.metaeducation.com#p-8502-why-was-this-abandoned-1"></a>Why Was This Abandoned?</h2>
+<p><strong><a href="http://www.rebol.net/r3blogs/0007.html">According to Carl</a>:</strong></p>
+<blockquote>
+<p><em>"Prior versions of REBOL used 'hot' errors. That is, you had to treat error values in a special way or they would automatically trigger error processing. This behavior was originally implemented to keep errors from propagating too far from their origins (the principle was to preserve as much as possible the locality of the error)."</em></p>
+<p><em>"These hot errors turned out to be overkill, and the benefit of error locality was offset by the difficulty of handling error values in general. (See the articles of <a href="https://web.archive.org/web/20060101045815/http://www.fm.vslib.cz/~ladislav/rebol/">Ladislav Mecir</a> who wrote excellent notes on this subject). It could be quite tricky at times."</em></p>
+</blockquote>
+<p>I'm not sure what articles he's referring to from Ladislav.  The link he provides has an error section where Ladislav points out some bugs and says <em>"any Rebol value should be obtainable as a result of an expression, a result of a parenthesized expression, a result of a block evaluation and a result of a function evaluation"</em>, which seems pretty uncontroversial.</p>
+<h2><a name="p-8502-so-what-was-the-problem-2" class="anchor" href="https://rebol.metaeducation.com#p-8502-so-what-was-the-problem-2"></a>So... What Was The Problem?</h2>
+<p>One big ergonomic problem is that TRY intercepted errors, but didn't disarm them.  <img src="https://rebol.metaeducation.com/images/emoji/twitter/frowning.png?v=14" title=":frowning:" class="emoji" alt=":frowning:" loading="lazy" width="20" height="20"></p>
+<pre><code>rebol2&gt;&gt; foo: func [] [return make error! "Boom"]
+
+rebol2&gt;&gt; caught: try [foo]
+** User Error: Boom
+** Near: return make error! "Boom"
+
+rebol2&gt;&gt; caught/id
+** User Error: Boom
+** Near: return make error! "Boom"
+</code></pre>
+<p>That's incredibly inconvenient.  So why didn't TRY do a DISARM?</p>
+<p>The problem is "hotness" was a property of all values of ERROR! type, and when you disarm them they'd become OBJECT!.  If TRY were to DISARM the error it wouldn't be an ERROR! anymore, so you couldn't test to see if your expression had produced an error or not.</p>
+<p>You get this because you're trying to pack too much information into one return result.  It could have been addressed by having you write your TRY as arity-2 with an EXCEPT.</p>
+<pre><code>rebol2&gt;&gt; try-except: func [code handler /local e] [
+             return either error? e: try code [handler disarm :e] [:e]
+         ]
+
+rebol2&gt;&gt; try-except [foo] func [e] [probe e/arg1]
+"Boom"
+
+rebol2&gt;&gt; try-except [1 + 2] func [e] [probe e/arg1]
+== 3
+</code></pre>
+<p>Ren-C gives you this with infix, and you can use an arrow function, so it's more pleasing:</p>
+<pre><code>foo except e -&gt; [probe e.arg1]
+</code></pre>
+<h2><a name="p-8502-hot-errors-would-have-been-only-half-the-story-3" class="anchor" href="https://rebol.metaeducation.com#p-8502-hot-errors-would-have-been-only-half-the-story-3"></a>Hot Errors Would Have Been Only Half The Story</h2>
+<p>It seems Rebol2 was on the right track by having a state you could carry in a function's return result, that would promote to a divergent panic if not triaged at the callsite.</p>
+<p>But for it to gel, you need to draw a sharp line between divergent panics and ERROR!, and not mix up their interception (in fact, <a href="https://rebol.metaeducation.com/t/discouraging-the-interception-of-abrupt-failures/1871">you should practically never intercept divergent panics</a>).</p>
+<p>Rebol2's TRY was a one-size-fits-none construct, considering any typo or deeply nested errors to be on par with one that was "RETURN'd" directly from the function you were calling:</p>
+<pre><code>rebol2&gt;&gt; probe disarm try [read %nonexistent.txt]
+make object! [
+    code: 500
+    type: 'access
+    id: 'cannot-open
+    arg1: "/C/Projects/rebol2/nonexistent.txt"
+    arg2: none
+    arg3: none
+    near: [read %nonexistent.txt]
+    where: 'halt-view
+]
+
+rebol2&gt;&gt; probe disarm try [rread %nonexistent.txt]
+make object! [
+    code: 300
+    type: 'script
+    id: 'no-value
+    arg1: 'rread
+    arg2: none
+    arg3: none
+    near: [rread %nonexistent.txt]
+    where: 'halt-view
+]
+</code></pre>
+<p>This makes it nigh impossible to act upon the information reliably.</p>
+<h2><a name="p-8502-the-wayward-drift-to-all-errors-are-exceptions-4" class="anchor" href="https://rebol.metaeducation.com#p-8502-the-wayward-drift-to-all-errors-are-exceptions-4"></a>The Wayward Drift To All-Errors-Are-Exceptions...</h2>
+<p>Despite Rebol2 being on the cusp of meaningful error handling, R3-Alpha went the way of the exception fallacy.  Jumping across arbitrary levels of stack running arbitrary code in order to handle an error in stack levels above is something that the software industry has pretty much debunked.</p>
+<p>For the most part, exceptions need to be reserved for things that should basically <em>never</em> happen.  The rare systems that do handle them should be when it's required for mitigating damage or corruption that might occur if cleanup code doesn't get run.  Exceptions are not what you want to use to deliver garden variety errors...you need direct contracts between caller and callee.</p>
+          <p><a href="https://rebol.metaeducation.com/t/rebol2s-hot-errors-abandoned-by-r3-alpha-red/2505/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/rebol2s-hot-errors-abandoned-by-r3-alpha-red/2505/1</link>
+        <pubDate>Thu, 10 Jul 2025 09:29:18 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2505-1</guid>
+        <source url="https://rebol.metaeducation.com/t/rebol2s-hot-errors-abandoned-by-r3-alpha-red/2505.rss">Rebol2&#39;s &quot;Hot Errors&quot; (Abandoned by R3-Alpha, Red)</source>
+      </item>
+  </channel>
+</rss>

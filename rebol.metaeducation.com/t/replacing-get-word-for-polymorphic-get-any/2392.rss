@@ -1,0 +1,416 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Replacing GET-WORD! for Polymorphic &quot;GET:ANY&quot;</title>
+    <link>https://rebol.metaeducation.com/t/replacing-get-word-for-polymorphic-get-any/2392</link>
+    <description>So the [Big Alien Proposal](https://rebol.metaeducation.com/t/big-alien-proposal-word-runs-functions/1905/13?u=hostilefork) has been settling out, and I&#39;ve [backed off the idea that you need a leading slash to assign actions to words](https://rebol.metaeducation.com/t/the-grand-leading-slash-safety-or-burden-question/2352/2?u=hostilefork).
+
+An area that still hasn&#39;t been pushed through is what to do about replacing the former **`:FOO`** behavior for what was &quot;GET-WORD!&quot; (and is now a &quot;refinement&quot;).
+
+Rebol2 used `:FOO` to suppress function invocations, and fetch any other variable normally.  But it didn&#39;t let you get unset variables:
+
+    rebol2&gt;&gt; type? :append
+    == function!
+
+    rebol2&gt;&gt; num: 10
+
+    rebol2&gt;&gt; type? :num
+    == integer!
+
+    rebol2&gt;&gt; type? :asdfasdf
+    ** Script Error: asdfasdf has no value
+
+R3-Alpha made `:FOO` a fully generic GET, that could also get UNSET!
+
+    r3-alpha&gt;&gt; type? :append
+    == action!
+
+    r3-alpha&gt;&gt; num: 10
+
+    r3-alpha&gt;&gt; type? :num
+    == integer!
+
+    r3-alpha&gt;&gt; type? :asdfasdf
+    == unset!
+
+Red followed suit, and does the same thing.
+
+**I never liked this idea of coalescing the two things.**  If you meant to suppress an action invocation, conflating that with &quot;but if it&#39;s unset that&#39;s okay&quot; has been a recipe for disaster.
+
+In fact, the Big Alien Proposal moves in a stronger direction... trailing slash doesn&#39;t just suppress action invocation, it ensures that the thing *is* an action:
+
+    &gt;&gt; type of append/
+    == ~{action!}~  ; anti
+
+    &gt;&gt; num: 10
+
+    &gt;&gt; num/
+    ** Error: trailing slash in paths can only fetch ACTION!, not INTEGER!
+
+    &gt;&gt; asdfasdf/
+    ** Error: asdfasdf is NOTHING
+
+## But What If You Want Other Behaviors?
+
+I&#39;ve floated the idea that if you want to tolerate getting something that may be unassigned, you can do that with a trailing **`~`**.
+
+    &gt;&gt; foo: ~
+    &gt;&gt; bar: 1020
+
+    &gt;&gt; foo
+    ** Error: foo is NOTHING
+
+    &gt;&gt; foo.~
+    == ~  ; anti
+
+    &gt;&gt; foo/~
+    == ~  ; anti
+
+    &gt;&gt; bar.~
+    == 1020
+
+    &gt;&gt; bar/~
+    ** Error: trailing slash in paths can only fetch ACTION!, not INTEGER!
+
+    &gt;&gt; type of append/~
+    == ~{action!}~  ; anti
+
+**That seems pretty slick.**
+
+There is one qualm, which is that **`bar.~`** can theoretically be meaningful, if you&#39;re picking something like a quasiform out of a MAP!, because quasi-blank is a valid map key.  Typically if you put something in a TUPLE! like that which can be literally looked up, it is looked up literally.
+
+We could go the other way with it, and put it at the beginning...
+
+    &gt;&gt; ~.foo
+    == ~  ; anti
+
+    &gt;&gt; ~.bar
+    == 1020
+
+But if you&#39;ve got a long chain of things, it puts the &quot;I&#39;m okay with this being unset&quot; far away from the thing that&#39;s actually unset.
+
+    &gt;&gt; ~.obj1.obj2.field
+    == ~  ; anti
+
+    &gt;&gt; obj1.obj2.field.~
+    == ~  ; anti
+
+So comparing there, it&#39;s FIELD that&#39;s the thing that you&#39;re &quot;modifying&quot; the access of.
+
+But...I suppose looked at that way, you might put it anywhere:
+
+    &gt;&gt; obj1.obj2.~.field
+    == ~  ; anti
+
+Well, that&#39;s a bit interesting, in the sense that this way you could cut short any chain of accesses:
+
+    &gt;&gt; ~.obj1.~.obj2.~.field
+    == ~  ; anti
+
+That might translate to &quot;Suppress an error and just give me NOTHING if any of OBJ1, OBJ2, or FIELD are unset&quot; (or maybe just any kind of unavailable?)
+
+Well actually you can do this either way, with a before or after convention:
+
+    &gt;&gt; obj1.~.obj2.~.field.~
+    == ~  ; anti
+
+One thing to like about the after convention is that it wouldn&#39;t produce things that look like unix paths, e.g. **`~/foo`** looks like a file hanging off your home folder.
+
+## After Convention Looks Good, Still Has A Hole...
+
+There&#39;s still one hole here.
+
+**`foo.~`** gives you a non-antiform-action value that may be an unset variable (or tripwire, we&#39;ll assume they&#39;re both covered)
+
+**`foo/~`** gives you either an antiform action value or the value of an unset variable, but errors on other things.
+
+*(I should point out that in **`foo.bar.baz/~`**, that is structurally like **`(foo.bar.baz)/~`** so there would be no putting it in the middle as I suggested you might be able to do with the tuple version.  But appropriately, that wouldn&#39;t make any sense for an antiform action to be anywhere but at the end, because you can&#39;t &quot;pick out of it&quot; the way you may be able to do with a tuple product.)*
+
+Anyway... the hole is the case of where you *genuinely* want anything.  How to get the behavior of R3-Alpha and Red&#39;s GET-WORD! ?
+
+***This is actually pretty rare.***  If you&#39;ve assigned something to a variable and you have no idea whether it&#39;s a function or a plain value, you don&#39;t know how to use it.  Unless the function is arity-1 and promises that it&#39;s pure (otherwise you&#39;ll have trouble with treating it with value semantics).
+
+Could do like Rebol2 and punt on it... just say you have to use **`get:any`** and move on.  :face_with_diagonal_mouth: 
+
+Or expand **`foo.~`** to say antiform actions are acceptable to access with that.  :frowning: 
+
+## Another Hole: What About ACTION! NULL-tolerance?
+
+This is something that comes up...which we might write up like this:
+
+    &gt;&gt; foo: null
+    &gt;&gt; bar: func [x] [...]
+
+    &gt;&gt; proxy-foo: foo/~null~
+    == ~null~  ; anti
+
+    &gt;&gt; proxy-bar: bar/~null~
+    == ~#[frame! ...]~
+
+Uuuugly.  :goblin:   But it&#39;s more often the case you want to fetch action-or-null than it is that you want to fetch action-or-not-set.
+
+**But Wait...** since we know it&#39;s not an invocation, TRY could be used!
+
+    &gt;&gt; proxy-foo: try foo/
+    == ~null~
+
+    &gt;&gt; proxy-bar: try bar/
+    == ~#[frame! ...]~
+
+The convention could be that trailing slash does a RAISE, but only if the variable is NULL... otherwise it does a FAIL.  So TRY could effectively pipe the NULL!
+
+That&#39;s subtle, but I feel the subtlety of *&quot;actions pass, nulls raise, everything else fails&quot;* is as-easy or easier to explain than any attempt to do this with a notation.
+
+
+## Sidenote, What About Protecting Assignments?
+
+I&#39;ve become very accustomed to being able to unset variables on the fly:
+
+    x: y: z: ~
+
+    mode: ~&lt;mode not initialized by INIT-SYSTEM&gt;~
+
+Though we could maybe draw a distinction with SET-BLOCK...
+
+    &gt;&gt; [x]: ~
+    ** Error: SET-BLOCK! variables must be var.~ to unset
+
+    &gt;&gt; [x.~]: ~
+    == ~  ; anti
+
+Eeeeh.  No.
+
+## Anyway, There&#39;s Enough Here To Get Started
+
+I&#39;ve converted most everywhere in the code that meant to get an action to **`FOO/`**  But there&#39;s still a fair number of places in the code still using **`:FOO`**.  I&#39;ll have to start surveying them, but my current leaning is to go for it with the trailing tilde idea.</description>
+    
+    <lastBuildDate>Tue, 01 Apr 2025 19:35:39 +0000</lastBuildDate>
+    <category>Internals</category>
+    <atom:link href="https://rebol.metaeducation.com/t/replacing-get-word-for-polymorphic-get-any/2392.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Replacing GET-WORD! for Polymorphic &quot;GET:ANY&quot;</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="2392">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">&gt;&gt; proxy-foo: try foo/
+== ~null~
+
+&gt;&gt; proxy-bar: try bar/
+== ~#[frame! ...]~
+</code></pre>
+<p>The convention could be that trailing slash does a RAISE, but only if the variable is NULL... otherwise it does a FAIL. So TRY could effectively pipe the NULL!</p>
+</blockquote>
+</aside>
+<p>Sigh, no that can't work.</p>
+<p>Because TRY already takes advantage of the "I know I'm not executing" state to suppress TUPLE! picking failures:</p>
+<pre><code>&gt;&gt; block: [a b]
+
+&gt;&gt; block.3
+** Error... (raised)
+
+&gt;&gt; try block.3
+== ~null~  ; anti
+</code></pre>
+<p>So what happens when you mix a tuple and a terminal slash?  The answer is conflated:</p>
+<pre><code>&gt;&gt; try foo.bar/
+== ~null~  ; anti
+</code></pre>
+<p>The higher priority feature is the tuple selection, it wins.</p>
+<p>Priorities, priorities.  <img src="https://rebol.metaeducation.com/images/emoji/twitter/neutral_face.png?v=14" title=":neutral_face:" class="emoji" alt=":neutral_face:" loading="lazy" width="20" height="20"></p>
+<p>Which reminds me of the idea of <strong><code>foo.</code></strong>  That's a TUPLE! and it <em>could</em> mean "RAISE an error, but don't fail, if FOO is unset".  So <strong><code>try foo.</code></strong> would give you null if foo was unset (<strong>try foo</strong> has to consider the case that FOO is a function, and the TRY has to be processing the result of that if so).</p>
+<p><em>Maybe these could be combined...</em> such that <strong><code>foo./</code></strong> fuses as "get if it's anything but not set", and <strong><code>foo./~</code></strong> means "get absolutely anything, set or not".  Given how rarely this comes up, the fact that it looks weird might not matter.</p>
+<p>Or...</p>
+<aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="2392">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>Or expand <strong><code>foo.~</code></strong> to say antiform actions are acceptable to access with that. <img src="https://rebol.metaeducation.com/images/emoji/twitter/frowning.png?v=14" title=":frowning:" class="emoji" alt=":frowning:" loading="lazy" width="20" height="20"></p>
+</blockquote>
+</aside>
+<p>I don't love this direction, but in practice "get me anything" is the most common intent.</p>
+<p>It may be wiser if that's what <strong><code>foo/~</code></strong> means (to draw attention to "this could be an action")... and then <strong><code>foo.~</code></strong> can mean "get me anything so long as it isn't an action".  Any filtering beyond that you do with ENSURE, etc.</p>
+<aside class="quote no-group quote-modified" data-username="hostilefork" data-post="1" data-topic="2392">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<h2>Another Hole: What About ACTION! NULL-tolerance?</h2>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">&gt;&gt; foo: null
+&gt;&gt; bar: func [x] [...]
+
+&gt;&gt; proxy-foo: foo/~null~
+== ~null~  ; anti
+
+&gt;&gt; proxy-bar: bar/~null~
+== ~#[frame! ...]~
+</code></pre>
+</blockquote>
+</aside>
+<p>The answer here may just be "tough luck".  Not everything needs to be solved with a notation.</p>
+<pre><code>proxy-foo: ensure [~null~ action!] foo/~
+</code></pre>
+          <p><a href="https://rebol.metaeducation.com/t/replacing-get-word-for-polymorphic-get-any/2392/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/replacing-get-word-for-polymorphic-get-any/2392/2</link>
+        <pubDate>Tue, 01 Apr 2025 19:35:39 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2392-2</guid>
+        <source url="https://rebol.metaeducation.com/t/replacing-get-word-for-polymorphic-get-any/2392.rss">Replacing GET-WORD! for Polymorphic &quot;GET:ANY&quot;</source>
+      </item>
+      <item>
+        <title>Replacing GET-WORD! for Polymorphic &quot;GET:ANY&quot;</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>So the <a href="https://rebol.metaeducation.com/t/big-alien-proposal-word-runs-functions/1905/13">Big Alien Proposal</a> has been settling out, and I've <a href="https://rebol.metaeducation.com/t/the-grand-leading-slash-safety-or-burden-question/2352/2">backed off the idea that you need a leading slash to assign actions to words</a>.</p>
+<p>An area that still hasn't been pushed through is what to do about replacing the former <strong><code>:FOO</code></strong> behavior for what was "GET-WORD!" (and is now a "refinement").</p>
+<p>Rebol2 used <code>:FOO</code> to suppress function invocations, and fetch any other variable normally.  But it didn't let you get unset variables:</p>
+<pre><code>rebol2&gt;&gt; type? :append
+== function!
+
+rebol2&gt;&gt; num: 10
+
+rebol2&gt;&gt; type? :num
+== integer!
+
+rebol2&gt;&gt; type? :asdfasdf
+** Script Error: asdfasdf has no value
+</code></pre>
+<p>R3-Alpha made <code>:FOO</code> a fully generic GET, that could also get UNSET!</p>
+<pre><code>r3-alpha&gt;&gt; type? :append
+== action!
+
+r3-alpha&gt;&gt; num: 10
+
+r3-alpha&gt;&gt; type? :num
+== integer!
+
+r3-alpha&gt;&gt; type? :asdfasdf
+== unset!
+</code></pre>
+<p>Red followed suit, and does the same thing.</p>
+<p><strong>I never liked this idea of coalescing the two things.</strong>  If you meant to suppress an action invocation, conflating that with "but if it's unset that's okay" has been a recipe for disaster.</p>
+<p>In fact, the Big Alien Proposal moves in a stronger direction... trailing slash doesn't just suppress action invocation, it ensures that the thing <em>is</em> an action:</p>
+<pre><code>&gt;&gt; type of append/
+== ~{action!}~  ; anti
+
+&gt;&gt; num: 10
+
+&gt;&gt; num/
+** Error: trailing slash in paths can only fetch ACTION!, not INTEGER!
+
+&gt;&gt; asdfasdf/
+** Error: asdfasdf is NOTHING
+</code></pre>
+<h2><a name="p-8097-but-what-if-you-want-other-behaviors-1" class="anchor" href="https://rebol.metaeducation.com#p-8097-but-what-if-you-want-other-behaviors-1"></a>But What If You Want Other Behaviors?</h2>
+<p>I've floated the idea that if you want to tolerate getting something that may be unassigned, you can do that with a trailing <strong><code>~</code></strong>.</p>
+<pre><code>&gt;&gt; foo: ~
+&gt;&gt; bar: 1020
+
+&gt;&gt; foo
+** Error: foo is NOTHING
+
+&gt;&gt; foo.~
+== ~  ; anti
+
+&gt;&gt; foo/~
+== ~  ; anti
+
+&gt;&gt; bar.~
+== 1020
+
+&gt;&gt; bar/~
+** Error: trailing slash in paths can only fetch ACTION!, not INTEGER!
+
+&gt;&gt; type of append/~
+== ~{action!}~  ; anti
+</code></pre>
+<p><strong>That seems pretty slick.</strong></p>
+<p>There is one qualm, which is that <strong><code>bar.~</code></strong> can theoretically be meaningful, if you're picking something like a quasiform out of a MAP!, because quasi-blank is a valid map key.  Typically if you put something in a TUPLE! like that which can be literally looked up, it is looked up literally.</p>
+<p>We could go the other way with it, and put it at the beginning...</p>
+<pre><code>&gt;&gt; ~.foo
+== ~  ; anti
+
+&gt;&gt; ~.bar
+== 1020
+</code></pre>
+<p>But if you've got a long chain of things, it puts the "I'm okay with this being unset" far away from the thing that's actually unset.</p>
+<pre><code>&gt;&gt; ~.obj1.obj2.field
+== ~  ; anti
+
+&gt;&gt; obj1.obj2.field.~
+== ~  ; anti
+</code></pre>
+<p>So comparing there, it's FIELD that's the thing that you're "modifying" the access of.</p>
+<p>But...I suppose looked at that way, you might put it anywhere:</p>
+<pre><code>&gt;&gt; obj1.obj2.~.field
+== ~  ; anti
+</code></pre>
+<p>Well, that's a bit interesting, in the sense that this way you could cut short any chain of accesses:</p>
+<pre><code>&gt;&gt; ~.obj1.~.obj2.~.field
+== ~  ; anti
+</code></pre>
+<p>That might translate to "Suppress an error and just give me NOTHING if any of OBJ1, OBJ2, or FIELD are unset" (or maybe just any kind of unavailable?)</p>
+<p>Well actually you can do this either way, with a before or after convention:</p>
+<pre><code>&gt;&gt; obj1.~.obj2.~.field.~
+== ~  ; anti
+</code></pre>
+<p>One thing to like about the after convention is that it wouldn't produce things that look like unix paths, e.g. <strong><code>~/foo</code></strong> looks like a file hanging off your home folder.</p>
+<h2><a name="p-8097-after-convention-looks-good-still-has-a-hole-2" class="anchor" href="https://rebol.metaeducation.com#p-8097-after-convention-looks-good-still-has-a-hole-2"></a>After Convention Looks Good, Still Has A Hole...</h2>
+<p>There's still one hole here.</p>
+<p><strong><code>foo.~</code></strong> gives you a non-antiform-action value that may be an unset variable (or tripwire, we'll assume they're both covered)</p>
+<p><strong><code>foo/~</code></strong> gives you either an antiform action value or the value of an unset variable, but errors on other things.</p>
+<p><em>(I should point out that in <strong><code>foo.bar.baz/~</code></strong>, that is structurally like <strong><code>(foo.bar.baz)/~</code></strong> so there would be no putting it in the middle as I suggested you might be able to do with the tuple version.  But appropriately, that wouldn't make any sense for an antiform action to be anywhere but at the end, because you can't "pick out of it" the way you may be able to do with a tuple product.)</em></p>
+<p>Anyway... the hole is the case of where you <em>genuinely</em> want anything.  How to get the behavior of R3-Alpha and Red's GET-WORD! ?</p>
+<p><em><strong>This is actually pretty rare.</strong></em>  If you've assigned something to a variable and you have no idea whether it's a function or a plain value, you don't know how to use it.  Unless the function is arity-1 and promises that it's pure (otherwise you'll have trouble with treating it with value semantics).</p>
+<p>Could do like Rebol2 and punt on it... just say you have to use <strong><code>get:any</code></strong> and move on.  <img src="https://rebol.metaeducation.com/images/emoji/twitter/face_with_diagonal_mouth.png?v=14" title=":face_with_diagonal_mouth:" class="emoji" alt=":face_with_diagonal_mouth:" loading="lazy" width="20" height="20"></p>
+<p>Or expand <strong><code>foo.~</code></strong> to say antiform actions are acceptable to access with that.  <img src="https://rebol.metaeducation.com/images/emoji/twitter/frowning.png?v=14" title=":frowning:" class="emoji" alt=":frowning:" loading="lazy" width="20" height="20"></p>
+<h2><a name="p-8097-another-hole-what-about-action-null-tolerance-3" class="anchor" href="https://rebol.metaeducation.com#p-8097-another-hole-what-about-action-null-tolerance-3"></a>Another Hole: What About ACTION! NULL-tolerance?</h2>
+<p>This is something that comes up...which we might write up like this:</p>
+<pre><code>&gt;&gt; foo: null
+&gt;&gt; bar: func [x] [...]
+
+&gt;&gt; proxy-foo: foo/~null~
+== ~null~  ; anti
+
+&gt;&gt; proxy-bar: bar/~null~
+== ~#[frame! ...]~
+</code></pre>
+<p>Uuuugly.  <img src="https://rebol.metaeducation.com/images/emoji/twitter/goblin.png?v=14" title=":goblin:" class="emoji" alt=":goblin:" loading="lazy" width="20" height="20">   But it's more often the case you want to fetch action-or-null than it is that you want to fetch action-or-not-set.</p>
+<p><strong>But Wait...</strong> since we know it's not an invocation, TRY could be used!</p>
+<pre><code>&gt;&gt; proxy-foo: try foo/
+== ~null~
+
+&gt;&gt; proxy-bar: try bar/
+== ~#[frame! ...]~
+</code></pre>
+<p>The convention could be that trailing slash does a RAISE, but only if the variable is NULL... otherwise it does a FAIL.  So TRY could effectively pipe the NULL!</p>
+<p>That's subtle, but I feel the subtlety of <em>"actions pass, nulls raise, everything else fails"</em> is as-easy or easier to explain than any attempt to do this with a notation.</p>
+<h2><a name="p-8097-sidenote-what-about-protecting-assignments-4" class="anchor" href="https://rebol.metaeducation.com#p-8097-sidenote-what-about-protecting-assignments-4"></a>Sidenote, What About Protecting Assignments?</h2>
+<p>I've become very accustomed to being able to unset variables on the fly:</p>
+<pre><code>x: y: z: ~
+
+mode: ~&lt;mode not initialized by INIT-SYSTEM&gt;~
+</code></pre>
+<p>Though we could maybe draw a distinction with SET-BLOCK...</p>
+<pre><code>&gt;&gt; [x]: ~
+** Error: SET-BLOCK! variables must be var.~ to unset
+
+&gt;&gt; [x.~]: ~
+== ~  ; anti
+</code></pre>
+<p>Eeeeh.  No.</p>
+<h2><a name="p-8097-anyway-theres-enough-here-to-get-started-5" class="anchor" href="https://rebol.metaeducation.com#p-8097-anyway-theres-enough-here-to-get-started-5"></a>Anyway, There's Enough Here To Get Started</h2>
+<p>I've converted most everywhere in the code that meant to get an action to <strong><code>FOO/</code></strong>  But there's still a fair number of places in the code still using <strong><code>:FOO</code></strong>.  I'll have to start surveying them, but my current leaning is to go for it with the trailing tilde idea.</p>
+          <p><a href="https://rebol.metaeducation.com/t/replacing-get-word-for-polymorphic-get-any/2392/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/replacing-get-word-for-polymorphic-get-any/2392/1</link>
+        <pubDate>Mon, 31 Mar 2025 13:44:26 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2392-1</guid>
+        <source url="https://rebol.metaeducation.com/t/replacing-get-word-for-polymorphic-get-any/2392.rss">Replacing GET-WORD! for Polymorphic &quot;GET:ANY&quot;</source>
+      </item>
+  </channel>
+</rss>

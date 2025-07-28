@@ -1,0 +1,318 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>FRAME! / ACTION! Duality Examined</title>
+    <link>https://rebol.metaeducation.com/t/frame-action-duality-examined/1898</link>
+    <description>The mechanics behind FRAME! and ACTION! have been mixed up and reshaped over time, to where they are very much tied together.
+
+At times I&#39;ve wondered if we need both types.  If ACTION!s become inert unless they are isotopic, then that would seem to blur the distinction even more... since FRAME!s have kind of been &quot;inert actions&quot;.  
+
+So I thought I&#39;d try writing up an explanation of the current state of things.
+
+## First: What&#39;s a FRAME! ?
+
+You can think of a FRAME! as an object which has keys and values for the arguments and locals of a function.  There&#39;s a flag on each cell which indicates whether the object member has been &quot;specialized out&quot;.  If the flag is set, the slot is presumed to contain the value it will have when the function runs.  Otherwise the object member is presumed to contain the type information for acquiring that parameter.
+
+So when you make an ACTION! like:
+
+    foo: func [x [integer!] y [text!] &lt;local&gt; z] [...]
+
+It&#39;s internals are actually a FRAME! (called an &quot;exemplar&quot;) that looks *something* like:
+
+    make frame! [
+        x: [integer!]  ; unspecialized
+        y: [text!]  ; unspecialized
+        z: ~   ; specialized
+    ]
+
+## What&#39;s The Difference Between ACTION! and FRAME!, Then?
+
+Looking at the above: **you wouldn&#39;t want to try and DO a FRAME! which has type information in the argument slots**.  When the code for the function runs, it&#39;s expected that X be *an integer instance*...not type information saying an integer is expected!
+
+So when you MAKE FRAME! from an ACTION!, it goes through all the slots and wipes them out to be unset:
+
+    &gt;&gt; make frame! :foo
+    == make frame! [
+        x: ~
+        y: ~
+    ]  ; ^-- local z is not shown, as it was already specialized to a value
+
+But it still has to maintain a link to the original information about the parameter types, in order to validate them.  So there&#39;s a pointer from each of these &quot;non-exemplar&quot; FRAME!s to the &quot;exemplar&quot; FRAME! with the type information.
+
+## So ACTION!s are FRAME!s w/typesets in slots where args would be? 
+
+Kind of.  I glossed over some details there (there&#39;s more information in the parameter description than the type block...you need to know if it&#39;s quoted, or if it&#39;s a refinement, etc.)
+
+Right now every FRAME! points at an ACTION! instance.  So you can ask **action of frame** and get an answer.  That answer leads you to the thing that the system will use to do type checking on that frame (and you can in theory use it yourself).
+
+**It could truthfully be said that you never execute ACTION!s, you only execute FRAME!s.**  But when we say we &quot;execute an action&quot; all we mean is that a new frame is created for it, and then *that* frame is executed.
+
+One might wonder why something like SPECIALIZE would create an ACTION! instead of just making a FRAME!.  One good reason is that this offers an opportunity to *completely erase* the specialized variables from the interface.  With the variables erased, the words become available again for use in AUGMENT-ing the composite function.
+
+## So There&#39;s Some Info...
+
+Things are sort of stable with this, but a big thing on the horizon is the possibility that there might be FRAME! instances for evaluators besides actions.  So you could have a FRAME! representing just the evaluation of a BLOCK!.  (Today that&#39;s *sort of* what a VARARGS! is.)</description>
+    
+    <lastBuildDate>Mon, 23 Dec 2024 16:19:33 +0000</lastBuildDate>
+    <category>Internals</category>
+    <atom:link href="https://rebol.metaeducation.com/t/frame-action-duality-examined/1898.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>FRAME! / ACTION! Duality Examined</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>It's been harrowing <img src="https://rebol.metaeducation.com/images/emoji/twitter/persevere.png?v=14" title=":persevere:" class="emoji" alt=":persevere:" loading="lazy" width="20" height="20"> but I've been slowly paying off the technical debt of the FRAME! and ACTION! unification.</p>
+<p><strong>I've had some success with the lingering issue is how to deal with the contradictory desires to expose vs. not expose a frame's specialized slots.</strong>  You clearly want them exposed while you're building the frame (otherwise how could you have assigned them?)</p>
+<p>Above I suggested that you'd see the slots when dealing with a non-antiform frame, but you could view it through the lens of the antiform state and not see them.</p>
+<p>But I realized that is contentious with things like FOR-EACH interpreting antiform frames as generators.</p>
+<pre><code>&gt;&gt; /g: generator [yield 1 yield 2 yield 3]
+
+&gt;&gt; for-each 'item g/ [print ["Num:" item]]
+Num: 1
+Num: 2
+Num: 3
+</code></pre>
+<p>So if you wrote <strong><code>for-each [key val] g/ [...]</code></strong> it wouldn't be extracting the parameters of the function interface, but invoking the function to supply the values.</p>
+<h2><a name="p-7988-better-idea-utilize-frame-lensing-1" class="anchor" href="https://rebol.metaeducation.com#p-7988-better-idea-utilize-frame-lensing-1"></a>Better Idea: Utilize <strong><strong>"Frame Lensing"</strong></strong></h2>
+<p>I realized that this would be a perfect application of a feature that already existed (in a form)... which is the ability of FRAME! Cell instances to store an additional pointer to a ParamList "Lens" to use for describing what portion of the interface should be visible:</p>
+<p><a href="https://rebol.metaeducation.com/t/understanding-frame-lensing/1645" class="inline-onebox">Understanding FRAME! "Lensing"</a></p>
+<p>A reason I didn't think about this at first was that this was originally called "Frame Phasing" and it pertained to the "currently executing phase".  So this field was only available for frames that were in flight in the evaluator...not the kind of FRAME! you would get back from MAKE FRAME! or as a parameter to your shim in ENCLOSE.  But after a bunch of switcheroos of naming and concepts, the field is available in non-running frames.</p>
+<p>So when MAKE FRAME! happens, it gives back a cell with a lens on it that says to show all the fields on the interface at that moment.  Even as you fill in slot with a specialized value, you'll still see it--because it's heding the lens and not the specialization status.</p>
+<p><em>Then transitioning to an antiform gives back a cell with no lens.</em>  It's cheap to null out the field, and it makes sense...because the same slot where the lens is held is where you can put a cache of the WORD! symbol a function is extracted from (<a href="https://rebol.metaeducation.com/t/more-comprehensible-errors-with-per-cell-labeling/1357">this is helpful in APPLY scenarios</a>).  So when you don't have a lens because a Symbol pointer is there, it doesn't go by the lens...it goes by whether the cells hold specialized values or not.</p>
+<p>This works quite well.  It does mean that when you say <strong>make frame! append/</strong> there's a lens on that frame and hence no room for a symbol.  So when you say <strong>eval f</strong> or <strong>run f</strong> how do we know to put "append" in the name of any errors?  Well that's done by a trick that puts the symbol in a place that's specific to the frame and shared by all references.  It can be overridden if you turn the frame into an antiform and have the Cell slot, but if you don't then all frame references will see the same name and it can't be updated.</p>
+<p>I should probably write the code in such a way that it doesn't presume lensed cells don't have room for symbols, in case there were some version of the system with larger cells.  But another part of me thinks "no, there never will be, this is the end of this design".  <img src="https://rebol.metaeducation.com/images/emoji/twitter/slight_smile.png?v=14" title=":slight_smile:" class="emoji" alt=":slight_smile:" loading="lazy" width="20" height="20"></p>
+<p>Anyway...I think this is resolving about as well as it can.  The biggest issue remaining is when and if the frame is automatically locked against modification.  I think that just EVAL'ing it should not lock, because you might want to make a frame and invoke it multiple times with some tweaking each time.  This might be a case for just RUN'ing it not doing that either, but then you start having questions about infix.  How about when you create a derivation?  If you're allowed to change values after specialization then the specialization might have too many or too few parameters for the function as it is.  But I'm keeping an open mind on all this for the moment, to see what use cases might arise and just how bad the inconsistencies are in practice.</p>
+          <p><a href="https://rebol.metaeducation.com/t/frame-action-duality-examined/1898/5">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/frame-action-duality-examined/1898/5</link>
+        <pubDate>Mon, 23 Dec 2024 16:19:33 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1898-5</guid>
+        <source url="https://rebol.metaeducation.com/t/frame-action-duality-examined/1898.rss">FRAME! / ACTION! Duality Examined</source>
+      </item>
+      <item>
+        <title>FRAME! / ACTION! Duality Examined</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>It's been a tough week of contemplation, but...</p>
+<p>...I think a "bad" idea I had along the way here, is actually turning out to be a good idea.</p>
+<h2><a name="p-7934-details-or-varlist-vs-details-varlist-1" class="anchor" href="https://rebol.metaeducation.com#p-7934-details-or-varlist-vs-details-varlist-1"></a><code>(Details* -or- VarList*)</code> vs. <code>(Details* + VarList*)</code></h2>
+<aside class="quote no-group quote-modified" data-username="hostilefork" data-post="3" data-topic="1898">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>But it's been on my mind... and it's part of what is making me think through this idea of pairing up <code>(Details* + VarList*)</code> with reused phases instead of making a new Phase every time you want to make a specialization/combinatorization.</p>
+</blockquote>
+</aside>
+<p>So at one point, I grafted in the idea that a FRAME! cell's first Node hold something that's simply a superset of <code>Details*</code> and <code>VarList*</code>.  If a function composition creates a new Details, it puts that in the cell and points to the old VarList.  If it creates a new VarList, it puts that in the cell and it points to the old Details.  If it creates both, it can pick either--doesn't matter.</p>
+<ul>
+<li>
+<p>This brings back the notion of a single pointer serving as an action's identity</p>
+</li>
+<li>
+<p>This again frees up the space for the stored symbol <em>(...I hate losing features, so was really struggling with any design that lost that...)</em></p>
+</li>
+</ul>
+<p>It seems like an uncomfortable situation of a new class of Context Cells which have in their Payload's Node1 something that can either be a VarList or a Details.  But I found that when "simplifying" things so that there's never a symbol in the "Phase" slot, and always a VarList in the VarList slot, that I was having to create questions to reverse-engineer the question of <em>"Are you a <code>VarList*</code>-identity Action or a <code>Details*</code>-identity Action?"</em></p>
+<p>Previously I'd called this superset of VarList and Details "Action".  That's a bit confusing since actions are a type of Cell (specifically, FRAME! cells in the antiform state), not a type of Stub.  So I think actually calling it <strong><code>Phase</code></strong> is probably better.</p>
+<p>What confused me was that it was seeming like introducing this new <code>Phase*</code> was breaking the idea of the "current" <code>Phase*</code> in the Cell, because you could tweak the types of values in a VarList-based FRAME! (or AUGMENT it, etc.) and then be beholden to a "phase" of typechecking that wasn't a Details.  I couldn't square the terminology and nothing seemed to work.</p>
+<p>But I think by talking it out here and figuring out the limits of what's possible and not, you always have to create a new Details if you want to introduce new typechecking.  And this concept of having to "harden", plus the viewing through the "lens" of antiform vs. non, answers a bunch of other questions.</p>
+          <p><a href="https://rebol.metaeducation.com/t/frame-action-duality-examined/1898/4">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/frame-action-duality-examined/1898/4</link>
+        <pubDate>Sat, 30 Nov 2024 10:22:56 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1898-4</guid>
+        <source url="https://rebol.metaeducation.com/t/frame-action-duality-examined/1898.rss">FRAME! / ACTION! Duality Examined</source>
+      </item>
+      <item>
+        <title>FRAME! / ACTION! Duality Examined</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="2" data-topic="1898">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>I definitely underestimated just how many issues were folded in with the "hardening" process that creating a Details brought about</p>
+</blockquote>
+</aside>
+<p>This goes further... because there are questions that the evaluator has to ask like "what is the first unspecialized parameter" when dealing with an infix function.</p>
+<p>So imagine this:</p>
+<pre><code>/mp-add: lambda [a b c] [a * b + c]
+
+f: make frame! mp-add/  ; ...some questions here RE: parameter antiforms
+
+f.a: 10
+
+/mp10-add: infix anti f
+</code></pre>
+<p>The question "what is your first unspecialized parameter" is supposed to operate on a cache that remembers which parameter that is (this shows a relatively simple case, but it's still slow to have to re-figure out it's <code>b</code> every time...it can get a lot trickier).</p>
+<p>So when does that calculation get done?</p>
+<p>The last possible moment it seems this can happen is when the frame is being executed.  It <em>could</em> happen when you turn a FRAME! into an antiform, but bear in mind you don't have to make a frame an antiform in order to RUN or EVAL it (though that could just claim it "makes an antiform as part of the internal processing", whether it actually does or not)</p>
+<h2><a name="p-7933-consequential-question-changing-answers-1" class="anchor" href="https://rebol.metaeducation.com#p-7933-consequential-question-changing-answers-1"></a>Consequential Question: Changing Answers?</h2>
+<p>Continuing the above example, you would expect the following, right?</p>
+<pre><code>&gt;&gt; /mp-add: lambda [a b c] [a * b + c]
+
+&gt;&gt; f: make frame! mp-add/  ; or whatever "fill 'holes' with nothing" op is
+
+&gt;&gt; map-each key f [key]
+== [a b c]
+</code></pre>
+<p>But if that frame is allowed to just "morph" to be the representation of an action, then if the <code>a</code> has been specialized out you don't want it to be part of the interface.</p>
+<pre><code>&gt;&gt; f.a: 10
+
+&gt;&gt; /mp10-add: infix anti f
+
+&gt;&gt; map-each key f [key]
+== [b c]   ; ugh, different answer for the same F?
+</code></pre>
+<p>So it's like the "hardening" moment is fundamentally changing what you had in your hand.</p>
+<h2><a name="p-7933-that-doesnt-sit-well-with-me-pouting_cat-2" class="anchor" href="https://rebol.metaeducation.com#p-7933-that-doesnt-sit-well-with-me-pouting_cat-2"></a>That Doesn't Sit Well With Me <img src="https://rebol.metaeducation.com/images/emoji/twitter/pouting_cat.png?v=14" title=":pouting_cat:" class="emoji" alt=":pouting_cat:" loading="lazy" width="20" height="20"></h2>
+<aside class="quote no-group" data-username="hostilefork" data-post="2" data-topic="1898">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>So FRAME!/ACTION! Unification Was A Mistake?</p>
+</blockquote>
+</aside>
+<p>Well, it can't be incoherent.</p>
+<p><strong>I'd be happier saying that when you enumerate the antiform, you get the public interface as if it were an action, and when you enumerate the non-antiform you get access to the specialized slots.</strong></p>
+<p>So perhaps it is the moment of turning into an antiform that does the hardening... but doesn't change how the non-antiform state behaves.</p>
+<pre><code>&gt;&gt; f.a: 10
+
+&gt;&gt; /mp10-add: infix anti f  ; INFIX RUNS F is same but typechecks FRAME!
+
+&gt;&gt; map-each key f [key]
+== [a b c]
+
+&gt;&gt; map-each key mp10-add/ [key]
+== [b c]
+</code></pre>
+<p>Better.</p>
+<h2><a name="p-7933-giving-antiforms-the-old-action-properties-may-be-it-3" class="anchor" href="https://rebol.metaeducation.com#p-7933-giving-antiforms-the-old-action-properties-may-be-it-3"></a>Giving Antiforms The Old "ACTION!" Properties May Be It</h2>
+<p>It may have to be that frames, when viewed through the antiform lens, answer questions differently.</p>
+<p>Once you enable that lens, it will have to lock the frame from modification.  But the idea would be that any non-mutating operations that can still work would answer questions of the non-antiform state the same way they would have been answered before the lock.</p>
+<ul>
+<li>
+<p>I have identified that something significant was lost when the "moment of hardening" that occurred when producing ACTION! from FRAME! disappeared.</p>
+</li>
+<li>
+<p>We don't want questions of the same objects to be answered differently before and after hardening.</p>
+</li>
+<li>
+<p>There is no other available distinguishing state besides the antiform state, and antiform FRAME! is ostensibly the surrogate for a separate action type, so...</p>
+</li>
+</ul>
+<p>...I guess I'm going to try to rig this up.  This is all a bit of a mess right now, it's extremely annoying and hard to know where to start.  But very necessary to sort out.</p>
+<p>Mechanically what this means is that when FRAME!s are antiforms, they give answers to questions about their interface based on the VarList* they hold in the cell.  Whereas when they are not antiforms, they consider their interface to be that associated with the "Phase" they hold in the cell.  The VarList* in the cell can't answer questions until it has been "hardened", which happens when you create an antiform of a frame, or use an operation like RUN on the plain FRAME! which will implicitly harden it.</p>
+<h2><a name="p-7933-ulterior-motive-disclosure-uparse-optimization-4" class="anchor" href="https://rebol.metaeducation.com#p-7933-ulterior-motive-disclosure-uparse-optimization-4"></a>Ulterior Motive Disclosure: UPARSE Optimization</h2>
+<p>One reason that I've been trying so hard to drive down the "allocated entity count" and reuse Phases is that when UPARSE combinators are turned into parsers, they are often used just once.</p>
+<p>You might write <strong>opt some "a"</strong>, and the "a" combinator could be called 50 times.  But [some "a"] is only called once, by the OPT, and the OPT may well be called only once as well.  If this is so, a native combinator doesn't need a reusable function... it can just take a disposable FRAME! and instead of using it as an archetypal pattern for a call, use its existing allocation for <em>the</em> one call.  <em>(It can even skip typechecking if it's native code and knows what it's doing... poke the input position into the INPUT slot, the parsers into the PARSER slots, and go straight to dispatching the combinated parser.)</em></p>
+<p>So my thinking here is that the function spec of combinators could specify whether they want a FRAME! or an ACTION?.  And if it takes a frame, it could be cheap.</p>
+<p>It's far out and I don't know how that would interact with debugging, or other forms of combinator wrapping.  It's just an idea.  But it's been on my mind... and it's part of what is making me think through this idea of pairing up <code>(Details* + VarList*)</code> with reused phases instead of making a new Details every time you want to make a specialization/combinatorization.</p>
+          <p><a href="https://rebol.metaeducation.com/t/frame-action-duality-examined/1898/3">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/frame-action-duality-examined/1898/3</link>
+        <pubDate>Thu, 28 Nov 2024 04:11:52 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1898-3</guid>
+        <source url="https://rebol.metaeducation.com/t/frame-action-duality-examined/1898.rss">FRAME! / ACTION! Duality Examined</source>
+      </item>
+      <item>
+        <title>FRAME! / ACTION! Duality Examined</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <h2><a name="p-7929-its-time-to-revisit-this-1" class="anchor" href="https://rebol.metaeducation.com#p-7929-its-time-to-revisit-this-1"></a>It's Time To Revisit This</h2>
+<p>At one point, ACTION! and FRAME! were two different types, whose Cells pointed to two different data structures.</p>
+<p>An ACTION! pointed to a <strong><code>DispatchDetails*</code></strong> (or <code>Details*</code> for short).  A Details contained the implementation information for the action... so if it were something like a FUNC, then it would hold the BLOCK! of the body for that specific function.  It also held a pointer to a C function called a <strong><code>Dispatcher*</code></strong> which would know how to interpret those details (e.g. the Func_Dispatcher() would know to run the code in the BLOCK! in the Details array).  Invoking a function could wind up running a chain reaction of Details, that had been composed together to run in the same memory space.</p>
+<p>A FRAME! pointed to a <strong><code>VarList*</code></strong> ... which is the same kind of thing that an OBJECT! points to: a list of keys (symbols) and then Cells for each key's value.  However, the cells could either specify an unfulfilled argument (antiform PARAMETER!) or a specialized value...which includes locals.  While this VarList pointed to the specific Details it was for, the FRAME! Cell itself also held another Details* (as the "Phase").  Then, whether you could see the locals or not (or which args and locals) depended on the <strong><code>VarList*</code></strong> of the Phase held in the cell... which is a nuance that made frames quite a bit trickier than objects.</p>
+<h2><a name="p-7929-could-frame-be-just-a-details-varlist-pairing-thinking-2" class="anchor" href="https://rebol.metaeducation.com#p-7929-could-frame-be-just-a-details-varlist-pairing-thinking-2"></a>Could FRAME! be Just a (Details*, VarList*) Pairing? <img src="https://rebol.metaeducation.com/images/emoji/twitter/thinking.png?v=14" title=":thinking:" class="emoji" alt=":thinking:" loading="lazy" width="20" height="20"></h2>
+<p>When you are going to add new execution information... you necessarily must create a new Details.  There simply isn't anywhere to put code in a VarList.  However, you can reuse a VarList with that new Details.</p>
+<p>e.g. if you were to ADAPT an ACTION! then you'd produce a new <code>Details*</code> which would point to the same <code>VarList*</code> as the thing you were adapting... but just give it a new <code>Adapter_Dispatcher()</code> to with some preamble code in the Phase's array to run.  (It also needs to store the function it is adapting, so it can pass control to it when it's done running the preamble.)</p>
+<p>When all ACTION! needed a unique Details, things like SPECIALIZE would create a new Details too, but just a dummy one...since all the information for the specialization exists in a new VarList*.  But ACTION!s had to have a Details, so that's what it did.</p>
+<p>A tempting thought is that a FRAME! could just be a Details* and a VarList* paired together in a Cell.  If this were the case, you could create a specialization without making a new Details... which has been a sought-after optimization for some time.</p>
+<p>There are a few casualties of such a design.  One is that this breaks the notion of a single pointer being an action's "identity"... you've just got a list of parameters and variables paired up with a compatible implementation...and these are being mixed and matched freely by function composition tools.  The HIJACK capability was only designed for Details pointers, and this would mean you could not hijack a specialization <em>(at least without hijacking all the other specializations of the same function--in practice this is every use case of HIJACK that has come up, but there's nothing in theory saying you wouldn't implement a "unique" service entry point by way of specialization and want to HIJACK that... I can easily imagine it happening, it just hasn't yet.)</em></p>
+<p>Another casualty would be the <a href="https://rebol.metaeducation.com/t/more-comprehensible-errors-with-per-cell-labeling/1357">storing of a Symbol* inside FRAME! values</a>, which is reliant on a VarList* storing its one-and-only Details* inside it.  If Phases can be mixed with arbitrary Varlists in a FRAME! cell, then there are no free bits for this feature.</p>
+<h2><a name="p-7929-elegant-design-fringe-features-3" class="anchor" href="https://rebol.metaeducation.com#p-7929-elegant-design-fringe-features-3"></a>Elegant Design &gt; Fringe Features?</h2>
+<p>It's likely that if I were looking at this from scratch--before HIJACK or symbol caching--I would think that the <strong><code>FRAME! Cell =&gt; (VarList* + Details*)</code></strong> made the most sense.</p>
+<p>It feels like it decouples things cleanly.  Why <em>would</em> you need to create a new <code>Details*</code> if you're just specializing out values?  If you've made a new <code>VarList*</code> with the updated values, couldn't it be paired up with the old Phase?</p>
+<p>It may still be possible to implement HIJACK in such a world.  You could ask the Details* in a FRAME! Cell "what's your VarList*", and if the answer was the same as the VarList* in the Cell then you'd know the Phase was created after the VarList, hence the Details must be the "identity"...so you hijack that.  Otherwise, the VarList* must be the identity...so you'd hijack it <em>(<img src="https://rebol.metaeducation.com/images/emoji/twitter/raised_hand_with_fingers_splayed.png?v=14" title=":raised_hand_with_fingers_splayed:" class="emoji" alt=":raised_hand_with_fingers_splayed:" loading="lazy" width="20" height="20"> hand waving as to how this would work)</em></p>
+<p>Additionally, it may be possible to sneak a Symbol* into FRAME! Cells if they aren't using their "Coupling".  (e.g. if they're not a METHOD, or RETURN/CONTINUE/YIELD/BREAK/etc.)  A Symbol* in the coupling slot could just indicate it's uncoupled.  That's...fairly random.  Though to be honest, the feature turned out to be somewhat hard to wield anyway, it was never really clear which assignments should rename the function.</p>
+<p>There are a few more glitches, though.</p>
+<h2><a name="p-7929-devils-in-the-details-imp-irreducibility-of-typechecking-4" class="anchor" href="https://rebol.metaeducation.com#p-7929-devils-in-the-details-imp-irreducibility-of-typechecking-4"></a>Devil's In The Details <img src="https://rebol.metaeducation.com/images/emoji/twitter/imp.png?v=14" title=":imp:" class="emoji" alt=":imp:" loading="lazy" width="20" height="20">  Irreducibility Of Typechecking</h2>
+<p>Before you run a Details, the expectation is that all the unfulfilled slots in a VarList will be filled... with <em>type-correct</em> values.  Calling any function with incorrectly typed cells is bad, but native code actually expects the bit patterns in Cells to be specific to what it asked for...and will crash if it's wrong.</p>
+<p>So if a FRAME! is a mix and match of a <code>VarList*</code> and a <code>Details*</code>, when does the <code>VarList*</code> get checked?</p>
+<p>There are some weird cases to think about like AUGMENT, which adds to a function's frame.  It only makes an expanded VarList with new keys/cells... there's no implementation code.  So it should be able to reuse whatever Details* was in the FRAME! Cell it augments.  But this means the type checking and argument gathering has to use the VarList* in the cell, not the VarList* that the Details was coupled with.</p>
+<p>But wait: the VarList* in the Cell is an arbitrary coupling, with arbitrary tweaked values.  You may have overwritten an argument with a specialized value, that needs checking.  So you can't use that list instead of the VarList* the Phase was coupled with.  <img src="https://rebol.metaeducation.com/images/emoji/twitter/exclamation.png?v=14" title=":exclamation:" class="emoji" alt=":exclamation:" loading="lazy" width="20" height="20"></p>
+<p>Exploring this problem further: if PARAMETER! antiforms are indicative of needing to gather that argument, what happens if you tweak it?</p>
+<pre><code> &gt;&gt; ap-int: copy meta:lite append/
+
+ &gt;&gt; ap-int.value: anti make parameter! [integer!]  ; or whatever syntax
+ == ~#[parameter! [integer!]]~  ; anti
+
+ &gt;&gt; /ap-int: anti ap-int
+ == ~#[frame! ...]~  ; anti
+</code></pre>
+<p>Does this mean you've just created a variant of the APPEND function that only takes integers for the value to append?  Well, not so fast.  APPEND is native code, what would happen if you added a type check which would allow types to pass that weren't legal for APPEND?  You still have to run APPEND's type check.</p>
+<p>There's no way to check programmatically if one type constraint is a subset of another.  So if you're allowed to re-type parameters, they have to go through both checks...somehow.</p>
+<h2><a name="p-7929-not-so-simple-5" class="anchor" href="https://rebol.metaeducation.com#p-7929-not-so-simple-5"></a>Not So Simple...</h2>
+<p>This makes it seem like AUGMENT needs to pay for a trivial Details, in order to get its VarList into a Phase position.  (A trivial Details can be 8 platform-pointers in size, it's not a huge deal, but annoying.)</p>
+<p>And it makes it seem like you can't update FRAME! slots that are PARAMETER! antiforms to be new parameter antiforms, without some yet-to-be-designed mechanic... because there's only one type check when slots are filled, and that is that.</p>
+<p>Furthermore... if there's no moment of type checking and a specialization is just a Cell that pairs together a VarList* and a Details*, you'd have to type check a specialization every time it's called.  <img src="https://rebol.metaeducation.com/images/emoji/twitter/frowning.png?v=14" title=":frowning:" class="emoji" alt=":frowning:" loading="lazy" width="20" height="20"></p>
+<p>This shows a feature of the previous creation of a "Specialization Details" when making an ACTION!, that defined a moment where you could check all the VarList slots and make that the Details's new VarList.</p>
+<h2><a name="p-7929-so-frameaction-unification-was-a-mistake-6" class="anchor" href="https://rebol.metaeducation.com#p-7929-so-frameaction-unification-was-a-mistake-6"></a>So FRAME!/ACTION! Unification Was A Mistake?</h2>
+<p>Well, not so fast.  I'm just mapping out the territory.  <em>(There's actually more to consider when you weigh in things like partial specializations which specify the use of a refinement, but not the specific value for that refinement, which has to encode ordering and other issues.)</em></p>
+<p>It may be that when you invoke a FRAME! as if it were an action, then it remembers if the type check passed when the arguments were filled in.  If it does pass for everything, then it knows that it must have passed the specialized portions, and then marks it ok to not have to test the specialized portions the next time.  This means that if you try and call a "fresh" frame function with bad arguments, you won't validate it, but since the call raised an error that extra typechecking is probably not a big issue, and it will just try again next time.</p>
+<p>Re-typing a PARAMETER! appears to be more involved than first thought.  Just filling in a FRAME! slot isn't going to do it, you'd need another operation.</p>
+<p>Anyway, this has been driving me crazy the last few days so I had to write something down about it.  I definitely underestimated just how many issues were folded in with the "hardening" process that creating a Details brought about...and how many features were tied into Details* being a unique "action identity".  I'm going to have to experiment a bit before I can resolve what's best here.</p>
+          <p><a href="https://rebol.metaeducation.com/t/frame-action-duality-examined/1898/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/frame-action-duality-examined/1898/2</link>
+        <pubDate>Wed, 27 Nov 2024 22:08:02 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1898-2</guid>
+        <source url="https://rebol.metaeducation.com/t/frame-action-duality-examined/1898.rss">FRAME! / ACTION! Duality Examined</source>
+      </item>
+      <item>
+        <title>FRAME! / ACTION! Duality Examined</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>The mechanics behind FRAME! and ACTION! have been mixed up and reshaped over time, to where they are very much tied together.</p>
+<p>At times I've wondered if we need both types.  If ACTION!s become inert unless they are isotopic, then that would seem to blur the distinction even more... since FRAME!s have kind of been "inert actions".</p>
+<p>So I thought I'd try writing up an explanation of the current state of things.</p>
+<h2><a name="p-6160-first-whats-a-frame-1" class="anchor" href="https://rebol.metaeducation.com#p-6160-first-whats-a-frame-1"></a>First: What's a FRAME! ?</h2>
+<p>You can think of a FRAME! as an object which has keys and values for the arguments and locals of a function.  There's a flag on each cell which indicates whether the object member has been "specialized out".  If the flag is set, the slot is presumed to contain the value it will have when the function runs.  Otherwise the object member is presumed to contain the type information for acquiring that parameter.</p>
+<p>So when you make an ACTION! like:</p>
+<pre><code>foo: func [x [integer!] y [text!] &lt;local&gt; z] [...]
+</code></pre>
+<p>It's internals are actually a FRAME! (called an "exemplar") that looks <em>something</em> like:</p>
+<pre><code>make frame! [
+    x: [integer!]  ; unspecialized
+    y: [text!]  ; unspecialized
+    z: ~   ; specialized
+]
+</code></pre>
+<h2><a name="p-6160-whats-the-difference-between-action-and-frame-then-2" class="anchor" href="https://rebol.metaeducation.com#p-6160-whats-the-difference-between-action-and-frame-then-2"></a>What's The Difference Between ACTION! and FRAME!, Then?</h2>
+<p>Looking at the above: <strong>you wouldn't want to try and DO a FRAME! which has type information in the argument slots</strong>.  When the code for the function runs, it's expected that X be <em>an integer instance</em>...not type information saying an integer is expected!</p>
+<p>So when you MAKE FRAME! from an ACTION!, it goes through all the slots and wipes them out to be unset:</p>
+<pre><code>&gt;&gt; make frame! :foo
+== make frame! [
+    x: ~
+    y: ~
+]  ; ^-- local z is not shown, as it was already specialized to a value
+</code></pre>
+<p>But it still has to maintain a link to the original information about the parameter types, in order to validate them.  So there's a pointer from each of these "non-exemplar" FRAME!s to the "exemplar" FRAME! with the type information.</p>
+<h2><a name="p-6160-so-actions-are-frames-wtypesets-in-slots-where-args-would-be-3" class="anchor" href="https://rebol.metaeducation.com#p-6160-so-actions-are-frames-wtypesets-in-slots-where-args-would-be-3"></a>So ACTION!s are FRAME!s w/typesets in slots where args would be?</h2>
+<p>Kind of.  I glossed over some details there (there's more information in the parameter description than the type block...you need to know if it's quoted, or if it's a refinement, etc.)</p>
+<p>Right now every FRAME! points at an ACTION! instance.  So you can ask <strong>action of frame</strong> and get an answer.  That answer leads you to the thing that the system will use to do type checking on that frame (and you can in theory use it yourself).</p>
+<p><strong>It could truthfully be said that you never execute ACTION!s, you only execute FRAME!s.</strong>  But when we say we "execute an action" all we mean is that a new frame is created for it, and then <em>that</em> frame is executed.</p>
+<p>One might wonder why something like SPECIALIZE would create an ACTION! instead of just making a FRAME!.  One good reason is that this offers an opportunity to <em>completely erase</em> the specialized variables from the interface.  With the variables erased, the words become available again for use in AUGMENT-ing the composite function.</p>
+<h2><a name="p-6160-so-theres-some-info-4" class="anchor" href="https://rebol.metaeducation.com#p-6160-so-theres-some-info-4"></a>So There's Some Info...</h2>
+<p>Things are sort of stable with this, but a big thing on the horizon is the possibility that there might be FRAME! instances for evaluators besides actions.  So you could have a FRAME! representing just the evaluation of a BLOCK!.  (Today that's <em>sort of</em> what a VARARGS! is.)</p>
+          <p><a href="https://rebol.metaeducation.com/t/frame-action-duality-examined/1898/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/frame-action-duality-examined/1898/1</link>
+        <pubDate>Sat, 23 Jul 2022 17:43:10 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1898-1</guid>
+        <source url="https://rebol.metaeducation.com/t/frame-action-duality-examined/1898.rss">FRAME! / ACTION! Duality Examined</source>
+      </item>
+  </channel>
+</rss>

@@ -1,0 +1,386 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Full-Band Return Values from Generators/Yielders</title>
+    <link>https://rebol.metaeducation.com/t/full-band-return-values-from-generators-yielders/2329</link>
+    <description>Definitional Errors came into PARSE as an answer for how to make it possible to return any value... simply make a failed parse a definitional error.  Not only does it mean that NULL can be a legitimate synthesized product that you don&#39;t conflate with failure, but it also means that parse failures can give back more information in the error about what went wrong *(farthest parse point reached, etc.)*...
+
+Looking at another problem where a sentinel NULL had been used... there&#39;s [Generators and Yielders](https://rebol.metaeducation.com/t/yielder-and-generator-and-thinking-about-coroutines/1311):
+
+    &gt;&gt; g: generator [print &quot;A&quot; yield 1, print &quot;B&quot; yield 2, print &quot;C&quot;]
+
+    &gt;&gt; g
+    A
+    == 1
+
+    &gt;&gt; g
+    B
+    == 2
+
+    &gt;&gt; g
+    C
+    == ~null~  ; anti
+
+    &gt;&gt; g
+    == ~null~  ; anti
+
+    &gt;&gt; g
+    == ~null~  ; anti
+
+But Generators and Yielders predate antiforms in general... they came at a time where there were just two forms of NULL: &quot;heavy&quot; and &quot;light&quot;.  So the thought was that if you wanted to actually yield null, it would be the heavy form.
+
+    &gt;&gt; g: generator [&quot;Start&quot;, yield null, print &quot;Done&quot;]
+
+    &gt;&gt; g
+    Start
+    == ~[~null~]~  ; anti
+
+    &gt;&gt; g
+    Done
+    == ~null~  ; anti
+
+But this isn&#39;t nearly as good as using a specific raised error.  If NULL is truly out of band, then you could use **`try g`** to get null when there are no more values.
+
+If you try to YIELD or RETURN a raised error, then it would become an abrupt failure.  So you&#39;d be assured that the only time you&#39;d ever get a definitional error back from a generator or yielder would be if it had been exhausted.
+
+## PACK returns for things like KEY and VALUE in objects?
+
+As the enumeration routines are retooled to be based on generator functions, it struck me as very cool if generators returned packs, which could be decayed:
+
+    &gt;&gt; obj: make object! [a: 10 b: 20 c: 30]
+
+    &gt;&gt; g: each obj
+
+    &gt;&gt; g
+    ; first in pack of 2 items
+    == a
+
+    &gt;&gt; meta g
+    == ~[&#39;b &#39;20]~
+
+    &gt;&gt; [key {val}]: g
+    == 30
+
+    &gt;&gt; key
+    == c
+
+    &gt;&gt; g
+    ** Error: Generator/Yielder exhausted
+
+    &gt;&gt; try g
+    == ~null~  ; anti
+
+That&#39;s really cool, and seems like it would go along with decaying:
+
+    for &#39;key each obj [...]
+
+    for [key val] each obj [...]
+
+This looks pretty nice, however blocks used in FOR-EACH scenarios like this haven&#39;t meant &quot;unpack&quot;, it has meant keep getting items and assign them to each.
+
+It seems like it would be unfortunate if you had to write the object unpacking as:
+
+    for [~[key val]~] each obj [...]
+
+But that does seem sort of like what you&#39;d have to do in order to make it generalized.  It doesn&#39;t look *that* bad, and it does have a theory behind it...
+
+    &gt;&gt; obj: make object! [a: 10 b: 20 c: 30]
+
+    &gt;&gt; for [~[key val]~ :otherkey] each obj [  ; leading colon for optionality
+           print [&quot;key:&quot; key]
+           print [&quot;val:&quot; val]
+           if otherkey [
+               print [&quot;otherkey:&quot; otherkey]
+           ]
+       ]
+
+    key: a
+    val: 10
+    otherkey: b
+    key: c
+    val: 30
+
+This assumes that plain blocks might be taken for some other intent in the FOR.  If it were not:
+
+    for [[key val] :otherkey] each obj [...]
+
+But I had been thinking that plain BLOCK! would likely be good for type checking (@hiiamboris has some experiments in this vein):
+
+    for [x [integer!] y [tag!]] each [1 &lt;a&gt; 2 &lt;b&gt;] [....]
+
+## Big Design Space, but Full-Band Returns Opens It Up
+
+I&#39;d let the Generator and Yielder experiments atrophy while working on other things.  But I stopped today to try and get the basics working again, and it&#39;s interesting to see how isotopes bring a lot to the table...as they seem to have done with nearly everything.</description>
+    
+    <lastBuildDate>Tue, 12 Nov 2024 16:07:37 +0000</lastBuildDate>
+    <category>Errors</category>
+    <atom:link href="https://rebol.metaeducation.com/t/full-band-return-values-from-generators-yielders/2329.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Full-Band Return Values from Generators/Yielders</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <h1><a name="p-7888-i-described-the-design-of-yield-to-claude-1" class="anchor" href="https://rebol.metaeducation.com#p-7888-i-described-the-design-of-yield-to-claude-1"></a>I Described The Design of YIELD To Claude:</h1>
+<p>I have a special out-of-band state that I use to let you say you are done yielding, and this state is a "raised error". It can't be stored in variables like plain errors can, but it can be returned by functions.</p>
+<p>So you can write <strong><code>yield done</code></strong> where <strong><code>done</code></strong> is a function that returns such a raised error. And yet, a generator can still return the non-raised state.</p>
+<p>For performance, I've also added a variant called <strong><code>yield:final</code></strong> which lets you pass a value, but say that it's the last value you are giving back. So <strong><code>yield:final 1</code></strong> is equivalent to <strong><code>(yield 1, yield done)</code></strong>.</p>
+<p>The concept was not to overrule the <strong><code>return</code></strong> word in a generator, so you can construct a generator inside a function and in the generator's body the <strong><code>return</code></strong> would still refer to the function's return, allowing you to execute that return inside the generator's body (which is considered to complete the body of the generator, so it will not yield more values).</p>
+<p>But if you want the word <strong><code>return</code></strong> to mean return from the generator, you can define that by saying <strong><code>/return: yield:final/</code></strong> which asks for a local definition of return that means the same thing as <strong><code>yield:final</code></strong>.</p>
+<p>So that seems to get pretty good coverage of interesting intents. I'm curious what other languages might have for covering these scenarios, can you compare/contrast?</p>
+<hr>
+<h1><a name="p-7888-claude-gets-it-mostly-2" class="anchor" href="https://rebol.metaeducation.com#p-7888-claude-gets-it-mostly-2"></a>Claude Gets It... Mostly...</h1>
+<blockquote>
+<p>Let me break down how different languages handle these scenarios:</p>
+<h3>Python's Approach:</h3>
+<pre><code>def generator():
+    yield 1        # regular yield
+    return 2       # StopIteration(2) - the 2 can be captured
+    # unreachable  # code after return is unreachable
+
+# To get the return value:
+gen = generator()
+try:
+    while True:
+        next(gen)
+except StopIteration as e:
+    final_value = e.value  # gets 2
+</code></pre>
+<h3>JavaScript's Generator Returns:</h3>
+<pre><code>function* generator() {
+    yield 1;
+    return 2;      // {value: 2, done: true}
+    // unreachable
+}
+
+// Two ways to get the return value:
+const gen = generator();
+for (const value of gen) {
+    console.log(value);  // only sees 1, not 2
+}
+
+// Or:
+let result;
+while (!(result = gen.next()).done) {
+    console.log(result.value);
+}
+console.log(result.value);  // gets 2
+</code></pre>
+<h3>Ruby's Enumerators</h3>
+<p>Ruby doesn't have a built-in way to return a final value, but you can do:</p>
+<pre><code>enum = Enumerator.new do |y|
+    y &lt;&lt; 1
+    y &lt;&lt; 2
+    break 3  # final value
+end
+</code></pre>
+<p>Your approach has some unique and interesting characteristics:</p>
+<ol>
+<li>
+<p>The separation of <code>yield done</code> vs <code>yield:final</code> gives explicit control over whether you want to pass a final value or just stop</p>
+<ul>
+<li>
+<p>Most languages don't distinguish these cases clearly</p>
+</li>
+<li>
+<p>Python and JavaScript bundle the "done" signal with an optional final value</p>
+</li>
+</ul>
+</li>
+<li>
+<p>Your handling of <code>return</code> is novel:</p>
+<ul>
+<li>
+<p>Keeping <code>return</code> bound to the outer function</p>
+</li>
+<li>
+<p>Providing <code>/return: yield:final/</code> for local rebinding</p>
+</li>
+<li>
+<p>This gives more flexibility than other languages where <code>return</code> in a generator body always means "return from generator"</p>
+</li>
+</ul>
+</li>
+<li>
+<p>The "raised error" state as an out-of-band signal is interesting:</p>
+<ul>
+<li>
+<p>Python uses exceptions (StopIteration)</p>
+</li>
+<li>
+<p>JavaScript uses a {done: true} flag</p>
+</li>
+<li>
+<p>Your approach keeps it distinct from regular error handling</p>
+</li>
+</ul>
+</li>
+</ol>
+<h2>Some unique aspects of your design:</h2>
+<h3>Explicit Final Value:</h3>
+<pre><code>; Your language
+yield 1
+yield:final 2   ; Clear that 2 is the last value
+
+# vs Python
+yield 1
+return 2        # Less clear this is yielding 2 as final value
+
+# vs JavaScript
+yield 1
+return 2        // Similar ambiguity to Python
+</code></pre>
+<h3>Function Return Access:</h3>
+<pre><code>; Your language
+/fn: function [
+    /gen: generator [
+        if condition [return value]  ; returns from fn
+        yield 1
+    ]
+    gen  ; returns generator
+]
+
+# vs Python - can't access outer function's return
+def fn():
+    def gen():
+        if condition:
+            return value  # returns from generator
+        yield 1
+    return gen()
+</code></pre>
+<h2>Summary</h2>
+<p>Your design seems to offer more precise control over the different "ending" scenarios a generator might have. The distinction between:</p>
+<ul>
+<li>Yielding a final value</li>
+<li>Just being done</li>
+<li>Returning from the containing function</li>
+</ul>
+<p>...is clearer than in most other languages I've seen. The trade-off might be slightly more complexity in the conceptual model, but it gives users more expressive power when they need these distinctions.</p>
+</blockquote>
+<hr>
+<h2><a name="p-7888-claudes-example-of-return-binding-isnt-useful-3" class="anchor" href="https://rebol.metaeducation.com#p-7888-claudes-example-of-return-binding-isnt-useful-3"></a>Claude's Example of RETURN Binding Isn't Useful</h2>
+<blockquote>
+<pre><code>; Your language
+/fn: function [
+    /gen: generator [
+        if condition [return value]  ; returns from fn
+        yield 1
+    ]
+    gen  ; returns generator
+]
+</code></pre>
+</blockquote>
+<p>The generator is being returned to someone else to call.  So the RETURN inside the generator won't ever be useful--it will always abruptly fail because the function call is over.</p>
+<p>That isn't an indictment of the feature.  You just have to be using the generator while the function is still running.</p>
+          <p><a href="https://rebol.metaeducation.com/t/full-band-return-values-from-generators-yielders/2329/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/full-band-return-values-from-generators-yielders/2329/2</link>
+        <pubDate>Tue, 12 Nov 2024 11:46:49 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2329-2</guid>
+        <source url="https://rebol.metaeducation.com/t/full-band-return-values-from-generators-yielders/2329.rss">Full-Band Return Values from Generators/Yielders</source>
+      </item>
+      <item>
+        <title>Full-Band Return Values from Generators/Yielders</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>Definitional Errors came into PARSE as an answer for how to make it possible to return any value... simply make a failed parse a definitional error.  Not only does it mean that NULL can be a legitimate synthesized product that you don't conflate with failure, but it also means that parse failures can give back more information in the error about what went wrong <em>(farthest parse point reached, etc.)</em>...</p>
+<p>Looking at another problem where a sentinel NULL had been used... there's <a href="https://rebol.metaeducation.com/t/yielder-and-generator-and-thinking-about-coroutines/1311">Generators and Yielders</a>:</p>
+<pre><code>&gt;&gt; g: generator [print "A" yield 1, print "B" yield 2, print "C"]
+
+&gt;&gt; g
+A
+== 1
+
+&gt;&gt; g
+B
+== 2
+
+&gt;&gt; g
+C
+== ~null~  ; anti
+
+&gt;&gt; g
+== ~null~  ; anti
+
+&gt;&gt; g
+== ~null~  ; anti
+</code></pre>
+<p>But Generators and Yielders predate antiforms in general... they came at a time where there were just two forms of NULL: "heavy" and "light".  So the thought was that if you wanted to actually yield null, it would be the heavy form.</p>
+<pre><code>&gt;&gt; g: generator ["Start", yield null, print "Done"]
+
+&gt;&gt; g
+Start
+== ~[~null~]~  ; anti
+
+&gt;&gt; g
+Done
+== ~null~  ; anti
+</code></pre>
+<p>But this isn't nearly as good as using a specific raised error.  If NULL is truly out of band, then you could use <strong><code>try g</code></strong> to get null when there are no more values.</p>
+<p>If you try to YIELD or RETURN a raised error, then it would become an abrupt failure.  So you'd be assured that the only time you'd ever get a definitional error back from a generator or yielder would be if it had been exhausted.</p>
+<h2><a name="p-7884-pack-returns-for-things-like-key-and-value-in-objects-1" class="anchor" href="https://rebol.metaeducation.com#p-7884-pack-returns-for-things-like-key-and-value-in-objects-1"></a>PACK returns for things like KEY and VALUE in objects?</h2>
+<p>As the enumeration routines are retooled to be based on generator functions, it struck me as very cool if generators returned packs, which could be decayed:</p>
+<pre><code>&gt;&gt; obj: make object! [a: 10 b: 20 c: 30]
+
+&gt;&gt; g: each obj
+
+&gt;&gt; g
+; first in pack of 2 items
+== a
+
+&gt;&gt; meta g
+== ~['b '20]~
+
+&gt;&gt; [key {val}]: g
+== 30
+
+&gt;&gt; key
+== c
+
+&gt;&gt; g
+** Error: Generator/Yielder exhausted
+
+&gt;&gt; try g
+== ~null~  ; anti
+</code></pre>
+<p>That's really cool, and seems like it would go along with decaying:</p>
+<pre><code>for 'key each obj [...]
+
+for [key val] each obj [...]
+</code></pre>
+<p>This looks pretty nice, however blocks used in FOR-EACH scenarios like this haven't meant "unpack", it has meant keep getting items and assign them to each.</p>
+<p>It seems like it would be unfortunate if you had to write the object unpacking as:</p>
+<pre><code>for [~[key val]~] each obj [...]
+</code></pre>
+<p>But that does seem sort of like what you'd have to do in order to make it generalized.  It doesn't look <em>that</em> bad, and it does have a theory behind it...</p>
+<pre><code>&gt;&gt; obj: make object! [a: 10 b: 20 c: 30]
+
+&gt;&gt; for [~[key val]~ :otherkey] each obj [  ; leading colon for optionality
+       print ["key:" key]
+       print ["val:" val]
+       if otherkey [
+           print ["otherkey:" otherkey]
+       ]
+   ]
+
+key: a
+val: 10
+otherkey: b
+key: c
+val: 30
+</code></pre>
+<p>This assumes that plain blocks might be taken for some other intent in the FOR.  If it were not:</p>
+<pre><code>for [[key val] :otherkey] each obj [...]
+</code></pre>
+<p>But I had been thinking that plain BLOCK! would likely be good for type checking (<span class="mention">@hiiamboris</span> has some experiments in this vein):</p>
+<pre><code>for [x [integer!] y [tag!]] each [1 &lt;a&gt; 2 &lt;b&gt;] [....]
+</code></pre>
+<h2><a name="p-7884-big-design-space-but-full-band-returns-opens-it-up-2" class="anchor" href="https://rebol.metaeducation.com#p-7884-big-design-space-but-full-band-returns-opens-it-up-2"></a>Big Design Space, but Full-Band Returns Opens It Up</h2>
+<p>I'd let the Generator and Yielder experiments atrophy while working on other things.  But I stopped today to try and get the basics working again, and it's interesting to see how isotopes bring a lot to the table...as they seem to have done with nearly everything.</p>
+          <p><a href="https://rebol.metaeducation.com/t/full-band-return-values-from-generators-yielders/2329/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/full-band-return-values-from-generators-yielders/2329/1</link>
+        <pubDate>Sun, 10 Nov 2024 19:25:54 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2329-1</guid>
+        <source url="https://rebol.metaeducation.com/t/full-band-return-values-from-generators-yielders/2329.rss">Full-Band Return Values from Generators/Yielders</source>
+      </item>
+  </channel>
+</rss>

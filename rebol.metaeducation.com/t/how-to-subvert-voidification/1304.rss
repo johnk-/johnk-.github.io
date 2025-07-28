@@ -1,0 +1,235 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>How to Subvert Voidification?</title>
+    <link>https://forum.rebol.info/t/how-to-subvert-voidification/1304</link>
+    <description>[quote=&quot;rgchris, post:9, topic:1249&quot;]
+I&#39;ve read this thread over and I feel I get the basic concepts. It just starts to hit me when I start to actually use them.
+[/quote]
+
+I&#39;ve certainly felt the frustration at voidification.  If I&#39;m writing something like:
+
+     wrapper: func [x y] [
+          case [
+              x &gt; y [wrapped x + y]
+              x &lt; y [wrapped x - y]
+              default [0]
+         ]
+     ]
+
+If the wrapped function returns a NULL, it is a pain to get that passed through if it&#39;s going to get voided.  So this is something where an answer is needed.
+
+Originally all the control constructs had an /OPT refinement so you ended up with **`CASE`** and **`CASE*`**, and **`IF`** and **`IF*`**, with the `*` denoting the specialization that passed through NULL unscathed.  But this broke the usual rule I had for the `*` functions, which meant &quot;lower level function from which the higher level &#39;user friendly&#39; version is built&quot;.  Because you can&#39;t tell from the outside of a null-passthru **`CASE*`** whether a branch was evaluated or not when you see a NULL.  It&#39;s something the construct itself has to be told to do.
+
+But refinements aren&#39;t as flexible as decorating specific branches.  That way you can call out which ones you want to subvert voidification and which ones you don&#39;t.  And it keeps you from complicating the interface with things like /OPT refinements that lead to strange decorated specializations...
+
+     wrapper: func [x y] [
+          case [
+              x &gt; y :[wrapped x + y]
+              x &lt; y :[wrapped x - y]
+              default [0]
+         ]
+     ]
+
+Conceptually, it ties along with the Rebol black-box credo: **if you&#39;re just passing it through and don&#39;t know what the range of values is, you should use a GET-WORD! or GET-PATH!, in case it&#39;s an ACTION! or a VOID!.**  So it&#39;s not the most nonsensical thing.  Though it would maybe make more  &quot;holistic sense&quot; if plain word access of NULL gave back VOID!, while GET-WORD! access gave null.  (?!)  But I don&#39;t think that&#39;s a good idea.
+
+Tangent aside: this does mean that if your branch is in a variable, you&#39;ll have to DO it:
+
+     &gt;&gt; branch: [print &quot;nulling!&quot; null]
+
+     &gt;&gt; compose [case [true :[do branch]]]
+     nulling!
+     ; null
+
+Or COMPOSE.  Fortunately, GET-GROUP!s compose to &quot;getify&quot; their argument, if a GET-type exists.
+
+     &gt;&gt; branch: [print &quot;nulling!&quot; null]
+
+     &gt;&gt; code: compose [case [true :(branch)]]
+     nulling!
+     == [case [true :[print &quot;nulling!&quot; null]]]
+
+     &gt;&gt; do code
+     ; null
+
+Or maybe GET-GROUP! itself is in on the trick, just as-is:
+
+     &gt;&gt; branch: [print &quot;nulling!&quot; null]
+
+     &gt;&gt; case [true :(branch)]
+     nulling!
+     ; null
+
+But it makes one wonder a bit about using GET-WORD! and GET-PATH! if this is a &quot;soft-quoted branch&quot;.  If the other GETs did nulling, do they also?  For today, **case [true :branch]** is a synonym for **case [true (:branch)]** as is usual with soft-quoting.  So it might seem odd to make it *also* mean that if branch is a null variable, or a block of code that evaluates to NULL, then you get the NULL and all bets are off as far as voidification.  The only way you could get voidification in that case would be with the **(:branch)** as above, since the GROUP! is plain. 
+
+There are questions, but this provides a possibly coherent train of thought about an issue that I agree is a thorn.  It ties into the other benefits of soft-quoted branching, like being able to see the quote mark and not have it disappear before the control construct sees it....</description>
+    
+    <lastBuildDate>Thu, 25 Aug 2022 08:52:43 +0000</lastBuildDate>
+    <category>Internals</category>
+    <atom:link href="https://forum.rebol.info/t/how-to-subvert-voidification/1304.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>How to Subvert Voidification?</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="2" data-topic="1304">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/40/26_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>So there were two potential motivations you might want to mark a branch to subvert this:</p>
+<ul>
+<li>
+<strong>honest</strong> - The <a class="mention" href="https://forum.rebol.info/u/rgchris">@rgchris</a> reason (<em>"don't corrupt my value...it's a NULL and I meant NULL"</em>)</li>
+<li>
+<strong>dishonest</strong> - A desire to communicate to an adjoining ELSE-or-THEN-like-construct that although you took a branch and ran code, you didn't take a branch...so it reacts as if you hadn't.</li>
+</ul>
+</blockquote>
+</aside>
+<p>I realized there's a new and interesting mechanism we can throw in here for the "honest uses"... that is to go through ^META mechanisms and then UNMETA it.</p>
+<p>This is enabled by the new rules, <strong><a href="https://forum.rebol.info/t/the-meta-of-null-and-void/1941">where no ^META type is either NULL or VOID</a></strong>.</p>
+<pre><code>&gt;&gt; ^(null)
+== '
+
+&gt;&gt; ^(void)
+== ~
+</code></pre>
+<p>As I explain in the linked post, I had once thought that making ^META of NULL be NULL had an advantage, by letting things like ELSE react to a NULL despite its containment .  Yet having it be purely contained means that NULL and VOID are available for other meanings.</p>
+<p>So CASE has it avaliable unambiguously for signaling purposes!</p>
+<pre><code>wrapper: func [x y] [
+    unmeta case [
+        x &gt; y ^[wrapped x + y]
+        x &lt; y ^[wrapped x - y]
+    ] else ^[
+       0
+    ]
+]
+</code></pre>
+<p>The branch form <strong>^[...]</strong> is supported by all branching constructs.  But we could also imagine CASE itself offering a ^META level overall by having using a meta block for its cases list:</p>
+<pre><code>wrapper: func [x y] [
+    unmeta case ^[
+        x &gt; y [wrapped x + y]
+        x &lt; y [wrapped x - y]
+    ] else ^[
+       0
+    ]
+]
+</code></pre>
+<p>While this won't likely be Chris's favorite method of doing things...<em><strong>it is interesting because it's an option that actually works, under my "honest" standard set above.</strong></em>  It acts with fidelity to running the ELSE on only cases where no branch gets taken.</p>
+          <p><a href="https://forum.rebol.info/t/how-to-subvert-voidification/1304/3">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/how-to-subvert-voidification/1304/3</link>
+        <pubDate>Thu, 25 Aug 2022 08:44:09 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1304-3</guid>
+        <source url="https://forum.rebol.info/t/how-to-subvert-voidification/1304.rss">How to Subvert Voidification?</source>
+      </item>
+      <item>
+        <title>How to Subvert Voidification?</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group quote-modified" data-username="hostilefork" data-post="1" data-topic="1304">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/40/26_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>But refinements aren't as flexible as decorating specific branches. <strong>That way you can call out which ones you want to subvert voidifcation, and which ones you don't.</strong> [emphasis mine]</p>
+<pre><code> wrapper: func [x y] [
+      case [
+          x &gt; y :[wrapped x + y]
+          x &lt; y :[wrapped x - y]
+          default [0]
+     ]
+ ]
+</code></pre>
+</blockquote>
+</aside>
+<p>This was written two years ago, prior to isotopes.</p>
+<p>At that time, VOID! was a first class value that represented a non-convertible intent from null.  When a NULL was changed into void, it was a <em>conflating distortion</em> of two semantically distinct types.</p>
+<p>So there were two potential motivations you might want to mark a branch to subvert this:</p>
+<ul>
+<li>
+<p><strong>honest</strong> - The <a class="mention" href="https://forum.rebol.info/u/rgchris">@rgchris</a> reason (<em>"don't corrupt my value...it's a NULL and I meant NULL"</em>)</p>
+</li>
+<li>
+<p><strong>dishonest</strong> - A desire to communicate to an adjoining ELSE-or-THEN-like-construct that although you took a branch and ran code, you didn't take a branch...so it reacts as if you hadn't.</p>
+</li>
+</ul>
+<p>I empathized with the honest reason, and now isotopes have supplanted voidification as <em>the</em> solution.  <a href="https://forum.rebol.info/t/conflation-vs-safety-return-and-the-finer-points-of-null-isotopes/1799">~null~ isotopes preserve null intent, and I'm pretty sure we're all square on this now</a>.</p>
+<p>Somewhere along the line I got the weird idea that the dishonest reason was worth supporting.  But allowing it isn't just technically esoteric and weird... <em>it also breaks the invariant of knowing from the outside of a conditional construct whether it ran code or not</em>.</p>
+<p>You might want to build higher-level conditional constructs out of lower-level ones... much the way I've shown how to build loops on top of multiple loops... with pure NULL uniquely signaling breaks.  If a user could pass in a kind of branch that broke the rules, your higher-level conditional won't be able to function correctly.</p>
+<p><strong>So no more empathy for the dishonest purpose!</strong>  We can forget about the idea of an annotation to say that a branch should run and return pure null, and instead use smarter things...<a href="https://forum.rebol.info/t/why-then-and-else-are-mutually-exclusive/1080/9">like input-decaying *ELSE and *THEN</a>!</p>
+<p>This opens up better meanings for the @[...] branching, and there's already something on the table for that.</p>
+          <p><a href="https://forum.rebol.info/t/how-to-subvert-voidification/1304/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/how-to-subvert-voidification/1304/2</link>
+        <pubDate>Tue, 17 May 2022 22:47:58 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1304-2</guid>
+        <source url="https://forum.rebol.info/t/how-to-subvert-voidification/1304.rss">How to Subvert Voidification?</source>
+      </item>
+      <item>
+        <title>How to Subvert Voidification?</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-post="9" data-topic="1249">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/rgchris/40/14_2.png" class="avatar"> rgchris:</div>
+<blockquote>
+<p>I've read this thread over and I feel I get the basic concepts. It just starts to hit me when I start to actually use them.</p>
+</blockquote>
+</aside>
+<p>I've certainly felt the frustration at voidification.  If I'm writing something like:</p>
+<pre><code> wrapper: func [x y] [
+      case [
+          x &gt; y [wrapped x + y]
+          x &lt; y [wrapped x - y]
+          default [0]
+     ]
+ ]
+</code></pre>
+<p>If the wrapped function returns a NULL, it is a pain to get that passed through if it's going to get voided.  So this is something where an answer is needed.</p>
+<p>Originally all the control constructs had an /OPT refinement so you ended up with <strong><code>CASE</code></strong> and <strong><code>CASE*</code></strong>, and <strong><code>IF</code></strong> and <strong><code>IF*</code></strong>, with the <code>*</code> denoting the specialization that passed through NULL unscathed.  But this broke the usual rule I had for the <code>*</code> functions, which meant "lower level function from which the higher level 'user friendly' version is built".  Because you can't tell from the outside of a null-passthru <strong><code>CASE*</code></strong> whether a branch was evaluated or not when you see a NULL.  It's something the construct itself has to be told to do.</p>
+<p>But refinements aren't as flexible as decorating specific branches.  That way you can call out which ones you want to subvert voidification and which ones you don't.  And it keeps you from complicating the interface with things like /OPT refinements that lead to strange decorated specializations...</p>
+<pre><code> wrapper: func [x y] [
+      case [
+          x &gt; y :[wrapped x + y]
+          x &lt; y :[wrapped x - y]
+          default [0]
+     ]
+ ]
+</code></pre>
+<p>Conceptually, it ties along with the Rebol black-box credo: <strong>if you're just passing it through and don't know what the range of values is, you should use a GET-WORD! or GET-PATH!, in case it's an ACTION! or a VOID!.</strong>  So it's not the most nonsensical thing.  Though it would maybe make more  "holistic sense" if plain word access of NULL gave back VOID!, while GET-WORD! access gave null.  (?!)  But I don't think that's a good idea.</p>
+<p>Tangent aside: this does mean that if your branch is in a variable, you'll have to DO it:</p>
+<pre><code> &gt;&gt; branch: [print "nulling!" null]
+
+ &gt;&gt; compose [case [true :[do branch]]]
+ nulling!
+ ; null
+</code></pre>
+<p>Or COMPOSE.  Fortunately, GET-GROUP!s compose to "getify" their argument, if a GET-type exists.</p>
+<pre><code> &gt;&gt; branch: [print "nulling!" null]
+
+ &gt;&gt; code: compose [case [true :(branch)]]
+ nulling!
+ == [case [true :[print "nulling!" null]]]
+
+ &gt;&gt; do code
+ ; null
+</code></pre>
+<p>Or maybe GET-GROUP! itself is in on the trick, just as-is:</p>
+<pre><code> &gt;&gt; branch: [print "nulling!" null]
+
+ &gt;&gt; case [true :(branch)]
+ nulling!
+ ; null
+</code></pre>
+<p>But it makes one wonder a bit about using GET-WORD! and GET-PATH! if this is a "soft-quoted branch".  If the other GETs did nulling, do they also?  For today, <strong>case [true :branch]</strong> is a synonym for <strong>case [true (:branch)]</strong> as is usual with soft-quoting.  So it might seem odd to make it <em>also</em> mean that if branch is a null variable, or a block of code that evaluates to NULL, then you get the NULL and all bets are off as far as voidification.  The only way you could get voidification in that case would be with the <strong>(:branch)</strong> as above, since the GROUP! is plain.</p>
+<p>There are questions, but this provides a possibly coherent train of thought about an issue that I agree is a thorn.  It ties into the other benefits of soft-quoted branching, like being able to see the quote mark and not have it disappear before the control construct sees it....</p>
+          <p><a href="https://forum.rebol.info/t/how-to-subvert-voidification/1304/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/how-to-subvert-voidification/1304/1</link>
+        <pubDate>Thu, 02 Jul 2020 23:41:55 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1304-1</guid>
+        <source url="https://forum.rebol.info/t/how-to-subvert-voidification/1304.rss">How to Subvert Voidification?</source>
+      </item>
+  </channel>
+</rss>

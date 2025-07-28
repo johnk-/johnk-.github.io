@@ -1,0 +1,103 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Should Context in Api Functions Accrue LETs, etc.?</title>
+    <link>https://rebol.metaeducation.com/t/should-context-in-api-functions-accrue-lets-etc/2397</link>
+    <description>When I was designing the context sensitivity functions in the API, I wondered if this should work:
+
+    rebElide(&quot;let x: 1000&quot;);
+
+    assert(1020 = rebUnboxInteger(&quot;x + 20&quot;));
+
+Under the hood, what&#39;s happening here is:
+
+    rebElideHelper(LIBREBOL_BINDING(), &quot;let x: 1000&quot;, rebEND);
+
+    assert(1020 = rebUnboxIntegerHelper(LIBREBOL_BINDING(), &quot;x + 20&quot;, rebEND));
+
+And that LIBREBOL_BINDING() is something that you can configure to be any context... with the big trick being that inside of a native, it uses a shadowed variable that&#39;s an argument to the native... allowing the context to be &quot;inside&quot; the function for API calls in the native body.
+
+With that being a fixed context pointer, it can&#39;t be updated.  Each call would be independent and see the same environment coming in.  So no accrual.
+
+**But what if LIBREBOL_BINDING() wasn&#39;t a pointer to a context, but a *pointer-to-a-pointer* to a context?**  Each API call could potentially update that.  The environment could grow with each call.
+
+## It&#39;s Technically Questionable
+
+Right now the LIBREBOL_CONTEXT() is defined to things that should *not* be changed.  e.g. the **`level_`** parameter to a native cannot change, because it&#39;s used by other macros.
+
+So there&#39;d have to be a copy of it made that could be changed:
+
+    Bounce N_whatever(Level* const level_) {
+        Context* librebol_binding = level_;  // capture this, not level_
+        ...
+    }
+
+So this is suggesting that `librebol_binding` variable would get updated as each API got called, taking the binding enviroment as it was outgoing from the last call.
+
+Another technical aspect is that these new environments being handed out as pointer-to-pointer don&#39;t have anything keeping them alive in the GC.  They&#39;re stray pointers inside the user&#39;s code.
+
+## Does It Even Make Sense?
+
+It wouldn&#39;t know anything about the scoping rules of the C it&#39;s running inside:
+
+     if (condition) {
+         rebElide(&quot;let inside-if: 304&quot;);
+     }
+     rebElide(&quot;print [-{Should we be seeing}- inside-if]&quot;);
+
+I think this is likely to just invite bugs and lead to leaks.  If you want to use a LET and not leak it, you&#39;d have to put your evaluations in parentheses:
+
+     rebElide(&quot;(let x: -{lame and easy to forget}- ...)&quot;);
+
+The desire of being able to do multiple evaluations inside a context that accrues context is valid, but given that something needs to be keeping those contexts alive then it should be done through an API.</description>
+    
+    <lastBuildDate>Mon, 07 Apr 2025 03:33:44 +0000</lastBuildDate>
+    <category>Language Bridging</category>
+    <atom:link href="https://rebol.metaeducation.com/t/should-context-in-api-functions-accrue-lets-etc/2397.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Should Context in Api Functions Accrue LETs, etc.?</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>When I was designing the context sensitivity functions in the API, I wondered if this should work:</p>
+<pre><code>rebElide("let x: 1000");
+
+assert(1020 = rebUnboxInteger("x + 20"));
+</code></pre>
+<p>Under the hood, what's happening here is:</p>
+<pre><code>rebElideHelper(LIBREBOL_BINDING(), "let x: 1000", rebEND);
+
+assert(1020 = rebUnboxIntegerHelper(LIBREBOL_BINDING(), "x + 20", rebEND));
+</code></pre>
+<p>And that LIBREBOL_BINDING() is something that you can configure to be any context... with the big trick being that inside of a native, it uses a shadowed variable that's an argument to the native... allowing the context to be "inside" the function for API calls in the native body.</p>
+<p>With that being a fixed context pointer, it can't be updated.  Each call would be independent and see the same environment coming in.  So no accrual.</p>
+<p><strong>But what if LIBREBOL_BINDING() wasn't a pointer to a context, but a <em>pointer-to-a-pointer</em> to a context?</strong>  Each API call could potentially update that.  The environment could grow with each call.</p>
+<h2><a name="p-8117-its-technically-questionable-1" class="anchor" href="https://rebol.metaeducation.com#p-8117-its-technically-questionable-1"></a>It's Technically Questionable</h2>
+<p>Right now the LIBREBOL_CONTEXT() is defined to things that should <em>not</em> be changed.  e.g. the <strong><code>level_</code></strong> parameter to a native cannot change, because it's used by other macros.</p>
+<p>So there'd have to be a copy of it made that could be changed:</p>
+<pre><code>Bounce N_whatever(Level* const level_) {
+    Context* librebol_binding = level_;  // capture this, not level_
+    ...
+}
+</code></pre>
+<p>So this is suggesting that <code>librebol_binding</code> variable would get updated as each API got called, taking the binding enviroment as it was outgoing from the last call.</p>
+<p>Another technical aspect is that these new environments being handed out as pointer-to-pointer don't have anything keeping them alive in the GC.  They're stray pointers inside the user's code.</p>
+<h2><a name="p-8117-does-it-even-make-sense-2" class="anchor" href="https://rebol.metaeducation.com#p-8117-does-it-even-make-sense-2"></a>Does It Even Make Sense?</h2>
+<p>It wouldn't know anything about the scoping rules of the C it's running inside:</p>
+<pre><code> if (condition) {
+     rebElide("let inside-if: 304");
+ }
+ rebElide("print [-{Should we be seeing}- inside-if]");
+</code></pre>
+<p>I think this is likely to just invite bugs and lead to leaks.  If you want to use a LET and not leak it, you'd have to put your evaluations in parentheses:</p>
+<pre><code> rebElide("(let x: -{lame and easy to forget}- ...)");
+</code></pre>
+<p>The desire of being able to do multiple evaluations inside a context that accrues context is valid, but given that something needs to be keeping those contexts alive then it should be done through an API.</p>
+          <p><a href="https://rebol.metaeducation.com/t/should-context-in-api-functions-accrue-lets-etc/2397/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/should-context-in-api-functions-accrue-lets-etc/2397/1</link>
+        <pubDate>Mon, 07 Apr 2025 03:33:44 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2397-1</guid>
+        <source url="https://rebol.metaeducation.com/t/should-context-in-api-functions-accrue-lets-etc/2397.rss">Should Context in Api Functions Accrue LETs, etc.?</source>
+      </item>
+  </channel>
+</rss>

@@ -1,0 +1,266 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Implementing COLLECT + KEEP</title>
+    <link>https://rebol.metaeducation.com/t/implementing-collect-keep/2099</link>
+    <description>COLLECT allows you to build up a block, without needing to name the block or pass it as a parameter to individual APPEND instructions.  Instead you use KEEP, which appends to the implicit nameless block:
+
+    &gt;&gt; collect [
+           keep &#39;foo:
+           print &quot;Arbitrary code possible&quot;
+           keep/line [1 2 3]
+           keep spread [Spread #works @(T O O)]
+           repeat 2 [keep &lt;whatever&gt;]
+        ]
+    Arbitrary code possible
+    == [
+        foo: [1 2 3]
+        Spread #works @(T O O) &lt;whatever&gt; &lt;whatever&gt;]
+
+## Leverages LAMBDA To Bind KEEP To Code
+
+The trick is that the body is turned into a function that takes KEEP as a parameter.  This defines the word KEEP for the body.
+
+To see how this works, imagine this:
+
+    collector: lambda [keep [action?]] [
+        keep &#39;foo:
+        print &quot;Arbitrary code possible&quot;
+        keep/line [1 2 3]
+        keep spread [Spread #works @(T O O)]
+        repeat 2 [keep &lt;whatever&gt;]
+     ]
+
+     block: copy []
+     keeper: specialize :append [series: block]
+
+     collector :keeper
+
+This code gets the desired result in BLOCK.
+
+## Slight Twist: Make KEEP Return Its Input
+
+APPEND will return the block that you append to.  This would reveal the partially-built temporary block before the collect is complete.  A better and more useful result of KEEP would be to return the value that you pass it.
+
+To accomplish that, we can ENCLOSE the specialization:
+
+    keeper: enclose (specialize :append [series: block]) func [f [frame!]] [
+        let value: f.value
+        do f
+        return value
+    ]
+
+We have to capture the value to append before we DO the captured FRAME!, because Rebol functions are permitted to make arbitrary modifications to their arguments during execution.  *(To help avoid mistakes, you are not allowed to read a frame&#39;s values after a DO is complete.)*  It&#39;s possible to DO COPY F but that makes a copy of the entire frame, and here we just copy the value we want.
+
+A more efficient way to do this is to use a LAMBDA for the wrapper function, and ELIDE the DO.  There&#39;s no need to type check F (since ENCLOSE only passes the FRAME! built for APPEND, never anything else):
+
+    keeper: enclose (specialize :append [series: block]) lambda [f] [
+        f.value
+        elide do f  ; evaluates to anti-isotope of 0 length block, vanishes
+    ]
+
+## Putting It Together
+
+Wrapping this up for a working COLLECT implementation:
+
+    collect: func [
+        return: [block!]
+        body [block!]
+    ][
+        let block: copy []
+        let keeper: enclose (specialize :append [series: block]) lambda [f] [
+            f.value
+            elide do f
+        ]
+        run (lambda [keep] body) :keeper
+        return block
+    ]
+
+It&#39;s a good demonstration of how you can make something impressive that feels like a first-class language feature out of Rebol, with little effort.</description>
+    
+    <lastBuildDate>Thu, 11 Jan 2024 10:16:34 +0000</lastBuildDate>
+    <category>Show &amp; Tell</category>
+    <atom:link href="https://rebol.metaeducation.com/t/implementing-collect-keep/2099.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Implementing COLLECT + KEEP</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>I thought it might be interesting to compare how Ren-C does COLLECT to other implementations.</p>
+<h2><a name="p-6901-rebol2-1" class="anchor" href="https://rebol.metaeducation.com#p-6901-rebol2-1"></a>Rebol2</h2>
+<pre><code>collect: func [
+    body [block!]
+    /into
+    output [series!]
+][
+    unless output [output: make block! 16]
+    do make function! [keep] copy/deep body make function! [value /only] copy/deep [
+        output: either only [insert/only output :value] [insert output :value]
+        :value
+    ]
+    either into [output] [head output]
+]
+</code></pre>
+<p>MAKE FUNCTION! in Rebol2 was a low-level routine that did not make a copy of the body.  If you're wondering why it's being used here instead of FUNC when it does a COPY/DEEP of the body... I think that just means it's misguided inlining (to avoid the overhead of calling FUNC).</p>
+<p>Historical DO is variadic, and if passed a function will collect further args at the callsite.  Ren-C makes DO arity-1, and only runs functions with complete frames.  Variadic invocation is done with the distinct RUN operation.</p>
+<p>We see here a COLLECT/INTO feature that lets you do a COLLECT into an already existing series.  These two statements would be equivalent.</p>
+<pre><code>collect/into [...] target
+insert target collect [...]
+</code></pre>
+<p>There was a certain cabal of people who lobbied for adding /INTO operations to various functions in order to avoid the creation of intermediate series...which they believed was costly.  Experience has borne out that the handling of /INTO generally made things slower.  I was in the camp who never liked it, and called it <strong><a href="https://rebol.metaeducation.com/t/stopping-the-into-virus/705">"the /INTO virus"</a></strong>.  All instances of /INTO in Ren-C were dropped.</p>
+<p>Due to the /INTO, the implementation is based on INSERT instead of APPEND, and has to update the intermediate block's insertion position as it goes.</p>
+<p>There's no specialization in historical Rebol.  So the KEEPER function being made here takes an /ONLY refinement, and then dispatches to one of two different calls to either INSERT or INSERT/ONLY.</p>
+<h2><a name="p-6901-r3-alpha-2" class="anchor" href="https://rebol.metaeducation.com#p-6901-r3-alpha-2"></a>R3-Alpha</h2>
+<pre><code>collect: func [
+    body [block!]
+    /into
+    output [series!]
+][
+    unless output [output: make block! 16]
+    do func [keep] body func [value [any-type!] /only] [
+        output: apply :insert [output :value none none only]
+        :value
+    ]
+    either into [output] [head output]
+]
+</code></pre>
+<p>The misguided inlining is gone, and it just uses FUNC.</p>
+<p>Rather than having two calls to INSERT based on whether /ONLY is used, it uses the messy historical APPLY operator (see <strong><a href="https://rebol.metaeducation.com/t/apply-ii-the-revenge/1834">APPLY II: The Revenge</a></strong> for contrast).</p>
+<p>If you notice the NONE and NONE in the APPLY, this is for missing refinements that APPEND and INSERT have, that aren't given to KEEP... /DUP and /PART.</p>
+<pre><code>r3-alpha&gt;&gt; append/dup [a b c] &lt;d&gt; 3
+== [a b c &lt;d&gt; &lt;d&gt; &lt;d&gt;]
+
+r3-alpha&gt;&gt; append/part [a b c] [d e f g] 2
+== [a b c d e]
+</code></pre>
+<p>By using specialization, Ren-C inherits all the refinements of APPEND.  There's no /ONLY (since splicing is solved with isotopes), but there is a /LINE refinement (demonstrated above)... and /DUP and /PART are still around.</p>
+<pre><code>ren-c&gt;&gt; collect [keep/dup &lt;d&gt; 3]
+== [&lt;d&gt; &lt;d&gt; &lt;d&gt;]
+
+ren-c&gt;&gt; collect [keep/part spread [d e f g] 2]
+== [d e]
+</code></pre>
+<h2><a name="p-6901-red-3" class="anchor" href="https://rebol.metaeducation.com#p-6901-red-3"></a>Red</h2>
+<pre><code>collect: func [
+    body [block!] 
+    /into
+    collected [series!] 
+    /local keep rule pos
+][
+    keep: func [v /only] [append/:only collected v v] 
+    unless collected [collected: make block! 16] 
+    parse body rule: [
+        any [
+             pos: ['keep | 'collected] (pos/1: bind pos/1 'keep)
+             | any-string! | binary! | into rule | skip
+        ]
+    ] 
+    do body 
+    either into [collected] [head collected]
+]
+</code></pre>
+<p>Okay... well... they did that differently.</p>
+<p>It adds another keyword, COLLECTED, to give you access to the collection result as you go.  That seems to me about as likely to cause accidents from people not knowing about the feature as it is to be useful.  Needing access to the buffer as you collect it means you might as well name it, at which point COLLECT is saving you almost nothing... Ren-C makes it easy enough to specialize APPEND and call it EMIT, adding whatever other features you need.</p>
+<p>The code block that you pass in has its bindings mutated directly--and everywhere in the system that does this has bothersome implications.  <strong><code>(pos/1: bind pos/1 'keep)</code></strong> uses <strong><code>'keep</code></strong> as a shorthand for naming a context, e.g. <em>"bind the word KEEP or COLLECTED that we found in the block to whatever context this word 'keep is looking up to"</em>.  In this case, that means bind it to this function invocation.</p>
+<p>Red has a weird ability to chain refinements that they're taking advantage of here with <strong>append/:only</strong> which saves them from doing an APPLY or branching to either APPEND or APPEND/ONLY calls.  This only works if the variable name matches the refinement name.  Strange feature.  Ren-C can do this but via what I think is a more normal way, with <strong>append/(if only ['only])</strong>.  In practice, having things like specialization, adaptation, enclosure, etc. turns out to be much higher-leverage (and faster in most cases).</p>
+<p>Offhand I don't see how their /INTO can work correctly if they're using APPEND.</p>
+<pre><code>red&gt;&gt; data: [a b c]
+== [a b c]
+
+red&gt;&gt; collect/into [keep &lt;1&gt; keep &lt;2&gt; keep &lt;3&gt;] data
+== [a b c &lt;1&gt; &lt;2&gt; &lt;3&gt;]
+
+red&gt;&gt; data
+== [a b c &lt;1&gt; &lt;2&gt; &lt;3&gt;]
+</code></pre>
+<p>Okay, so, it doesn't work correctly.</p>
+<pre><code>rebol2&gt;&gt; data: [a b c]
+== [a b c]
+
+rebol2&gt;&gt; collect/into [keep &lt;1&gt; keep &lt;2&gt; keep &lt;3&gt;] data
+== [a b c]
+
+rebol2&gt;&gt; data
+== [&lt;1&gt; &lt;2&gt; &lt;3&gt; a b c]
+</code></pre>
+          <p><a href="https://rebol.metaeducation.com/t/implementing-collect-keep/2099/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/implementing-collect-keep/2099/2</link>
+        <pubDate>Wed, 10 Jan 2024 18:43:47 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2099-2</guid>
+        <source url="https://rebol.metaeducation.com/t/implementing-collect-keep/2099.rss">Implementing COLLECT + KEEP</source>
+      </item>
+      <item>
+        <title>Implementing COLLECT + KEEP</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>COLLECT allows you to build up a block, without needing to name the block or pass it as a parameter to individual APPEND instructions.  Instead you use KEEP, which appends to the implicit nameless block:</p>
+<pre><code>&gt;&gt; collect [
+       keep 'foo:
+       print "Arbitrary code possible"
+       keep/line [1 2 3]
+       keep spread [Spread #works @(T O O)]
+       repeat 2 [keep &lt;whatever&gt;]
+    ]
+Arbitrary code possible
+== [
+    foo: [1 2 3]
+    Spread #works @(T O O) &lt;whatever&gt; &lt;whatever&gt;]
+</code></pre>
+<h2><a name="p-6899-leverages-lambda-to-bind-keep-to-code-1" class="anchor" href="https://rebol.metaeducation.com#p-6899-leverages-lambda-to-bind-keep-to-code-1"></a>Leverages LAMBDA To Bind KEEP To Code</h2>
+<p>The trick is that the body is turned into a function that takes KEEP as a parameter.  This defines the word KEEP for the body.</p>
+<p>To see how this works, imagine this:</p>
+<pre><code>collector: lambda [keep [action?]] [
+    keep 'foo:
+    print "Arbitrary code possible"
+    keep/line [1 2 3]
+    keep spread [Spread #works @(T O O)]
+    repeat 2 [keep &lt;whatever&gt;]
+ ]
+
+ block: copy []
+ keeper: specialize :append [series: block]
+
+ collector :keeper
+</code></pre>
+<p>This code gets the desired result in BLOCK.</p>
+<h2><a name="p-6899-slight-twist-make-keep-return-its-input-2" class="anchor" href="https://rebol.metaeducation.com#p-6899-slight-twist-make-keep-return-its-input-2"></a>Slight Twist: Make KEEP Return Its Input</h2>
+<p>APPEND will return the block that you append to.  This would reveal the partially-built temporary block before the collect is complete.  A better and more useful result of KEEP would be to return the value that you pass it.</p>
+<p>To accomplish that, we can ENCLOSE the specialization:</p>
+<pre><code>keeper: enclose (specialize :append [series: block]) func [f [frame!]] [
+    let value: f.value
+    do f
+    return value
+]
+</code></pre>
+<p>We have to capture the value to append before we DO the captured FRAME!, because Rebol functions are permitted to make arbitrary modifications to their arguments during execution.  <em>(To help avoid mistakes, you are not allowed to read a frame's values after a DO is complete.)</em>  It's possible to DO COPY F but that makes a copy of the entire frame, and here we just copy the value we want.</p>
+<p>A more efficient way to do this is to use a LAMBDA for the wrapper function, and ELIDE the DO.  There's no need to type check F (since ENCLOSE only passes the FRAME! built for APPEND, never anything else):</p>
+<pre><code>keeper: enclose (specialize :append [series: block]) lambda [f] [
+    f.value
+    elide do f  ; evaluates to anti-isotope of 0 length block, vanishes
+]
+</code></pre>
+<h2><a name="p-6899-putting-it-together-3" class="anchor" href="https://rebol.metaeducation.com#p-6899-putting-it-together-3"></a>Putting It Together</h2>
+<p>Wrapping this up for a working COLLECT implementation:</p>
+<pre><code>collect: func [
+    return: [block!]
+    body [block!]
+][
+    let block: copy []
+    let keeper: enclose (specialize :append [series: block]) lambda [f] [
+        f.value
+        elide do f
+    ]
+    run (lambda [keep] body) :keeper
+    return block
+]
+</code></pre>
+<p>It's a good demonstration of how you can make something impressive that feels like a first-class language feature out of Rebol, with little effort.</p>
+          <p><a href="https://rebol.metaeducation.com/t/implementing-collect-keep/2099/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/implementing-collect-keep/2099/1</link>
+        <pubDate>Wed, 10 Jan 2024 17:20:00 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2099-1</guid>
+        <source url="https://rebol.metaeducation.com/t/implementing-collect-keep/2099.rss">Implementing COLLECT + KEEP</source>
+      </item>
+  </channel>
+</rss>

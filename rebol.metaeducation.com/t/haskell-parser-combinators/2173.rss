@@ -1,0 +1,545 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Haskell parser combinators</title>
+    <link>https://rebol.metaeducation.com/t/haskell-parser-combinators/2173</link>
+    <description>I’ve seen a few parsing-related threads recently in this forum. I haven’t been commenting much on them, since I don’t have enough experience with UPARSE (or for that matter historical PARSE) to say anything helpful.
+
+On the other hand, I *do* have a lot of experience with parser combinators in Haskell. In terms of structure and purpose, they’re probably the concept most similar to UPARSE that I’ve seen from another language. So I thought I’d write this post in the hope that something, somewhere, might eventually prove useful somehow.
+
+## High-level overview
+
+The first and most important thing to realise about parser combinators is that **they’re not built into the language**. They’re simply ordinary libraries which make it easy to construct parsers compositionally.
+
+(I mean, for that matter, UPARSE isn’t built in either. But there’s a different level of integration with the rest of the language.)
+
+The basic approach is to define a new datatype for parsers, usually called something like `Parser a`. This is a parser which can process a string (or other datatype), returning a result of type `a` if it succeeds. Alongside this there will be a set of primitive parsers, most notably `char` (to parse single characters), `return` (which always succeeds with a result), and `empty` (which always fails).
+
+(Of course, practical libraries will have more primitives. `megaparsec` has [a nice selection](https://hackage.haskell.org/package/megaparsec-9.6.1/docs/Text-Megaparsec.html#g:4), with good comments.)
+
+The most interesting bit is the way these parser combinators are combined to create larger parsers. This, of course, relies on the standard abstractions of Haskell. Two operators are particularly important:
+
+- Sequencing: `p &gt;&gt;= f` is a parser which runs `p` and passes the result to function `f`, then runs the resulting parser.
+- Choice: `p &lt;|&gt; q` is a parser which runs `p`, then backtracks and runs `q` if that failed.
+
+From these basic elements you can define a very wide range of generic combinators, for instance these useful ones:
+
+```hs
+-- sequencing ignoring result
+(&gt;&gt;) :: Parser a -&gt; Parser b -&gt; Parser b
+p &gt;&gt; q = p &gt;&gt;= \_ -&gt; q
+
+-- Match a whole string
+string :: String -&gt; Parser ()
+string &quot;&quot; = return ()
+string (c:cs) = char c &gt;&gt; string cs
+
+-- 1 or more
+some :: Parser a -&gt; Parser [a]
+some p =
+    p &gt;&gt;= \first -&gt;
+    many p &gt;&gt;= \rest -&gt;
+    return (first : rest)
+
+-- 0 or more
+many :: Parser a -&gt; Parser [a]
+many p = some p &lt;|&gt; return []
+```
+
+## A basic implementation
+
+This is all a little abstract, though. Probably the easiest way to understand parser combinators is to implement them.
+
+A basic implementation is quite simple. A parser is just a function which takes in a string, and on success returns the result alongside the unparsed portion of the string:
+
+```hs
+newtype Parser a = Parser (String -&gt; Maybe (String, a))
+```
+
+You then run the parser simply by unwrapping the function and applying it to your input:
+
+```hs
+runParser :: Parser a -&gt; String -&gt; Maybe (String, a)
+runParser (Parser p) input = p input
+```
+
+Simple parsers work as you’d expect:
+
+```hs
+char :: Char -&gt; Parser ()
+char c = Parser $ \input -&gt; case input of
+    (c&#39;:cs) | c == c&#39; -&gt; Just (cs, ())
+    _ -&gt; Nothing
+
+return :: a -&gt; Parser a
+return a = Parser $ \input -&gt; Just (input, a)
+
+empty :: Parser a
+empty = Parser $ \_ -&gt; Nothing
+```
+
+The combinators require more elaborate state-threading, but are still straightforward:
+
+```hs
+(&gt;&gt;=) :: Parser a -&gt; (a -&gt; Parser b) -&gt; Parser b
+p &gt;&gt;= f = Parser $ \input -&gt;
+    case runParser p input of
+        Nothing -&gt; Nothing
+        Just (partiallyParsed, a) -&gt;
+            runParser (f a) partiallyParsed
+
+(&lt;|&gt;) :: Parser a -&gt; Parser a -&gt; Parser a
+p &lt;|&gt; q = Parser $ \input -&gt;
+    case runParser p input of
+        Just result -&gt; Just result
+        Nothing -&gt; runParser q input
+```
+
+This simple code suffices for a surprisingly wide variety of tasks. For instance, a slight variant is present in the base library as [`ReadS`](https://hackage.haskell.org/package/base-4.16.3.0/docs/Text-Read.html#t:ReadS). (The variation is that `ReadS` can produce multiple results.)
+
+## Managing backtracking
+
+Unfortunately, **this has serious problems with any larger-scale use**. For one thing, it can’t do error reporting beyond ‘it failed somewhere’. But there are even bigger problems with this implementation of the choice combinator `(&lt;|&gt;)`:
+
+1. It behaves unpredictably: any error anywhere will result in the parser backtracking to the last choice, and so on until every single choice has been exhausted. This is bad for the time complexity, plus it leaves you no chance of ever reporting errors nicely.
+2. It holds onto the input string during the whole time `p` is executing. This creates a space leak, which grows larger the more nested choices you have.
+
+The first parser combinator library to solve these issues was `Parsec`. Its design is described in [this paper](https://www.microsoft.com/en-us/research/wp-content/uploads/2016/02/parsec-paper-letter.pdf) (which seems very readable). I won’t describe its implementation here… but the basic idea is simple to summarise: each parser keeps track of what it’s consumed, and **commits to a parser as soon as it’s consumed any characters**.
+
+Some parsers require no changes under this new semantics. For instance, `string &quot;first word&quot; &lt;|&gt; string &quot;second word&quot;` works without problems. If it sees an input character `f`, the first choice `string &quot;first word&quot;` matches immediately, meaning the library can commit to the first parser, and know that the second parser never needs to run. On the other hand, upon seeing an input character `&#39;s&#39;`, that first parser will fail on that very first character: since no characters have been consumed, control passes over to the second parser to succeed or fail.
+
+On the other hand, more elaborate lookahead becomes more difficult. For instance, `string &quot;word 1&quot; &lt;|&gt; string &quot;word 2&quot;` no longer works: as soon as this parser sees `&#39;w&#39;`, it matches the first parser, so the second parser will never be run.
+
+To solve this, Parsec introduces a new primitive combinator: `try`, which creates a parser which never consumes characters on failure. The effect of this is to allow backtracking over whatever is in the `try`. For this example, `try (string &quot;word 1&quot;) &lt;|&gt; string &quot;word 2&quot;` would work as expected.
+
+The nice thing about this approach is the control it gives you. For instance, I can write things like:
+```hs
+(try (string &quot;App&quot;) &gt;&gt; string &quot;le&quot;) &lt;|&gt; string &quot;Apricot&quot;
+```
+Here, as soon as the parser reaches a second `&#39;p&#39;`, it can commit to the first branch. But if it sees another character, it’s still able to backtrack through the `string &quot;App&quot;` and move on to the second branch. Of course, this is a contrived example — but in general, being able to specify the control flow of your parser like this is exceedingly useful in larger parsers.
+
+## What use is this for Rebol?
+
+Quite probably, none at all.
+
+But like I said, I’m hoping potentially some of this might end up useful somewhere. If it can act as inspiration which helps solve any problems, I’m happy.
+
+And, of course, now that we have this thread for it, feel free to ask me any questions about parser combinators you might have!</description>
+    
+    <lastBuildDate>Tue, 12 Mar 2024 08:29:40 +0000</lastBuildDate>
+    <category>Foreign Inspiration</category>
+    <atom:link href="https://rebol.metaeducation.com/t/haskell-parser-combinators/2173.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Haskell parser combinators</title>
+        <dc:creator><![CDATA[bradrn]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group quote-modified" data-username="hostilefork" data-post="2" data-topic="2173">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>I've written a little here before:</p>
+<p><a href="https://rebol.metaeducation.com/t/parse-vs-haskells-x-parsec/1321">PARSE vs. Haskell's (X)PARSEC</a></p>
+</blockquote>
+</aside>
+<p>Interesting, thanks! After reading it, I do have a few thoughts, but I’ll reply in that thread.</p>
+<aside class="quote no-group" data-username="hostilefork" data-post="2" data-topic="2173">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>One thing to notice is that UPARSE doesn't have a <em><strong>sequencing</strong></em> combinator. Instead, it has a <em><strong>BLOCK!</strong></em> combinator.</p>
+</blockquote>
+</aside>
+<p>Sure, but I wasn’t aiming to describe Rebol there.</p>
+<aside class="quote no-group" data-username="hostilefork" data-post="2" data-topic="2173">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>UPARSE adds in another element to BLOCK!'s recognized-literally vocabulary of <strong><code>||</code></strong></p>
+</blockquote>
+</aside>
+<p>This certainly is neat. Reminds me a bit of Haskell’s <code>($)</code> operator, but more flexible.</p>
+<aside class="quote no-group quote-modified" data-username="hostilefork" data-post="2" data-topic="2173">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<aside class="quote no-group" data-username="bradrn" data-post="1" data-topic="2173">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/bradrn/48/365_2.png" class="avatar"> bradrn:</div>
+<blockquote>
+<p><code>string "word 1" &lt;|&gt; string "word 2"</code> no longer works: as soon as this parser sees <code>'w'</code>, it matches the first parser, so the second parser will never be run.</p>
+</blockquote>
+</aside>
+<p>Seems unfortunate that the default is biased that way, and you have to tack on more to get the likely-intended meaning.</p>
+</blockquote>
+</aside>
+<p>But on the other hand, this approach greatly improves performance, and makes control flow far more manageable. From my experience using parser combinators, the trade-off is well worth it.</p>
+<aside class="quote no-group quote-modified" data-username="hostilefork" data-post="2" data-topic="2173">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>There was significant discussion on what to call the "0 or more" combinator. Historical Redbol called this ANY and I did not like that […] But I do not like MANY either--it might be worse. Ultimately I decided that OPTIONAL SOME (or OPT SOME) is just what you would write out.</p>
+</blockquote>
+</aside>
+<p>In Haskell, <code>many</code> is just the conventional term which has stuck. Haskell tends to care much less about names than Rebol does, probably because the types and the syntax carry so much more information.</p>
+<aside class="quote no-group quote-modified" data-username="hostilefork" data-post="2" data-topic="2173">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<aside class="quote no-group" data-username="bradrn" data-post="1" data-topic="2173">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/bradrn/48/365_2.png" class="avatar"> bradrn:</div>
+<blockquote>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">return :: a -&gt; Parser a
+return a = Parser $ \input -&gt; Just (input, a)
+</code></pre>
+</blockquote>
+</aside>
+<p>To prematurely return a result from UPARSE (without requiring reaching the end of input), the ACCEPT combinator can be used.</p>
+</blockquote>
+</aside>
+<p>Apologies, I should have made this clearer. <code>return</code> in Haskell does <strong>not</strong> prematurely return a result. It simply takes a value and hoists it into a monadic context. In this case, <code>return value</code> is a parser which consumes no characters and always succeeds, yielding the result <code>value</code> as it does so.</p>
+<p>(Note that <code>return</code> has the alias name <code>pure</code>. Arguably that’s a less confusing name, and I should have used it.)</p>
+<aside class="quote no-group quote-modified" data-username="hostilefork" data-post="2" data-topic="2173">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<aside class="quote no-group" data-username="bradrn" data-post="1" data-topic="2173">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/bradrn/48/365_2.png" class="avatar"> bradrn:</div>
+<blockquote>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">-- sequencing ignoring result
+(&gt;&gt;) :: Parser a -&gt; Parser b -&gt; Parser b
+p &gt;&gt; q = p &gt;&gt;= \_ -&gt; q
+</code></pre>
+</blockquote>
+</aside>
+<p>UPARSE combinators can synthesize antiforms, including NIHIL. So there's an ELIDE combinator.</p>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">&gt;&gt; parse [a b a b b c c] [accumulate ['a | 'b], some 'c]
+== c
+
+&gt;&gt; parse [a b a b b c c] [accumulate ['a | 'b], elide some 'c]
+== [a b a b b]
+</code></pre>
+</blockquote>
+</aside>
+<p>Again, this is something I should have been clearer about. Haskell <code>(&gt;&gt;)</code> is simply the equivalent of  Rebol COMMA!.</p>
+<p>In this case, <code>(&gt;&gt;)</code> is used to write the equivalent of your first example, not your second. In Haskell, these would be:</p>
+<pre data-code-wrap="hs"><code class="lang-hs">parser1 = many (char 'a' &lt;|&gt; char 'b') &gt;&gt; some (char 'c')
+parser2 = many (char 'a' &lt;|&gt; char 'b') &gt;&gt;= \result -&gt; (some (char 'c') &gt;&gt; return result)
+</code></pre>
+<p>Although in practice we have another operator <code>(&lt;*)</code> to make that second example a bit shorter: <code>many (…) &lt;* some (char 'c')</code>.</p>
+<aside class="quote no-group" data-username="hostilefork" data-post="2" data-topic="2173">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>The most useful thing is bringing this outside perspective to the sort of "people who grew up on C64 BASIC" who tend to populate and design Rebol.</p>
+</blockquote>
+</aside>
+<p>Yep, you understand my intentions!</p>
+<aside class="quote no-group" data-username="hostilefork" data-post="2" data-topic="2173">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>The big areas where ideas are needed most are in error delivery</p>
+</blockquote>
+</aside>
+<p>Some parser combinator libraries have interesting strategies for error handling, so that might be worth a look. I know that the paper I linked summarises the basic ideas around how that works. (If I get time, perhaps I can investigate further and write it up here.)</p>
+<aside class="quote no-group" data-username="hostilefork" data-post="2" data-topic="2173">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>what the story is for binding tools within parse to help dialect authors accomplish cool things easily</p>
+</blockquote>
+</aside>
+<p>Haskell is well-suited in this regard, because it has so many well-specified abstractions for combining things together. (e.g., many libraries implement parsers as monad transformers.) And of course parsers are simply ordinary values, so it’s easy to manipulate them using the rest of the language.</p>
+<p>By contrast, I’ve always felt this is the limitation of dialecting: the elements of a dialect are just words in a block, rather than first-class values of the language. Rebol has parse specifications, but the ‘parsers’ themselves don’t actually exist outside the call to <code>uparse</code>. There may be some solution to this problem, but I’m not sure what it is.</p>
+          <p><a href="https://rebol.metaeducation.com/t/haskell-parser-combinators/2173/3">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/haskell-parser-combinators/2173/3</link>
+        <pubDate>Tue, 12 Mar 2024 08:29:40 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2173-3</guid>
+        <source url="https://rebol.metaeducation.com/t/haskell-parser-combinators/2173.rss">Haskell parser combinators</source>
+      </item>
+      <item>
+        <title>Haskell parser combinators</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>Thank you for summarizing!  I've written a little here before:</p>
+<p><a href="https://rebol.metaeducation.com/t/parse-vs-haskells-x-parsec/1321" class="inline-onebox">PARSE vs. Haskell's (X)PARSEC</a></p>
+<p>Parser combinators were not an influence on the original Rebol PARSE (circa 90s), but were what I drew inspiration from for UPARSE.</p>
+<aside class="quote no-group" data-username="bradrn" data-post="1" data-topic="2173">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/bradrn/48/365_2.png" class="avatar"> bradrn:</div>
+<blockquote>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">(&lt;|&gt;) :: Parser a -&gt; Parser a -&gt; Parser a
+p &lt;|&gt; q = Parser $ \input -&gt;
+    case runParser p input of
+        Just result -&gt; Just result
+        Nothing -&gt; runParser q input
+</code></pre>
+</blockquote>
+</aside>
+<p>One thing to notice is that UPARSE doesn't have a <em><strong>sequencing</strong></em> combinator.  Instead, it has a <em><strong>BLOCK!</strong></em> combinator.</p>
+<p>And it's the BLOCK! combinator that generally does the "combinating".  It can technically be replaced, but it is the most complex combinator and so difficult to replace entirely... it's almost like the block combinator <em>is</em> UPARSE.  So it is more likely that it would be augmented vs. people wanting to rewrite it entirely.</p>
+<p>When one of the parsers the block combinator has "combinated" fails, it then scans literally for the next <strong><code>|</code></strong> in the input and starts applying rules there.  This is true also historical Redbol, in that you can write any old (LOAD-able) gibberish after a failing rule, due to the skipping:</p>
+<pre><code>red&gt;&gt; parse "aaa" [some "b" fhqwhgads ??? | some "a"]
+== true
+</code></pre>
+<p>(Should a debug mode exist that runs through and ensures these regions will combinate, just not call the parsers?  Probably not in this language paradigm.  Mismatching rules can guard against dereferencing undefined variables and such, and that's kind of how the whole language works... it's modeling clay.)</p>
+<p>UPARSE adds in another element to BLOCK!'s recognized-literally vocabulary of <strong><code>||</code></strong>, that is a synonym for putting everything to the left of it in a block:</p>
+<pre><code>[rule1 | rule2 | rule3 || rule4]
+=&gt;
+[[rule1 | rule2 | rule3] rule4]
+
+[rule1 | rule2 || rule3 | rule4 || rule5]
+=&gt;
+[[rule1 | rule2] [rule3 | rule4] rule5]
+</code></pre>
+<p>(Well, it's a synonym so long as you haven't redefined the BLOCK! combinator itself to other meanings, but if you did you might also redefine <code>||</code> while you're at it.)</p>
+<p>Anyway, I'm rather fond of <code>||</code>.</p>
+<aside class="quote no-group" data-username="bradrn" data-post="1" data-topic="2173">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/bradrn/48/365_2.png" class="avatar"> bradrn:</div>
+<blockquote>
+<p><code>string "word 1" &lt;|&gt; string "word 2"</code> no longer works: as soon as this parser sees <code>'w'</code>, it matches the first parser, so the second parser will never be run.</p>
+</blockquote>
+</aside>
+<p>Seems unfortunate that the default is biased that way, and you have to tack on more to get the likely-intended meaning.</p>
+<aside class="quote no-group" data-username="bradrn" data-post="1" data-topic="2173">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/bradrn/48/365_2.png" class="avatar"> bradrn:</div>
+<blockquote>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">-- 0 or more
+many :: Parser a -&gt; Parser [a]
+many p = some p &lt;|&gt; return []
+</code></pre>
+</blockquote>
+</aside>
+<p>There was significant discussion on what to call the "0 or more" combinator.  Historical Redbol called this ANY and I did not like that (<a href="https://rebol.metaeducation.com/t/the-cool-new-repurposing-of-any-in-parse/1662">instead pursuing an ANY that is aligned with the ANY construct in the language</a>).</p>
+<p>But I do not like MANY either--it might be worse.  Ultimately I decided that OPTIONAL SOME (or OPT SOME) is just what you would write out.</p>
+<p>On the linguistic front, we don't have a word for "zero or more" in English, and maybe there is a reason for that.  What I found in going through replacing the old "ANY"=&gt;"OPT SOME" was that there were a lot of cases where someone reached for ANY when it actually wasn't a zero-or-more situation, so I liked it being explicit.</p>
+<p>Many cases I looked at tidied up (and by many I mean many, not zero). I found this code removing 0 or more newlines at the head of a series via ANY:</p>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">parse series [
+    remove [any newline]
+    ...
+]
+</code></pre>
+<p>But when you rephrase this with OPT SOME it suggests a better factoring:</p>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">parse series [
+    remove [opt some newline]
+    ...
+]
+</code></pre>
+<p>It reads clearest when you bring the OPT outside, to say you're <em>optionally removing some newlines</em>:</p>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">parse series [
+    opt remove [some newline]
+    ...
+]
+</code></pre>
+<p>Plus it's now more obvious that the whole expression will be NULL in the case when no newlines are removed, and leverage that.</p>
+<p>Note that the block is not necessary there:</p>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">parse series [
+    opt remove some newline
+    ...
+]
+</code></pre>
+<p>And shows a bit of the dynamics of choice we like about the medium.</p>
+<aside class="quote no-group" data-username="bradrn" data-post="1" data-topic="2173">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/bradrn/48/365_2.png" class="avatar"> bradrn:</div>
+<blockquote>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">return :: a -&gt; Parser a
+return a = Parser $ \input -&gt; Just (input, a)
+</code></pre>
+</blockquote>
+</aside>
+<p>To prematurely return a result from UPARSE (without requiring reaching the end of input), the ACCEPT combinator can be used.</p>
+<pre><code>&gt;&gt; parse [a b c 10 20 &lt;d&gt;] [some [word! | integer!]]
+** Error: PARSE partially matched the input, but didn't reach the tail
+
+&gt;&gt; parse [a b c 10 20 &lt;d&gt;] [some [word! | accept integer!]]
+== 10
+
+&gt;&gt; parse [a b c 10 20 &lt;d&gt;] [some [word! | accept [let i: integer! accept (i * 3)]]]
+== 30
+</code></pre>
+<p>R3-Alpha added this as "RETURN", but Red doesn't seem to have carried that forward.  I like using a different word.</p>
+<aside class="quote no-group" data-username="bradrn" data-post="1" data-topic="2173">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/bradrn/48/365_2.png" class="avatar"> bradrn:</div>
+<blockquote>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">-- sequencing ignoring result
+(&gt;&gt;) :: Parser a -&gt; Parser b -&gt; Parser b
+p &gt;&gt; q = p &gt;&gt;= \_ -&gt; q
+</code></pre>
+</blockquote>
+</aside>
+<p>UPARSE combinators can synthesize antiforms, <a href="https://rebol.metaeducation.com/t/making-invisible-functions-e-g-comment-elide/2034">including GHOST</a>.  So there's an ELIDE combinator.</p>
+<pre><code>&gt;&gt; parse [a b a b b c c] [accumulate ['a | 'b], some 'c]
+== c
+
+&gt;&gt; parse [a b a b b c c] [accumulate ['a | 'b], elide some 'c]
+== [a b a b b]
+</code></pre>
+<p>This is particularly helpful to reach for in cases where an ACCEPT that returned prematurely would not complete your match.  e.g. you synthesized your result, but you still have more matching to do, and want to avoid the inconvenience of making and naming a variable for the synthesized result and then evaluating to it at the end.</p>
+<p><em>(Note that COMMA! doesn't do anything, they are skipped by the BLOCK! combinator so long as they are between combinated parsers.  <strong>some "a", some "b"</strong> is legal but not <strong>some, "a" some, "b"</strong>).</em></p>
+<aside class="quote no-group" data-username="bradrn" data-post="1" data-topic="2173">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/bradrn/48/365_2.png" class="avatar"> bradrn:</div>
+<blockquote>
+<p>It holds onto the input string during the whole time <code>p</code> is executing. This creates a space leak, which grows larger the more nested choices you have.</p>
+</blockquote>
+</aside>
+<p>Rebol PARSE has lots of performance issues.  e.g. when doing something like a seek, a block rule is re-applied at each location:</p>
+<pre><code>red&gt;&gt; parse "aaaaab" [thru [(print "testing") "b"]]
+testing
+testing
+testing
+testing
+testing
+testing
+== true
+</code></pre>
+<p>There are attempts in historical Rebol and Red to try and optimize where possible, e.g. the implementation of <strong><code>to "b"</code></strong> optimizes the find to do a faster seek for the pattern.  But you lose that optimization as soon as you change it to <strong><code>to ["b"]</code></strong>, and it recurses the parser.</p>
+<p>Ren-C dials things up to 11, including the crappy performance.  UPARSE is knowingly painfully turtle slow, because it is really just a sketch of the architecture for how parser combinators would be done.  But as its broken up into functions, those functions can be rewritten as native C when the time comes (though I want to make sure the usermode implementations are kept in sync and can be swapped in and still work equivalently--so I imagine maintaining each usermode combinator and its C implementation in the same file).</p>
+<p>I also want to make sure all the right hooks are in place to do things like stepwise debugging:</p>
+<p><a href="https://rebol.metaeducation.com/t/replpad-visual-parse-debugger/2063" class="inline-onebox">ReplPad Visual PARSE Debugger</a></p>
+<p>But I'm trying to put that together as part of a bigger story of what kind of infrastructure exists for dialect debugging and debugging in the main language (e.g. you'd be able to "step in" to a dialect at the Rebol instructions--like an assembly view--or at the level the dialect offers).</p>
+<aside class="quote no-group" data-username="bradrn" data-post="1" data-topic="2173">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/bradrn/48/365_2.png" class="avatar"> bradrn:</div>
+<blockquote>
+<p>What use is this for Rebol?</p>
+<p>Quite probably, none at all.</p>
+</blockquote>
+</aside>
+<p>The most useful thing is bringing this outside perspective to the sort of "people who grew up on C64 BASIC" who tend to populate and design Rebol.  (You've already usefully pointed out that OPTIONAL is a perfectly acceptable word and explained the Haskell sense of TRY...)</p>
+<p>Like I say above, the UPARSE design is still very much prototype-y.  It's at the "amazing it works at all" phase, though it's already the most tested PARSE variant by far (e.g. <a href="https://rebol.metaeducation.com/t/making-red-tests-useful-starting-uparse-on-the-right-foot/1649">by subsuming Red's PARSE tests</a>).  But by being all usermode code, it's still at the point where there's plasticity in the design to incorporate new ideas.</p>
+<p>The big areas where ideas are needed most are in error delivery, and what the story is for binding tools within parse to help dialect authors accomplish cool things easily.  And any architectural ideas to bolster performance (while still keeping the pleasing ergonomics) would be welcome.</p>
+          <p><a href="https://rebol.metaeducation.com/t/haskell-parser-combinators/2173/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/haskell-parser-combinators/2173/2</link>
+        <pubDate>Tue, 12 Mar 2024 05:24:52 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2173-2</guid>
+        <source url="https://rebol.metaeducation.com/t/haskell-parser-combinators/2173.rss">Haskell parser combinators</source>
+      </item>
+      <item>
+        <title>Haskell parser combinators</title>
+        <dc:creator><![CDATA[bradrn]]></dc:creator>
+        <description><![CDATA[
+            <p>I’ve seen a few parsing-related threads recently in this forum. I haven’t been commenting much on them, since I don’t have enough experience with UPARSE (or for that matter historical PARSE) to say anything helpful.</p>
+<p>On the other hand, I <em>do</em> have a lot of experience with parser combinators in Haskell. In terms of structure and purpose, they’re probably the concept most similar to UPARSE that I’ve seen from another language. So I thought I’d write this post in the hope that something, somewhere, might eventually prove useful somehow.</p>
+<h2><a name="p-7250-high-level-overview-1" class="anchor" href="https://rebol.metaeducation.com#p-7250-high-level-overview-1"></a>High-level overview</h2>
+<p>The first and most important thing to realise about parser combinators is that <strong>they’re not built into the language</strong>. They’re simply ordinary libraries which make it easy to construct parsers compositionally.</p>
+<p>(I mean, for that matter, UPARSE isn’t built in either. But there’s a different level of integration with the rest of the language.)</p>
+<p>The basic approach is to define a new datatype for parsers, usually called something like <code>Parser a</code>. This is a parser which can process a string (or other datatype), returning a result of type <code>a</code> if it succeeds. Alongside this there will be a set of primitive parsers, most notably <code>char</code> (to parse single characters), <code>return</code> (which always succeeds with a result), and <code>empty</code> (which always fails).</p>
+<p>(Of course, practical libraries will have more primitives. <code>megaparsec</code> has <a href="https://hackage.haskell.org/package/megaparsec-9.6.1/docs/Text-Megaparsec.html#g:4">a nice selection</a>, with good comments.)</p>
+<p>The most interesting bit is the way these parser combinators are combined to create larger parsers. This, of course, relies on the standard abstractions of Haskell. Two operators are particularly important:</p>
+<ul>
+<li>Sequencing: <code>p &gt;&gt;= f</code> is a parser which runs <code>p</code> and passes the result to function <code>f</code>, then runs the resulting parser.</li>
+<li>Choice: <code>p &lt;|&gt; q</code> is a parser which runs <code>p</code>, then backtracks and runs <code>q</code> if that failed.</li>
+</ul>
+<p>From these basic elements you can define a very wide range of generic combinators, for instance these useful ones:</p>
+<pre data-code-wrap="hs"><code class="lang-hs">-- sequencing ignoring result
+(&gt;&gt;) :: Parser a -&gt; Parser b -&gt; Parser b
+p &gt;&gt; q = p &gt;&gt;= \_ -&gt; q
+
+-- Match a whole string
+string :: String -&gt; Parser ()
+string "" = return ()
+string (c:cs) = char c &gt;&gt; string cs
+
+-- 1 or more
+some :: Parser a -&gt; Parser [a]
+some p =
+    p &gt;&gt;= \first -&gt;
+    many p &gt;&gt;= \rest -&gt;
+    return (first : rest)
+
+-- 0 or more
+many :: Parser a -&gt; Parser [a]
+many p = some p &lt;|&gt; return []
+</code></pre>
+<h2><a name="p-7250-a-basic-implementation-2" class="anchor" href="https://rebol.metaeducation.com#p-7250-a-basic-implementation-2"></a>A basic implementation</h2>
+<p>This is all a little abstract, though. Probably the easiest way to understand parser combinators is to implement them.</p>
+<p>A basic implementation is quite simple. A parser is just a function which takes in a string, and on success returns the result alongside the unparsed portion of the string:</p>
+<pre data-code-wrap="hs"><code class="lang-hs">newtype Parser a = Parser (String -&gt; Maybe (String, a))
+</code></pre>
+<p>You then run the parser simply by unwrapping the function and applying it to your input:</p>
+<pre data-code-wrap="hs"><code class="lang-hs">runParser :: Parser a -&gt; String -&gt; Maybe (String, a)
+runParser (Parser p) input = p input
+</code></pre>
+<p>Simple parsers work as you’d expect:</p>
+<pre data-code-wrap="hs"><code class="lang-hs">char :: Char -&gt; Parser ()
+char c = Parser $ \input -&gt; case input of
+    (c':cs) | c == c' -&gt; Just (cs, ())
+    _ -&gt; Nothing
+
+return :: a -&gt; Parser a
+return a = Parser $ \input -&gt; Just (input, a)
+
+empty :: Parser a
+empty = Parser $ \_ -&gt; Nothing
+</code></pre>
+<p>The combinators require more elaborate state-threading, but are still straightforward:</p>
+<pre data-code-wrap="hs"><code class="lang-hs">(&gt;&gt;=) :: Parser a -&gt; (a -&gt; Parser b) -&gt; Parser b
+p &gt;&gt;= f = Parser $ \input -&gt;
+    case runParser p input of
+        Nothing -&gt; Nothing
+        Just (partiallyParsed, a) -&gt;
+            runParser (f a) partiallyParsed
+
+(&lt;|&gt;) :: Parser a -&gt; Parser a -&gt; Parser a
+p &lt;|&gt; q = Parser $ \input -&gt;
+    case runParser p input of
+        Just result -&gt; Just result
+        Nothing -&gt; runParser q input
+</code></pre>
+<p>This simple code suffices for a surprisingly wide variety of tasks. For instance, a slight variant is present in the base library as <a href="https://hackage.haskell.org/package/base-4.16.3.0/docs/Text-Read.html#t:ReadS"><code>ReadS</code></a>. (The variation is that <code>ReadS</code> can produce multiple results.)</p>
+<h2><a name="p-7250-managing-backtracking-3" class="anchor" href="https://rebol.metaeducation.com#p-7250-managing-backtracking-3"></a>Managing backtracking</h2>
+<p>Unfortunately, <strong>this has serious problems with any larger-scale use</strong>. For one thing, it can’t do error reporting beyond ‘it failed somewhere’. But there are even bigger problems with this implementation of the choice combinator <code>(&lt;|&gt;)</code>:</p>
+<ol>
+<li>It behaves unpredictably: any error anywhere will result in the parser backtracking to the last choice, and so on until every single choice has been exhausted. This is bad for the time complexity, plus it leaves you no chance of ever reporting errors nicely.</li>
+<li>It holds onto the input string during the whole time <code>p</code> is executing. This creates a space leak, which grows larger the more nested choices you have.</li>
+</ol>
+<p>The first parser combinator library to solve these issues was <code>Parsec</code>. Its design is described in <a href="https://www.microsoft.com/en-us/research/wp-content/uploads/2016/02/parsec-paper-letter.pdf">this paper</a> (which seems very readable). I won’t describe its implementation here… but the basic idea is simple to summarise: each parser keeps track of what it’s consumed, and <strong>commits to a parser as soon as it’s consumed any characters</strong>.</p>
+<p>Some parsers require no changes under this new semantics. For instance, <code>string "first word" &lt;|&gt; string "second word"</code> works without problems. If it sees an input character <code>f</code>, the first choice <code>string "first word"</code> matches immediately, meaning the library can commit to the first parser, and know that the second parser never needs to run. On the other hand, upon seeing an input character <code>'s'</code>, that first parser will fail on that very first character: since no characters have been consumed, control passes over to the second parser to succeed or fail.</p>
+<p>On the other hand, more elaborate lookahead becomes more difficult. For instance, <code>string "word 1" &lt;|&gt; string "word 2"</code> no longer works: as soon as this parser sees <code>'w'</code>, it matches the first parser, so the second parser will never be run.</p>
+<p>To solve this, Parsec introduces a new primitive combinator: <code>try</code>, which creates a parser which never consumes characters on failure. The effect of this is to allow backtracking over whatever is in the <code>try</code>. For this example, <code>try (string "word 1") &lt;|&gt; string "word 2"</code> would work as expected.</p>
+<p>The nice thing about this approach is the control it gives you. For instance, I can write things like:</p>
+<pre data-code-wrap="hs"><code class="lang-hs">(try (string "App") &gt;&gt; string "le") &lt;|&gt; string "Apricot"
+</code></pre>
+<p>Here, as soon as the parser reaches a second <code>'p'</code>, it can commit to the first branch. But if it sees another character, it’s still able to backtrack through the <code>string "App"</code> and move on to the second branch. Of course, this is a contrived example — but in general, being able to specify the control flow of your parser like this is exceedingly useful in larger parsers.</p>
+<h2><a name="p-7250-what-use-is-this-for-rebol-4" class="anchor" href="https://rebol.metaeducation.com#p-7250-what-use-is-this-for-rebol-4"></a>What use is this for Rebol?</h2>
+<p>Quite probably, none at all.</p>
+<p>But like I said, I’m hoping potentially some of this might end up useful somewhere. If it can act as inspiration which helps solve any problems, I’m happy.</p>
+<p>And, of course, now that we have this thread for it, feel free to ask me any questions about parser combinators you might have!</p>
+          <p><a href="https://rebol.metaeducation.com/t/haskell-parser-combinators/2173/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/haskell-parser-combinators/2173/1</link>
+        <pubDate>Mon, 11 Mar 2024 15:08:10 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2173-1</guid>
+        <source url="https://rebol.metaeducation.com/t/haskell-parser-combinators/2173.rss">Haskell parser combinators</source>
+      </item>
+  </channel>
+</rss>

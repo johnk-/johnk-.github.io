@@ -1,0 +1,214 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Agreed Upon Symbol Numbers for Extensions</title>
+    <link>https://rebol.metaeducation.com/t/agreed-upon-symbol-numbers-for-extensions/1188</link>
+    <description>A concept in the R3-Alpha codebase is that there are a certain number of built-in words...which come from a file called %words.r
+
+[https://github.com/rebol/rebol/blob/master/src/boot/words.r](https://github.com/rebol/rebol/blob/master/src/boot/words.r)
+
+This is done so you can switch on a numeric code for these words, and not bother with needing to do a string comparison in C.  Some words (like PARSE keywords) are strategically chosen to be in a sequential range, to make testing for them faster.
+
+If you write an extension in C that operates at the internal level API and want the performance of a native, you might want to talk about a word that&#39;s not in that list.  You can get a bit close to the performance for a single test by caching a pointer to the canonized version of that word, and comparing to that canon pointer.  But it won&#39;t be quite as fast, and since that won&#39;t be a constant...C can&#39;t use it in switch statements.
+
+To be more concrete, imagine you have some words not in %words.r like OVERLOAD, MULTIPLE, INHERITANCE.  You couldn&#39;t write:
+
+     switch (VAL_WORD_SYM(some_word)) {  ; small 16-bit # can be cached in word
+         case SYM_OVERLOAD: ...  ; ...but these weren&#39;t in %words.r!
+         case SYM_MULTIPLE: ...
+         case SYM_INHERITANCE: ...
+         default: ...
+    }
+
+Can&#39;t do that for those new terms.  You&#39;d have to do case-insensitive string comparisons, or something like this pseudocode:
+
+     const Symbol* canon_overload;
+     const Symbol* canon_multiple;
+     const Symbol* canon_inheritance;
+
+     void On_Module_Load() {
+         symbol_overload = Register_Symbol(&quot;overload&quot;);
+         symbol_multiple = Register_Symbol(&quot;multiple&quot;);
+         symbol_inheritance = Register_Symbol(&quot;inheritance&quot;);
+     }
+
+     void On_Module_Shutdown() {
+         Unregister_Symbol(symbol_overload);
+         Unregister_Symbol(symbol_multiple);
+         Unregister_Symbol(symbol_inheritance);
+     }
+
+So imagine this gives you word series pointers that are guarded from GC for as long as your module is loaded.  Then you could say:
+
+     const String* symbol = Cell_Word_Symbol(some_word);
+     if (symbol == symbol_overload) { ... }
+     else if (symbol == symbol_multiple) { ... }
+     else if (symbol == symbol_inheritance) { ... }
+     else { ... }
+
+It&#39;s less elegant than the switch(), and since the numbers are runtime pointers and not fixed at compile-time, there&#39;s no way to optimize as in a switch() by repeatedly bisecting the range of values...if you have N words, you will do N comparisons.
+
+## Weird idea: Agree on a list of words and numbers, commit on Internet
+
+It would be pretty heinous to make a much bigger %words.r and ship it in every executable...inflating the size of Rebol to include a dictionary.
+
+But there&#39;s a possibility that doesn&#39;t go that far yet still gets the benefit.  Make the word list and commit it somewhere on the internet that developers can look.  Give every common word a number.  Then, the extension ships with just the spellings and numbers it needs.  All extensions agree to use the same numbers:
+
+     #define SYM_OVERLOAD 15092
+     #define SYM_MULTIPLE 32091
+     #define SYM_INHERITANCE 63029
+
+     void On_Module_Load() {
+         Register_Symbol(&quot;overload&quot;, SYM_OVERLOAD);
+         Register_Symbol(&quot;multiple&quot;, SYM_MULTIPLE);
+         Register_Symbol(&quot;inheritance&quot;, SYM_INHERITANCE);
+     }
+
+     void On_Module_Shutdown() {
+         Unregister_Symbol(SYM_OVERLOAD);
+         Unregister_Symbol(SYM_MULTIPLE);
+         Unregister_Symbol(SYM_INHERITANCE);
+     }
+
+Your switch() statements can work just fine, and you&#39;re only out of luck if you use a sequence of characters that wasn&#39;t committed to in the database.  But the database can grow, so long as it grows centrally and not inconsistently.  (In fact, it&#39;s probably better to do it that way, where extension authors ask for the words they want and get them approved before shipping the extension.)
+
+The worst that can happen is you load two extensions that disagree, and it refuses to load them.  It could print out the disagreeing numbers and you could consult the internet to decide who was the culprit using the wrong number.
+
+It&#39;s a weird idea but kind of interesting--not in particular because of the performance aspect, but because of enabling the C switch()es.  Since there&#39;s only 16 bits of space in the word available for the symbol trick, it&#39;s an exhaustible resource.  But maybe still worth doing.  This really isn&#39;t difficult, outside of the administrative headache of deciding the policy on giving out #s</description>
+    
+    <lastBuildDate>Thu, 27 Mar 2025 20:04:56 +0000</lastBuildDate>
+    <category>Optimization</category>
+    <atom:link href="https://rebol.metaeducation.com/t/agreed-upon-symbol-numbers-for-extensions/1188.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Agreed Upon Symbol Numbers for Extensions</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>Five years later...</p>
+<p>Since I'm reviving <a href="https://rebol.metaeducation.com/t/extension-types-implementation/1203/5">Extension Types</a>, it brought me face to face with the issue of these old extensions introducing clutter, in terms of built-in symbols that you pay for whether you use them or not.</p>
+<p>You can see how the original <code>%words.r</code> grew between R3-Alpha and R3-Atronix/Saphirion:</p>
+<p>R3-Alpha: <a href="https://github.com/rebol/rebol/blob/master/src/boot/words.r">https://github.com/rebol/rebol/blob/master/src/boot/words.r</a></p>
+<p>R3-Atronix: <a href="https://github.com/zsx/r3/blob/atronix/src/boot/words.r">https://github.com/zsx/r3/blob/atronix/src/boot/words.r</a></p>
+<p>It's messy, and building in the words grows the lookup hash table... costs you the string storage... and costs you the memory Stub corresponding to the string (though small strings fit in the Stub).</p>
+<p>So I decided it was time to implement the idea...</p>
+<h2><a name="p-8089-a-little-different-1" class="anchor" href="https://rebol.metaeducation.com#p-8089-a-little-different-1"></a>A Little Different...</h2>
+<p>This is what I originally suggested:</p>
+<blockquote>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext"> #define SYM_OVERLOAD 15092
+ #define SYM_MULTIPLE 32091
+ #define SYM_INHERITANCE 63029
+
+ void On_Module_Load() {
+     Register_Symbol("overload", SYM_OVERLOAD);
+     Register_Symbol("multiple", SYM_MULTIPLE);
+     Register_Symbol("inheritance", SYM_INHERITANCE);
+ }
+
+ void On_Module_Shutdown() {
+     Unregister_Symbol(SYM_OVERLOAD);
+     Unregister_Symbol(SYM_MULTIPLE);
+     Unregister_Symbol(SYM_INHERITANCE);
+ }
+</code></pre>
+</blockquote>
+<p>I've made it a bit easier by having an <code>#include</code> file with the SYM_XXX defined that you can use in your extension.  But I call them EXT_SYM_XXX instead.</p>
+<p>Also, what you get back is actually not a <strong><code>Symbol*</code></strong>, but instead a <strong><code>Value*</code></strong>.</p>
+<p><em>"Why a Value?"</em>.. you ask.  Well, because it's not useless to have the value around, and because for now an API handle is the easiest way to prevent the GC from collecting the symbol if it's not used.  You don't want that to happen between the Register/Unregister calls, because if it disappeared and came back it wouldn't get the symbol ID.</p>
+<p>If there were space inside the symbol to put a reference could we could put it there.  But things are hyper optimized, and there's not space for that--for such a fringe feature.  Even if the space was available, I'd use it for something else.</p>
+<p>So it looks more like this:</p>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">Value* g_word_overload = nullptr;
+Value* g_word_multiple = nullptr;
+Value* g_word_intheritance = nullptr;
+
+void On_Module_Load() {
+    g_word_overload = Register_Symbol("overload", EXT_SYM_OVERLOAD);
+    g_word_multiple = Register_Symbol("multiple", EXT_SYM_MULTIPLE);
+    g_word_inheritance = Register_Symbol("inheritance", EXT_SYM_INHERITANCE);
+}
+
+void On_Module_Shutdown() {
+    Unregister_Symbol(g_word_overload, EXT_SYM_OVERLOAD);
+    Unregister_Symbol(g_word_multiple, EXT_SYM_MULTIPLE);
+    Unregister_Symbol(g_word_inheritance, EXT_SYM_INHERITANCE);
+ }
+</code></pre>
+<p><em>(You don't technically have to pass the symbol in on unregistering, but it's a sanity check.)</em></p>
+<p>And that's all it takes to be able to use the EXT_SYM_XXX in <code>switch()</code> statements in your extension... without bloating the core with your weird words!</p>
+          <p><a href="https://rebol.metaeducation.com/t/agreed-upon-symbol-numbers-for-extensions/1188/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/agreed-upon-symbol-numbers-for-extensions/1188/2</link>
+        <pubDate>Thu, 27 Mar 2025 20:04:56 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1188-2</guid>
+        <source url="https://rebol.metaeducation.com/t/agreed-upon-symbol-numbers-for-extensions/1188.rss">Agreed Upon Symbol Numbers for Extensions</source>
+      </item>
+      <item>
+        <title>Agreed Upon Symbol Numbers for Extensions</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>A concept in the R3-Alpha codebase is that there are a certain number of built-in words...which come from a file called %words.r</p>
+<p><a href="https://github.com/rebol/rebol/blob/master/src/boot/words.r">https://github.com/rebol/rebol/blob/master/src/boot/words.r</a></p>
+<p>This is done so you can switch on a numeric code for these words, and not bother with needing to do a string comparison in C.  Some words (like PARSE keywords) are strategically chosen to be in a sequential range, to make testing for them faster.</p>
+<p>If you write an extension in C that operates at the internal level API and want the performance of a native, you might want to talk about a word that's not in that list.  You can get a bit close to the performance for a single test by caching a pointer to the canonized version of that word, and comparing to that canon pointer.  But it won't be quite as fast, and since that won't be a constant...C can't use it in switch statements.</p>
+<p>To be more concrete, imagine you have some words not in %words.r like OVERLOAD, MULTIPLE, INHERITANCE.  You couldn't write:</p>
+<pre><code> switch (VAL_WORD_SYM(some_word)) {  ; small 16-bit # can be cached in word
+     case SYM_OVERLOAD: ...  ; ...but these weren't in %words.r!
+     case SYM_MULTIPLE: ...
+     case SYM_INHERITANCE: ...
+     default: ...
+}
+</code></pre>
+<p>Can't do that for those new terms.  You'd have to do case-insensitive string comparisons, or something like this pseudocode:</p>
+<pre><code> const Symbol* canon_overload;
+ const Symbol* canon_multiple;
+ const Symbol* canon_inheritance;
+
+ void On_Module_Load() {
+     symbol_overload = Register_Symbol("overload");
+     symbol_multiple = Register_Symbol("multiple");
+     symbol_inheritance = Register_Symbol("inheritance");
+ }
+
+ void On_Module_Shutdown() {
+     Unregister_Symbol(symbol_overload);
+     Unregister_Symbol(symbol_multiple);
+     Unregister_Symbol(symbol_inheritance);
+ }
+</code></pre>
+<p>So imagine this gives you word series pointers that are guarded from GC for as long as your module is loaded.  Then you could say:</p>
+<pre><code> const String* symbol = Cell_Word_Symbol(some_word);
+ if (symbol == symbol_overload) { ... }
+ else if (symbol == symbol_multiple) { ... }
+ else if (symbol == symbol_inheritance) { ... }
+ else { ... }
+</code></pre>
+<p>It's less elegant than the switch(), and since the numbers are runtime pointers and not fixed at compile-time, there's no way to optimize as in a switch() by repeatedly bisecting the range of values...if you have N words, you will do N comparisons.</p>
+<h2><a name="p-3448-weird-idea-agree-on-a-list-of-words-and-numbers-commit-on-internet-1" class="anchor" href="https://rebol.metaeducation.com#p-3448-weird-idea-agree-on-a-list-of-words-and-numbers-commit-on-internet-1"></a>Weird idea: Agree on a list of words and numbers, commit on Internet</h2>
+<p>It would be pretty heinous to make a much bigger %words.r and ship it in every executable...inflating the size of Rebol to include a dictionary.</p>
+<p>But there's a possibility that doesn't go that far yet still gets the benefit.  Make the word list and commit it somewhere on the internet that developers can look.  Give every common word a number.  Then, the extension ships with just the spellings and numbers it needs.  All extensions agree to use the same numbers:</p>
+<pre><code> #define SYM_OVERLOAD 15092
+ #define SYM_MULTIPLE 32091
+ #define SYM_INHERITANCE 63029
+
+ void On_Module_Load() {
+     Register_Symbol("overload", SYM_OVERLOAD);
+     Register_Symbol("multiple", SYM_MULTIPLE);
+     Register_Symbol("inheritance", SYM_INHERITANCE);
+ }
+
+ void On_Module_Shutdown() {
+     Unregister_Symbol(SYM_OVERLOAD);
+     Unregister_Symbol(SYM_MULTIPLE);
+     Unregister_Symbol(SYM_INHERITANCE);
+ }
+</code></pre>
+<p>Your switch() statements can work just fine, and you're only out of luck if you use a sequence of characters that wasn't committed to in the database.  But the database can grow, so long as it grows centrally and not inconsistently.  (In fact, it's probably better to do it that way, where extension authors ask for the words they want and get them approved before shipping the extension.)</p>
+<p>The worst that can happen is you load two extensions that disagree, and it refuses to load them.  It could print out the disagreeing numbers and you could consult the internet to decide who was the culprit using the wrong number.</p>
+<p>It's a weird idea but kind of interesting--not in particular because of the performance aspect, but because of enabling the C switch()es.  Since there's only 16 bits of space in the word available for the symbol trick, it's an exhaustible resource.  But maybe still worth doing.  This really isn't difficult, outside of the administrative headache of deciding the policy on giving out <span class="hashtag-raw">#s</span></p>
+          <p><a href="https://rebol.metaeducation.com/t/agreed-upon-symbol-numbers-for-extensions/1188/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/agreed-upon-symbol-numbers-for-extensions/1188/1</link>
+        <pubDate>Thu, 25 Jul 2019 18:44:16 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1188-1</guid>
+        <source url="https://rebol.metaeducation.com/t/agreed-upon-symbol-numbers-for-extensions/1188.rss">Agreed Upon Symbol Numbers for Extensions</source>
+      </item>
+  </channel>
+</rss>

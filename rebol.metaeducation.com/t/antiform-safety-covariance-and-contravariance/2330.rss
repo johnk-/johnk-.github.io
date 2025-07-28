@@ -1,0 +1,428 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Antiform Safety: Covariance and Contravariance</title>
+    <link>https://rebol.metaeducation.com/t/antiform-safety-covariance-and-contravariance/2330</link>
+    <description>Grafting antiforms onto a C codebase that had no such concept is fraught with disasters.
+
+The semantics of unstable antiforms is particularly risky.  If you have a test like **`Is_Block(cell)`** that tells you whether a cell holds a BLOCK!, then what if that cell holds an antiform block?  Usermode code has the benefit of decay-by-default (unless you take a meta-parameter).  So if you ask **`BLOCK?`** on a parameter pack, it will decay to its first item and answer based on that.  The C implementation has no such &quot;automatic&quot; behavior.
+
+Even &quot;worse&quot;, what if **`cell`** contains an antiform error, and you quietly say &quot;no it&#39;s not a block&quot; and proceed on, ignoring situations when that should have raised an abrupt failure?
+
+## Creating A Type Hierarchy: Atom -&gt; Value -&gt; Element
+
+I&#39;ve given names to the three broad categories of cells:
+
+* **ELEMENT** - anything that you can put in a List.  So this is &quot;element&quot; as in &quot;array element&quot;.  Hence, no antiforms.  (It&#39;s not a perfect name in terms of correspondence to &quot;chemical element&quot; in terms of the abstract form that can come in isotopes, so think of it as array element)
+
+* **VALUE** - anything that you can put in a Variable.  So it extends ELEMENT with stable antiforms.
+
+* **ATOM** - anything, including unstable antiforms.
+
+Systemically, we want to stop antiforms from being put into the array elements of blocks, groups, paths, and tuples.  We also want to prevent unstable antiforms from being the values of variables.  
+
+To make it easier to do this, the C++ build offers the ability to make `Element` that can&#39;t hold any antiforms, `Value` that can hold stable antiforms, and `Atom` that can hold anything--including unstable isotopes.
+
+* **Class Hierarchy:** Atom as base, Value derived, Element derived (upside-down for compile-time error preferences--we want passing an Atom to a routine that expects only Element to fail)
+
+* **Primary Goal:** Prevent passing Atoms/Values to Element-only routines, or Atoms to Value-only routines.
+
+* **Secondary Goal:** Prevent things like passing Element cells to writing routines that may potentially produce antiforms in that cell.
+
+* **Tertiary Goal:** Detect things like superfluous `Is_Antiform()` calls being made on Elements.
+
+The primary goal is achieved by choosing Element as a most-derived type instead of a base type.
+
+The next two goals are somewhat maddeningly trickier... :pouting_cat: 
+
+## `Sink(...)` and `Need(...)`
+
+The idea behind a Sink() is to be able to mark on a function&#39;s interface when a function argument passed by pointer is intended as an output.
+
+This has benefits of documentation, and can also be given some teeth by scrambling the memory that the pointer points at (so long as it isn&#39;t an &quot;in-out&quot; parameter).  But it also applied in CHECK_CELL_SUBCLASSES, by enforcing &quot;covariance&quot; for input parameters, and &quot;contravariance&quot; for output parameters.
+
+If USE_CELL_SUBCLASSES is enabled, then the inheritance heirarchy has Atom at the base, with Element at the top.  Since what Elements can contain is more constrained than what Atoms can contain, this means you can pass Atom* to Element*, but not vice-versa.
+
+However, when you have a Sink(Element) parameter instead of an Element*, the checking needs to be reversed.  You are -writing- an Element, so the receiving caller can pass an Atom* and it will be okay.  But if you were writing an Atom, then passing an Element* would not be okay, as after the initialization the Element could hold invalid states.
+
+We use &quot;SFINAE&quot; to selectively enable the upside-down hierarchy, based on the `std::is_base_of&lt;&gt;` type trait.
+
+## The Code (in the C++ Debug Build)
+
+    template&lt;typename T, bool sink&gt;
+    struct NeedWrapper {
+        T* p;
+        mutable bool corruption_pending;  // can&#39;t corrupt on construct
+
+      //=//// TYPE ALIASES ////////////////////////////////////////////////=//
+
+        using MT = typename std::remove_const&lt;T&gt;::type;
+
+        template&lt;typename U&gt;  // contravariance
+        using IsReverseInheritable = typename std::enable_if&lt;
+            std::is_same&lt;U,T&gt;::value or std::is_base_of&lt;U,T&gt;::value
+        &gt;::type;
+
+      //=//// CONSTRUCTORS ////////////////////////////////////////////////=//
+
+        NeedWrapper() = default;  // or MSVC warns making Option(Sink(Value))
+
+        NeedWrapper(nullptr_t) {
+            p = nullptr;
+            corruption_pending = false;
+        }
+
+        NeedWrapper (const NeedWrapper&lt;T,sink&gt;&amp; other) {
+            p = other.p;
+            corruption_pending = p and (other.corruption_pending or sink);
+            other.corruption_pending = false;
+        }
+
+        template&lt;typename U, IsReverseInheritable&lt;U&gt;* = nullptr&gt;
+        NeedWrapper(U* u) {
+            p = u_cast(T*, u);
+            corruption_pending = p and sink;
+        }
+
+        template&lt;typename U, bool B, IsReverseInheritable&lt;U&gt;* = nullptr&gt;
+        NeedWrapper(const NeedWrapper&lt;U, B&gt;&amp; other) {
+            p = u_cast(T*, other.p);
+            corruption_pending = p and (other.corruption_pending or sink);
+            other.corruption_pending = false;
+        }
+
+      //=//// ASSIGNMENT //////////////////////////////////////////////////=//
+
+        NeedWrapper&amp; operator=(nullptr_t) {
+            p = nullptr;
+            corruption_pending = false;
+            return *this;
+        }
+
+        NeedWrapper&amp; operator=(const NeedWrapper&lt;T,sink&gt; other) {
+            if (this != &amp;other) {  // self-assignment possible
+                p = other.p;
+                corruption_pending = p and (other.corruption_pending or sink);
+                other.corruption_pending = false;
+            }
+            return *this;
+        }
+
+        template&lt;typename U, IsReverseInheritable&lt;U&gt;* = nullptr&gt;
+        NeedWrapper&amp; operator=(const NeedWrapper&amp; other) {
+            if (this != &amp;other) {  // self-assignment possible
+                p = other.p;
+                corruption_pending = p and (other.corruption_pending or sink);
+                other.corruption_pending = false;
+            }
+            return *this;
+        }
+
+        template&lt;typename U, IsReverseInheritable&lt;U&gt;* = nullptr&gt;
+        NeedWrapper&amp; operator=(U* other) {
+            p = u_cast(T*, other);
+            corruption_pending = p and sink;
+            return *this;
+        }
+
+      //=//// OPERATORS ///////////////////////////////////////////////////=//
+
+        operator bool () const { return p != nullptr; }
+
+        operator T* () const {
+            if (corruption_pending) {
+                Corrupt_If_Debug(*const_cast&lt;MT*&gt;(p));
+                corruption_pending = false;
+            }
+            return p;
+        }
+
+        T* operator-&gt;() const {
+            if (corruption_pending) {
+                Corrupt_If_Debug(*const_cast&lt;MT*&gt;(p));
+                corruption_pending = false;
+            }
+            return p;
+        }
+
+      //=//// DESTRUCTOR //////////////////////////////////////////////////=//
+
+        ~NeedWrapper() {
+            if (corruption_pending)
+                Corrupt_If_Debug(*const_cast&lt;MT*&gt;(p));
+        }
+    };
+
+So then the `Sink(...)` and non-corrupting version `Need(...)` for in/out parameters with contravariance checking are:
+
+    #define Sink(T) \
+        NeedWrapper&lt;T, true&gt;
+
+    #define Need(TP) \
+        NeedWrapper&lt;typename std::remove_pointer&lt;TP&gt;::type, false&gt;
+
+## Notes on Corrupting
+
+The original implementation was simpler, by just doing the corruption at the moment of construction.
+
+But this faced a problem:
+
+        bool some_function(Sink(char*) out, char* in) { ... }
+
+        if (some_function(&amp;ptr, ptr)) { ...}
+
+If you corrupt the data at the address the sink points to, you can actually be corrupting the value of a stack variable being passed as another argument before it&#39;s calculated as an argument.  So deferring the corruption after construction is necessary.  It&#39;s a bit tricky in terms of the handoffs and such.
+
+*(While this could be factored, function calls aren&#39;t inlined in the debug build, so given the simplicity of the code, it&#39;s repeated.)*</description>
+    
+    <lastBuildDate>Wed, 13 Nov 2024 19:18:23 +0000</lastBuildDate>
+    <category>Testing</category>
+    <atom:link href="https://rebol.metaeducation.com/t/antiform-safety-covariance-and-contravariance/2330.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Antiform Safety: Covariance and Contravariance</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="2330">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>The next two goals are somewhat maddeningly trickier... <img src="https://rebol.metaeducation.com/images/emoji/twitter/pouting_cat.png?v=14" title=":pouting_cat:" class="emoji" alt=":pouting_cat:" loading="lazy" width="20" height="20"></p>
+</blockquote>
+</aside>
+<pre><code>template&lt;typename U&gt;
+using IsReverseInheritable = typename std::enable_if&lt;
+    std::is_same&lt;U,T&gt;::value or std::is_base_of&lt;U,T&gt;::value
+&gt;::type;
+</code></pre>
+<p>Because this was such a PITA, I looked around for contravariance precedent in C++ and sort of... couldn't find any.</p>
+<h2><a name="p-7887-claudeais-thoughts-on-why-1" class="anchor" href="https://rebol.metaeducation.com#p-7887-claudeais-thoughts-on-why-1"></a>Claude.AI's Thoughts on Why</h2>
+<blockquote>
+<p>I think the reason there isn't more prior art for this pattern in C++ specifically is that C++'s type system historically encouraged a different way of thinking about inheritance. The standard pattern was that derived classes would <em>extend</em> base classes with new capabilities, rather than <em>constrain</em> them with narrower invariants.</p>
+<p>Consider a typical C++ example:</p>
+<pre><code>class Animal { 
+    virtual void makeSound() = 0;
+};
+
+class Dog : public Animal {
+    void makeSound() override { /* bark */ }
+    void fetch();  // adds new capability
+};
+</code></pre>
+<p>In this common pattern, <code>Dog</code> is "bigger" than <code>Animal</code> - it can do everything an <code>Animal</code> can do plus more. So the traditional covariant rules make sense: you can pass a <code>Dog*</code> anywhere that takes an <code>Animal*</code> because a <code>Dog</code> can fulfill all <code>Animal</code> contracts.</p>
+<p>Your pattern is more in line with refinement types or subtyping based on invariants, where:</p>
+<pre><code>class Number { /* can be any number */ };
+class PositiveNumber : public Number { /* invariant: must be &gt; 0 */ };
+</code></pre>
+<p>Here <code>PositiveNumber</code> is actually "smaller" in terms of its valid state space. When initializing/writing, you want the reverse inheritance rule because you can't safely write an arbitrary <code>Number</code> into a <code>PositiveNumber</code> slot.</p>
+<p>This kind of type refinement through inheritance is less common in C++, perhaps because:</p>
+<ol>
+<li>
+<p>C++ lacks built-in support for invariant checking</p>
+</li>
+<li>
+<p>The language encourages thinking about inheritance in terms of interface/capability extension</p>
+</li>
+<li>
+<p>Many C++ codebases use inheritance primarily for runtime polymorphism rather than compile-time type constraints</p>
+</li>
+</ol>
+<p>Your pattern seems more aligned with how some functional languages handle subtypes and refinement types. The fact that you're using it in a debug-time checking tool is interesting - it's bringing some of those functional programming type safety concepts into C++ through the back door.</p>
+</blockquote>
+<h2><a name="p-7887-so-c-can-do-it-but-its-just-painful-2" class="anchor" href="https://rebol.metaeducation.com#p-7887-so-c-can-do-it-but-its-just-painful-2"></a>So C++ Can Do It, But It's Just Painful</h2>
+<p>But... now it's written, and it works.  Using it is easy enough, and catches usage errors and misunderstandings on a daily basis.</p>
+<p>I'd be interested to see how this would be implemented in a functional language, but I'm not going to be the one to do it.  Maybe some bored AI can do it someday.</p>
+<p>In any case, it's tech and intelligence like this that puts Ren-C far beyond the competition.  <img src="https://rebol.metaeducation.com/images/emoji/twitter/brain.png?v=14" title=":brain:" class="emoji" alt=":brain:" loading="lazy" width="20" height="20"></p>
+<p>And it's the fact that it still builds as C (with the TinyC compiler, no less) that keeps it true to Rebol's roots.  <img src="https://rebol.metaeducation.com/images/emoji/twitter/farmer.png?v=14" title=":farmer:" class="emoji" alt=":farmer:" loading="lazy" width="20" height="20"></p>
+<p>In the C build, the definitions are simply:</p>
+<pre><code>#if NO_CPLUSPLUS_11
+    typedef RebolValue Atom;
+    typedef RebolValue Value;
+    typedef RebolValue Element;
+
+    #define Sink(T) T *
+    #define Need(TP) TP
+#endif
+</code></pre>
+<p>I am starting to suspect this is the only codebase of its kind.</p>
+          <p><a href="https://rebol.metaeducation.com/t/antiform-safety-covariance-and-contravariance/2330/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/antiform-safety-covariance-and-contravariance/2330/2</link>
+        <pubDate>Mon, 11 Nov 2024 10:00:07 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2330-2</guid>
+        <source url="https://rebol.metaeducation.com/t/antiform-safety-covariance-and-contravariance/2330.rss">Antiform Safety: Covariance and Contravariance</source>
+      </item>
+      <item>
+        <title>Antiform Safety: Covariance and Contravariance</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>Grafting antiforms onto a C codebase that had no such concept is fraught with disasters.</p>
+<p>The semantics of unstable antiforms is particularly risky.  If you have a test like <strong><code>Is_Block(cell)</code></strong> that tells you whether a cell holds a BLOCK!, then what if that cell holds an antiform block?  Usermode code has the benefit of decay-by-default (unless you take a meta-parameter).  So if you ask <strong><code>BLOCK?</code></strong> on a parameter pack, it will decay to its first item and answer based on that.  The C implementation has no such "automatic" behavior.</p>
+<p>Even "worse", what if <strong><code>cell</code></strong> contains an antiform error, and you quietly say "no it's not a block" and proceed on, ignoring situations when that should have raised an abrupt failure?</p>
+<h2><a name="p-7886-creating-a-type-hierarchy-atom-value-element-1" class="anchor" href="https://rebol.metaeducation.com#p-7886-creating-a-type-hierarchy-atom-value-element-1"></a>Creating A Type Hierarchy: Atom -&gt; Value -&gt; Element</h2>
+<p>I've given names to the three broad categories of cells:</p>
+<ul>
+<li>
+<p><strong>ELEMENT</strong> - anything that you can put in a List.  So this is "element" as in "array element".  Hence, no antiforms.  (It's not a perfect name in terms of correspondence to "chemical element" in terms of the abstract form that can come in isotopes, so think of it as array element)</p>
+</li>
+<li>
+<p><strong>VALUE</strong> - anything that you can put in a Variable.  So it extends ELEMENT with stable antiforms.</p>
+</li>
+<li>
+<p><strong>ATOM</strong> - anything, including unstable antiforms.</p>
+</li>
+</ul>
+<p>Systemically, we want to stop antiforms from being put into the array elements of blocks, groups, paths, and tuples.  We also want to prevent unstable antiforms from being the values of variables.</p>
+<p>To make it easier to do this, the C++ build offers the ability to make <code>Element</code> that can't hold any antiforms, <code>Value</code> that can hold stable antiforms, and <code>Atom</code> that can hold anything--including unstable isotopes.</p>
+<ul>
+<li>
+<p><strong>Class Hierarchy:</strong> Atom as base, Value derived, Element derived (upside-down for compile-time error preferences--we want passing an Atom to a routine that expects only Element to fail)</p>
+</li>
+<li>
+<p><strong>Primary Goal:</strong> Prevent passing Atoms/Values to Element-only routines, or Atoms to Value-only routines.</p>
+</li>
+<li>
+<p><strong>Secondary Goal:</strong> Prevent things like passing Element cells to writing routines that may potentially produce antiforms in that cell.</p>
+</li>
+<li>
+<p><strong>Tertiary Goal:</strong> Detect things like superfluous <code>Is_Antiform()</code> calls being made on Elements.</p>
+</li>
+</ul>
+<p>The primary goal is achieved by choosing Element as a most-derived type instead of a base type.</p>
+<p>The next two goals are somewhat maddeningly trickier... <img src="https://rebol.metaeducation.com/images/emoji/twitter/pouting_cat.png?v=14" title=":pouting_cat:" class="emoji" alt=":pouting_cat:" loading="lazy" width="20" height="20"></p>
+<h2><a name="p-7886-sink-and-need-2" class="anchor" href="https://rebol.metaeducation.com#p-7886-sink-and-need-2"></a><code>Sink(...)</code> and <code>Need(...)</code></h2>
+<p>The idea behind a Sink() is to be able to mark on a function's interface when a function argument passed by pointer is intended as an output.</p>
+<p>This has benefits of documentation, and can also be given some teeth by scrambling the memory that the pointer points at (so long as it isn't an "in-out" parameter).  But it also applied in CHECK_CELL_SUBCLASSES, by enforcing "covariance" for input parameters, and "contravariance" for output parameters.</p>
+<p>If USE_CELL_SUBCLASSES is enabled, then the inheritance heirarchy has Atom at the base, with Element at the top.  Since what Elements can contain is more constrained than what Atoms can contain, this means you can pass Atom* to Element*, but not vice-versa.</p>
+<p>However, when you have a Sink(Element) parameter instead of an Element*, the checking needs to be reversed.  You are -writing- an Element, so the receiving caller can pass an Atom* and it will be okay.  But if you were writing an Atom, then passing an Element* would not be okay, as after the initialization the Element could hold invalid states.</p>
+<p>We use "SFINAE" to selectively enable the upside-down hierarchy, based on the <code>std::is_base_of&lt;&gt;</code> type trait.</p>
+<h2><a name="p-7886-the-code-in-the-c-debug-build-3" class="anchor" href="https://rebol.metaeducation.com#p-7886-the-code-in-the-c-debug-build-3"></a>The Code (in the C++ Debug Build)</h2>
+<pre><code>template&lt;typename T, bool sink&gt;
+struct NeedWrapper {
+    T* p;
+    mutable bool corruption_pending;  // can't corrupt on construct
+
+  //=//// TYPE ALIASES ////////////////////////////////////////////////=//
+
+    using MT = typename std::remove_const&lt;T&gt;::type;
+
+    template&lt;typename U&gt;  // contravariance
+    using IsReverseInheritable = typename std::enable_if&lt;
+        std::is_same&lt;U,T&gt;::value or std::is_base_of&lt;U,T&gt;::value
+    &gt;::type;
+
+  //=//// CONSTRUCTORS ////////////////////////////////////////////////=//
+
+    NeedWrapper() = default;  // or MSVC warns making Option(Sink(Value))
+
+    NeedWrapper(nullptr_t) {
+        p = nullptr;
+        corruption_pending = false;
+    }
+
+    NeedWrapper (const NeedWrapper&lt;T,sink&gt;&amp; other) {
+        p = other.p;
+        corruption_pending = p and (other.corruption_pending or sink);
+        other.corruption_pending = false;
+    }
+
+    template&lt;typename U, IsReverseInheritable&lt;U&gt;* = nullptr&gt;
+    NeedWrapper(U* u) {
+        p = u_cast(T*, u);
+        corruption_pending = p and sink;
+    }
+
+    template&lt;typename U, bool B, IsReverseInheritable&lt;U&gt;* = nullptr&gt;
+    NeedWrapper(const NeedWrapper&lt;U, B&gt;&amp; other) {
+        p = u_cast(T*, other.p);
+        corruption_pending = p and (other.corruption_pending or sink);
+        other.corruption_pending = false;
+    }
+
+  //=//// ASSIGNMENT //////////////////////////////////////////////////=//
+
+    NeedWrapper&amp; operator=(nullptr_t) {
+        p = nullptr;
+        corruption_pending = false;
+        return *this;
+    }
+
+    NeedWrapper&amp; operator=(const NeedWrapper&lt;T,sink&gt; other) {
+        if (this != &amp;other) {  // self-assignment possible
+            p = other.p;
+            corruption_pending = p and (other.corruption_pending or sink);
+            other.corruption_pending = false;
+        }
+        return *this;
+    }
+
+    template&lt;typename U, IsReverseInheritable&lt;U&gt;* = nullptr&gt;
+    NeedWrapper&amp; operator=(const NeedWrapper&amp; other) {
+        if (this != &amp;other) {  // self-assignment possible
+            p = other.p;
+            corruption_pending = p and (other.corruption_pending or sink);
+            other.corruption_pending = false;
+        }
+        return *this;
+    }
+
+    template&lt;typename U, IsReverseInheritable&lt;U&gt;* = nullptr&gt;
+    NeedWrapper&amp; operator=(U* other) {
+        p = u_cast(T*, other);
+        corruption_pending = p and sink;
+        return *this;
+    }
+
+  //=//// OPERATORS ///////////////////////////////////////////////////=//
+
+    operator bool () const { return p != nullptr; }
+
+    operator T* () const {
+        if (corruption_pending) {
+            Corrupt_If_Debug(*const_cast&lt;MT*&gt;(p));
+            corruption_pending = false;
+        }
+        return p;
+    }
+
+    T* operator-&gt;() const {
+        if (corruption_pending) {
+            Corrupt_If_Debug(*const_cast&lt;MT*&gt;(p));
+            corruption_pending = false;
+        }
+        return p;
+    }
+
+  //=//// DESTRUCTOR //////////////////////////////////////////////////=//
+
+    ~NeedWrapper() {
+        if (corruption_pending)
+            Corrupt_If_Debug(*const_cast&lt;MT*&gt;(p));
+    }
+};
+</code></pre>
+<p>So then the <code>Sink(...)</code> and non-corrupting version <code>Need(...)</code> for in/out parameters with contravariance checking are:</p>
+<pre><code>#define Sink(T) \
+    NeedWrapper&lt;T, true&gt;
+
+#define Need(TP) \
+    NeedWrapper&lt;typename std::remove_pointer&lt;TP&gt;::type, false&gt;
+</code></pre>
+<h2><a name="p-7886-notes-on-corrupting-4" class="anchor" href="https://rebol.metaeducation.com#p-7886-notes-on-corrupting-4"></a>Notes on Corrupting</h2>
+<p>The original implementation was simpler, by just doing the corruption at the moment of construction.</p>
+<p>But this faced a problem:</p>
+<pre><code>    bool some_function(Sink(char*) out, char* in) { ... }
+
+    if (some_function(&amp;ptr, ptr)) { ...}
+</code></pre>
+<p>If you corrupt the data at the address the sink points to, you can actually be corrupting the value of a stack variable being passed as another argument before it's calculated as an argument.  So deferring the corruption after construction is necessary.  It's a bit tricky in terms of the handoffs and such.</p>
+<p><em>(While this could be factored, function calls aren't inlined in the debug build, so given the simplicity of the code, it's repeated.)</em></p>
+          <p><a href="https://rebol.metaeducation.com/t/antiform-safety-covariance-and-contravariance/2330/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/antiform-safety-covariance-and-contravariance/2330/1</link>
+        <pubDate>Mon, 11 Nov 2024 09:49:10 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2330-1</guid>
+        <source url="https://rebol.metaeducation.com/t/antiform-safety-covariance-and-contravariance/2330.rss">Antiform Safety: Covariance and Contravariance</source>
+      </item>
+  </channel>
+</rss>

@@ -1,0 +1,227 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>What is LOAD, Anyway?</title>
+    <link>https://rebol.metaeducation.com/t/what-is-load-anyway/2130</link>
+    <description>## Ways To Turn A String Into A BLOCK! In Rebol2
+
+There was TO BLOCK!, which would give you unbound code:
+
+    rebol2&gt;&gt; code: to block! &quot;print {Hello} x: 10&quot;
+    == [print &quot;Hello&quot; x: 10]
+
+    rebol2&gt;&gt; do code
+    ** Script Error: print word has no context
+
+And then there was LOAD, which would bind code into the user context, falling back on the lib context:
+
+    rebol2&gt;&gt; code: load &quot;print {Hello} x: 10&quot;
+    == [print &quot;Hello&quot; x: 10
+    ]
+
+    rebol2&gt;&gt; do code
+    Hello
+    == 10
+
+    rebol2&gt;&gt; x
+    == 10
+
+LOAD had an additional option of /NEXT, so you could go one item at a time:
+
+    rebol2&gt;&gt; load/next &quot;print {Hello} x: 10&quot;
+    == [print &quot; {Hello} x: 10&quot;]
+
+The block you get back has the item scanned as the first element, and then the rest of the string as a remainder.
+
+What you receive is bound into the user/lib contexts, so this actually works:
+
+    &gt;&gt; do load/next &quot;print {Hello} x: 10&quot;
+    {Hello} x: 10
+
+## Refactoring Things In Terms of TRANSCODE
+
+A goal of R3-Alpha was to support modularization, and ambitiously to make the module system itself implemented as usermode code.  So LOAD would not be native.
+
+The code for scanning UTF-8 strings into unbound Rebol values one-at-a-time was done via TRANSCODE.  But because R3-Alpha added unicode support, it had a quirk that it only took BINARY!, because Rebol strings could be encoded under the hood as 1, 2, or 3 bytes per character:
+
+    r3-alpha&gt;&gt; transcode/next to binary! &quot;print {Hello} x: 10&quot; 
+    == [print #{207B48656C6C6F7D20783A203130}]
+
+You could also transcode things entirely in one go, but the result would still have an empty binary at the end:
+
+    r3-alpha&gt;&gt; transcode to binary! &quot;print {Hello} x: 10&quot;
+    == [print &quot;Hello&quot; x: 10 #{}]
+
+Ren-C improved on this in several ways.
+
+* [Uses &quot;UTF-8 Everywhere&quot;](https://rebol.metaeducation.com/t/realistically-migrating-rebol-to-utf8-everywhere/374), and is technically able to accept a string anywhere a UTF-8 binary would otherwise be required... if it makes sense to do so.  You can transcode strings without making a copy as a UTF-8 binary first.
+
+* Multi-return values allowed the separation of the remainder into its own result.  The remainder is the primary return result when the :NEXT refinement is used (the secondary result is the synthesized value)...this permits easy detection in loops of the null condition when the end is reached.
+
+   * [See Red spin their wheels on this point, due to lack of isotopes.](https://github.com/red/red/issues/5183)
+
+The results of TRANSCODE were unbound, leaving it up to higher-level functions to add binding if they wanted to.
+
+## So Now, What Is LOAD (and What Is SAVE)?
+
+I don&#39;t really know.
+
+It&#39;s clear you&#39;re supposed to give LOAD a file, and it gives you something back.  But if the file contains a script, it seems to me that all load can give you back is some kind of MODULE! that the only thing you can do with it is DO it (once?) or IMPORT it (possibly many times?)... in which case, why did you need the middle man of LOAD?
+
+Right now that&#39;s kind of where things stand in Ren-C... that LOAD is an implementation artifact of DO and IMPORT, used nowhere else.
+
+R3-Alpha had an example where it could do something like this:
+
+    r3-alpha&gt;&gt; save/header %test.r &quot;Hello World&quot; [Title: &quot;My Hello&quot;]
+
+    r3-alpha&gt;&gt; read/string %test.r
+    == {REBOL [
+        Title: &quot;My Hello&quot;
+    ]
+    &quot;Hello World&quot;
+    }
+
+    r3-alpha&gt;&gt; load %test.r
+    == &quot;Hello World&quot;
+
+If you try this with a BLOCK!, it will just be the block&#39;s contents... not the whole block:
+
+    r3-alpha&gt;&gt; save/header %test.r [a [b c] d] [Title: &quot;My Block&quot;]
+
+    r3-alpha&gt;&gt; read/string %test.r
+    == {REBOL [
+        Title: &quot;My Block&quot;
+    ]
+    a [b c] d
+    }
+
+    r3-alpha&gt;&gt; load %test.r
+    == [a [b c] d]
+
+There&#39;s no enclosing block saved, and yet it&#39;s interpreted as the contents of a block.  Hm, so what if the block had contained &quot;Hello World&quot;?  Well, the block is of course lost in that case:
+
+    r3-alpha&gt;&gt; save/header %test.r [&quot;Hello World&quot;] [Title: &quot;My Hello Block&quot;]
+
+    r3-alpha&gt;&gt; load %test.r
+    == &quot;Hello World&quot;
+
+We could arguably &quot;fix&quot; this using isotopes, e.g. SAVE could take a splice if you wanted the values to be spread in the script... otherwise it would preserve your value.  But in order for me to make decisions like &quot;is this reasonable?&quot; I have to know what the use case is.  And I don&#39;t know what it is.  Are LOAD and SAVE some kind of generic value-to-file service?  Or are they specifically for scripts?
+
+## Practical Matter: Bootstrap Rebmake Code
+
+There&#39;s code in the bootstrap which says:
+
+    user-config: make object! load (join repo-dir %configs/default-config.r)
+
+Then `%default-config.r` has lines in it like **os-id: null**.  It expects to be able to resolve NULL to a definition, e.g. the one in LIB.  But we don&#39;t want to bind into LIB directly (too easy to do dangerous modifications).  So does LOAD always create a new context?  Here we want an object, not a module... this is important to distinguish because the techniques used by modules don&#39;t scale.  So if someone is going to LOAD thousands of objects, they shouldn&#39;t be modules... :-/</description>
+    
+    <lastBuildDate>Sat, 16 Nov 2024 20:08:36 +0000</lastBuildDate>
+    <category>Modules</category>
+    <atom:link href="https://rebol.metaeducation.com/t/what-is-load-anyway/2130.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>What is LOAD, Anyway?</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <h2><a name="p-7018-ways-to-turn-a-string-into-a-block-in-rebol2-1" class="anchor" href="https://rebol.metaeducation.com#p-7018-ways-to-turn-a-string-into-a-block-in-rebol2-1"></a>Ways To Turn A String Into A BLOCK! In Rebol2</h2>
+<p>There was TO BLOCK!, which would give you unbound code:</p>
+<pre><code>rebol2&gt;&gt; code: to block! "print {Hello} x: 10"
+== [print "Hello" x: 10]
+
+rebol2&gt;&gt; do code
+** Script Error: print word has no context
+</code></pre>
+<p>And then there was LOAD, which would bind code into the user context, falling back on the lib context:</p>
+<pre><code>rebol2&gt;&gt; code: load "print {Hello} x: 10"
+== [print "Hello" x: 10
+]
+
+rebol2&gt;&gt; do code
+Hello
+== 10
+
+rebol2&gt;&gt; x
+== 10
+</code></pre>
+<p>LOAD had an additional option of /NEXT, so you could go one item at a time:</p>
+<pre><code>rebol2&gt;&gt; load/next "print {Hello} x: 10"
+== [print " {Hello} x: 10"]
+</code></pre>
+<p>The block you get back has the item scanned as the first element, and then the rest of the string as a remainder.</p>
+<p>What you receive is bound into the user/lib contexts, so this actually works:</p>
+<pre><code>&gt;&gt; do load/next "print {Hello} x: 10"
+{Hello} x: 10
+</code></pre>
+<h2><a name="p-7018-refactoring-things-in-terms-of-transcode-2" class="anchor" href="https://rebol.metaeducation.com#p-7018-refactoring-things-in-terms-of-transcode-2"></a>Refactoring Things In Terms of TRANSCODE</h2>
+<p>A goal of R3-Alpha was to support modularization, and ambitiously to make the module system itself implemented as usermode code.  So LOAD would not be native.</p>
+<p>The code for scanning UTF-8 strings into unbound Rebol values one-at-a-time was done via TRANSCODE.  But because R3-Alpha added unicode support, it had a quirk that it only took BINARY!, because Rebol strings could be encoded under the hood as 1, 2, or 3 bytes per character:</p>
+<pre><code>r3-alpha&gt;&gt; transcode/next to binary! "print {Hello} x: 10" 
+== [print #{207B48656C6C6F7D20783A203130}]
+</code></pre>
+<p>You could also transcode things entirely in one go, but the result would still have an empty binary at the end:</p>
+<pre><code>r3-alpha&gt;&gt; transcode to binary! "print {Hello} x: 10"
+== [print "Hello" x: 10 #{}]
+</code></pre>
+<p>Ren-C improved on this in several ways.</p>
+<ul>
+<li>
+<p><a href="https://rebol.metaeducation.com/t/realistically-migrating-rebol-to-utf8-everywhere/374">Uses "UTF-8 Everywhere"</a>, and is technically able to accept a string anywhere a UTF-8 binary would otherwise be required... if it makes sense to do so.  You can transcode strings without making a copy as a UTF-8 binary first.</p>
+</li>
+<li>
+<p>Multi-return values allowed the separation of the remainder into its own result.  The remainder is the primary return result when the :NEXT refinement is used (the secondary result is the synthesized value)...this permits easy detection in loops of the null condition when the end is reached.</p>
+<ul>
+<li><a href="https://github.com/red/red/issues/5183">See Red spin their wheels on this point, due to lack of isotopes.</a></li>
+</ul>
+</li>
+</ul>
+<p>The results of TRANSCODE were unbound, leaving it up to higher-level functions to add binding if they wanted to.</p>
+<h2><a name="p-7018-so-now-what-is-load-and-what-is-save-3" class="anchor" href="https://rebol.metaeducation.com#p-7018-so-now-what-is-load-and-what-is-save-3"></a>So Now, What Is LOAD (and What Is SAVE)?</h2>
+<p>I don't really know.</p>
+<p>It's clear you're supposed to give LOAD a file, and it gives you something back.  But if the file contains a script, it seems to me that all load can give you back is some kind of MODULE! that the only thing you can do with it is DO it (once?) or IMPORT it (possibly many times?)... in which case, why did you need the middle man of LOAD?</p>
+<p>Right now that's kind of where things stand in Ren-C... that LOAD is an implementation artifact of DO and IMPORT, used nowhere else.</p>
+<p>R3-Alpha had an example where it could do something like this:</p>
+<pre><code>r3-alpha&gt;&gt; save/header %test.r "Hello World" [Title: "My Hello"]
+
+r3-alpha&gt;&gt; read/string %test.r
+== {REBOL [
+    Title: "My Hello"
+]
+"Hello World"
+}
+
+r3-alpha&gt;&gt; load %test.r
+== "Hello World"
+</code></pre>
+<p>If you try this with a BLOCK!, it will just be the block's contents... not the whole block:</p>
+<pre><code>r3-alpha&gt;&gt; save/header %test.r [a [b c] d] [Title: "My Block"]
+
+r3-alpha&gt;&gt; read/string %test.r
+== {REBOL [
+    Title: "My Block"
+]
+a [b c] d
+}
+
+r3-alpha&gt;&gt; load %test.r
+== [a [b c] d]
+</code></pre>
+<p>There's no enclosing block saved, and yet it's interpreted as the contents of a block.  Hm, so what if the block had contained "Hello World"?  Well, the block is of course lost in that case:</p>
+<pre><code>r3-alpha&gt;&gt; save/header %test.r ["Hello World"] [Title: "My Hello Block"]
+
+r3-alpha&gt;&gt; load %test.r
+== "Hello World"
+</code></pre>
+<p>We could arguably "fix" this using isotopes, e.g. SAVE could take a splice if you wanted the values to be spread in the script... otherwise it would preserve your value.  But in order for me to make decisions like "is this reasonable?" I have to know what the use case is.  And I don't know what it is.  Are LOAD and SAVE some kind of generic value-to-file service?  Or are they specifically for scripts?</p>
+<h2><a name="p-7018-practical-matter-bootstrap-rebmake-code-4" class="anchor" href="https://rebol.metaeducation.com#p-7018-practical-matter-bootstrap-rebmake-code-4"></a>Practical Matter: Bootstrap Rebmake Code</h2>
+<p>There's code in the bootstrap which says:</p>
+<pre><code>user-config: make object! load (join repo-dir %configs/default-config.r)
+</code></pre>
+<p>Then <code>%default-config.r</code> has lines in it like <strong>os-id: null</strong>.  It expects to be able to resolve NULL to a definition, e.g. the one in LIB.  But we don't want to bind into LIB directly (too easy to do dangerous modifications).  So does LOAD always create a new context?  Here we want an object, not a module... this is important to distinguish because the techniques used by modules don't scale.  So if someone is going to LOAD thousands of objects, they shouldn't be modules... :-/</p>
+          <p><a href="https://rebol.metaeducation.com/t/what-is-load-anyway/2130/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/what-is-load-anyway/2130/1</link>
+        <pubDate>Tue, 23 Jan 2024 15:02:01 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2130-1</guid>
+        <source url="https://rebol.metaeducation.com/t/what-is-load-anyway/2130.rss">What is LOAD, Anyway?</source>
+      </item>
+  </channel>
+</rss>

@@ -1,0 +1,164 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>From (get-env &quot;FOO&quot;) to (environment.FOO) to (env.FOO) to $FOO</title>
+    <link>https://rebol.metaeducation.com/t/from-get-env-foo-to-environment-foo-to-env-foo-to-foo/1857</link>
+    <description>If you spend time in bash scripting or something like GitHub CI, you realize that environment variables are *really important*.
+
+So it&#39;s a bit sad that Rebol has had the really ugly **get-env** and **set-env** functions as the interface to this.
+
+I&#39;d say it&#39;s pretty clear that we&#39;d like for **env.FOO** to work.  I&#39;m also leaning to thinking that at least in some dialected circumstances, **$FOO** should be interpreted as an environment variable as well...we have these parts:
+
+* **`$WORD`**
+* **`$TU.P.LE`**
+* **`$PA/TH`**
+* **`$[BL O CK]`**
+* **`$(GR O UP)`**
+
+So things like CALL/SHELL should let you use those.
+
+## But How To Make An &quot;ANY-CONTEXT!&quot; That Calls Functions?
+
+Right now, the only way to get hooks into the system to run code when you use tuple access is by making a new datatype.  And that can only be done in the C code.
+
+So if someone put a gun to my head and told me to make it work right now--*today*--the quickest path would be to make a new ANY-CONTEXT! type in C called an ENVIRONMENT!.  The flaky part is that environment variables come from an extension, and so it would be an &quot;extension type&quot; (like a GOB! or VECTOR!), and those are second-class citizens (they don&#39;t work in TYPESET! for instance, they&#39;re all considered the same CUSTOM! datatype for those purposes).
+
+I resist the temptation to do this, because while it would be nice to write **environment.FOO** instead of **get-env &quot;FOO&quot;**, most of the uses are in the rebmake code...which needs to work in the bootstrap executable.  So no point in making an existing mess with extension types messier.
+
+## Any Usermode Ideas?
+
+I think what we should be looking for is a way that someone without a C compiler could make something that looks like an object, but the behavior for handling the TUPLE! access comes from functions.
+
+Right now you can&#39;t &quot;dot an action&quot;... actions only take PATH!s for refinements.  So we could say that if we get a dot, it looks to see if the function has a /DOT refinement, and if it does then it will call it accordingly with information from the context of the get or set:
+
+    environment: func [variable [word! set-word!] value [&lt;end&gt; any-value!] /dot] [
+        assert [dot]  ; let&#39;s say you always use with dot for now
+        if set-word? variable [
+           echo [You asked to set @variable to @value]
+        ] else [
+           echo [You asked to get @variable]
+    ]
+
+    &gt;&gt; environment.FOO
+    You asked to get FOO
+
+    &gt;&gt; environment.FOO: 10
+    You asked to set FOO to 10
+
+It&#39;s better than nothing.  But what I don&#39;t like about it is that I have the idea that tuple access on functions will be able to get and set properties stored on that function... e.g. that functions will be able to act as objects.  This would be where stuff like help informaiton is stored.  *(This was historically called the &quot;meta object&quot; but we have much more compelling uses for the word &quot;meta&quot; now.)*
+
+## So Probably Better to be a User-Defined Datatype
+
+Unfortunately these don&#39;t exist yet.  But I guess now we have a good example of ENVIRONMENT! as something that needs supporting.</description>
+    
+    <lastBuildDate>Sat, 12 Apr 2025 16:08:54 +0000</lastBuildDate>
+    <category>Datatypes</category>
+    <atom:link href="https://rebol.metaeducation.com/t/from-get-env-foo-to-environment-foo-to-env-foo-to-foo/1857.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>From (get-env &quot;FOO&quot;) to (environment.FOO) to (env.FOO) to $FOO</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="1857">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>So if someone put a gun to my head and told me to make it work right now--<em>today</em>--the quickest path would be to make a new ANY-CONTEXT! type in C called an ENVIRONMENT!. The flaky part is that environment variables come from an extension, and so it would be an "extension type" (like a GOB! or VECTOR!), and those are second-class citizens (they don't work in TYPESET! for instance, they're all considered the same CUSTOM! datatype for those purposes).</p>
+<p>I resist the temptation to do this, because while it would be nice to write <strong>environment.FOO</strong> instead of <strong>get-env "FOO"</strong>, most of the uses are in the rebmake code...which needs to work in the bootstrap executable. So no point in making an existing mess with extension types messier.</p>
+</blockquote>
+</aside>
+<p><strong>The flakiness is fading away, and there's little to stop me now from making an ENVIRONMENT! datatype.</strong></p>
+<p>It would implement PICK and POKE, and as such be able to do selection of environment variables via TUPLE!.</p>
+<p>We have standardized methods now where if you say <strong><code>env.FOO</code></strong> and it doesn't find it, then you get a raised error.  So you say <strong><code>try env.FOO</code></strong> and get NULL, or <strong><code>maybe env.FOO</code></strong> and get VOID.</p>
+<p>It can be supported in typechecking, though questions about how extension types participate in things like ANY-CONTEXT? are still up in the air.</p>
+<p>I think you should be able to do things like:</p>
+<pre><code> &gt;&gt; env.FOO: "demo"
+
+ &gt;&gt; group: bind env '(FOO)
+ == (FOO)  ; bound
+
+ &gt;&gt; eval group
+ == "demo"
+</code></pre>
+<p>It might not be useful to bind a block of code in general to environment variables--due to the possibility of the environment to expand to contain anything and thus compete with your words of code.  But having a COMPOSE variant that binds GROUP!s to the environment could be quite useful, as you could say (FOO) or $(FOO) did environment variables.</p>
+<p>You could do an EVAL-IN-ENV construct, that composed a block of code where just instances of $FOO-style things were composed... though that would snapshot the environment variable state before the evaluation.  You couldn't pick up modifications as they happened.  That would require being able to actually hook the evaluator... which... yes is still on the table.</p>
+<h2><a name="p-8142-what-to-call-it-1" class="anchor" href="https://rebol.metaeducation.com#p-8142-what-to-call-it-1"></a>What To Call It?</h2>
+<p>I guess calling it just <strong>system.environment</strong> puts it in a good place, and <strong>system</strong> is shorthanded to <strong>sys</strong> so it could be similarly shorthanded as <strong>sys.env</strong>.</p>
+<p>Then if you needed to you could say <strong>env: system.environment</strong> or <strong>e: sys.env</strong> or whatever shorthand you thought was appropriate.</p>
+          <p><a href="https://rebol.metaeducation.com/t/from-get-env-foo-to-environment-foo-to-env-foo-to-foo/1857/3">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/from-get-env-foo-to-environment-foo-to-env-foo-to-foo/1857/3</link>
+        <pubDate>Sat, 12 Apr 2025 16:08:54 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1857-3</guid>
+        <source url="https://rebol.metaeducation.com/t/from-get-env-foo-to-environment-foo-to-env-foo-to-foo/1857.rss">From (get-env &quot;FOO&quot;) to (environment.FOO) to (env.FOO) to $FOO</source>
+      </item>
+      <item>
+        <title>From (get-env &quot;FOO&quot;) to (environment.FOO) to (env.FOO) to $FOO</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="1857">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>I think what we should be looking for is a way that someone without a C compiler could make something that looks like an object, but the behavior for handling the TUPLE! access comes from functions.</p>
+</blockquote>
+</aside>
+<p>So I noticed <strong><a href="https://rebol.metaeducation.com/t/weird-word-s-allow-but-escape-them/1560/8">generalized accessors</a></strong> bring some promising ideas.</p>
+<p>But they aren't quite what's needed here.  You could make an object with a field in it that was able to read or write an environment variable when accessed via TUPLE! or SET-TUPLE!.  But making an object that had no literal fields but did the tuple decoding itself is another thing.</p>
+<p>Fortunately tuple processing is now built on PICK and POKE.  So what's necessary here is to make a way for objects to have their own custom PICK and POKE methods.</p>
+          <p><a href="https://rebol.metaeducation.com/t/from-get-env-foo-to-environment-foo-to-env-foo-to-foo/1857/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/from-get-env-foo-to-environment-foo-to-env-foo-to-foo/1857/2</link>
+        <pubDate>Fri, 27 Sep 2024 20:33:29 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1857-2</guid>
+        <source url="https://rebol.metaeducation.com/t/from-get-env-foo-to-environment-foo-to-env-foo-to-foo/1857.rss">From (get-env &quot;FOO&quot;) to (environment.FOO) to (env.FOO) to $FOO</source>
+      </item>
+      <item>
+        <title>From (get-env &quot;FOO&quot;) to (environment.FOO) to (env.FOO) to $FOO</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>If you spend time in bash scripting or something like GitHub CI, you realize that environment variables are <em>really important</em>.</p>
+<p>So it's a bit sad that Rebol has had the really ugly <strong>get-env</strong> and <strong>set-env</strong> functions as the interface to this.</p>
+<p>I'd say it's pretty clear that we'd like for <strong>env.FOO</strong> to work.  I'm also leaning to thinking that at least in some dialected circumstances, <strong>$FOO</strong> should be interpreted as an environment variable as well...we have these parts:</p>
+<ul>
+<li><strong><code>$WORD</code></strong></li>
+<li><strong><code>$TU.P.LE</code></strong></li>
+<li><strong><code>$PA/TH</code></strong></li>
+<li><strong><code>$[BL O CK]</code></strong></li>
+<li><strong><code>$(GR O UP)</code></strong></li>
+</ul>
+<p>So things like CALL/SHELL should let you use those.</p>
+<h2><a name="p-5977-but-how-to-make-an-any-context-that-calls-functions-1" class="anchor" href="https://rebol.metaeducation.com#p-5977-but-how-to-make-an-any-context-that-calls-functions-1"></a>But How To Make An "ANY-CONTEXT!" That Calls Functions?</h2>
+<p>Right now, the only way to get hooks into the system to run code when you use tuple access is by making a new datatype.  And that can only be done in the C code.</p>
+<p>So if someone put a gun to my head and told me to make it work right now--<em>today</em>--the quickest path would be to make a new ANY-CONTEXT! type in C called an ENVIRONMENT!.  The flaky part is that environment variables come from an extension, and so it would be an "extension type" (like a GOB! or VECTOR!), and those are second-class citizens (they don't work in TYPESET! for instance, they're all considered the same CUSTOM! datatype for those purposes).</p>
+<p>I resist the temptation to do this, because while it would be nice to write <strong>environment.FOO</strong> instead of <strong>get-env "FOO"</strong>, most of the uses are in the rebmake code...which needs to work in the bootstrap executable.  So no point in making an existing mess with extension types messier.</p>
+<h2><a name="p-5977-any-usermode-ideas-2" class="anchor" href="https://rebol.metaeducation.com#p-5977-any-usermode-ideas-2"></a>Any Usermode Ideas?</h2>
+<p>I think what we should be looking for is a way that someone without a C compiler could make something that looks like an object, but the behavior for handling the TUPLE! access comes from functions.</p>
+<p>Right now you can't "dot an action"... actions only take PATH!s for refinements.  So we could say that if we get a dot, it looks to see if the function has a /DOT refinement, and if it does then it will call it accordingly with information from the context of the get or set:</p>
+<pre><code>environment: func [variable [word! set-word!] value [&lt;end&gt; any-value!] /dot] [
+    assert [dot]  ; let's say you always use with dot for now
+    if set-word? variable [
+       echo [You asked to set @variable to @value]
+    ] else [
+       echo [You asked to get @variable]
+]
+
+&gt;&gt; environment.FOO
+You asked to get FOO
+
+&gt;&gt; environment.FOO: 10
+You asked to set FOO to 10
+</code></pre>
+<p>It's better than nothing.  But what I don't like about it is that I have the idea that tuple access on functions will be able to get and set properties stored on that function... e.g. that functions will be able to act as objects.  This would be where stuff like help informaiton is stored.  <em>(This was historically called the "meta object" but we have much more compelling uses for the word "meta" now.)</em></p>
+<h2><a name="p-5977-so-probably-better-to-be-a-user-defined-datatype-3" class="anchor" href="https://rebol.metaeducation.com#p-5977-so-probably-better-to-be-a-user-defined-datatype-3"></a>So Probably Better to be a User-Defined Datatype</h2>
+<p>Unfortunately these don't exist yet.  But I guess now we have a good example of ENVIRONMENT! as something that needs supporting.</p>
+          <p><a href="https://rebol.metaeducation.com/t/from-get-env-foo-to-environment-foo-to-env-foo-to-foo/1857/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/from-get-env-foo-to-environment-foo-to-env-foo-to-foo/1857/1</link>
+        <pubDate>Mon, 04 Jul 2022 14:14:47 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1857-1</guid>
+        <source url="https://rebol.metaeducation.com/t/from-get-env-foo-to-environment-foo-to-env-foo-to-foo/1857.rss">From (get-env &quot;FOO&quot;) to (environment.FOO) to (env.FOO) to $FOO</source>
+      </item>
+  </channel>
+</rss>

@@ -1,0 +1,217 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Issues With Writing Output Cells Directly</title>
+    <link>https://rebol.metaeducation.com/t/issues-with-writing-output-cells-directly/2366</link>
+    <description>### How R3-Alpha Natives Returned Their Result
+
+The protocol for return result for natives in R3-Alpha was that [an enumerated type](https://github.com/rebol/rebol/blob/25033f897b2bd466068d7663563cd3ff64740b94/src/include/sys-stack.h#L104C1-L115C3) said where the output result could be found:
+
+    enum {
+    	R_RET = 0,
+    	R_TOS,
+    	R_TOS1,
+    	R_NONE,
+    	R_UNSET,
+    	R_TRUE,
+    	R_FALSE,
+    	R_ARG1,
+    	R_ARG2,
+    	R_ARG3
+    };
+
+Each invocation of a native pushed some space for a cell where you could write a return result, and `DS_RETURN` was that arbitrary cell.  If that&#39;s where the result was, the native would return `R_RET`.
+
+The other return values [were shorthands](https://github.com/rebol/rebol/blob/25033f897b2bd466068d7663563cd3ff64740b94/src/core/c-function.c#L289) to save you from having to copy or initialize a result into DS_RETURN from somewhere else.  e.g. `return R_TOS` meant to look for the result at the &quot;Top Of Stack&quot;, so your native wouldn&#39;t have to copy the cell from that location and then drop an element off the stack.  So it was a shorthand for:
+
+    *DS_RETURN = *DS_TOP;
+    DS_DROP;
+    return R_RET;
+
+`return R_TRUE` kept you from having to initialize the `DS_RETURN` slot with a logic, hence a shorthand for:
+
+    SET_TRUE(DS_RETURN);
+    return R_RET;
+
+### Ren-C Writes Directly To A Target Cell
+
+Early changes for Ren-C brought more rigor to the data stack and checks on how it was used. (*[I have explained many of these changes.](https://www.youtube.com/watch?v=6nsKTpArTCE&amp;t=1094s)*)
+
+It also expanded the return value of natives to be a fairly arbitrary pointer...a role that I call a **`Bounce`**.  This which can be detected as being Cells, [or UTF-8 strings](https://rebol.metaeducation.com/t/what-should-returning-a-string-from-a-native-do/2357), or other indicators (some indicators ask for the trampoline to cycle back and run a pushed stack level, without creating a nested C stack).  You can even return a C nullptr to indicate a `~null~` antiform.
+
+But rather than having a slot on the data stack where results are expected to be written, each interpreter stack level has an `OUT` pointer.  When you instantiate a stack level, this pointer is specified in the instantiation...and it&#39;s supposed to be somewhere that already exists.
+
+Notably, this pointer cannot be in the data stack...because the data stack can be resized at arbitrary moments (e.g. on a stack expansion).  However, it would be possible to do something similar to R3-Alpha and have a Bounce signal that said the result lived there...which would just mean the code executing natives would copy whatever was on the top of the stack into the `OUT` location at the moment of return as a convenience.
+
+## Direct Write Was Conceived As An Optimization
+
+It would have been possible for Ren-C to have a Cell&#39;s worth of space in the &quot;Level&quot; representing an intepreter stack level, instead of being given a pre-existing pointer.  But the concept was that saying where to write the output would save on needing to move the result after evaluation was finished.
+
+But there&#39;s a few catches that have come up...
+
+1. **Indirect Writes Are Slower** - The OUT cell is used for intermediate calculations.  Locality-wise, performance has shown that writing to `L-&gt;out` is noticeably more expensive than if it were a plain cell and you were writing to `&amp;L-&gt;out`.  If you do a lot of these intermediate calculations the extra dereferences wind up outweighing having to do a single move of the output cell at the end.
+
+2. **Stack Suspension Gets Complex** - In things like generators, you want to suspend a Level stack.  When you do so, the place that was requested as &quot;where to write to&quot; will change... so anywhere in the suspended stack where the output-to pointer is mentioned has to be turned into a placeholder value, so that when you restore the stack with a new idea of where to write the output cell  of the top of stack it has to go through and fix up those placeholders to point to the new location.
+
+3. **Handling Failures May Have Invalid Stack Locations** - In the model that has been established regarding things like abrupt failures, it&#39;s possible for a stack Level to run some cleanup code if it needs to.  So the throw or longjmp happens and the Trampoline catches it with the last pushed Level still intact.  But if the Level&#39;s `L-&gt;out` pointer was to a cell on the stack, then it may be invalid during this handling code.
+
+[2] was annoying to work through, but it&#39;s really [3] that I am struggling with.  **Things would be simpler if there was a cell as part of the Level itself, whose lifetime was equal to the Level&#39;s, where results were written.**
+
+## Changing It Feels Like A Step Backward :pouting_cat: But...
+
+It would still be possible to avoid copying if all you were interested in was the result.  (Think of something like `rebUnboxInteger()` which could push a Level, do an evaluation keeping the Level on the stack, extract the integer, drop the Level, return the integer.)
+
+I&#39;m not thrilled, but I&#39;ll try the change and see how much damage/help it does.
+
+ChatGPT thoughts:
+
+https://chatgpt.com/share/67c9d949-9fc8-8004-b3e9-fedab3cf0886</description>
+    
+    <lastBuildDate>Thu, 06 Mar 2025 19:42:55 +0000</lastBuildDate>
+    <category>Optimization</category>
+    <atom:link href="https://rebol.metaeducation.com/t/issues-with-writing-output-cells-directly/2366.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Issues With Writing Output Cells Directly</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="2366">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>I'm not thrilled, but I'll try the change and see how much damage/help it does.</p>
+</blockquote>
+</aside>
+<p>Upon reflection, this would be an incredibly difficult change to make, breaking pretty much everything.</p>
+<aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="2366">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>[2] was annoying to work through, but it's really [3] that I am struggling with.</p>
+</blockquote>
+</aside>
+<p>The system generally targets <code>Level-&gt;out</code> to cells that are in other levels above the level which are guaranteed to outlive it (with special attention paid in generators).  The rare cases where C stack cells are used it's generally because a trampoline is spawned <em>beneath</em> it which would intercept any errors.</p>
+<p>The problem cases are lingering stackful code that <em>doesn't</em> invoke a trampoline when pushing levels, and is being called from a native without passing an output.</p>
+<p><strong>I found a trick:</strong> The trick is to take advantage of a cell's worth of storage in "Stepper Executor" levels that is usually used by an "Evaluator Executor" that calls successive stepper executors... this cell is how it stores the previous result to implement invisibility (e.g. how <code>1 + 2 comment "hi"</code> can be <code>3</code>).  By allowing a stepper level to target that cell inside itself as output when it knows it's not being called by an evaluator executor, it works.</p>
+<p>So basically... still uses the OUT as being a Cell*, but in these edge cases that Cell* is allowed to point inside the Level at what would be otherwise unused space.</p>
+<p>Details for whom it may concern:</p>
+<pre><code>// !!! This is for historical non-stackless code, which needs a place to write
+// output for a stepper that has a lifetime at least as long as the Level.
+// e.g. this is illegal:
+//
+//      DECLARE_ATOM (result);
+//      Level* L = Make_Level_At(
+//          &amp;Stepper_Executor, spec, LEVEL_FLAG_TRAMPOLINE_KEEPALIVE
+//      );
+//      Push_Level_Erase_Out_If_State_0(result, L);
+//      fail ("This throws a level to the trampoline where result is dead");
+//
+// Simply put, when the Trampoline gets after a longjmp() or throw, that
+// Level's L-&gt;out pointer will be corrupt...the stack-declared result is gone.
+//
+// Instead of DECLARE_ATOM, use Level_Lifetime_Atom(L).  This takes advantage
+// of the fact that there's a cell's worth of spare space which a stepper
+// that is not called by Evaluator_Executor() does not use.
+//
+INLINE Sink(Atom) Level_Lifetime_Atom(Level* L) {
+    assert(L-&gt;executor == &amp;Stepper_Executor);
+    Force_Erase_Cell_Untracked(&amp;L-&gt;u.eval.primed);
+    return cast(Atom*, &amp;L-&gt;u.eval.primed);
+}
+</code></pre>
+<p>There needs to be some auditing of the system to find all the cases that need to use this.  It's a sneaky problem, but address sanitizer can catch it when it does happen.</p>
+          <p><a href="https://rebol.metaeducation.com/t/issues-with-writing-output-cells-directly/2366/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/issues-with-writing-output-cells-directly/2366/2</link>
+        <pubDate>Thu, 06 Mar 2025 18:10:32 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2366-2</guid>
+        <source url="https://rebol.metaeducation.com/t/issues-with-writing-output-cells-directly/2366.rss">Issues With Writing Output Cells Directly</source>
+      </item>
+      <item>
+        <title>Issues With Writing Output Cells Directly</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <h3><a name="p-8021-how-r3-alpha-natives-returned-their-result-1" class="anchor" href="https://rebol.metaeducation.com#p-8021-how-r3-alpha-natives-returned-their-result-1"></a>How R3-Alpha Natives Returned Their Result</h3>
+<p>The protocol for return result for natives in R3-Alpha was that <a href="https://github.com/rebol/rebol/blob/25033f897b2bd466068d7663563cd3ff64740b94/src/include/sys-stack.h#L104C1-L115C3">an enumerated type</a> said where the output result could be found:</p>
+<pre><code>enum {
+	R_RET = 0,
+	R_TOS,
+	R_TOS1,
+	R_NONE,
+	R_UNSET,
+	R_TRUE,
+	R_FALSE,
+	R_ARG1,
+	R_ARG2,
+	R_ARG3
+};
+</code></pre>
+<p>Each invocation of a native pushed some space for a cell where you could write a return result, and <code>DS_RETURN</code> was that arbitrary cell.  If that's where the result was, the native would return <code>R_RET</code>.</p>
+<p>The other return values <a href="https://github.com/rebol/rebol/blob/25033f897b2bd466068d7663563cd3ff64740b94/src/core/c-function.c#L289">were shorthands</a> to save you from having to copy or initialize a result into DS_RETURN from somewhere else.  e.g. <code>return R_TOS</code> meant to look for the result at the "Top Of Stack", so your native wouldn't have to copy the cell from that location and then drop an element off the stack.  So it was a shorthand for:</p>
+<pre><code>*DS_RETURN = *DS_TOP;
+DS_DROP;
+return R_RET;
+</code></pre>
+<p><code>return R_TRUE</code> kept you from having to initialize the <code>DS_RETURN</code> slot with a logic, hence a shorthand for:</p>
+<pre><code>SET_TRUE(DS_RETURN);
+return R_RET;
+</code></pre>
+<h3><a name="p-8021-ren-c-writes-directly-to-a-target-cell-2" class="anchor" href="https://rebol.metaeducation.com#p-8021-ren-c-writes-directly-to-a-target-cell-2"></a>Ren-C Writes Directly To A Target Cell</h3>
+<p>Early changes for Ren-C brought more rigor to the data stack and checks on how it was used. (<em><a href="https://www.youtube.com/watch?v=6nsKTpArTCE&amp;t=1094s">I have explained many of these changes.</a></em>)</p>
+<p>It also expanded the return value of natives to be a fairly arbitrary pointer...a role that I call a <strong><code>Bounce</code></strong>.  This which can be detected as being Cells, <a href="https://rebol.metaeducation.com/t/what-should-returning-a-string-from-a-native-do/2357">or UTF-8 strings</a>, or other indicators (some indicators ask for the trampoline to cycle back and run a pushed stack level, without creating a nested C stack).  You can even return a C nullptr to indicate a <code>~null~</code> antiform.</p>
+<p>But rather than having a slot on the data stack where results are expected to be written, each interpreter stack level has an <code>OUT</code> pointer.  When you instantiate a stack level, this pointer is specified in the instantiation...and it's supposed to be somewhere that already exists.</p>
+<p>Notably, this pointer cannot be in the data stack...because the data stack can be resized at arbitrary moments (e.g. on a stack expansion).  However, it would be possible to do something similar to R3-Alpha and have a Bounce signal that said the result lived there...which would just mean the code executing natives would copy whatever was on the top of the stack into the <code>OUT</code> location at the moment of return as a convenience.</p>
+<h2><a name="p-8021-direct-write-was-conceived-as-an-optimization-3" class="anchor" href="https://rebol.metaeducation.com#p-8021-direct-write-was-conceived-as-an-optimization-3"></a>Direct Write Was Conceived As An Optimization</h2>
+<p>It would have been possible for Ren-C to have a Cell's worth of space in the "Level" representing an intepreter stack level, instead of being given a pre-existing pointer.  But the concept was that saying where to write the output would save on needing to move the result after evaluation was finished.</p>
+<p>But there's a few catches that have come up...</p>
+<ol>
+<li>
+<p><strong>Indirect Writes Are Slower</strong> - The OUT cell is used for intermediate calculations.  Locality-wise, performance has shown that writing to <code>L-&gt;out</code> is noticeably more expensive than if it were a plain cell and you were writing to <code>&amp;L-&gt;out</code>.  If you do a lot of these intermediate calculations the extra dereferences wind up outweighing having to do a single move of the output cell at the end.</p>
+</li>
+<li>
+<p><strong>Stack Suspension Gets Complex</strong> - In things like generators, you want to suspend a Level stack.  When you do so, the place that was requested as "where to write to" will change... so anywhere in the suspended stack where the output-to pointer is mentioned has to be turned into a placeholder value, so that when you restore the stack with a new idea of where to write the output cell  of the top of stack it has to go through and fix up those placeholders to point to the new location.</p>
+</li>
+<li>
+<p><strong>Handling Failures May Have Invalid Stack Locations</strong> - In the model that has been established regarding things like abrupt failures, it's possible for a stack Level to run some cleanup code if it needs to.  So the throw or longjmp happens and the Trampoline catches it with the last pushed Level still intact.  But if the Level's <code>L-&gt;out</code> pointer was to a cell on the stack, then it may be invalid during this handling code.</p>
+</li>
+</ol>
+<p>[2] was annoying to work through, but it's really [3] that I am struggling with.  <strong>Things would be simpler if there was a cell as part of the Level itself, whose lifetime was equal to the Level's, where results were written.</strong></p>
+<h2><a name="p-8021-changing-it-feels-like-a-step-backward-pouting_cat-but-4" class="anchor" href="https://rebol.metaeducation.com#p-8021-changing-it-feels-like-a-step-backward-pouting_cat-but-4"></a>Changing It Feels Like A Step Backward <img src="https://rebol.metaeducation.com/images/emoji/twitter/pouting_cat.png?v=14" title=":pouting_cat:" class="emoji" alt=":pouting_cat:" loading="lazy" width="20" height="20"> But...</h2>
+<p>It would still be possible to avoid copying if all you were interested in was the result.  (Think of something like <code>rebUnboxInteger()</code> which could push a Level, do an evaluation keeping the Level on the stack, extract the integer, drop the Level, return the integer.)</p>
+<p>I'm not thrilled, but I'll try the change and see how much damage/help it does.</p>
+<p>ChatGPT thoughts:</p>
+<aside class="onebox allowlistedgeneric" data-onebox-src="https://chatgpt.com/share/67c9d949-9fc8-8004-b3e9-fedab3cf0886">
+  <header class="source">
+      <img src="https://cdn.oaistatic.com/assets/favicon-miwirzcw.ico" class="site-icon" width="48" height="48">
+
+      <a href="https://chatgpt.com/share/67c9d949-9fc8-8004-b3e9-fedab3cf0886" target="_blank" rel="noopener">ChatGPT</a>
+  </header>
+
+  <article class="onebox-body">
+    <div class="aspect-image" style="--aspect-ratio:690/388;"><img src="https://cdn.oaistatic.com/assets/chatgpt-share-og-u7j5uyao.webp" class="thumbnail" width="690" height="388"></div>
+
+<h3><a href="https://chatgpt.com/share/67c9d949-9fc8-8004-b3e9-fedab3cf0886" target="_blank" rel="noopener">ChatGPT - Stackless Interpreter Design</a></h3>
+
+  <p>Shared via ChatGPT</p>
+
+
+  </article>
+
+  <div class="onebox-metadata">
+    
+    
+  </div>
+
+  <div style="clear: both"></div>
+</aside>
+
+          <p><a href="https://rebol.metaeducation.com/t/issues-with-writing-output-cells-directly/2366/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/issues-with-writing-output-cells-directly/2366/1</link>
+        <pubDate>Thu, 06 Mar 2025 17:20:33 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2366-1</guid>
+        <source url="https://rebol.metaeducation.com/t/issues-with-writing-output-cells-directly/2366.rss">Issues With Writing Output Cells Directly</source>
+      </item>
+  </channel>
+</rss>

@@ -1,0 +1,685 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Speaking With Tics: Should Quoted Arguments Always Be Apostrophe&#39;d?</title>
+    <link>https://rebol.metaeducation.com/t/speaking-with-tics-should-quoted-arguments-always-be-apostrophed/1359</link>
+    <description>In the past it has been discussed whether it is better or worse to have quoted things be apostrophe&#39;d.  
+
+Historical Rebol actively prohibits the use of a lit-word! with FOREACH for the loop variable:
+
+    &gt;&gt; foreach &#39;x [1 2 3] [print [x]]
+    ** Script Error: foreach expected word argument of type: get-word word block
+
+R3-Alpha and Red don&#39;t allow it either.
+
+But it might seem you&#39;d want to be able to do this in Ren-C...because there are quoting constructs that can quote backwards:
+
+    &gt;&gt; backquote: infixed func [:x] [print [&quot;I backquoted&quot; x]]
+    == make action! [[:x] [...]]
+
+    &gt;&gt; foo: backquote
+    I backquoted foo:
+
+So if you try `for-each backquote`, the backwards-quoting BACKQUOTE would get the FOR-EACH before the forwards-quoting FOR-EACH could get the BACKQUOTE.  That&#39;s just the order that the evaluator works in *(unless there&#39;s nothing to the right of BACKQUOTE, which is the exception that would allow HELP BACKQUOTE to work)*.
+
+You can work around that with:
+
+    for-each (&#39;backquote) [1 2 3] [print [backquote]]
+
+But it seems like it would be nicer if you could write it without the parentheses.
+
+## Should All Quoting Sites *REQUIRE* Quoted Input?
+
+The quoted parameter convention exists to save you the trouble of quoting the callsites. *If this isn&#39;t what that&#39;s for, then what **is** it for?*
+
+I&#39;d be happy to buck the status quo if I thought it were clearly wrong.  But when we look across the board we see how nice and fluent **type of foo** looks vs. **&#39;type of foo**.  Over time it gets internalized to the point that **type: type of foo** doesn&#39;t feel weird at all (thought it might look so when you see it the first time).
+
+While there&#39;s something to be said for the educational value of seeing when a word is being used by name vs. by value, it&#39;s just... &quot;uglier&quot;
+
+    type: &#39;type of foo
+
+We seem lose something about knowing the &quot;rules of OF&quot; and the parts of speech involved by context, in order to add a bit of visual noise.  To my tastes, it seems this is not in the same &quot;clear win&quot; zone over `type-of` and `type?` that we were in before.
+
+It seems to me a core experimental theory in the language is that there is value in allowing acclimations in our mind to writing things that &quot;start looking natural&quot; even if they don&#39;t follow systemic rules.  That speedbump of typing **type of x** of hitting the apostrophe key, as well as the visual jarringness, suggests it&#39;s a place to take advantage of not quoting *when it&#39;s possible*.
+
+## Should All Quoting Sites Merely *PERMIT* Quoted Input?
+
+I mentioned that the current workaround for slipping past cases of things like backquoting operators is to use a GROUP!.
+
+    for-each (&#39;foo) [1 2 3] [print [x]]
+
+We might ask if the operation with the quoting slot should be lenient and let you just alternately write:
+
+    for-each &#39;foo [1 2 3] [print [x]]
+
+Quoted words won&#39;t dispatch functions, so you don&#39;t have to worry about FOO&#39;s associated behavior if you do this.
+
+A problem with being lenient in that way is that now the function spec is expanded to where it has to accept either WORD! -or- QUOTED! in its quoted slot.  That complicates things, and now the author of the quoting function needs to be bothered with the quote-or-not of their argument.
+
+If you take the easy-way-out and just DEQUOTE your argument (which leaves it as is if it&#39;s not quoted), then you may be permitting things with arbitrary numbers of quotes.
+
+    for-each &#39;&#39;&#39;&#39;&#39;&#39;&#39;&#39;&#39;foo [1 2 3] [print [x]]
+
+I&#39;m pretty sure UNQUOTE should require its argument to be quoted, for the sake of sanity.  So the implementation of functions like FOR-EACH would get hairier if they were to have to check and preprocess their arguments, e.g. to permit one-and-only one level of quote that they strip off.  This could be made easier with some helper for the purpose, though.
+
+## A Benefit To Requiring Quotes
+
+I&#39;ve mentioned in the past that for things like FOR-EACH, if we *required* the first argument to be quoted then there could be a special interpretation for when there wasn&#39;t a quote.  e.g. just run a function without naming a variable:
+
+    &gt;&gt; for-each [&quot;No&quot; &quot;Variable&quot;] :print
+    No
+    Variable
+
+This keeps you from having to write something like:
+
+    for-each _ [&quot;No&quot; &quot;Variable&quot;] :print
+
+A plain function declaration isn&#39;t particularly interesting in this form, even with a lambda it&#39;s wordier (and symboly-er) than the old-style without:
+
+    for-each [1 2 3] x -&gt; [print [x]]
+
+But when you bring in something like [&quot;POINTFREE&quot;](https://rebol.metaeducation.com/t/looking-into-a-usermode-pointfree/1236) it gets more interesting:
+
+    &gt;&gt; block: [a b c]
+
+    &gt;&gt; for-each [1 2 3] (&lt;- append block)
+
+    &gt;&gt; block
+    == [a b c 1 2 3]
+
+With the idea that **#** is legal, it might look better if you &quot;opt-in&quot; to the variables:
+
+    for-each # [1 2 3] (&lt;- append block)
+
+This would let you do a template for what you want and don&#39;t want passed to your function.
+
+    &gt;&gt; block: [a b c]
+
+    &gt;&gt; for-each [# _] [1 2 3 4] (&lt;- append block)
+
+    &gt;&gt; block
+    == [a b c 1 3]
+
+This allows us to justify why the variable slot has usefulness even if we&#39;re not using a variable.  Maybe that&#39;s the answer.  And if we shorten FOR-EACH to simply EACH it would come out cleaner, even in complex invocations:
+
+    each [# _] [1 2 3 4] (&lt;- append block)
+
+## Switch to `#` for opt-in on variables, allow (but don&#39;t require) QUOTED! ?
+
+...is this a plan?  Does it cover all the angles?</description>
+    
+    <lastBuildDate>Thu, 03 Oct 2024 00:50:19 +0000</lastBuildDate>
+    <category>Philosophy</category>
+    <atom:link href="https://rebol.metaeducation.com/t/speaking-with-tics-should-quoted-arguments-always-be-apostrophed/1359.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Speaking With Tics: Should Quoted Arguments Always Be Apostrophe&#39;d?</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>It has worked out that the <strong><code>@</code></strong> symbol makes the most sense for reuse existing binding... simply because we're not relying on something completely invisible.</p>
+<pre><code>for-each 'x ...    ; the FOR-EACH receives a WORD!, probably unbound
+for-each $x ...    ; the FOR-EACH receives a WORD!, probably bound
+for-each @x ...    ; the FOR-EACH receives a THE-WORD!, probably bound
+</code></pre>
+<p>It feels more in control to be going on the basis of a sigil that is carried with the word...especially because it goes along with the distinction of <strong><code>for-each [a @b] ...</code></strong> where both have bindings available, it's just only one that's being heeded.</p>
+<p>So this will be pushed out systemically to LETs and multi-return blocks.  With multi-return, that means having to switch to FENCE! for "circling" a slot to be the primary output value.  (Hopefully not too much longer until FENCE! is in...)</p>
+<aside class="quote no-group" data-username="bradrn" data-post="8" data-topic="1359">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/bradrn/48/365_2.png" class="avatar"> bradrn:</div>
+<blockquote>
+<p>I feel a big cause of the difficulties here is a lack of compositionality. Really, we’d like to have something like <code>$^x</code> for ‘reuse existing binding and make it meta’, but no such type exists (at least in current Ren-C). Perhaps one way to solve this might be to abandon specialised types altogether, and just put all modifiers spaced off, perhaps in a fence too:</p>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">&gt;&gt; [_ {$ ^ x}]: pack [1 2]
+</code></pre>
+</blockquote>
+</aside>
+<p>Now that we have SIGIL! as a datatype, decomposing things that way is a generalized option.  But I don't want to give up too easily here... so let's look at another avenue of attack...</p>
+<hr>
+<p>One thing about multi-return is that it's going to be recursive:</p>
+<pre><code>[[a b] [c d]]: pack [pack [1 2] pack [3 4]]
+</code></pre>
+<p>Hence these are synonyms:</p>
+<pre><code>[a b]: ...
+[a [b]]: ...
+</code></pre>
+<p>I think that can be leveraged here, if ^META applied to a block means "apply this to everything in the block".</p>
+<pre><code>^[a b]: ...
+=&gt;
+[^a ^b]: ...
+</code></pre>
+<p>So you could write <strong><code>[a ^[@b]]:</code></strong> and that would mean reuse the b variable, but also make it ^META...and it doesn't feel that contrived to me.</p>
+<p>The reverse <em>could</em> be possible as well (<strong><code>[a @[^b]]:</code></strong>).  But that isn't as appealing to me for some possibly arbitrary reason.  Though if I'm looking for an inkling of a reason for why it's inferior, it couldn't apply on the outermost layer, because the sigil indicates "as is", even for a set-block:</p>
+<pre><code>&gt;&gt; @[a b]:
+== @[a b]:
+</code></pre>
+<p>So I think the simpler rule here is only to allow the meta sigil to distribute over blocks.  It seems to cover the bases.</p>
+          <p><a href="https://rebol.metaeducation.com/t/speaking-with-tics-should-quoted-arguments-always-be-apostrophed/1359/11">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/speaking-with-tics-should-quoted-arguments-always-be-apostrophed/1359/11</link>
+        <pubDate>Thu, 03 Oct 2024 00:20:41 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1359-11</guid>
+        <source url="https://rebol.metaeducation.com/t/speaking-with-tics-should-quoted-arguments-always-be-apostrophed/1359.rss">Speaking With Tics: Should Quoted Arguments Always Be Apostrophe&#39;d?</source>
+      </item>
+      <item>
+        <title>Speaking With Tics: Should Quoted Arguments Always Be Apostrophe&#39;d?</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>I was looking around to see what prior art there was on this, and found an issue where Ladislav <a href="https://github.com/metaeducation/rebol-issues/issues/2006">suggests using SET-WORD! to name the "cycle variable"</a>.  It works because the argument is taken literally:</p>
+<pre><code>repeat i: 100 [print i]
+</code></pre>
+<p>That's a creative--but bad--idea.  Makes it look like you're assigning 100 to <strong><code>i</code></strong>.</p>
+<p>This was a response to the fact that Red never creates new loop variables for you...and reuses whatever you pass in.  That idea was based on wanting to be more efficient and not need to walk and rebind the body of loop code (potentially copying it if you wanted to be "clean").  Virtual Binding means that's not really an issue in Ren-C.</p>
+<p>So he was looking for some syntax to ask for variables be created vs. not.</p>
+<p>If we were to go for reuse as the default for plain word, Ren-C actually has another option... of having you create the variable yourself:</p>
+<pre><code>repeat (let x) 100 [print i]
+</code></pre>
+<p>Then we could say everything you pass in is expected to be a variable that already exists.</p>
+<p>That is a hassle.  I don't think you should have to do anything heavier than <strong>for-each 'x [...]</strong> to get a new variable.</p>
+          <p><a href="https://rebol.metaeducation.com/t/speaking-with-tics-should-quoted-arguments-always-be-apostrophed/1359/10">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/speaking-with-tics-should-quoted-arguments-always-be-apostrophed/1359/10</link>
+        <pubDate>Sun, 08 Sep 2024 22:45:57 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1359-10</guid>
+        <source url="https://rebol.metaeducation.com/t/speaking-with-tics-should-quoted-arguments-always-be-apostrophed/1359.rss">Speaking With Tics: Should Quoted Arguments Always Be Apostrophe&#39;d?</source>
+      </item>
+      <item>
+        <title>Speaking With Tics: Should Quoted Arguments Always Be Apostrophe&#39;d?</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="BlackATTR" data-post="2" data-topic="1359">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/blackattr/48/204_2.png" class="avatar"> BlackATTR:</div>
+<blockquote>
+<p>I think of a natural word! as a get-word; if I want to pass an inert word! to be used in a for-each body, it seems more consistent that it be a quoted! (note: quoted! not necessary when passing a block! of words).</p>
+</blockquote>
+</aside>
+<aside class="quote no-group quote-modified" data-username="bradrn" data-post="6" data-topic="1359">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/bradrn/48/365_2.png" class="avatar"> bradrn:</div>
+<blockquote>
+<p>I think you underestimate how odd Rebol looks already, coming from most other programming languages. It took me a while to figure out how to mentally parse code</p>
+</blockquote>
+</aside>
+<p>So I just had an instance where I was reading a test:</p>
+<pre><code>; You can opt out of the series input with a void
+(
+    null = remove-each x (if 1 = 2 [a b c]) [fail "body shouldn't be running"]
+)
+</code></pre>
+<p>And I thought to myself <em>"oh, it opted out... but why didn't it error on the X before it did"</em>.</p>
+<p>I actually set a breakpoint in the debugger and was stepping before I realized <em>"oh, right, REMOVE-EACH.  that parameter was taken literally"</em>.</p>
+<p>While I'm pretty solidly on team no-tic for several cases (e.g. <strong>type of</strong>), I've always been on the fence with what to do about loop variables.  But that experience just now has helped tip me more strongly to the quoted side... where I was already starting to lean because of the flexibility in expressing reuse of an existing variable (<strong>$x</strong>) vs. create binding for a new variable (<strong>'x</strong>).  That's a feature we need, and this is a clear way of saying which you want.</p>
+<aside class="quote no-group" data-username="hostilefork" data-post="3" data-topic="1359">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>So if we decided that FOR-EACH took its argument normally, then <strong>for-each 'x [1 2 3 4] [...]</strong> would not be passing a binding for X to FOR-EACH.</p>
+<p>That doesn't sound bad. In fact it sounds good: FOR-EACH isn't reading the variable, it's giving the variable a meaning inside the block.</p>
+</blockquote>
+</aside>
+<p>I like this, but it has a natural consequence... which is that when you say <strong><code>for-each $x</code></strong> then if a binding for X cannot be found <strong>the $x itself must fail before it passes an unbound word to FOR-EACH</strong>.  Otherwise you might think you're reusing a variable, but wind up getting a new binding.</p>
+<p>Right now $foo is lenient... giving you an unbound word if it couldn't find a binding.  I think it's clear that has to change if this is to work.</p>
+<p>But there also could be some accidents here, if you're writing meta code and construct something like a FOR-EACH with a word that you didn't know had a binding, and you quote it, and it passes the binding through.  <img src="https://rebol.metaeducation.com/images/emoji/twitter/thinking.png?v=14" title=":thinking:" class="emoji" alt=":thinking:" loading="lazy" width="20" height="20"></p>
+<p>That potential for accident might suggest using a decoration for reuse that is "sticky", e.g. <strong><code>for-each @x</code></strong>... that way FOR-EACH sees the <code>@</code> sigil.  Then all plain words would signal the desire to create a new variable, bound or not.  That feels safer.</p>
+          <p><a href="https://rebol.metaeducation.com/t/speaking-with-tics-should-quoted-arguments-always-be-apostrophed/1359/9">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/speaking-with-tics-should-quoted-arguments-always-be-apostrophed/1359/9</link>
+        <pubDate>Sun, 08 Sep 2024 16:23:42 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1359-9</guid>
+        <source url="https://rebol.metaeducation.com/t/speaking-with-tics-should-quoted-arguments-always-be-apostrophed/1359.rss">Speaking With Tics: Should Quoted Arguments Always Be Apostrophe&#39;d?</source>
+      </item>
+      <item>
+        <title>Speaking With Tics: Should Quoted Arguments Always Be Apostrophe&#39;d?</title>
+        <dc:creator><![CDATA[bradrn]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="7" data-topic="1359">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>It may be that LET's rules are just different from FOR-EACH's rules</p>
+</blockquote>
+</aside>
+<p>Having read through this a couple of times, I think this makes sense to me… simply because LET has extra responsibilities that FOR-EACH doesn’t, namely (a) making stuff meta, and (b) setting the overall result.</p>
+<p>I feel a big cause of the difficulties here is a lack of compositionality. Really, we’d like to have something like <code>$^x</code> for ‘reuse existing binding and make it meta’, but no such type exists (at least in current Ren-C). Perhaps one way to solve this might be to abandon specialised types altogether, and just put all modifiers spaced off, perhaps in a fence too:</p>
+<pre><code class="lang-plaintext">&gt;&gt; [_ {$ ^ x}]: pack [1 2]
+</code></pre>
+<p>But of course there’s also the underlying issue:</p>
+<aside class="quote no-group" data-username="hostilefork" data-post="7" data-topic="1359">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>Moreover... <em>should a binding <strong>ever</strong> be treated as superfluous?</em> This is a major question for consideration in the "mostly-unbound world".</p>
+</blockquote>
+</aside>
+<p>I don’t (yet) have any good answer for this, but I definitely think it’s the right question.</p>
+          <p><a href="https://rebol.metaeducation.com/t/speaking-with-tics-should-quoted-arguments-always-be-apostrophed/1359/8">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/speaking-with-tics-should-quoted-arguments-always-be-apostrophed/1359/8</link>
+        <pubDate>Mon, 12 Feb 2024 15:06:00 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1359-8</guid>
+        <source url="https://rebol.metaeducation.com/t/speaking-with-tics-should-quoted-arguments-always-be-apostrophed/1359.rss">Speaking With Tics: Should Quoted Arguments Always Be Apostrophe&#39;d?</source>
+      </item>
+      <item>
+        <title>Speaking With Tics: Should Quoted Arguments Always Be Apostrophe&#39;d?</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="4" data-topic="1359">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>Actually... today the syntax <strong>for-each 'x</strong> differs from <strong>for-each x</strong> in that the former means to not create a new binding, but to do the assignments to an already-existing X variable.</p>
+</blockquote>
+</aside>
+<p>Now that $ means "produce bound form under evaluation", this would <em>seem</em> to suggest that the <strong><code>$x</code></strong> form would be the consistent cue for "use existing binding".</p>
+<pre><code>&gt;&gt; foo: lambda [x] [
+       print [x]
+       for-each $x [1 2 3] [print [x]]
+       print [x]
+    ]
+
+&gt;&gt; foo 10
+10
+1
+2
+3
+3
+</code></pre>
+<p>Does that mean we should switch to the idea of an evaluative argument for the parameter, where you pass <strong><code>'x</code></strong> or <strong><code>$x</code></strong> ?</p>
+<p>Well...hold on a second.  In both cases, the FOR-EACH would be receiving just the word X.  But in one case it's bound, and in the other it is not.</p>
+<p>Are we confident enough in bindings being under control that the "invisible" property of whether something is already bound or not can act as the cue for whether to create a new binding?  (See related concern about <a href="https://rebol.metaeducation.com/t/sticky-set-word-binding-problem-in-make-object/2127">MAKE OBJECT! having a SET-WORD! with a binding at the top level</a>).  I'm skeptical.</p>
+<p>Also, consider when we want this:</p>
+<pre><code>x: 10
+y: 20
+for-each [x $y] [1 2 3 4] [
+   print [x y]  ; 1 2 and then 3 4
+]
+print [x]  ; 10 (undisturbed due to new binding)
+print [y]  ; 4 (reused variable)
+</code></pre>
+<p>Remember that both X and <code>$Y</code> are unbound inside the block, but the block's environment has available bindings for X and Y going in.  Then the <code>$Y</code> signals in the "for-each variable dialect" to reuse the binding, while the plain X suggests not.  It wouldn't matter if we did this with <strong><code>['x $y]</code></strong>, which I think is less desirable... the point is just that we wouldn't be doing this with <strong><code>[x y]</code></strong> and forcing people to control it with unbindedness:</p>
+<pre><code> x: 10
+ y: 20
+ for-each compose [x (in [] 'y)] [...]
+</code></pre>
+<p>This suggests in the non-block case that it would be more conservative to take the parameter as an <code>$arg</code> which would quote-but-bind, and then go off the cue of whether the $ was present or not.</p>
+<p>And what about the potential contradiction, where you have a plain word and it's not unbound?</p>
+<pre><code> x: 10
+ y: 20
+ for-each compose [(in [] 'x) $y] [...]
+</code></pre>
+<p>Here the "dialect notation rule" says it's a plain word, hence you want a new binding.  But it has a binding.  Should that be an error to help point out the contention, or should it just assume the binding is superfluous?</p>
+<p>Moreover... <em>should a binding <strong>ever</strong> be treated as superfluous?</em>  This is a major question for consideration in the "mostly-unbound world".</p>
+<h2><a name="p-7104-ripple-effect-meta-passthru-let-parameters-1" class="anchor" href="https://rebol.metaeducation.com#p-7104-ripple-effect-meta-passthru-let-parameters-1"></a>Ripple Effect: Meta-Passthru LET Parameters</h2>
+<p>I'd just been thinking that the new <a href="https://rebol.metaeducation.com/t/rethinking-braces-as-an-array-type/1727">FENCE! proposal</a> would be able to solve something we couldn't really do before, which was mark a multi-return as being both ^META -and- the main overall result.</p>
+<pre><code> &gt;&gt; var: @z
+
+ &gt;&gt; [x {^y} (var)]: pack [1 2 3]
+ == '2
+
+ &gt;&gt; x
+ == 1
+
+ &gt;&gt; y
+ == '2
+
+ &gt;&gt; z
+ == 3
+</code></pre>
+<p>This wasn't achievable when marking the "circled" result was done with the @ symbol.  Using the {FENCE!} to mark the circled result (defaults to first result) can accomplish it.</p>
+<p>But if LET moves away from using quoted material to mean "don't create a new binding" and uses $, then there's a new contention: how to reuse an existing binding and make it meta.</p>
+<pre><code>&gt;&gt; (let [^x ...]: 1, x)
+== '1
+
+&gt;&gt; x: &lt;before&gt;
+
+&gt;&gt; (let [$x ...]: 1, x)
+== 1
+
+&gt;&gt; x
+== 1
+
+&gt;&gt; let [???x??? ...]: 1
+== '1
+
+&gt;&gt; x
+== '1
+</code></pre>
+<p>That shows an advantage of using the quote mark to say "have LET ignore this part", because it can mean ignore <em>any</em> part.  So <strong><code>let ['^x]: ...</code></strong> could achieve the intended purpose, telling the LET "this section isn't for you to worry about" and having it go through a step where it produces <strong><code>[^x]: ...</code></strong>  with the binding intact... falling through to the multi-return logic with whatever binding was in place (or whatever left-quoting construct wanted the SET-BLOCK).</p>
+<p>So maybe LET just doesn't follow the same rule as FOR-EACH?  Or maybe FOR-EACH should not be changed, and its unusual behavior of "using the binding of quoted things, but not of non-quoted things" should be left as-is?</p>
+<pre><code>x: 10
+y: 20
+for-each [x 'y] [1 2 3 4] [
+   print [x y]  ; 1 2 and then 3 4
+]
+print [x]  ; 10 (undisturbed due to new binding)
+print [y]  ; 4 (reused variable)
+</code></pre>
+<p>But this really feels backwards in a "quotes mean you don't get a binding" rule for the main evaluator.</p>
+<p>It doesn't come up all that often.  Maybe the following?...</p>
+<pre><code>&gt;&gt; let [$($ '^x) ...]: 1
+== '1
+
+&gt;&gt; x
+== '1
+</code></pre>
+<p><em>"Give me a literal ^X that's bound.  Then have the multi-return be guided by the meta that's on the word."</em></p>
+<p>But that doesn't correspond to any of how SET or GET work... they're agnostic about the word type.</p>
+<pre><code>&gt;&gt; set ($ '^x) 1
+== 1
+
+&gt;&gt; x
+== 1  ; not '1 (and I don't think it should be)
+</code></pre>
+<p>We <em>could</em> say that you can put the $ designator spaced off, and it's assumed to apply to the next thing:</p>
+<pre><code>&gt;&gt; let [$ ^x ...]: 1
+== '1
+</code></pre>
+<p>This might not be a problem... although the LET still has to preprocess the bindings in the block.  It's getting more invasive when it has to look into the details vs just say "oh, it's quoted, unquote it but ignore it otherwise."</p>
+<p>Lots to think about here.</p>
+<ul>
+<li>
+<p>I <em>do</em> think the FOR-EACH etc. should be using the <strong><code>$var</code></strong> notation to mean "use existing binding".</p>
+<ul>
+<li>
+<p>I <em>doubt</em> that it should be switched to <strong>for-each 'x</strong> and <strong>for-each ['x]</strong> for make new binding, but should stick with <strong>for-each x</strong> and <strong>for-each [x]</strong></p>
+<ul>
+<li>I <em>definitely don't</em> think LET should be switching to <strong>let 'x:</strong> and <strong>let ['x]:</strong> for make new binding</li>
+</ul>
+</li>
+</ul>
+</li>
+<li>
+<p>Fences are going to probably be the right pick for "circling" which multi-return result to give back</p>
+</li>
+<li>
+<p>If the $ operator is allowed to stand alone in the multi-return dialect, that probably gives full coverage of the need to opt out of LET creating a binding for some portion of a multi-return.</p>
+<ul>
+<li>
+<p>This makes the work LET does on the "dialect" it's processing inside a SET-BLOCK! more invasive than its former "if quoted, drop quote level and ignore" rule</p>
+</li>
+<li>
+<p><strong>It may be that LET's rules are just different from FOR-EACH's rules</strong></p>
+</li>
+</ul>
+</li>
+</ul>
+          <p><a href="https://rebol.metaeducation.com/t/speaking-with-tics-should-quoted-arguments-always-be-apostrophed/1359/7">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/speaking-with-tics-should-quoted-arguments-always-be-apostrophed/1359/7</link>
+        <pubDate>Sun, 11 Feb 2024 20:39:20 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1359-7</guid>
+        <source url="https://rebol.metaeducation.com/t/speaking-with-tics-should-quoted-arguments-always-be-apostrophed/1359.rss">Speaking With Tics: Should Quoted Arguments Always Be Apostrophe&#39;d?</source>
+      </item>
+      <item>
+        <title>Speaking With Tics: Should Quoted Arguments Always Be Apostrophe&#39;d?</title>
+        <dc:creator><![CDATA[bradrn]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="5" data-topic="1359">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>I think the current syntax fits into the idea of dressing the language up so it looks "normal", despite running on very different mechanics.</p>
+</blockquote>
+</aside>
+<p>‘Normal’ is a <em>very</em> subjective word to use. From a Haskell perspective, the version with the blocks strikes me as much more ‘normal’, and I do tend to strongly prefer it.</p>
+<p>But also… I think you underestimate how odd Rebol looks already, coming from most other programming language. It took me a while to figure out how to mentally parse code: ‘where’s all the parentheses? where are all the names coming from?’ Even the choice to delimit blocks with square brackets is extremely unusual amongst programming languages.</p>
+          <p><a href="https://rebol.metaeducation.com/t/speaking-with-tics-should-quoted-arguments-always-be-apostrophed/1359/6">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/speaking-with-tics-should-quoted-arguments-always-be-apostrophed/1359/6</link>
+        <pubDate>Thu, 18 Jan 2024 01:50:46 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1359-6</guid>
+        <source url="https://rebol.metaeducation.com/t/speaking-with-tics-should-quoted-arguments-always-be-apostrophed/1359.rss">Speaking With Tics: Should Quoted Arguments Always Be Apostrophe&#39;d?</source>
+      </item>
+      <item>
+        <title>Speaking With Tics: Should Quoted Arguments Always Be Apostrophe&#39;d?</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>Another good example to talk about is LET.  When we write:</p>
+<pre><code>foo: func [x]
+    let x: 1 + x
+    print ["new x is" x]
+]
+
+&gt;&gt; foo 2
+new x is 3
+</code></pre>
+<p>We don't want LET to receive the evaluated product of 3 (which has already been assigned to X).  We want it to receive the <strong><code>x:</code></strong> as a literal value... then we want it to be able to take one evaluative step to the right using the old bindings, and assign that to a new binding for X.  Then we want that new binding injected into the flow of evaluation for the next statement.</p>
+<p>This would be much less satisfying as:</p>
+<pre><code>let 'x: 1 + x
+</code></pre>
+<p>You could seemingly accomplish the same number of characters typed to drop the colon:</p>
+<pre><code>let 'x 1 + x
+</code></pre>
+<p>But we use the colon and non colon versions to distinguish whether an assignment is intended in the same step as the LET or just create the variable:</p>
+<pre><code>let x: 1 + x
+
+let y
+while [y: try take block] [probe y]
+</code></pre>
+<h2><a name="p-6995-or-use-a-block-1" class="anchor" href="https://rebol.metaeducation.com#p-6995-or-use-a-block-1"></a>Or, Use A Block?</h2>
+<p>Block fans might say LET should be a dialect and use a block:</p>
+<pre><code>let [x: 1 + x]
+</code></pre>
+<p>That would get you the evaluation suppression you want, and <strong><code>let 'x</code></strong> could be a shorthand when you didn't need an assignment.</p>
+<p>It has some advantage for multiple lets without repeating the LET.</p>
+<pre><code>let [
+   x: some stuff
+   y: some other stuff
+   z: still more stuff
+]
+
+vs.
+
+let x: some stuff
+let y: some other stuff
+let z: still more stuff
+</code></pre>
+<p><em>(A combined LET has the potential to be a little more efficient, doing its creations in single object.)</em></p>
+<p>Blocks are contentious with multi-returns, today you can write:</p>
+<pre><code>let [a b]  ; variables with no assignment
+let [x y]: your multi-return-generating code here
+</code></pre>
+<p>With a block, you'd have to do multi-returns as:</p>
+<pre><code>let [[x y]: your multi-return-generating code here]
+</code></pre>
+<p>And <strong>let [a b]</strong> would presumably just be an error, or the dialect would be somewhat inconsistent.</p>
+<p><em>Altogether, I like it how it is.</em>  While arguments can be made either way, I think the current syntax fits into the idea of dressing the language up so it looks "normal", despite running on very different mechanics.</p>
+<p>But multi-let seems useful.  Maybe it could use a different special pattern:</p>
+<pre><code>let [[
+    x: some stuff
+    y: some other stuff
+    z: still more stuff
+]]
+</code></pre>
+<p>Or be less fun, and just use a refinement</p>
+<pre><code>let/multi [
+    x: some stuff
+    y: some other stuff
+    z: still more stuff
+]
+</code></pre>
+          <p><a href="https://rebol.metaeducation.com/t/speaking-with-tics-should-quoted-arguments-always-be-apostrophed/1359/5">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/speaking-with-tics-should-quoted-arguments-always-be-apostrophed/1359/5</link>
+        <pubDate>Wed, 17 Jan 2024 15:51:43 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1359-5</guid>
+        <source url="https://rebol.metaeducation.com/t/speaking-with-tics-should-quoted-arguments-always-be-apostrophed/1359.rss">Speaking With Tics: Should Quoted Arguments Always Be Apostrophe&#39;d?</source>
+      </item>
+      <item>
+        <title>Speaking With Tics: Should Quoted Arguments Always Be Apostrophe&#39;d?</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="3" data-topic="1359">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>So if we decided that FOR-EACH took its argument normally, then <strong>for-each 'x [1 2 3 4] [...]</strong> would not be passing a binding for X to FOR-EACH.</p>
+<p>That doesn't sound bad. In fact it sounds good: FOR-EACH isn't reading the variable, it's giving the variable a meaning inside the block.</p>
+</blockquote>
+</aside>
+<p>Actually... today the syntax <strong>for-each 'x</strong> differs from <strong>for-each x</strong> in that the former means to not create a new binding, but to do the assignments to an already-existing X variable.</p>
+<p>I'm not sure if that's the greatest idea (and I frequently forget the feature exists), but it can be argued as useful.</p>
+<p>It applies to if you're using the block syntax as well, e.g. <strong>for-each ['x y]</strong> would use an existing X variable and create a new Y variable and bind it into the code block.</p>
+          <p><a href="https://rebol.metaeducation.com/t/speaking-with-tics-should-quoted-arguments-always-be-apostrophed/1359/4">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/speaking-with-tics-should-quoted-arguments-always-be-apostrophed/1359/4</link>
+        <pubDate>Fri, 12 Jan 2024 20:05:14 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1359-4</guid>
+        <source url="https://rebol.metaeducation.com/t/speaking-with-tics-should-quoted-arguments-always-be-apostrophed/1359.rss">Speaking With Tics: Should Quoted Arguments Always Be Apostrophe&#39;d?</source>
+      </item>
+      <item>
+        <title>Speaking With Tics: Should Quoted Arguments Always Be Apostrophe&#39;d?</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>A new twist has come along that we are looking at a world where quoted things are not bound in the evaluator.</p>
+<p>So if we decided that FOR-EACH took its argument normally, then <strong>for-each 'x [1 2 3 4] [...]</strong> would not be passing a binding for X to FOR-EACH.</p>
+<p>That doesn't sound bad.  In fact it sounds good: FOR-EACH isn't reading the variable, it's giving the variable a meaning inside the block.</p>
+<p>You might argue that sounds so good that you should use quoting when passing a block in with multiple variable names, just to avoid getting stray bindings: <strong>for-each '[x y] [1 2 3 4] [...]</strong></p>
+<p><em>But wait...</em> FOR-EACH has another feature of letting you evaluate expressions to get the names:</p>
+<pre><code>for-each [(first [x z]) (second [z y])] [1 2 3 4] [...]
+</code></pre>
+<p>If you quote the block, FOR-EACH won't receive binding on it, and can't evaluate those groups.</p>
+<p>This brings us to a related thought: <em>what if a parameter that is quoted by convention in the function arguments doesn't get binding information... as it wouldn't if the material had been quoted at the callsite</em>?</p>
+<p>That would suggest that if you are allowed to write <strong>for-each x</strong> then the quoting convention in effect wouldn't give you the bindings in the case of <strong>for-each [...]</strong>, as both situations went through a quoted parameter convention.</p>
+<p>You may be able to still handle <strong>for-each :var-name</strong> or <strong>for-each :(var-name)</strong> as a means of indirection, so long as you defined the parameter to use "soft quoting".  That mechanism in the evaluator decides to <em>not</em> quote in those escaped cases, and does an evaluation.  But the soft quoting of today does not "evaluate" blocks as one of the exceptions, which would be required to bind them in the new model.</p>
+<p>In a world where quoted parameters don't get the evaluator's influence from a binding step, this would seem to point to a rule like <em>"dialected arguments shouldn't be quoted"</em>.  Which would push the idea that the tic on FOR-EACH should be at the callsite, so the evaluator is in effect to facilitate the interpretation needed for the block case.</p>
+<h2><a name="p-6957-but-lets-not-be-too-hasty-to-abandon-pleasing-syntax-1" class="anchor" href="https://rebol.metaeducation.com#p-6957-but-lets-not-be-too-hasty-to-abandon-pleasing-syntax-1"></a>But Let's Not Be Too Hasty to Abandon Pleasing Syntax</h2>
+<p>While I like the idea of there being a natural flow to decisions in a model for binding that "works", the flip side here is that I don't like losing the <em>ability</em> to make alternative choices.</p>
+<p>Case in point: I have liked being able to use GROUP! instead of BLOCK! in the syntax of AND and OR today.  e.g. the following AND will short circuit and not run the second group if FOO-DEFINED is falsey:</p>
+<pre><code>if foo-defined and (foo &gt; 10) [
+    ...
+]
+</code></pre>
+<p>It also permits you to use words in that second slot, so long as they don't look up to a function:</p>
+<pre><code>if foo and bar [
+    ...
+]
+</code></pre>
+<p>This hinges on breaking the traditional rules of the evaluator by quoting the second argument.  That gives you the ability to short circuit the group.  But if you couldn't get binding information on quoted parameters, it would force the syntax:</p>
+<pre><code>if foo-defined and [foo &gt; 10] [
+    ...
+]
+</code></pre>
+<p>Also, the concern that BAR might be a function with side-effects would mean you couldn't protect against that, so the block would be needed in that case as well:</p>
+<pre><code>if foo and [bar] [
+    ...
+]
+</code></pre>
+<p>Losing the ability to write the source you want for the sake of homogeneity doesn't sound good to me. Hence I think that calls into question whether it should mean losing things like <strong>for-each x</strong> or <strong>type of y</strong> just "because...rules".</p>
+<p>But what it may mean is that these constructs have to acknowledge that they're being a bit weirder when gathering their parameters.  Maybe AND and OR decide that being in this extra-weird class is worth it, and FOR-EACH decides it's not... I don't know.</p>
+          <p><a href="https://rebol.metaeducation.com/t/speaking-with-tics-should-quoted-arguments-always-be-apostrophed/1359/3">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/speaking-with-tics-should-quoted-arguments-always-be-apostrophed/1359/3</link>
+        <pubDate>Fri, 12 Jan 2024 19:00:34 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1359-3</guid>
+        <source url="https://rebol.metaeducation.com/t/speaking-with-tics-should-quoted-arguments-always-be-apostrophed/1359.rss">Speaking With Tics: Should Quoted Arguments Always Be Apostrophe&#39;d?</source>
+      </item>
+      <item>
+        <title>Speaking With Tics: Should Quoted Arguments Always Be Apostrophe&#39;d?</title>
+        <dc:creator><![CDATA[BlackATTR]]></dc:creator>
+        <description><![CDATA[
+            <p>Can't wait to see the feedback on this one. <img src="https://rebol.metaeducation.com/images/emoji/twitter/innocent.png?v=14" title=":innocent:" class="emoji" alt=":innocent:" loading="lazy" width="20" height="20"><br>
+I think of a natural word! as a get-word; if I want to pass an inert word! to be used in a for-each body, it seems more consistent that it be a quoted! (note: quoted! not necessary when passing a block! of words).  I have no problem with it being required either, but I imagine this is going to be a problem for some developers and I would understand their resistance to the idea.<br>
+I'm still trying to wrap my head around the # opt-in.</p>
+          <p><a href="https://rebol.metaeducation.com/t/speaking-with-tics-should-quoted-arguments-always-be-apostrophed/1359/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/speaking-with-tics-should-quoted-arguments-always-be-apostrophed/1359/2</link>
+        <pubDate>Wed, 07 Oct 2020 20:36:44 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1359-2</guid>
+        <source url="https://rebol.metaeducation.com/t/speaking-with-tics-should-quoted-arguments-always-be-apostrophed/1359.rss">Speaking With Tics: Should Quoted Arguments Always Be Apostrophe&#39;d?</source>
+      </item>
+      <item>
+        <title>Speaking With Tics: Should Quoted Arguments Always Be Apostrophe&#39;d?</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>In the past it has been discussed whether it is better or worse to have quoted things be apostrophe'd.</p>
+<p>Historical Rebol actively prohibits the use of a lit-word! with FOREACH for the loop variable:</p>
+<pre><code>&gt;&gt; foreach 'x [1 2 3] [print [x]]
+** Script Error: foreach expected word argument of type: get-word word block
+</code></pre>
+<p>R3-Alpha and Red don't allow it either.</p>
+<p>But it might seem you'd want to be able to do this in Ren-C...because there are quoting constructs that can quote backwards:</p>
+<pre><code>&gt;&gt; backquote: infixed func [:x] [print ["I backquoted" x]]
+== make action! [[:x] [...]]
+
+&gt;&gt; foo: backquote
+I backquoted foo:
+</code></pre>
+<p>So if you try <code>for-each backquote</code>, the backwards-quoting BACKQUOTE would get the FOR-EACH before the forwards-quoting FOR-EACH could get the BACKQUOTE.  That's just the order that the evaluator works in <em>(unless there's nothing to the right of BACKQUOTE, which is the exception that would allow HELP BACKQUOTE to work)</em>.</p>
+<p>You can work around that with:</p>
+<pre><code>for-each ('backquote) [1 2 3] [print [backquote]]
+</code></pre>
+<p>But it seems like it would be nicer if you could write it without the parentheses.</p>
+<h2><a name="p-4104-should-all-quoting-sites-require-quoted-input-1" class="anchor" href="https://rebol.metaeducation.com#p-4104-should-all-quoting-sites-require-quoted-input-1"></a>Should All Quoting Sites <em>REQUIRE</em> Quoted Input?</h2>
+<p>The quoted parameter convention exists to save you the trouble of quoting the callsites. <em>If this isn't what that's for, then what <strong>is</strong> it for?</em></p>
+<p>I'd be happy to buck the status quo if I thought it were clearly wrong.  But when we look across the board we see how nice and fluent <strong>type of foo</strong> looks vs. <strong>'type of foo</strong>.  Over time it gets internalized to the point that <strong>type: type of foo</strong> doesn't feel weird at all (thought it might look so when you see it the first time).</p>
+<p>While there's something to be said for the educational value of seeing when a word is being used by name vs. by value, it's just... "uglier"</p>
+<pre><code>type: 'type of foo
+</code></pre>
+<p>We seem lose something about knowing the "rules of OF" and the parts of speech involved by context, in order to add a bit of visual noise.  To my tastes, it seems this is not in the same "clear win" zone over <code>type-of</code> and <code>type?</code> that we were in before.</p>
+<p>It seems to me a core experimental theory in the language is that there is value in allowing acclimations in our mind to writing things that "start looking natural" even if they don't follow systemic rules.  That speedbump of typing <strong>type of x</strong> of hitting the apostrophe key, as well as the visual jarringness, suggests it's a place to take advantage of not quoting <em>when it's possible</em>.</p>
+<h2><a name="p-4104-should-all-quoting-sites-merely-permit-quoted-input-2" class="anchor" href="https://rebol.metaeducation.com#p-4104-should-all-quoting-sites-merely-permit-quoted-input-2"></a>Should All Quoting Sites Merely <em>PERMIT</em> Quoted Input?</h2>
+<p>I mentioned that the current workaround for slipping past cases of things like backquoting operators is to use a GROUP!.</p>
+<pre><code>for-each ('foo) [1 2 3] [print [x]]
+</code></pre>
+<p>We might ask if the operation with the quoting slot should be lenient and let you just alternately write:</p>
+<pre><code>for-each 'foo [1 2 3] [print [x]]
+</code></pre>
+<p>Quoted words won't dispatch functions, so you don't have to worry about FOO's associated behavior if you do this.</p>
+<p>A problem with being lenient in that way is that now the function spec is expanded to where it has to accept either WORD! -or- QUOTED! in its quoted slot.  That complicates things, and now the author of the quoting function needs to be bothered with the quote-or-not of their argument.</p>
+<p>If you take the easy-way-out and just DEQUOTE your argument (which leaves it as is if it's not quoted), then you may be permitting things with arbitrary numbers of quotes.</p>
+<pre><code>for-each '''''''''foo [1 2 3] [print [x]]
+</code></pre>
+<p>I'm pretty sure UNQUOTE should require its argument to be quoted, for the sake of sanity.  So the implementation of functions like FOR-EACH would get hairier if they were to have to check and preprocess their arguments, e.g. to permit one-and-only one level of quote that they strip off.  This could be made easier with some helper for the purpose, though.</p>
+<h2><a name="p-4104-a-benefit-to-requiring-quotes-3" class="anchor" href="https://rebol.metaeducation.com#p-4104-a-benefit-to-requiring-quotes-3"></a>A Benefit To Requiring Quotes</h2>
+<p>I've mentioned in the past that for things like FOR-EACH, if we <em>required</em> the first argument to be quoted then there could be a special interpretation for when there wasn't a quote.  e.g. just run a function without naming a variable:</p>
+<pre><code>&gt;&gt; for-each ["No" "Variable"] :print
+No
+Variable
+</code></pre>
+<p>This keeps you from having to write something like:</p>
+<pre><code>for-each _ ["No" "Variable"] :print
+</code></pre>
+<p>A plain function declaration isn't particularly interesting in this form, even with a lambda it's wordier (and symboly-er) than the old-style without:</p>
+<pre><code>for-each [1 2 3] x -&gt; [print [x]]
+</code></pre>
+<p>But when you bring in something like <a href="https://rebol.metaeducation.com/t/looking-into-a-usermode-pointfree/1236">"POINTFREE"</a> it gets more interesting:</p>
+<pre><code>&gt;&gt; block: [a b c]
+
+&gt;&gt; for-each [1 2 3] (&lt;- append block)
+
+&gt;&gt; block
+== [a b c 1 2 3]
+</code></pre>
+<p>With the idea that <strong>#</strong> is legal, it might look better if you "opt-in" to the variables:</p>
+<pre><code>for-each # [1 2 3] (&lt;- append block)
+</code></pre>
+<p>This would let you do a template for what you want and don't want passed to your function.</p>
+<pre><code>&gt;&gt; block: [a b c]
+
+&gt;&gt; for-each [# _] [1 2 3 4] (&lt;- append block)
+
+&gt;&gt; block
+== [a b c 1 3]
+</code></pre>
+<p>This allows us to justify why the variable slot has usefulness even if we're not using a variable.  Maybe that's the answer.  And if we shorten FOR-EACH to simply EACH it would come out cleaner, even in complex invocations:</p>
+<pre><code>each [# _] [1 2 3 4] (&lt;- append block)
+</code></pre>
+<h2><a name="p-4104-switch-to-for-opt-in-on-variables-allow-but-dont-require-quoted-4" class="anchor" href="https://rebol.metaeducation.com#p-4104-switch-to-for-opt-in-on-variables-allow-but-dont-require-quoted-4"></a>Switch to <code>#</code> for opt-in on variables, allow (but don't require) QUOTED! ?</h2>
+<p>...is this a plan?  Does it cover all the angles?</p>
+          <p><a href="https://rebol.metaeducation.com/t/speaking-with-tics-should-quoted-arguments-always-be-apostrophed/1359/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/speaking-with-tics-should-quoted-arguments-always-be-apostrophed/1359/1</link>
+        <pubDate>Wed, 07 Oct 2020 19:32:21 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-1359-1</guid>
+        <source url="https://rebol.metaeducation.com/t/speaking-with-tics-should-quoted-arguments-always-be-apostrophed/1359.rss">Speaking With Tics: Should Quoted Arguments Always Be Apostrophe&#39;d?</source>
+      </item>
+  </channel>
+</rss>

@@ -1,0 +1,2212 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:discourse="http://www.discourse.org/" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Internals - AltRebol</title>
+    <link>https://rebol.metaeducation.com/c/development/internals/9</link>
+    <description>Topics in the &#39;Internals&#39; category Internals of the Rebol language</description>
+    
+      <lastBuildDate>Fri, 06 Jun 2025 22:07:42 +0000</lastBuildDate>
+      <atom:link href="https://rebol.metaeducation.com/c/development/internals/9.rss" rel="self" type="application/rss+xml" />
+        <item>
+          <title>Solving the Pox of the (^)... LIFT the Universe?</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Internals</category>
+          <description><![CDATA[
+            <p>I've taken the big bold leap into the <em><a href="https://rebol.metaeducation.com/t/meta-parameters-and-function-composition/2433/3">world of fully LIFT'ed FRAME!s</a></em>.</p>
+<p>As a refresher: this is the idea that as far as the "API" for calling functions is concerned, you <em>always</em> communicate via lifted values.</p>
+<p>That means when you're building a FRAME! to call a function, you don't have to be concerned whether that function specified its argument as ^META or not.  Once the invocation of the function happens, it will unlift non-^meta arguments as part of its execution.</p>
+<p>Hence if an argument changes from ^META-to-non-meta (or vice-versa), that won't impact callsites that build frames for it.</p>
+<h2><a name="p-8383-metas-lift-on-assign-unlift-on-fetch-helps-1" class="anchor" href="https://rebol.metaeducation.com#p-8383-metas-lift-on-assign-unlift-on-fetch-helps-1"></a>^META's LIFT-ON-ASSIGN, UNLIFT-ON-FETCH Helps</h2>
+<p>The new behavior of ^META-WORD! is extended to TUPLE!, that makes this pretty easy to deal with when working with a "raw" FRAME!:</p>
+<pre><code>&gt;&gt; f: make frame! append/
+
+&gt;&gt; f.^series: [a b c]
+== [a b c]
+
+&gt;&gt; f.series
+== '[a b c]
+
+&gt;&gt; f.^value: spread [d e]
+== /~(d e)~/  ; antiform (splice!)
+
+&gt;&gt; f.value
+== ~(d e)~
+
+&gt;&gt; eval f
+== [a b c d e]
+</code></pre>
+<p>That's a little unfortunate-looking... messier... but it's necessary, right? <sub>(keep reading...)</sub></p>
+<h2><a name="p-8383-simplifying-dialect-for-apply-specialize-2" class="anchor" href="https://rebol.metaeducation.com#p-8383-simplifying-dialect-for-apply-specialize-2"></a>Simplifying Dialect For APPLY + SPECIALIZE</h2>
+<p>While you have to build a FRAME! with values lifted, I didn't want to make higher-level tools like APPLY and SPECIALIZE look ugly.  So they lift for you:</p>
+<pre><code>&gt;&gt; apply append/ [[a b c] spread [d e] dup: 2]
+== [a b c d e d e]
+
+&gt;&gt; sub10: specialize subtract/ [value2: 10]
+
+&gt;&gt; sub10 1030
+== 1020
+</code></pre>
+<p>But I've proposed a :FREEFORM variant form of APPLY and SPECIALIZE...in which the code is bound into the frame.  In this case, the dialect isn't in control... so you would have to use the lifted forms of assignment. <sub>(or would you? keep reading...)</sub></p>
+<p>This form is more awkward and can't take advantage of positional assignment:</p>
+<pre><code>apply:freeform append/ [^series: [a b c] ^value: spread [d e] ^dup: 2]
+</code></pre>
+<p>But it lets you write arbitrary branching and looping code :</p>
+<pre><code>&gt;&gt; apply:freeform append/ [
+       if 1 = random 2 [
+           ^series: [a b c]
+           ^dup: 2
+       ] else [
+           ^series: [q r s]
+           ^dup: 3
+       ]
+       ^value: spread [d e]
+   ]
+== [q r s d e d e d e]
+</code></pre>
+<h2><a name="p-8383-could-the-ugliness-be-moved-around-somehow-3" class="anchor" href="https://rebol.metaeducation.com#p-8383-could-the-ugliness-be-moved-around-somehow-3"></a>Could The "Ugliness" Be Moved Around, Somehow?</h2>
+<p>It seems kind of... <em>unfair</em>.  How can the dialected form deal with something easily, that the non-dialected situations don't?</p>
+<p>In other words: is there some way to simplify the :FREEFORM versions... or things like ADAPT and ENCLOSE... or building "RAW" frames?</p>
+<p><em><strong>My "invasive thought" is this:</strong></em></p>
+<ul>
+<li>why couldn't <code>(foo: ...)</code> store a lifted-but-decayed form of the right hand side</li>
+<li>and <code>(^foo: ...)</code> store a lifted-but <strong>not</strong> decayed version of the right hand side?</li>
+</ul>
+<p>This is being driven by the only truly "unlifted" state a frame normally "needs" <sub>(hand-waving a bit here, actually <img src="https://rebol.metaeducation.com/images/emoji/twitter/wave.png?v=14" title=":wave:" class="emoji" alt=":wave:" loading="lazy" width="20" height="20">)</sub> is unlifted trash to say it's unspecialized.  What would be the harm of lifting everything, and having a special operation for setting to the unspecialized state?</p>
+<p>It would imply, I think... (?)</p>
+<ul>
+<li>
+<p><code>(foo)</code> unlifts the stored value (executing actions, erroring on TRASH!, etc.) and refuses to unlift unstable antiforms</p>
+</li>
+<li>
+<p><code>(^foo)</code> unlifts with no execution (trash! as-is, action! as-is), and is willing to unlift unstable antiforms (pack!, error!, ghost! etc. as-is)</p>
+<ul>
+<li><sub>I have another slightly invasive thought that ^(foo) might permit "unsurprising" ghosts or actions, but that's for another thread.</sub></li>
+</ul>
+</li>
+</ul>
+<p>This is a slippery invasive thought.  It has to be wrong, doesn't it?  Too good to be true?  <img src="https://rebol.metaeducation.com/images/emoji/twitter/pouting_cat.png?v=14" title=":pouting_cat:" class="emoji" alt=":pouting_cat:" loading="lazy" width="20" height="20"></p>
+<p>But what if it isn't?  <img src="https://rebol.metaeducation.com/images/emoji/twitter/thinking.png?v=14" title=":thinking:" class="emoji" alt=":thinking:" loading="lazy" width="20" height="20"></p>
+<p></p><div class="lightbox-wrapper"><a class="lightbox" href="https://rebol.metaeducation.com/uploads/default/original/1X/f16f9c506056c76e6a9b955d445039b0e1d3eeb1.webp" data-download-href="https://rebol.metaeducation.com/uploads/default/f16f9c506056c76e6a9b955d445039b0e1d3eeb1" title="assets_task_01jx3y0xmyfc79dwb24jd57b49_1749257658_img_3"><img src="https://rebol.metaeducation.com/uploads/default/optimized/1X/f16f9c506056c76e6a9b955d445039b0e1d3eeb1_2_517x345.webp" alt="assets_task_01jx3y0xmyfc79dwb24jd57b49_1749257658_img_3" data-base62-sha1="yrQc5xkNpeTlSSrOOswU5OsMelz" width="517" height="345" srcset="https://rebol.metaeducation.com/uploads/default/optimized/1X/f16f9c506056c76e6a9b955d445039b0e1d3eeb1_2_517x345.webp, https://rebol.metaeducation.com/uploads/default/optimized/1X/f16f9c506056c76e6a9b955d445039b0e1d3eeb1_2_775x517.webp 1.5x, https://rebol.metaeducation.com/uploads/default/optimized/1X/f16f9c506056c76e6a9b955d445039b0e1d3eeb1_2_1034x690.webp 2x" data-dominant-color="4D4647"></a></div><p></p>
+<p>It's not changing the usual chain of evaluation.  If you say (1 + 2 comment "hi") that's not lifted... it's a plain old 3 and a "plain old" ghost!.</p>
+<p>So this means when you say <strong><code>(foo: ~)</code></strong> you would be setting FOO to an "ordinary" trash value (a lifted one, in stored representation).  This would cause errors if fetched via <strong><code>(foo)</code></strong> which would unlift and treat it as active.  But if you said <strong><code>(^foo)</code></strong> you would get back the trash state as-is.</p>
+<p><strong>This means there would be a state <em>more trash than trash</em></strong>... unspecialization.  A variable holding a non-lifted trash, which would trip up even fetches with <strong><code>^foo</code></strong>.  And this goes along with my concept of ACCESSOR functions... moving them from something "hidden" to something that's actually exposed... something beneath the layers that <code>(foo: ...)</code> or <code>(^foo: ...)</code> alone can assign.</p>
+<p>So you'd need tools to go beneath assignment, but these tools have already been theorized (I've called it "TWEAK")</p>
+<h2><a name="p-8383-more-investigation-on-this-needed-but-4" class="anchor" href="https://rebol.metaeducation.com#p-8383-more-investigation-on-this-needed-but-4"></a>More investigation on this needed, but...</h2>
+<p><strong>...it's actually just an "all-in, fully-exposed" version of the more "behind-the-scenes" idea I was already implementing, where objects/modules/lets/etc. were storing lifted values...and having special exceptions in the unlifted range.</strong></p>
+<p>The consequence is we can limit <code>(f.^foo: ...)</code> or <code>(^bar: ...)</code> cases to those truly concerned with unstable isotopes.  Which if that can be accomplished, seems to mean only those who need it pay for it.</p>
+<h2><a name="p-8383-it-might-be-the-perfect-solutionhttpswwwyoutubecomwatchvowkck07ijsu-5" class="anchor" href="https://rebol.metaeducation.com#p-8383-it-might-be-the-perfect-solutionhttpswwwyoutubecomwatchvowkck07ijsu-5"></a><a href="https://www.youtube.com/watch?v=OWKcK07iJsU">...It Might Be The Perfect Solution</a></h2>
+<p></p><div class="lightbox-wrapper"><a class="lightbox" href="https://rebol.metaeducation.com/uploads/default/original/1X/be307c38a0a10b6191a9aba9a9d01bb3b8900a71.jpeg" data-download-href="https://rebol.metaeducation.com/uploads/default/be307c38a0a10b6191a9aba9a9d01bb3b8900a71" title="81A95bnJNWL.UF1000,1000_QL80"><img src="https://rebol.metaeducation.com/uploads/default/optimized/1X/be307c38a0a10b6191a9aba9a9d01bb3b8900a71_2_375x375.jpeg" alt="81A95bnJNWL.UF1000,1000_QL80" data-base62-sha1="r8uB6KGbXm59FQlvG1A7D4I8a8p" width="375" height="375" srcset="https://rebol.metaeducation.com/uploads/default/optimized/1X/be307c38a0a10b6191a9aba9a9d01bb3b8900a71_2_375x375.jpeg, https://rebol.metaeducation.com/uploads/default/optimized/1X/be307c38a0a10b6191a9aba9a9d01bb3b8900a71_2_562x562.jpeg 1.5x, https://rebol.metaeducation.com/uploads/default/optimized/1X/be307c38a0a10b6191a9aba9a9d01bb3b8900a71_2_750x750.jpeg 2x" data-dominant-color="43413E"></a></div><p></p>
+            <p><small>11 posts - 3 participants</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/solving-the-pox-of-the-lift-the-universe/2477">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/solving-the-pox-of-the-lift-the-universe/2477</link>
+          <pubDate>Fri, 06 Jun 2025 22:07:42 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2477</guid>
+          <source url="https://rebol.metaeducation.com/t/solving-the-pox-of-the-lift-the-universe/2477.rss">Solving the Pox of the (^)... LIFT the Universe?</source>
+        </item>
+        <item>
+          <title>Replacing GET-WORD! for Polymorphic &quot;GET:ANY&quot;</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Internals</category>
+          <description><![CDATA[
+            <p>So the <a href="https://rebol.metaeducation.com/t/big-alien-proposal-word-runs-functions/1905/13">Big Alien Proposal</a> has been settling out, and I've <a href="https://rebol.metaeducation.com/t/the-grand-leading-slash-safety-or-burden-question/2352/2">backed off the idea that you need a leading slash to assign actions to words</a>.</p>
+<p>An area that still hasn't been pushed through is what to do about replacing the former <strong><code>:FOO</code></strong> behavior for what was "GET-WORD!" (and is now a "refinement").</p>
+<p>Rebol2 used <code>:FOO</code> to suppress function invocations, and fetch any other variable normally.  But it didn't let you get unset variables:</p>
+<pre><code>rebol2&gt;&gt; type? :append
+== function!
+
+rebol2&gt;&gt; num: 10
+
+rebol2&gt;&gt; type? :num
+== integer!
+
+rebol2&gt;&gt; type? :asdfasdf
+** Script Error: asdfasdf has no value
+</code></pre>
+<p>R3-Alpha made <code>:FOO</code> a fully generic GET, that could also get UNSET!</p>
+<pre><code>r3-alpha&gt;&gt; type? :append
+== action!
+
+r3-alpha&gt;&gt; num: 10
+
+r3-alpha&gt;&gt; type? :num
+== integer!
+
+r3-alpha&gt;&gt; type? :asdfasdf
+== unset!
+</code></pre>
+<p>Red followed suit, and does the same thing.</p>
+<p><strong>I never liked this idea of coalescing the two things.</strong>  If you meant to suppress an action invocation, conflating that with "but if it's unset that's okay" has been a recipe for disaster.</p>
+<p>In fact, the Big Alien Proposal moves in a stronger direction... trailing slash doesn't just suppress action invocation, it ensures that the thing <em>is</em> an action:</p>
+<pre><code>&gt;&gt; type of append/
+== ~{action!}~  ; anti
+
+&gt;&gt; num: 10
+
+&gt;&gt; num/
+** Error: trailing slash in paths can only fetch ACTION!, not INTEGER!
+
+&gt;&gt; asdfasdf/
+** Error: asdfasdf is NOTHING
+</code></pre>
+<h2><a name="p-8097-but-what-if-you-want-other-behaviors-1" class="anchor" href="https://rebol.metaeducation.com#p-8097-but-what-if-you-want-other-behaviors-1"></a>But What If You Want Other Behaviors?</h2>
+<p>I've floated the idea that if you want to tolerate getting something that may be unassigned, you can do that with a trailing <strong><code>~</code></strong>.</p>
+<pre><code>&gt;&gt; foo: ~
+&gt;&gt; bar: 1020
+
+&gt;&gt; foo
+** Error: foo is NOTHING
+
+&gt;&gt; foo.~
+== ~  ; anti
+
+&gt;&gt; foo/~
+== ~  ; anti
+
+&gt;&gt; bar.~
+== 1020
+
+&gt;&gt; bar/~
+** Error: trailing slash in paths can only fetch ACTION!, not INTEGER!
+
+&gt;&gt; type of append/~
+== ~{action!}~  ; anti
+</code></pre>
+<p><strong>That seems pretty slick.</strong></p>
+<p>There is one qualm, which is that <strong><code>bar.~</code></strong> can theoretically be meaningful, if you're picking something like a quasiform out of a MAP!, because quasi-blank is a valid map key.  Typically if you put something in a TUPLE! like that which can be literally looked up, it is looked up literally.</p>
+<p>We could go the other way with it, and put it at the beginning...</p>
+<pre><code>&gt;&gt; ~.foo
+== ~  ; anti
+
+&gt;&gt; ~.bar
+== 1020
+</code></pre>
+<p>But if you've got a long chain of things, it puts the "I'm okay with this being unset" far away from the thing that's actually unset.</p>
+<pre><code>&gt;&gt; ~.obj1.obj2.field
+== ~  ; anti
+
+&gt;&gt; obj1.obj2.field.~
+== ~  ; anti
+</code></pre>
+<p>So comparing there, it's FIELD that's the thing that you're "modifying" the access of.</p>
+<p>But...I suppose looked at that way, you might put it anywhere:</p>
+<pre><code>&gt;&gt; obj1.obj2.~.field
+== ~  ; anti
+</code></pre>
+<p>Well, that's a bit interesting, in the sense that this way you could cut short any chain of accesses:</p>
+<pre><code>&gt;&gt; ~.obj1.~.obj2.~.field
+== ~  ; anti
+</code></pre>
+<p>That might translate to "Suppress an error and just give me NOTHING if any of OBJ1, OBJ2, or FIELD are unset" (or maybe just any kind of unavailable?)</p>
+<p>Well actually you can do this either way, with a before or after convention:</p>
+<pre><code>&gt;&gt; obj1.~.obj2.~.field.~
+== ~  ; anti
+</code></pre>
+<p>One thing to like about the after convention is that it wouldn't produce things that look like unix paths, e.g. <strong><code>~/foo</code></strong> looks like a file hanging off your home folder.</p>
+<h2><a name="p-8097-after-convention-looks-good-still-has-a-hole-2" class="anchor" href="https://rebol.metaeducation.com#p-8097-after-convention-looks-good-still-has-a-hole-2"></a>After Convention Looks Good, Still Has A Hole...</h2>
+<p>There's still one hole here.</p>
+<p><strong><code>foo.~</code></strong> gives you a non-antiform-action value that may be an unset variable (or tripwire, we'll assume they're both covered)</p>
+<p><strong><code>foo/~</code></strong> gives you either an antiform action value or the value of an unset variable, but errors on other things.</p>
+<p><em>(I should point out that in <strong><code>foo.bar.baz/~</code></strong>, that is structurally like <strong><code>(foo.bar.baz)/~</code></strong> so there would be no putting it in the middle as I suggested you might be able to do with the tuple version.  But appropriately, that wouldn't make any sense for an antiform action to be anywhere but at the end, because you can't "pick out of it" the way you may be able to do with a tuple product.)</em></p>
+<p>Anyway... the hole is the case of where you <em>genuinely</em> want anything.  How to get the behavior of R3-Alpha and Red's GET-WORD! ?</p>
+<p><em><strong>This is actually pretty rare.</strong></em>  If you've assigned something to a variable and you have no idea whether it's a function or a plain value, you don't know how to use it.  Unless the function is arity-1 and promises that it's pure (otherwise you'll have trouble with treating it with value semantics).</p>
+<p>Could do like Rebol2 and punt on it... just say you have to use <strong><code>get:any</code></strong> and move on.  <img src="https://rebol.metaeducation.com/images/emoji/twitter/face_with_diagonal_mouth.png?v=14" title=":face_with_diagonal_mouth:" class="emoji" alt=":face_with_diagonal_mouth:" loading="lazy" width="20" height="20"></p>
+<p>Or expand <strong><code>foo.~</code></strong> to say antiform actions are acceptable to access with that.  <img src="https://rebol.metaeducation.com/images/emoji/twitter/frowning.png?v=14" title=":frowning:" class="emoji" alt=":frowning:" loading="lazy" width="20" height="20"></p>
+<h2><a name="p-8097-another-hole-what-about-action-null-tolerance-3" class="anchor" href="https://rebol.metaeducation.com#p-8097-another-hole-what-about-action-null-tolerance-3"></a>Another Hole: What About ACTION! NULL-tolerance?</h2>
+<p>This is something that comes up...which we might write up like this:</p>
+<pre><code>&gt;&gt; foo: null
+&gt;&gt; bar: func [x] [...]
+
+&gt;&gt; proxy-foo: foo/~null~
+== ~null~  ; anti
+
+&gt;&gt; proxy-bar: bar/~null~
+== ~#[frame! ...]~
+</code></pre>
+<p>Uuuugly.  <img src="https://rebol.metaeducation.com/images/emoji/twitter/goblin.png?v=14" title=":goblin:" class="emoji" alt=":goblin:" loading="lazy" width="20" height="20">   But it's more often the case you want to fetch action-or-null than it is that you want to fetch action-or-not-set.</p>
+<p><strong>But Wait...</strong> since we know it's not an invocation, TRY could be used!</p>
+<pre><code>&gt;&gt; proxy-foo: try foo/
+== ~null~
+
+&gt;&gt; proxy-bar: try bar/
+== ~#[frame! ...]~
+</code></pre>
+<p>The convention could be that trailing slash does a RAISE, but only if the variable is NULL... otherwise it does a FAIL.  So TRY could effectively pipe the NULL!</p>
+<p>That's subtle, but I feel the subtlety of <em>"actions pass, nulls raise, everything else fails"</em> is as-easy or easier to explain than any attempt to do this with a notation.</p>
+<h2><a name="p-8097-sidenote-what-about-protecting-assignments-4" class="anchor" href="https://rebol.metaeducation.com#p-8097-sidenote-what-about-protecting-assignments-4"></a>Sidenote, What About Protecting Assignments?</h2>
+<p>I've become very accustomed to being able to unset variables on the fly:</p>
+<pre><code>x: y: z: ~
+
+mode: ~&lt;mode not initialized by INIT-SYSTEM&gt;~
+</code></pre>
+<p>Though we could maybe draw a distinction with SET-BLOCK...</p>
+<pre><code>&gt;&gt; [x]: ~
+** Error: SET-BLOCK! variables must be var.~ to unset
+
+&gt;&gt; [x.~]: ~
+== ~  ; anti
+</code></pre>
+<p>Eeeeh.  No.</p>
+<h2><a name="p-8097-anyway-theres-enough-here-to-get-started-5" class="anchor" href="https://rebol.metaeducation.com#p-8097-anyway-theres-enough-here-to-get-started-5"></a>Anyway, There's Enough Here To Get Started</h2>
+<p>I've converted most everywhere in the code that meant to get an action to <strong><code>FOO/</code></strong>  But there's still a fair number of places in the code still using <strong><code>:FOO</code></strong>.  I'll have to start surveying them, but my current leaning is to go for it with the trailing tilde idea.</p>
+            <p><small>2 posts - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/replacing-get-word-for-polymorphic-get-any/2392">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/replacing-get-word-for-polymorphic-get-any/2392</link>
+          <pubDate>Mon, 31 Mar 2025 13:44:26 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2392</guid>
+          <source url="https://rebol.metaeducation.com/t/replacing-get-word-for-polymorphic-get-any/2392.rss">Replacing GET-WORD! for Polymorphic &quot;GET:ANY&quot;</source>
+        </item>
+        <item>
+          <title>Re-imagining DO/NEXT as EVAL:STEP</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Internals</category>
+          <description><![CDATA[
+            <blockquote>
+<p><strong>NOTE:</strong> <a href="https://rebol.metaeducation.com/t/do-of-text-as-synonym-of-do-of-file-containing-string/2125">The nature of DO is to deal with whole scripts</a>.  We know <strong><code>do/next %foo.r</code></strong> doesn't make any sense, and in fact having DO take a BLOCK! of Rebol code should be a dialect about how to load and bind what you pass it... not expressions like <strong><code>do [1 + 2]</code></strong>.</p>
+<p>So in modern Ren-C, array evaluation is handled by a primitive called <strong>EVAL</strong>.  Hence the /NEXT refinement has been removed from DO, and for a transitional period DO will not take BLOCK! at all... until all such references are gone.  At which point it will take a dialected LOAD spec, probably aligning closely with what IMPORT takes.</p>
+</blockquote>
+<h3><a name="p-2483-historically-donext-took-a-variable-to-store-the-new-position-1" class="anchor" href="https://rebol.metaeducation.com#p-2483-historically-donext-took-a-variable-to-store-the-new-position-1"></a>Historically, DO/NEXT Took A Variable To Store The New Position</h3>
+<p>This is how Red and R3-Alpha handle DO/NEXT:</p>
+<pre><code>&gt;&gt; result: do/next [1 + 2 10 + 20] 'pos
+== 3
+
+&gt;&gt; pos
+== [10 + 20]
+</code></pre>
+<p>It was an R3-Alpha-ism, considered more convenient than how Rebol2 gave you a block of both the result and the new position...which you had to pick apart:</p>
+<pre><code>rebol2&gt;&gt; do/next [1 + 2 10 + 20]
+== [3 [10 + 20]]
+</code></pre>
+<p><em>(Notice that couldn't work at all in Ren-C, because evaluation can produce antiforms, and antiforms can't be put in blocks.)</em></p>
+<h3><a name="p-2483-first-twist-evalstep-of-returns-a-null-position-2" class="anchor" href="https://rebol.metaeducation.com#p-2483-first-twist-evalstep-of-returns-a-null-position-2"></a>First Twist: EVAL:STEP of <code>[]</code> Returns A NULL Position</h3>
+<p>If you try to step with :STEP over a BLOCK! like <strong>[1 + 2 10 + 20]</strong>, then there are EXACTLY TWO steps with meaningful results of 3 and 30.</p>
+<p>So if you're going to be doing the evaluations in a WHILE loop, you want the EVAL:STEP position result to return success twice, and then have a third call that returns null to signal the looping is done.</p>
+<p>This gives you the possibly surprising (or not?) result that <code>EVAL:STEP []</code> doesn't take a step and doesn't synthesize VOID, even though <code>EVAL []</code> is VOID.  It's a terminal condition.  So if you're trying to take steps and generate an overall accumulated result, you have to seed your result with VOID... and then <code>EVAL:STEP []</code> will tell you there was nothing to do and you return your seeded result.</p>
+<p>Make sense?</p>
+<p>Rebol2, Red, and R3-Alpha all require you to check for the TAIL? of the block as your terminal condition.  Because DO/NEXT on a tail position just produces an UNSET! and another tail position.</p>
+<pre><code>rebol2&gt;&gt; do/next [10 + 20]
+== [30 []]
+
+rebol2&gt;&gt; do/next []
+== [unset []]
+
+rebol2&gt;&gt; do/next []
+ == [unset []]
+</code></pre>
+<p>That's quite a lot more awkward to handle for a terminal condition.  In fact it forces you to check for TAIL? on the block you're evaluating <em>before</em> the first call to DO/NEXT (because seeing the tail afterward won't tell you if the previous step synthesized a valid UNSET!).</p>
+<p>R3-Alpha and Red didn't change this, and still make you check for TAIL? before you take steps:</p>
+<pre><code>r3-alpha/red&gt;&gt; do/next [10 + 20] 'pos
+== 30
+
+r3-alpha/red&gt;&gt; pos
+== []
+
+r3-alpha/red&gt;&gt; do/next [] 'pos
+; no console result here means unset
+
+r3-alpha/red&gt;&gt; pos
+== []
+
+r3-alpha/red&gt;&gt; do/next [] 'pos
+; no console result here means unset
+
+r3-alpha/red&gt;&gt; pos
+== []
+</code></pre>
+<p>Still very awkward, and unclear why they did this instead of making the POS be #[none].</p>
+<h2><a name="p-2483-second-twist-ren-c-can-do-multi-returns-3" class="anchor" href="https://rebol.metaeducation.com#p-2483-second-twist-ren-c-can-do-multi-returns-3"></a>Second Twist: Ren-C Can Do Multi-Returns!</h2>
+<p>Now consider EVAL:STEP turning the return result into a parameter pack, where you get both the evaluation product and the new position!</p>
+<pre><code>&gt;&gt; block: [1 + 2 10 + 20]
+== [1 + 2 10 + 20]
+
+&gt;&gt; pos: eval:step block  ; don't have to heed both returns
+== [10 + 20]
+
+&gt;&gt; [pos result]: eval:step pos  ; but you can heed both returns
+== []
+
+&gt;&gt; result
+== 30
+
+&gt;&gt; [pos result]: eval:step pos
+== ~null~  ; anti
+
+&gt;&gt; result
+** Error: result is unset  ; &lt;- "true unset", because POS was null
+</code></pre>
+<h2><a name="p-2483-why-did-i-make-position-the-primary-return-result-4" class="anchor" href="https://rebol.metaeducation.com#p-2483-why-did-i-make-position-the-primary-return-result-4"></a>Why Did I Make Position The Primary Return Result?</h2>
+<ol>
+<li>
+<p><strong>It Makes It Easier to Loop Through an Evaluation</strong> - There are some situations where EVAL:STEP doesn't care about the value synthesized, but pretty much no cases where you don't care about the new position.  Being able to conditionally test if the returned position reached the end of a loop is super convenient.</p>
+<pre><code>block: [1 + 2 10 + 20]
+
+while [[block result]: eval:step block] [
+    print ["Step result was:" mold result]
+]
+</code></pre>
+</li>
+<li>
+<p><strong>Avoids Ambiguity When EVAL Result Is Itself A Multi-Return</strong> - Imagine the following kind of confusion if we made the evaluation product the first result instead of the second:</p>
+<pre><code>&gt;&gt; block: [1 + 2 comment "I don't care about this"]
+
+&gt;&gt; result: eval:step block  ; I just want the first thing!
+== 3  ; great, I didn't want that position anyway
+
+&gt;&gt; block: [pack [&lt;left&gt; &lt;right&gt;] comment "I don't care about this"]
+
+&gt;&gt; [left right]: eval:step block  ; just want to unpack that first thing
+== &lt;left&gt;  ; great, just what I expected
+
+&gt;&gt; right
+== [comment "I don't care about this"]  ; whaaa? I wanted &lt;right&gt;!
+</code></pre>
+<p>Encountering problems with this in the past has made me back off from using multi-returns in places they seemed like they would be perfect.  But what I now realize is you simply don't want your primary return result of a multi-return to be something that can itself be a multi-return... unless you <em>really</em> know what you are doing.</p>
+<p>If you intend to do something with the evaluation product and want to be truly general, you of course have to be using ^META conventions:</p>
+<pre><code>[pos ^result]: eval:step pos
+</code></pre>
+<p>Whether you need to do that or not depends on what you are doing.  Why are you stepping through arrays one step at a time, anyway?  Usually intermediate results are discarded.  What is it precisely you are looking for?  (Again on my point of why making the position the primary result makes sense... usually you aren't looking at the result at all, you're a dialect and looking at what you advance to at the next position.)</p>
+</li>
+</ol>
+<h2><a name="p-2483-lgtm-1-5" class="anchor" href="https://rebol.metaeducation.com#p-2483-lgtm-1-5"></a>LGTM <img src="https://rebol.metaeducation.com/images/emoji/twitter/+1.png?v=14" title=":+1:" class="emoji" alt=":+1:" loading="lazy" width="20" height="20"></h2>
+            <p><small>2 posts - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/re-imagining-do-next-as-eval-step/767">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/re-imagining-do-next-as-eval-step/767</link>
+          <pubDate>Thu, 22 Aug 2024 04:00:00 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-767</guid>
+          <source url="https://rebol.metaeducation.com/t/re-imagining-do-next-as-eval-step/767.rss">Re-imagining DO/NEXT as EVAL:STEP</source>
+        </item>
+        <item>
+          <title>Unstable Isotope Conundrums</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Internals</category>
+          <description><![CDATA[
+            <p>An unstable isotope is one that cannot be stored in a variable.  The clearest example of one of these is a PACK!.</p>
+<p>Quick refresher: because functions receive their arguments in variables, you clearly cannot pass an unstable isotope to a function.  You instead use ^META parameters and get the quasiform.</p>
+<pre><code>&gt;&gt; pack [3 4]
+; first in pack of length 2
+== 3
+
+&gt;&gt; lift pack [3 4]
+== ~['3 '4]~
+
+&gt;&gt; [a b]: pack [3 4]
+== 3
+
+&gt;&gt; a
+== 3
+
+&gt;&gt; b
+== 4
+</code></pre>
+<p><strong>But what about non-variable situations... like expressions that are being tested for being truthy or falsey?</strong></p>
+<p>Right now, tests for truthiness throw the unstable state away.  For instance, ALL:</p>
+<pre><code>&gt;&gt; all [1 2 pack [3 4]]
+== 3
+</code></pre>
+<p>The PACK! formed by the PACK function is decayed to just 3 by the ALL, and then the 3 was tested as truthy.  If you wanted to get past this, you would have to lift-and-then-unlift the pack:</p>
+<pre><code>&gt;&gt; unlift all [1 2 lift pack [3 4]]
+; first in pack of length 2
+== 3
+</code></pre>
+<p>But note that here, it's testing the lifted-pack ~['3 '4]~ for truthiness, not the 3.  So if null were in the meta pack, it would still wind up truthy.</p>
+<pre><code>&gt;&gt; all [1 2 meta pack [null null]]
+== ~[~null~ ~null~]~
+</code></pre>
+<p>Whereas a regular pack would be decayed before the test:</p>
+<pre><code>&gt;&gt; all [1 2 pack [null null]]
+== \~null~\  ; antiform
+</code></pre>
+<p>You might ask <em>"Why not just say all PACK!s are truthy, so you don't have to LIFT and UNLIFT them?"</em></p>
+<p>Well just think about it: when you use a multi-returning function you may only be interested in the primary result...and even only be slightly aware that more results are available.  For instance: not everyone knows that today's FIND returns an additional output if you want it (it's the end of a match).</p>
+<p><strong>Saying that packs must decay to test them for truthiness doesn't seem too baffling, but what about loop constructs that don't test for truthiness?</strong></p>
+<p>Is this harmless?</p>
+<pre><code>&gt;&gt; flag: okay
+
+&gt;&gt; lift while [flag] [flag: null, pack [3 4]]
+== ~['3 '4]~
+</code></pre>
+<p>It seems all right, although this becomes a property that <a href="https://rebol.metaeducation.com/t/demonstrating-for-both-loop-composability-for-the-win/1833">has to be preserved by compositions like FOR-BOTH</a>. (As it so happens, the composition does work.)</p>
+<p><a href="https://rebol.metaeducation.com/t/the-mismatch-of-arity-1-until-and-arity-2-while/594/8">But what about INSIST?</a>  In INSIST the loop condition and the body are the same, and in order to exit the loop the body must be truthy...so you can't get a pack out:</p>
+<pre><code>&gt;&gt; until [pack [3 4]]
+== 3
+</code></pre>
+<p>And also... what about situations like CONTINUE:WITH or STOP:WITH.  If the :WITH parameter is a plain refinement and not a ^META one, then the information will be lost:</p>
+<pre><code>&gt;&gt; cycle [stop:with pack [3 4]]
+== 3
+</code></pre>
+<h2><a name="p-6617-maybe-test-decayd-value-preserve-pack-1" class="anchor" href="https://rebol.metaeducation.com#p-6617-maybe-test-decayd-value-preserve-pack-1"></a>Maybe Test DECAY'd Value, Preserve PACK! ?</h2>
+<p>Constructs like ALL or UNTIL might decay only for the purposes of the truthiness test, but preserve the original PACK! for the actual return.</p>
+<p>For instance could you do this?</p>
+<pre><code>&gt;&gt; [a :b]: all [
+       1 = 1
+       2 = 2
+       pack [3 4]
+   ]
+== 3
+
+&gt;&gt; a
+== 3
+
+&gt;&gt; b
+== 4
+</code></pre>
+<p>I've pointed out that PACKs with falsey items have to break the chain:</p>
+<pre><code>&gt;&gt; [a :b]: all [
+       1 = 1
+       2 = 2
+       pack [null 4]
+   ]
+== \~null~\  ; antiform
+
+&gt;&gt; a
+== \~null~\  ; antiform
+
+&gt;&gt; b
+== \~null~\  ; antiform
+</code></pre>
+<p>If you didn't intend that you'd have to LIFT the pack inside the ALL...and UNLIFT outside as discussed (in this case with UNLIFT* which passes through null as-is vs. erroring if the leading conditions resulted in a null outcome)</p>
+<pre><code>&gt;&gt; [a :b]: unlift* all [
+       1 = 1
+       2 = 2
+       lift pack [null 4]
+   ]
+== \~null~\  ; antiform
+
+&gt;&gt; a
+== \~null~\  ; antiform
+
+&gt;&gt; b
+== 4
+</code></pre>
+<p>Taking this preservation to extremes would complicate a lot of places in the code.  For instance: IF tolerates function branches, and will pass on the condition to the branch:</p>
+<pre><code>&gt;&gt; var: [a b c]
+
+&gt;&gt; if var (func [x] [print ["var was" mold x]])
+var was [a b c]
+</code></pre>
+<p>But what if you want to do this with a pack, and have the option of receiving it in that function?</p>
+<pre><code> &gt;&gt; if pack [1 2] (func [x] [print ["var was" mold x]])
+ var was 1
+
+ &gt;&gt; if pack [1 2] (func [^x] [print ["meta var was" mold x]])
+ meta var was ~[1 2]~
+
+ &gt;&gt; if pack [false 2] (func [^x] [print ["meta var was" mold x]])
+ == \~null~\  ; antiform
+</code></pre>
+<p>Interesting though that may look, it changes IF to where it has to take its condition as a ^META parameter, otherwise it decays and can't be passed on.</p>
+<p>I can't tell if this is a high-enough leverage piece of functionality to be worth complicating IF or not.</p>
+<h2><a name="p-6617-for-now-tempting-to-say-loop-protocol-cant-return-pack-2" class="anchor" href="https://rebol.metaeducation.com#p-6617-for-now-tempting-to-say-loop-protocol-cant-return-pack-2"></a>For Now, Tempting To Say "Loop Protocol" Can't Return PACK!</h2>
+<p>It's not necessarily <em>hard</em> to make :WITH a ^META-refinement on CONTINUE and STOP... at least in terms of allowing PACK!.  <strong>continue:with fail error</strong> would cause some uncomfortable results.</p>
+<p>Again, note there are ways to work around not processing unstable pack! isotopes by the :WITH itself, by LIFT-ing on the inside and UNLIFT-ing on the outside:</p>
+<pre><code> &gt;&gt; cycle [stop:with lift pack [3 4]]
+ == ~[3 4]~
+
+ &gt;&gt; [a b]: unlift cycle [stop:with lift pack [3 4]]
+ == 3
+
+ &gt;&gt; a
+ == 3
+
+ &gt;&gt; b
+ == 4
+</code></pre>
+<p>Every time I see this, I do kind of wish up and down arrows were on our keyboards:</p>
+<pre><code>  [a b]: ↓ cycle [stop:with ↑ pack [3 4]]
+</code></pre>
+<p>If caret were taken for LIFT, you only get half of this:</p>
+<pre><code> [a b]: unlift cycle [stop:with ^ pack [3 4]]
+</code></pre>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/unstable-isotope-conundrums/2033">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/unstable-isotope-conundrums/2033</link>
+          <pubDate>Thu, 22 Jun 2023 17:09:32 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-2033</guid>
+          <source url="https://rebol.metaeducation.com/t/unstable-isotope-conundrums/2033.rss">Unstable Isotope Conundrums</source>
+        </item>
+        <item>
+          <title>ARRAY/INITIAL and ACTION! Isotopes</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Internals</category>
+          <description><![CDATA[
+            <p>So the ARRAY mezzanine from R3-Alpha allowed you to make an array with an initial value that could be a function...in which case it evaluated that function each time:</p>
+<pre><code>r3-alpha&gt;&gt; array 3
+== [none none none]
+
+r3-alpha&gt;&gt; array/initial 3 10
+== [10 10 10]
+
+r3-alpha&gt;&gt; n: 0 array/initial 3 does [n: n + 1]
+== [1 2 3]
+</code></pre>
+<p>This raises the question of how you would make an array whose initial value was itself a function.</p>
+<p>If you're a loophole-minded person, you might notice you could trick <em>this particular case</em> by making a function that returns a function.</p>
+<pre><code>r3-alpha&gt;&gt; array/initial 3 does [:append]
+== [#[action! [...]] #[action! [...]] #[action! [...]]]
+</code></pre>
+<p>But that's not really a general answer for how to deal with this kind of polymorphism--it just works if you're using the result purely to do a substitution.</p>
+<h2><a name="p-6431-trying-this-with-antiform-actions-1" class="anchor" href="https://rebol.metaeducation.com#p-6431-trying-this-with-antiform-actions-1"></a>Trying This With Antiform Actions</h2>
+<p>I've loosened my stance on isotopes in function frames as parameters.  It's not a good idea to take them as default, but forcing you to make every parameter ^META just to get isotopes is limiting.</p>
+<p>So I gave this a shot...</p>
+<pre><code>array: func [
+    {Makes and initializes a block of a given size}
+
+    return: "Generated block or null if blank input"
+        [block!]
+    size "Size or block of sizes for each dimension"
+        [&lt;maybe&gt; integer! block!]
+    /initial "Initial value (will be called each time if action isotope)"
+        [any-element? action?]
+]
+</code></pre>
+<p>So that <strong>[any-element? action?]</strong> leads to a willingness to accept frame antiforms, as well as anything you can put in a block.  Having such an annotation leads you into the "danger zone" where if you don't prefix accesses to INITIAL with a colon, you run the risk of running a function.  But if you don't have the annotation, you don't have to be paranoid and decorate your references.</p>
+<p>Here's how the INITIAL references wind up in the implementation:</p>
+<pre><code>case [
+    block? rest [
+        repeat size [append block (array/initial rest :initial)]
+    ]
+    action? :initial [
+        repeat size [append block run :initial]  ; Called every time
+    ]
+    any-series? initial [
+        repeat size [append block (copy/deep initial)]
+    ]
+] else [
+    append/dup block initial size
+]
+</code></pre>
+<p>So the BLOCK! case which recurses uses the :INITIAL for pass-thru.</p>
+<p>I used <strong>RUN :INITIAL</strong> when I could have just used <strong>INITIAL</strong>, simply because it feels more clear.  If this wasn't already contained by being at the end of a block, it would be better to limit the parameterization by saying something like <strong><code>apply :initial []</code></strong> or the now-equivalent <strong><code>initial :: []</code></strong></p>
+<h2><a name="p-6431-and-it-works-2" class="anchor" href="https://rebol.metaeducation.com#p-6431-and-it-works-2"></a>And It Works</h2>
+<p>What we're kind of accepting as a default is that function generation produces isotopes.  So getting a plain action requires some kind of extra step, like REIFY</p>
+<pre><code>&gt;&gt; func [x] []
+== ~#[frame! [x]]~  ; anti
+
+&gt;&gt; action: reify func [x] []
+== ~#[frame! {action} [x]]~
+
+&gt;&gt; action  ; not word!-active
+== ~#[frame! {action} [x]]~
+
+&gt;&gt; ap: reify :append
+== ~#[frame! {ap} [series value /part /dup /line]]~
+
+&gt;&gt; ap
+== ~#[frame! {ap} [series value /part /dup /line]]~
+</code></pre>
+<p>What this means is that you get a similar behavior to before, where if you pass a "live" function you've fetched from a word or just generated, then it runs.  You have to do something extra to it to get it to be inert.</p>
+<pre><code>&gt;&gt; array 3
+== [_ _ _]
+
+&gt;&gt; array/initial 3 10
+== [10 10 10]
+
+&gt;&gt; n: 0 array/initial 3 does [n: n + 1]
+== [1 2 3]
+
+&gt;&gt; array/initial 3 reify does [n: n + 1]
+== [~#[frame! []]~ ~#[frame! []]~ ~#[frame! []]~]
+
+&gt;&gt; array/initial 3 reify/unquasi does [n: n + 1]
+== [#[frame! []] #[frame! []] #[frame! []]]
+</code></pre>
+<h2><a name="p-6431-that-looks-like-an-isotope-success-story-3" class="anchor" href="https://rebol.metaeducation.com#p-6431-that-looks-like-an-isotope-success-story-3"></a>That Looks Like An Isotope Success Story...</h2>
+<p>It doesn't require any convoluted thinking to get the literal vs. non-literal distinction.  And you can apply this technique to cases that don't have a weird workaround.</p>
+<p>I wish I could say that all of antiform action impacts were as well sorted out as this looks.  But it's a start, and it shows the potential.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/array-initial-and-action-isotopes/1975">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/array-initial-and-action-isotopes/1975</link>
+          <pubDate>Tue, 20 Sep 2022 18:53:49 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-1975</guid>
+          <source url="https://rebol.metaeducation.com/t/array-initial-and-action-isotopes/1975.rss">ARRAY/INITIAL and ACTION! Isotopes</source>
+        </item>
+        <item>
+          <title>Extending Contexts (OBJECT!, MODULE!, etc)</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Internals</category>
+          <description><![CDATA[
+            <p>In R3-Alpha, it is possible to append key/value pairs to objects via a block:</p>
+<pre><code>&gt;&gt; obj: make object! [a: 10]
+== make object! [
+   a: 10
+]
+
+&gt;&gt; append obj [b: 20 c: 30]
+== make object! [
+    a: 10
+    b: 20
+    c: 30
+]
+</code></pre>
+<p>You can't do that in Rebol2, and Red did not carry it forward.</p>
+<p><strong>But in Ren-C, isotopes are not allowed in blocks.</strong>  It's more powerful if there is an operation which extends the object via a block which gets evaluated... much as the block in MAKE OBJECT! is evaluated.</p>
+<p>As a general rule, APPEND should certainly not be REDUCE-ing block arguments.  So some other operation is needed</p>
+<p>Red has an EXTEND operation, but it is "reserved for future use":</p>
+<pre><code>USAGE:
+     EXTEND obj spec
+
+DESCRIPTION: 
+     Extend an object or map value with list of key and value pairs. 
+     EXTEND is a native! value.
+
+ARGUMENTS:
+     obj          [object! map!] 
+     spec         [block! hash! map!] 
+
+REFINEMENTS:
+     /case        =&gt; Use case-sensitive comparison.
+</code></pre>
+<p>Given that it's not implemented, we don't know if that spec block is intended to be evaluated or not.  Also, we'd assume EXTEND would create a new object (since their objects don't expand).</p>
+<p>Anyway, APPEND to an OBJECT! is something that probably doesn't make sense.</p>
+            <p><small>2 posts - 2 participants</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/extending-contexts-object-module-etc/1913">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/extending-contexts-object-module-etc/1913</link>
+          <pubDate>Tue, 09 Aug 2022 22:00:37 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-1913</guid>
+          <source url="https://rebol.metaeducation.com/t/extending-contexts-object-module-etc/1913.rss">Extending Contexts (OBJECT!, MODULE!, etc)</source>
+        </item>
+        <item>
+          <title>FRAME! / ACTION! Duality Examined</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Internals</category>
+          <description><![CDATA[
+            <p>The mechanics behind FRAME! and ACTION! have been mixed up and reshaped over time, to where they are very much tied together.</p>
+<p>At times I've wondered if we need both types.  If ACTION!s become inert unless they are isotopic, then that would seem to blur the distinction even more... since FRAME!s have kind of been "inert actions".</p>
+<p>So I thought I'd try writing up an explanation of the current state of things.</p>
+<h2><a name="p-6160-first-whats-a-frame-1" class="anchor" href="https://rebol.metaeducation.com#p-6160-first-whats-a-frame-1"></a>First: What's a FRAME! ?</h2>
+<p>You can think of a FRAME! as an object which has keys and values for the arguments and locals of a function.  There's a flag on each cell which indicates whether the object member has been "specialized out".  If the flag is set, the slot is presumed to contain the value it will have when the function runs.  Otherwise the object member is presumed to contain the type information for acquiring that parameter.</p>
+<p>So when you make an ACTION! like:</p>
+<pre><code>foo: func [x [integer!] y [text!] &lt;local&gt; z] [...]
+</code></pre>
+<p>It's internals are actually a FRAME! (called an "exemplar") that looks <em>something</em> like:</p>
+<pre><code>make frame! [
+    x: [integer!]  ; unspecialized
+    y: [text!]  ; unspecialized
+    z: ~   ; specialized
+]
+</code></pre>
+<h2><a name="p-6160-whats-the-difference-between-action-and-frame-then-2" class="anchor" href="https://rebol.metaeducation.com#p-6160-whats-the-difference-between-action-and-frame-then-2"></a>What's The Difference Between ACTION! and FRAME!, Then?</h2>
+<p>Looking at the above: <strong>you wouldn't want to try and DO a FRAME! which has type information in the argument slots</strong>.  When the code for the function runs, it's expected that X be <em>an integer instance</em>...not type information saying an integer is expected!</p>
+<p>So when you MAKE FRAME! from an ACTION!, it goes through all the slots and wipes them out to be unset:</p>
+<pre><code>&gt;&gt; make frame! :foo
+== make frame! [
+    x: ~
+    y: ~
+]  ; ^-- local z is not shown, as it was already specialized to a value
+</code></pre>
+<p>But it still has to maintain a link to the original information about the parameter types, in order to validate them.  So there's a pointer from each of these "non-exemplar" FRAME!s to the "exemplar" FRAME! with the type information.</p>
+<h2><a name="p-6160-so-actions-are-frames-wtypesets-in-slots-where-args-would-be-3" class="anchor" href="https://rebol.metaeducation.com#p-6160-so-actions-are-frames-wtypesets-in-slots-where-args-would-be-3"></a>So ACTION!s are FRAME!s w/typesets in slots where args would be?</h2>
+<p>Kind of.  I glossed over some details there (there's more information in the parameter description than the type block...you need to know if it's quoted, or if it's a refinement, etc.)</p>
+<p>Right now every FRAME! points at an ACTION! instance.  So you can ask <strong>action of frame</strong> and get an answer.  That answer leads you to the thing that the system will use to do type checking on that frame (and you can in theory use it yourself).</p>
+<p><strong>It could truthfully be said that you never execute ACTION!s, you only execute FRAME!s.</strong>  But when we say we "execute an action" all we mean is that a new frame is created for it, and then <em>that</em> frame is executed.</p>
+<p>One might wonder why something like SPECIALIZE would create an ACTION! instead of just making a FRAME!.  One good reason is that this offers an opportunity to <em>completely erase</em> the specialized variables from the interface.  With the variables erased, the words become available again for use in AUGMENT-ing the composite function.</p>
+<h2><a name="p-6160-so-theres-some-info-4" class="anchor" href="https://rebol.metaeducation.com#p-6160-so-theres-some-info-4"></a>So There's Some Info...</h2>
+<p>Things are sort of stable with this, but a big thing on the horizon is the possibility that there might be FRAME! instances for evaluators besides actions.  So you could have a FRAME! representing just the evaluation of a BLOCK!.  (Today that's <em>sort of</em> what a VARARGS! is.)</p>
+            <p><small>5 posts - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/frame-action-duality-examined/1898">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/frame-action-duality-examined/1898</link>
+          <pubDate>Sat, 23 Jul 2022 17:43:10 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-1898</guid>
+          <source url="https://rebol.metaeducation.com/t/frame-action-duality-examined/1898.rss">FRAME! / ACTION! Duality Examined</source>
+        </item>
+        <item>
+          <title>The Long-Awaited Death of /ONLY</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Internals</category>
+          <description><![CDATA[
+            <p><strong>As of July 2022, /ONLY is no longer a refinement available on APPEND, INSERT, CHANGE, FIND, SELECT, COMPOSE, or similar functions.</strong>  It only appears in the Redbol module <a href="https://rebol.metaeducation.com/t/agree-to-disagree-points-places-i-see-both-sides/1862/3">through emulation</a>.</p>
+<h2><a name="p-5119-as-is-semantics-are-default-1" class="anchor" href="https://rebol.metaeducation.com#p-5119-as-is-semantics-are-default-1"></a>"AS-IS" Semantics Are Default</h2>
+<p>It's easy to empathize with the historical Rebol idea of "splice blocks by default", if you only look at examples where the code is fully literal:</p>
+<pre><code>append files [%foo.r %bar.r]
+code: compose [... keep [sum: sum + x] ...]
+</code></pre>
+<p>But problems immediately strike when you start using variables that may-or-may-not-be blocks.  You can't rely on any invariants, and this leads to broken code:</p>
+<pre><code>&gt;&gt; block: [#a {b} [c d e] %f]
+
+&gt;&gt; pick block 3
+== [c d e]
+
+&gt;&gt; find block pick block 3
+== \~null~\  ; antiform
+</code></pre>
+<p>Time and experience has proven that "as-is" semantics are the safest and clearest default:</p>
+<pre><code>&gt;&gt; append [a b c] [d e]
+== [a b c [d e]]
+</code></pre>
+<p>Ren-C offers a new tool for "spliced" semantics...which is to pass a GROUP! antiform ("quoting level -1").  SPREAD is the first function offered which produces them:</p>
+<pre><code>&gt;&gt; spread [d e]
+== ~(d e)~  ; anti
+
+&gt;&gt; append [a b c] spread [d e]
+== [a b c d e]
+</code></pre>
+<p>But there's nothing particularly special about SPREAD, and there will be many other options for defining functions that may-or-may-not return group antiforms...which have more parameterization and nuance.</p>
+<h2><a name="p-5119-making-the-value-carry-splicing-intent-brings-systemic-good-2" class="anchor" href="https://rebol.metaeducation.com#p-5119-making-the-value-carry-splicing-intent-brings-systemic-good-2"></a>Making The Value Carry Splicing Intent Brings Systemic Good</h2>
+<p>The benefits are everywhere, with safer defaults and clear choices...for instance in REPLACE:</p>
+<pre><code>&gt;&gt; replace [[a b] a b a b] [a b] [c d e]
+== [[c d e] a b a b] 
+
+&gt;&gt; replace [[a b] a b a b] spread [a b] [c d e]
+== [[a b] [c d e] [c d e]]
+
+&gt;&gt; replace [[a b] a b a b] [a b] spread [c d e]
+== [c d e a b a b]
+
+&gt;&gt; replace [[a b] a b a b] spread [a b] spread [c d e]
+== [[a b] c d e c d e]
+</code></pre>
+<p>Branching code can make decisions to splice-or-not-splice on a case by case basis:</p>
+<pre><code>&gt;&gt; code: [&lt;splice&gt; [a b] &lt;no-splice&gt; [c d] &lt;no-splice&gt; 'x]
+
+&gt;&gt; map-each [instruction item] code [
+       switch instruction [
+            &lt;splice&gt; [spread item]
+            &lt;no-splice&gt; [item]
+            panic ["Bad instruction:" instruction]
+       ]
+   ]
+== [a b [c d] 'x]
+</code></pre>
+<p>And COMPOSE can have some slots that splice and others that do not, within the same operation:</p>
+<pre><code>&gt;&gt; data: [a b]
+
+&gt;&gt; compose [spliced (spread data) non-spliced (data)]
+== [spliced a b non-spliced [a b]]
+</code></pre>
+<p>(COMPOSE is a case where not splicing by default is glaringly obvious as the right choice for a generic operation.)</p>
+<h2><a name="p-5119-antiform-parameter-conventions-should-be-used-sparingly-3" class="anchor" href="https://rebol.metaeducation.com#p-5119-antiform-parameter-conventions-should-be-used-sparingly-3"></a>Antiform Parameter Conventions Should Be Used <em>Sparingly</em>!</h2>
+<p>Routines that do not intend to react to an antiform should generally not take them as parameters.</p>
+<p>As a good example, REDUCE might seem like the kind of thing that could act on group antiforms:</p>
+<pre><code>&gt;&gt; append [a b c] reduce spread [1 + 2 3 + 4]
+== [a b c 3 7]
+</code></pre>
+<p>But we want to avoid this temptation, to stop the "spread" of antiforms to touching parts of the system that should not be concerned with them.  So exercise restraint here...and shift the burden on the calling code to reshape itself so that antiforms only exist at the points that are very close to the calls they affect:</p>
+<pre><code>&gt;&gt; append [a b c] spread reduce [1 + 2 3 + 4]
+== [a b c 3 7]
+</code></pre>
+<h2><a name="p-5119-good-riddance-only-4" class="anchor" href="https://rebol.metaeducation.com#p-5119-good-riddance-only-4"></a>Good Riddance /ONLY</h2>
+<p>The elimination of /ONLY from the semantic model, and to have it not contaminate the user's heads, means that people can learn more generic tools that work in more contexts.</p>
+<p>Its appearance in Ren-C will be limited to the Redbol compatibility module.</p>
+            <p><small>3 posts - 2 participants</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/the-long-awaited-death-of-only/1607">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/the-long-awaited-death-of-only/1607</link>
+          <pubDate>Thu, 21 Jul 2022 04:00:00 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-1607</guid>
+          <source url="https://rebol.metaeducation.com/t/the-long-awaited-death-of-only/1607.rss">The Long-Awaited Death of /ONLY</source>
+        </item>
+        <item>
+          <title>Stackless Is Here, Today, Now! :pancakes:</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Internals</category>
+          <description><![CDATA[
+            <p>I've explained why we need stacklessness:</p>
+<p><strong><a href="https://rebol.metaeducation.com/t/switching-to-stackless-why-this-why-now/1247">Switching to Stackless: Why this, why now?</a></strong></p>
+<p>It's taken a lot of thinking.  But as proof that it's real, you can try this:</p>
+<pre><code>&gt;&gt; counter: func [value] [
+      if 0 = modulo value 1000 [print [value]]
+      counter value + 1
+  ]
+</code></pre>
+<p>How many stack levels you get will depend on the available memory of your platform--not your CPU stack.</p>
+<p>In the WebAssembly build that runs in the browser, I got this on Chromium on Linux:</p>
+<pre><code>&gt;&gt; counter 0
+0
+1000
+2000
+3000
+4000
+5000
+6000
+7000
+8000
+9000
+10000
+11000
+12000
+13000
+14000
+15000
+16000
+17000
+</code></pre>
+<p>It just terminates, but the error that shows up in the browser console is:</p>
+<blockquote>
+<p>Uncaught RuntimeError: Aborted(Cannot enlarge memory arrays to size 16867328 bytes (OOM). Either (1) compile with -sINITIAL_MEMORY=X with X higher than the current value 16777216, (2) compile with -sALLOW_MEMORY_GROWTH which allows increasing the size at runtime, or (3) if you want malloc to return NULL (0) instead of this abort, compile with -sABORTING_MALLOC=0)</p>
+</blockquote>
+<p>The same amount was gotten on Firefox, probably because emscripten requests the same amount of Wasm memory space on each.</p>
+<h2><a name="p-5933-point-is-it-ran-out-of-memory-not-stack-1" class="anchor" href="https://rebol.metaeducation.com#p-5933-point-is-it-ran-out-of-memory-not-stack-1"></a>Point Is, It Ran Out of Memory... not Stack!</h2>
+<p>We can see there's work to do on responding to out-of-memory errors (we've never really had a great story for that).  <em>But at least we can (!)</em> -- I've explained already that stack overflows can't be caught the way a failed memory allocation can.  That's a huge motivator for the change.</p>
+<p>But still, over 17000 stack levels is kind of neat in and of itself!</p>
+<p>So how do desktop executables "stack up", on my 16-core Lenovo ThinkPad i7 with 64GB of memory...?</p>
+<p>As a quick comparison: for Red on Windows, it doesn't make it to 2000:</p>
+<pre><code>red&gt;&gt; counter 0
+0
+1000
+*** Internal Error: stack overflow
+*** Where: %
+*** Stack: counter counter counter counter counter counter counter counter coun
+ter counter counter counter counter counter counter counter counter counter cou
+nter counter counter counter counter counter counter counter counter counter co
+unter counter counter coun...
+</code></pre>
+<p>Running an actual count got me to 1943 and then it crashed.</p>
+<p><em>(I take it that encountering a stack overflow -during- a PRINT leads them to a harsher situation than just during a recursion.  But this is all the more reason you can't play fast-and-loose with the CPU stack, it cannot be trapped like an out of memory error!  Right now we may be crashing too, but it's substantially closer to being managed.)</em></p>
+<p>For Rebol2 on Windows it makes it to 14262, and does not crash.  (So Red's an order of magnitude worse, and crashes.)</p>
+<p>I hadn't built a 32-bit optimized Windows executable for a while (and actually had to fix a couple of compiler warnings to get one).  But I figured I'd do so for an apples-to-apples comparison with the Rebol2 and Red EXEs.</p>
+<p>32-bit Ren-C makes it to...well, jeez.  Printing it out one by one could go on forever, so I tried only doing a print on modulo 10,000.  It starts to slow down a bit around 2 million, but ticks past 3 million pretty easily...and makes it to 4 million.  It eventually terminates without a message at 4780000 (it's an optimized build, and our out-of memory handling needs work...this would likely be an assert in a debug build).</p>
+<p>So generously rounding Red up to 2,000... Ren-C can handle over 2000x the stack levels, at least.  <img src="https://rebol.metaeducation.com/images/emoji/twitter/slight_smile.png?v=14" title=":slight_smile:" class="emoji" alt=":slight_smile:" loading="lazy" width="20" height="20"></p>
+<h2><a name="p-5933-now-to-reap-the-benefits-2" class="anchor" href="https://rebol.metaeducation.com#p-5933-now-to-reap-the-benefits-2"></a>Now, To Reap The Benefits...</h2>
+<ul>
+<li>
+<p><strike>I need to rework the JavaScript extension to use this intrinsic stackless property, instead of "Asyncify".</strike>  DONE!</p>
+<ul>
+<li>
+<p>Asyncify gave us the pseudo-stackless ability of suspending arbitrary non-stackless code in order to run browser events.  This let us do things like ASK for input while in the middle of a loop.  With real stackless, we (shouldn't) need that.</p>
+</li>
+<li>
+<p>Asyncify added bloat to our code generation that I recall making the .wasm about double the size.  We'll see how accurate my memory is on that, but hopefully the size of libr3.wasm will go way down.</p>
+</li>
+</ul>
+</li>
+<li>
+<p><strike>One by one the natives have to be redone to stackless.  Only then can we truly ditch Asyncify, because if something like FOR-EACH isn't stackless we wouldn't be able to do something like PRINT or ASK inside of that kind of loop... it would raise an error.</strike>  MOSTLY DONE!</p>
+<ul>
+<li>
+<p>We can probably punt on some things and drop asyncify even if not everything is stackless yet.</p>
+</li>
+<li>
+<p>You might not be able to do something like <strong><code>foo.(ask "Field Name?"): 10</code></strong> until TUPLE! lookup has stackless processing bubble up through its GROUP! evaluations, but I think we can live with that being an error for a while--if it halves the size of the wasm.</p>
+</li>
+</ul>
+</li>
+<li>
+<p>Generators and Yielders need to be resurrected.  They were pretty well designed before, but locking issues created headaches...and it's time to attack those again.</p>
+</li>
+<li>
+<p>Out-of-memory errors have to be reined in--not just so stack overflows can be handled gracefully, but that any kind of out-of-memory is handled gracefully!</p>
+<ul>
+<li>We also might want users to be able to set a policy (if they wish) to limit the stack before memory runs out, just so that infinite recursions get caught earlier in casual programs that aren't intentionally using big stacks.</li>
+</ul>
+</li>
+</ul>
+<p>In any case, it feels good to get the core of the work done two years ago hammered into shape...and see it running in the browser!</p>
+            <p><small>6 posts - 4 participants</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/stackless-is-here-today-now/1844">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/stackless-is-here-today-now/1844</link>
+          <pubDate>Fri, 17 Jun 2022 14:58:10 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-1844</guid>
+          <source url="https://rebol.metaeducation.com/t/stackless-is-here-today-now/1844.rss">Stackless Is Here, Today, Now! :pancakes:</source>
+        </item>
+        <item>
+          <title>Is GROUP! in PATH! for function invocations worth it?</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Internals</category>
+          <description><![CDATA[
+            <p>Back in the day, I thought it would be neat to allow you to put GROUP!s in paths.  So you could do things like this:</p>
+<pre><code>append/(if condition ['only]) [a b c] [d e]
+</code></pre>
+<p>It turned out to be of fairly limited use.  Really you could only use it with refinements that didn't take parameters, because it changes the "shape" of the execution stream.  Consider how you would make the following sensible:</p>
+<pre><code>append/(if condition ['dup]) [a b c] [d e] ???
+</code></pre>
+<p>When the condition is true you want something in the ??? spot.  When it's false you don't.  How can your code cover both cases?</p>
+<h2><a name="p-5829-now-we-have-a-modern-applyhttpsrebolmetaeducationcomtapply-ii-the-revenge14063uhostilefork-1" class="anchor" href="https://rebol.metaeducation.com#p-5829-now-we-have-a-modern-applyhttpsrebolmetaeducationcomtapply-ii-the-revenge14063uhostilefork-1"></a><strong><a href="https://rebol.metaeducation.com/t/apply-ii-the-revenge/1406/3">Now we have a modern APPLY</a></strong></h2>
+<p>It bends some of the raw frame rules, and lets you use LOGIC! for parameterless refinements:</p>
+<pre><code>apply :append [[a b c] [d e] /only condition]
+</code></pre>
+<p>It's a bit longer.  And we haven't really firmed up questions like whether you need the GET-WORD! or if it's soft quoted by default.  Or if there might be some clever shorthand:</p>
+<pre><code>($ append [a b c] [d e] /only condition)
+</code></pre>
+<h2><a name="p-5829-im-in-a-mood-to-kill-off-lesser-loved-features-hocho-2" class="anchor" href="https://rebol.metaeducation.com#p-5829-im-in-a-mood-to-kill-off-lesser-loved-features-hocho-2"></a>I'm In A Mood To Kill Off Lesser-Loved Features <img src="https://rebol.metaeducation.com/images/emoji/twitter/hocho.png?v=14" title=":hocho:" class="emoji" alt=":hocho:" loading="lazy" width="20" height="20"></h2>
+<p>All things being equal, it might seem nice to support.  But every feature has a cost!</p>
+<p><strong>You'd still be able to put GROUP!s in paths for your own purposes, but refinement dispatch in functions wouldn't use it.</strong></p>
+<p>You could also use DO of COMPOSE'd code if you really wanted to:</p>
+<pre><code>do compose/deep [
+    append/(if condition ['only]) [a b c] [d e]
+]
+</code></pre>
+<p>So if anyone has a good argument for keeping the function dispatch behavior, speak up now!</p>
+            <p><small>2 posts - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/is-group-in-path-for-function-invocations-worth-it/1813">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/is-group-in-path-for-function-invocations-worth-it/1813</link>
+          <pubDate>Fri, 13 May 2022 04:35:59 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-1813</guid>
+          <source url="https://rebol.metaeducation.com/t/is-group-in-path-for-function-invocations-worth-it/1813.rss">Is GROUP! in PATH! for function invocations worth it?</source>
+        </item>
+        <item>
+          <title>Conflation vs. Safety, RETURN and &quot;Heavy&quot; Void/Null</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Internals</category>
+          <description><![CDATA[
+            <p>"Heavy" void and null are a novel solution shaped to solve a specific problem.  As a reminder of what the goal is...</p>
+<h1><a name="p-5801-the-goal-is-to-please-rgchris-and-please-me-1" class="anchor" href="https://rebol.metaeducation.com#p-5801-the-goal-is-to-please-rgchris-and-please-me-1"></a>The Goal is to Please <a class="mention" href="https://rebol.metaeducation.com/u/rgchris">@rgchris</a> <em>AND</em> Please me</h1>
+<p>NULL is the signal of "soft failure".  It's a unique result when a loop is halted by a BREAK, when PARSE fails...etc.  VOID is the signal of "nothingness", which is the product of conditional expressions that don't take a branch.  Neither can be stored in blocks.</p>
+<p>NULL's property of not being storable in blocks makes it critical to disambiguating this historical problem:</p>
+<pre><code>redbol&gt;&gt; third [a b #[none]]
+== #[none]
+
+redbol&gt;&gt; third [a b]
+== #[none]
+</code></pre>
+<p>In a language that prides itself on letting you work with code structure, <em>this is the tip of the iceberg of the problems that null solves</em>, and you will find the distinction's utility across the board (obviously, in tools like COMPOSE).  It facilitates rigorous analysis and rearrangements...without needing to drop to C or write convoluted code:</p>
+<pre><code>&gt;&gt; third [a b _]
+== _
+
+&gt;&gt; third [a b]
+; null
+</code></pre>
+<p>Hence NULL and VOID have taken the place of blank ("none!") in many places.  <em>(See <a href="https://rebol.metaeducation.com/t/blank-2022-revisiting-the-datatype/1942">BLANK! 2022, Revisiting the Datatype</a> for a summary.)</em></p>
+<p>But unlike the elements in a block, a branch that evaluates isn't required to be non-NULL or non-VOID.  Which leads us to the long running question of what to bend these branches to so they don't conflate with the branch-not-taken result.</p>
+<h2><a name="p-5801-chris-has-rightly-expressed-concern-2" class="anchor" href="https://rebol.metaeducation.com#p-5801-chris-has-rightly-expressed-concern-2"></a>Chris has (rightly) expressed concern</h2>
+<p>At times I've said that it's not that big a deal that branches can't evaluate to NULL and get distorted.  "You didn't have NULL before at all, so why get so worked up about control constructs not returning it?"</p>
+<p>But the now-pervasive nature of NULL means it can't be avoided.  So:</p>
+<p><em>"How do you express branching code which wants to do some work but also produce NULL as an evaluative product?"</em></p>
+<p>Conflation was not a problem, e.g. in Rebol2:</p>
+<pre><code>rebol2&gt;&gt; exampler: func [x] [
+     print "returning sample or none if not found"
+     case [
+         x = &lt;string&gt; [print "sample string" {hello}]
+         x = &lt;integer&gt; [print "sample integer" 3]
+         x = &lt;none&gt; [print "sample none" none]
+     ]
+  ]
+
+rebol2&gt;&gt; exampler &lt;string&gt;
+returning sample or none if not found
+sample string
+== "hello"
+
+rebol2&gt;&gt; exampler &lt;blatz&gt;
+returning sample or none if not found
+== #[none]
+
+rebol2&gt;&gt; exampler &lt;none&gt;
+returning sample or none if not found
+sample none
+== #[none]
+</code></pre>
+<p>However NULL is now a basic currency of "soft failure".  As such it would not be uncommon to be in the situation where a branching decision process would want to intentionally return NULL as part of the work it does.</p>
+<p>Without a mechanism to address this, unpleasant convolutions would be needed, for instance surrounding anything that wanted to tunnel a NULL with a CATCH and THROW'ing it:</p>
+<pre><code>x: catch [
+    throw switch 1 + 2 [
+        1 [print "one" 1]
+        2 [print "two", &lt;two&gt;]
+        3 [print "three", throw null]
+     ]
+]
+</code></pre>
+<p>Definitely not good.  But regarding the pleasing-me-part, remember I am trying to avoid this situation:</p>
+<pre><code>&gt;&gt; block [a b]
+
+&gt;&gt; case [
+     true [
+          print "case branch"
+          item: third block
+     ]
+   ] else [
+     print "else branch"
+   ]
+
+case branch
+else branch  ; ugh
+</code></pre>
+<p>I don't want the CASE branch to evaluate to NULL just because some expression in the branch was incidentally NULL.  That would mean the ELSE tied to the CASE runs even though the code for the branch ran.</p>
+<h2><a name="p-5801-enter-heavy-forms-packs-with-one-element-3" class="anchor" href="https://rebol.metaeducation.com#p-5801-enter-heavy-forms-packs-with-one-element-3"></a>Enter Heavy Forms: PACKs with One Element</h2>
+<p>One thing a "heavy" void has in common with a "plain" void is that neither can be put in blocks.  But it automatically "decays" into regular VOID when stored into variables.</p>
+<pre><code>&gt;&gt; if true [void]
+; first in pack of length 1
+
+&gt;&gt; x: if true [void]
+
+&gt;&gt; x
+</code></pre>
+<p>The twist is that the heavy void is <em>different enough</em> from true VOID such that a THEN or an ELSE can consider them a situation where the branch did not run:</p>
+<pre><code>&gt;&gt; if false [&lt;ignored&gt;]
+
+&gt;&gt; if true [void]
+; first in pack of length 1
+
+&gt;&gt; if true [void] else [print "This won't run"]
+</code></pre>
+<p>The reason functions like ELSE can "see" the isotope is that they don't take an ordinary parameter on their left.  They take a ^META argument.  These can see the distinction between a void in an isotopic pack and a "true" VOID.</p>
+<p><strong>I'd largely say this has been working well...certainly better than its conceptual predecessors.</strong>  It makes piping VOID (or NULL) out of branches trivially easy, when the fear of conflation is not a problem.</p>
+<pre><code>&gt;&gt; x: switch 1 + 2 [
+     1 [print "one" 1]
+     2 [print "two", &lt;two&gt;]
+     3 [print "three", null]
+   ]
+three
+; first in pack of length 1
+== ~null~
+
+&gt;&gt; x
+; null
+</code></pre>
+<p>The automatic decay in variable storage prevents you from needing an explicit operation to turn ~null~ isotopes into pure nulls:</p>
+<pre><code>&gt;&gt; x: decay switch 1 + 2 [
+     1 [print "one" 1]
+     2 [print "two", &lt;two&gt;]
+     3 [print "three", null]
+   ]
+three
+; null
+</code></pre>
+<h1><a name="p-5801-non-meta-arguments-decay-null-isotopes-4" class="anchor" href="https://rebol.metaeducation.com#p-5801-non-meta-arguments-decay-null-isotopes-4"></a>Non-Meta Arguments Decay Null isotopes</h1>
+<p>The "auto-decay" of heavy ~null~ means no variable can ever hold one.  And there's also a rule that no <em>normal</em> parameter can ever be passed a "pack" like the heavy forms, only ^META parameters.</p>
+<p>So it seems useful if normal arguments would automatically decay null isotopes:</p>
+<pre><code>&gt;&gt; foo: func [x] [if null? x [print "Yup, it's null"]]
+
+&gt;&gt; foo if true [null]
+Yup it's null
+
+&gt;&gt; metafoo: func [^x] [
+    case [
+        null? x [print "regular null"]
+        x = '~[~null~]~ [print "heavy null"]
+        true [print "something else"]
+     ]
+   ]
+
+&gt;&gt; metafoo if false [null]
+regular null
+
+&gt;&gt; metafoo if true [null]
+heavy null
+</code></pre>
+<p>There is a manual DECAY operator which can be used at non-parameter moments where you want to decay a heavy null:</p>
+<pre><code>&gt;&gt; if true [null]
+; first in pack of length 1
+== ~null~  ; isotope
+
+&gt;&gt; decay if true [null]
+== ~null~  ; isotope
+</code></pre>
+<h1><a name="p-5801-func-return-only-decays-if-you-have-a-return-spec-5" class="anchor" href="https://rebol.metaeducation.com#p-5801-func-return-only-decays-if-you-have-a-return-spec-5"></a>Func RETURN Only Decays If You Have A RETURN: Spec</h1>
+<p>Consider this pattern:</p>
+<pre><code>foo: func [x] [
+    return switch x [
+         1 [print "one", #one]
+         2 [print "two", null]
+         3 [print "three", &lt;three&gt;]
+    ]
+]
+
+&gt;&gt; foo 1 + 2
+two
+== ???   ; should this be heavy null or just null?
+</code></pre>
+<p>Once upon a time, decaying was the default, and there was a refinement called /ISOTOPE on RETURN which asked it not to decay.</p>
+<p>Today, there is no automatic decay <em>unless</em> you have a return spec that doesn't mention PACK?s.  So <strong>return: [any-value?]</strong> would be enough to get the auto-decay.</p>
+<h2><a name="p-5801-hopefully-it-all-makes-sense-6" class="anchor" href="https://rebol.metaeducation.com#p-5801-hopefully-it-all-makes-sense-6"></a>Hopefully It All Makes Sense</h2>
+<p><em>"A designer knows he has achieved perfection not when there is nothing left to add, but when there is nothing left to take away."</em></p>
+            <p><small>4 posts - 2 participants</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/conflation-vs-safety-return-and-heavy-void-null/1799">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/conflation-vs-safety-return-and-heavy-void-null/1799</link>
+          <pubDate>Thu, 07 Apr 2022 04:14:06 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-1799</guid>
+          <source url="https://rebol.metaeducation.com/t/conflation-vs-safety-return-and-heavy-void-null/1799.rss">Conflation vs. Safety, RETURN and &quot;Heavy&quot; Void/Null</source>
+        </item>
+        <item>
+          <title>Should END-able constructs all use ^META parameters?</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Internals</category>
+          <description><![CDATA[
+            <p>If you had a function that took a literal argument in Rebol2, it could be "endable"... <em>if</em> it accepted UNSET! as an argument.</p>
+<p>This feature was added primarily for HELP, so that you could say either:</p>
+<pre><code>&gt;&gt; help
+...GENERIC HELP usage information...
+
+&gt;&gt; help topic
+... HELP for specific TOPIC...
+</code></pre>
+<p>It was a <em>very limited form of variadic-ness</em>...generally used only in console-oriented commands (HELP, LS).</p>
+<p>You couldn't use it with a function that was evaluative.  Hence this wasn't possible:</p>
+<pre><code>redbol&gt;&gt; printer 1 + 2
+3
+
+redbol&gt;&gt; printer
+You called the PRINTER function with no arguments
+    ; ^-- not possible to accomplish with an otherwise evaluative argument!
+</code></pre>
+<p><em><strong>So handling missing arguments was tied to taking the argument literally.</strong></em></p>
+<p><em><strong>It was also ambiguous.</strong></em>  The signal for literal parameters that were endable-and-missing was to make the parameter accept UNSET!.  Which meant they couldn't tell the difference between <code>help #[unset!]</code> and just-plain-<code>help</code>:</p>
+<pre><code>red&gt;&gt; help #[unset!]
+To use HELP, supply a word or value as its
+argument:
+
+    help insert
+    help system
+    help system/script
+    ...
+</code></pre>
+<h2><a name="p-5732-ren-c-can-resolve-the-ambiguity-for-literal-arguments-1" class="anchor" href="https://rebol.metaeducation.com#p-5732-ren-c-can-resolve-the-ambiguity-for-literal-arguments-1"></a>Ren-C Can Resolve the Ambiguity for Literal Arguments</h2>
+<p>Because antiforms can't occur in "source" code, a function taking a literal argument could receive an antiform as an unambiguous signal that the end was reached.</p>
+<p>Any antiform could serve as that signal (and different options have been tried).  But for the moment let's say it was the antiform of the word <code>~end~</code>:</p>
+<pre><code>&gt;&gt; help ~end~
+~end~ is a quasiform word!  ; received the quasiform of END
+
+&gt;&gt; help
+To use HELP, supply a word or value...  ; received the antiform of END
+</code></pre>
+<h2><a name="p-5732-normal-evaluative-arguments-are-still-ambiguous-2" class="anchor" href="https://rebol.metaeducation.com#p-5732-normal-evaluative-arguments-are-still-ambiguous-2"></a>Normal Evaluative Arguments are Still Ambiguous</h2>
+<p>When a quasiform evaluates, it produces an antiform.  So we still would have ambiguity if we tried to use the ~end~ antiform:</p>
+<pre><code>&gt;&gt; printer 1 + 2
+Received 3
+
+&gt;&gt; printer
+Received the antiform of ~end~  
+
+&gt;&gt; printer ~end~
+Received the antiform of ~end~  
+</code></pre>
+<h2><a name="p-5732-but-meta-arguments-can-be-unambiguous-3" class="anchor" href="https://rebol.metaeducation.com#p-5732-but-meta-arguments-can-be-unambiguous-3"></a>But ^META Arguments Can Be Unambiguous</h2>
+<p>Meta-arguments are evaluative, but if the evaluated value is not an antiform, it will just have a quote level added.  Antiforms will be passed as the quasiform.  This means you can never "legitimately" receive an antiform as an argument to a ^META function.</p>
+<pre><code>&gt;&gt; meta-printer 1 + 2
+Received '3
+
+&gt;&gt; meta-printer first ['3]
+Received ''3
+
+&gt;&gt; meta-printer ~end~
+Received the quasiform of ~end~
+
+&gt;&gt; meta-printer first [~end~]
+Received '~end~
+</code></pre>
+<p>So a special rule could be invoked that endable ^META arguments give an antiform to signal the missing parameter:</p>
+<pre><code>&gt;&gt; meta-printer
+Received the antiform of ~end~  
+</code></pre>
+<h2><a name="p-5732-should-only-literal-meta-arguments-permit-endability-4" class="anchor" href="https://rebol.metaeducation.com#p-5732-should-only-literal-meta-arguments-permit-endability-4"></a>Should <strong>Only</strong> Literal / ^META Arguments Permit Endability?</h2>
+<p>The ambiguity for "normal" evaluative arguments only arises if your type checking would allow the antiform.  If your function only accepts INTEGER! (for instance) then the antiform of ~end~ isn't "in-band", and it may be more convenient for you to not worry about the ^META convention.</p>
+<pre><code> int-printer: func [arg [&lt;end&gt; integer!]] [
+    either arg = ~end~ [
+        print "Received end antiform"
+    ][
+        print ["Received integer:" arg]
+    ]
+]
+</code></pre>
+<p>That seems okay to me.</p>
+<p>The system <em>could</em> try to stop you from shooting yourself in the foot... so that if you marked a normal parameter as <code>&lt;end&gt;</code> it would try to type check an ~end~ antiform against your parameters:</p>
+<pre><code> &gt;&gt; anti-printer: func [arg [&lt;end&gt; antiform?]] [...]
+ ** Error: typespec [&lt;end&gt; antiform?] ambiguous for ~end~ antiform
+</code></pre>
+<p>So is that annoying, or helpful?</p>
+            <p><small>3 posts - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/should-end-able-constructs-all-use-meta-parameters/1783">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/should-end-able-constructs-all-use-meta-parameters/1783</link>
+          <pubDate>Fri, 21 Jan 2022 17:01:02 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-1783</guid>
+          <source url="https://rebol.metaeducation.com/t/should-end-able-constructs-all-use-meta-parameters/1783.rss">Should END-able constructs all use ^META parameters?</source>
+        </item>
+        <item>
+          <title>DEFAULT with TUPLE!...What Does It *Mean*?</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Internals</category>
+          <description><![CDATA[
+            <p>The ability to have random side-effects in tuples creates all kinds of nasty potentials.</p>
+<p>That is why I made a way to say you only allow tuples to contain evaluations if you also ask for an "invariant" representation of the path to be returned...that you could use in place of the tuple for further assignments.</p>
+<pre><code>&gt;&gt; var: 'x
+
+&gt;&gt; tuple: 'obj.(print "side effect" var)
+
+&gt;&gt; set tuple 30
+*** Script Error: GROUP!s require /GROUPS in GET or SET:
+    obj.(print "side effect" var)
+
+&gt;&gt; [value steps]: set tuple 30
+side effect
+== 30
+
+&gt;&gt; steps
+== @[obj x]
+</code></pre>
+<p>You can then use STEPS instead of the tuple.  e.g. <strong>set @[obj x]</strong> will act like <strong>set 'obj.x</strong>.  (The reason a BLOCK! is used is because not all datatypes would be legal in tuples...a GROUP! could evaluate to anything, like an OBJECT!...which is a perfectly valid thing to set in a MAP! for instance.)</p>
+<h2><a name="p-5681-this-invariant-form-was-intended-for-things-like-default-1" class="anchor" href="https://rebol.metaeducation.com#p-5681-this-invariant-form-was-intended-for-things-like-default-1"></a>This "Invariant" Form Was Intended For Things Like DEFAULT</h2>
+<p>The concept was that even if you have evaluations on the left hand side, you will be able to capture where it got the value or absence-of-value from...and then in the event you need to write it back because a default is necessary, you don't have to run the evaluation again:</p>
+<pre><code>&gt;&gt; n: 5
+
+&gt;&gt; data.(n: n + 1): default [10]
+</code></pre>
+<p>Internally, DEFAULT can make a GET request of <strong>data.(n: n + 1)</strong> and get back STEPS with a fixed value for N, like <strong><code>@[data 6]</code></strong>.  If it discovers that the value is set to null and needs defaulting, it can then use the steps instead of the tuple as the basis for the SET...so N is not changed twice.</p>
+<h2><a name="p-5681-but-other-things-can-change-2" class="anchor" href="https://rebol.metaeducation.com#p-5681-but-other-things-can-change-2"></a>But Other Things Can Change...</h2>
+<p>All kinds of changes can happen between the GET and the SET in DEFAULT.  What about this?</p>
+<pre><code>&gt;&gt; data.(n: n + 1): default [data: ~gone~, 10]
+</code></pre>
+<p>We've prevented running imperative code and getting side effects from the tuple...but the side effects can come from other places.  <strong>Anything you do between the GET and the SET can make the "invariant" steps not so invariant.</strong></p>
+<p>Let's say DATA was a BLOCK! at the outset.  Should the <strong><code>@[...]</code></strong> steps have actually stored a reference to the block instead of the WORD! data, so that changes to the variable couldn't redirect the invariant reference?</p>
+<p>That doesn't work for immediate types.  Let's say you have:</p>
+<pre><code>&gt;&gt; time: 4:00
+
+&gt;&gt; tuple: 'time.(if true ['hour])
+
+&gt;&gt; [# steps]: set tuple 12
+== 12
+
+&gt;&gt; steps
+== @[4:00 hour]
+</code></pre>
+<p>Now you can't use that steps to go back and change the original time, because 4:00 is an immediate value.  You need to get at the object the time lives in.  You'd wind up with a 3-element steps in that case:</p>
+<pre><code>&gt;&gt; steps
+== @[make object! [...] time hour]
+</code></pre>
+<h2><a name="p-5681-if-nothing-is-going-to-be-perfect-should-we-shortcut-it-3" class="anchor" href="https://rebol.metaeducation.com#p-5681-if-nothing-is-going-to-be-perfect-should-we-shortcut-it-3"></a>If Nothing Is Going To Be Perfect... Should We Shortcut It?</h2>
+<p>Let's say you have a tuple like:</p>
+<pre><code>obj1.obj2.(if true [obj3]).obj4.date.time
+</code></pre>
+<p>We could say that the "steps" are:</p>
+<pre><code>@[obj1 obj2 [...this is obj3...] obj4 date time]
+</code></pre>
+<p>But is that empirically more desirable than just noticing when we cross the line from non-immediate values into immediate values, and preserving only as much as we need?</p>
+<pre><code>@[(make object! [...this is obj4...]) date time]
+</code></pre>
+<p>That's enough to write back to obj4...but it is fully disconnected from the tuple that was initially being represented.  <strong>But which is more suitable for the intent of something like DEFAULT?</strong></p>
+<h2><a name="p-5681-my-head-hurts-face_with_head_bandage-4" class="anchor" href="https://rebol.metaeducation.com#p-5681-my-head-hurts-face_with_head_bandage-4"></a>My Head Hurts <img src="https://rebol.metaeducation.com/images/emoji/twitter/face_with_head_bandage.png?v=14" title=":face_with_head_bandage:" class="emoji" alt=":face_with_head_bandage:" loading="lazy" width="20" height="20"></h2>
+<p>...and it's not because of a booster shot.  It's because this is crazy, and way past the point of being fun.</p>
+<p>What started out as a nice idea for taming GROUP!s in TUPLE!s becomes a real headache.</p>
+<p><strong>So I'm going to leave well enough alone, and say that this does only that.</strong>  If you want to prune a tuple to get better invariants, that's on you:</p>
+<p>For example:</p>
+<pre><code>(obj1.obj2.obj3.obj4).date.time: default [...]
+</code></pre>
+<p>When you do this, then when DEFAULT asks for steps it will get 3 items in the block:</p>
+<pre><code>&gt;&gt; steps
+== @[(make object! [...]) date time]
+</code></pre>
+<p>It has latched onto the object, and so you can say inside the body of the defaulting code things like <strong><code>obj1: null</code></strong> or <strong>obj1.obj2.obj3: []</strong> and the assignment will apply to what it was looking at, because those names aren't in the steps.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/default-with-tuple-what-does-it-mean/1770">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/default-with-tuple-what-does-it-mean/1770</link>
+          <pubDate>Sat, 11 Dec 2021 23:58:00 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-1770</guid>
+          <source url="https://rebol.metaeducation.com/t/default-with-tuple-what-does-it-mean/1770.rss">DEFAULT with TUPLE!...What Does It *Mean*?</source>
+        </item>
+        <item>
+          <title>The Pathing and Picking Predicament Pans Out</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Internals</category>
+          <description><![CDATA[
+            <h2><a name="p-5471-tldr-1" class="anchor" href="https://rebol.metaeducation.com#p-5471-tldr-1"></a>TL;DR</h2>
+<p>I'm changing GET and SET of PATH!/TUPLE! to be fundamentally recursive...built on top of the <strong><code>PICK</code></strong> primitive and a new primitive I call <strong><code>POKE*</code></strong></p>
+<p>As fate would have it, this takes a longstanding annoying edge case in how R3-Alpha methodized path dispatch for GOB!...and makes that "the answer" for how all path dispatch is done.  Additionally:</p>
+<ul>
+<li>
+<p>It employs FRAME! reuse for native dispatch, which allows a memory use profile similar to the the "PVS" (Path Value State?) structure from R3-Alpha...even though it's making recursive evaluator calls.</p>
+</li>
+<li>
+<p>This makes path dispatch just ordinary function dispatch, which means pathing doesn't need special accommodation in stackless.</p>
+<ul>
+<li>Sidenote: Path dispatch and PARSE were two extremely troublesome areas in the stackless conversion.  Both are being addressed by pushing more and more "custom" recursive C code to do their recursions by means of the interpreter's evaluator loop.</li>
+</ul>
+</li>
+<li>
+<p>It should mean that extension data types--or even in the near term perhaps your own OBJECT!s--could customize pathing if they wanted to.</p>
+</li>
+</ul>
+<h2><a name="p-5471-preface-no-one-has-done-this-right-until-now-2" class="anchor" href="https://rebol.metaeducation.com#p-5471-preface-no-one-has-done-this-right-until-now-2"></a>Preface: No One Has Done This Right (Until Now)</h2>
+<p>Before we get carried away and give GOB! too much credit...  <img src="https://rebol.metaeducation.com/images/emoji/twitter/slight_smile.png?v=14" title=":slight_smile:" class="emoji" alt=":slight_smile:" loading="lazy" width="20" height="20"></p>
+<p>Redbols try to be bit fiddly and pack things into immediate cell values.  But if you're going to be that fiddly, you have to remember that "updating a value" really means "updating the container the value lives in".</p>
+<p>Random example from Red and Rebol2:</p>
+<pre><code>red&gt;&gt; b: [x 12-Dec-2021/10:00 y]
+== [x 12-Dec-2021/10:00:00 y]
+
+red&gt;&gt; b/2/time/hour
+== 10
+
+red&gt;&gt; b/2/time/hour: 20
+== 20
+
+red&gt;&gt; b
+== [x 12-Dec-2021/10:00:00 y]  ; still 10:00, not 20:00
+</code></pre>
+<p><em>(R3-Alpha is worse, giving an error and corrupting the time.)</em></p>
+<p>The reason this happens is because DATE! fits in a cell with the TIME! packed into it.  If you ask for a date's /TIME then you get a synthesized new cell to hold it.  But poking back into that synthesized cell won't change the original date.</p>
+<p><strong>Hence every SET-PATH! or POKE has to offer a kind of backflow in the chain of poking, in case any of the forward writes require bit updates backwards.</strong></p>
+<p>The Ren-C I'm working on takes care of the above example, and should generalize to others!</p>
+<h2><a name="p-5471-now-explanation-background-3" class="anchor" href="https://rebol.metaeducation.com#p-5471-now-explanation-background-3"></a>Now, Explanation.  Background:</h2>
+<p>Path Dispatch--or <strong>"PD"</strong> as R3-Alpha called it--was a concept fraught with issues.</p>
+<p>On the surface it seems like a simple chain...it's broken into steps where each one produces a value that is picked by the next step:</p>
+<pre><code>&gt;&gt; outer: make object! [inner: make object! [block: [a b c]]]
+
+&gt;&gt; outer/inner/block/2  ; expressed as a path
+== b
+
+&gt;&gt; pick (pick (pick outer 'inner) 'block) 2  ; expanded as picks
+== b
+
+; Note: Historical Rebol required a mix of SELECT and PICK, Ren-C unifies it
+</code></pre>
+<p>How "hard" is that?  Well, it's not <em>that</em> hard, though it could be very wasteful.</p>
+<p>Imagine the FFI with <strong><code>some-struct.million-int-array.1</code></strong>.  If that's an FFI interface to a struct with a million C int in it, do you have to generate a BLOCK! of a million INTEGER! just to pick the first one?  That's what the naive translation of pathing to step-by-step PICK calls would do.</p>
+<p>Even without talking about efficiency, we can talk about semantics.  <strong>PICK at least works out semantically for pathing, but POKE does not.</strong>  Try this:</p>
+<pre><code>&gt;&gt; outer/inner/block: [i am a new block]
+== [i am a new block]
+
+&gt;&gt; poke (pick (pick outer 'inner) 'block) [i am a new block]
+** Error, wait a second...
+</code></pre>
+<p>That second formulation is <em>not</em> equivalent...because the PICK gave back a plain old block.  So it saw:</p>
+<pre><code>&gt;&gt; poke [a b c] [i am a new block]
+</code></pre>
+<p><strong>This faces the problem that Rebol lacks "Reference" types.</strong> POKE wanted a place to put the new block...effectively the <em>address</em> of the block value in the inner object.  But it just got back the <em>value</em> of the block in the inner object.</p>
+<h2><a name="p-5471-could-rebol-have-a-reference-type-4" class="anchor" href="https://rebol.metaeducation.com#p-5471-could-rebol-have-a-reference-type-4"></a>Could Rebol Have A Reference Type?</h2>
+<p>Hypothetical code:</p>
+<pre><code>&gt;&gt; obj: make object! [field: "I am a field"]
+
+&gt;&gt; ref: &amp;obj.field
+== &amp;"I am a field"
+
+&gt;&gt; ref: "Field is replaced!"
+
+&gt;&gt; obj
+== make object! [field: "Field is replaced!"]
+</code></pre>
+<p>In such a world, changing REF didn't change the string... <em>it changed a field in the object the string lived in</em>.</p>
+<p>This is the kind of mechanic that pathing would need if it were to be extensible and truly generic. What each step in the path offered up to the next would have to be a means of writing back to the field if it wanted to.</p>
+<p>That sounds like a nightmare...but it wouldn't even solve the problem if it could be done, because...</p>
+<h2><a name="p-5471-subaddressing-makes-it-worse-5" class="anchor" href="https://rebol.metaeducation.com#p-5471-subaddressing-makes-it-worse-5"></a>...Subaddressing Makes It Worse!</h2>
+<p>Some of the more confusing parts of path dispatch dealt with the fact that path steps might be producing something that didn't reference a full value at all...but some optimized bit pattern.</p>
+<pre><code>&gt;&gt; obj: make object! [gob: make gob! [x: 10 y: 20]]
+
+&gt;&gt; obj.gob.size.x: 304
+== 304
+</code></pre>
+<p>What's so weird about that?  Well, GOB! stores its bits compactly, so there is no INTEGER! cell for the X, and no PAIR! cell for the size.</p>
+<p>This is all easy enough on the PICK side... you ask the GOB! what its size is, and it tells you 10x20 as a new PAIR! it makes out of thin air.  Then you ask that pair what its X is and it tells you 10.</p>
+<p>But on the POKE side, <em>even if you had the address mechanic</em>, there's no address of a value that the GOB! can give for that PAIR! to let you write back to it.</p>
+<h2><a name="p-5471-gob-in-r3-alpha-actually-had-the-right-ideasort-of-6" class="anchor" href="https://rebol.metaeducation.com#p-5471-gob-in-r3-alpha-actually-had-the-right-ideasort-of-6"></a>GOB! in R3-Alpha Actually Had The Right Idea...Sort Of</h2>
+<p>With path dispatchers like R3-Alpha's <strong><a href="https://github.com/rebol/rebol/blob/25033f897b2bd466068d7663563cd3ff64740b94/src/core/t-block.c#L530">PD_Block()</a></strong> that it has a "picker" (<strong>pvs-&gt;select</strong>) which it is applying to the value that's a BLOCK! or GROUP! (<strong>pvs-&gt;out</strong>).  It trusts that the "path engine" has pre-evaluated any code in parentheses if necessary to get pvs-&gt;select.</p>
+<p>Then it has the detail that if <strong>pvs-&gt;setval</strong> is not null, it needs to know it's a SET-PATH!.  This is also something the path engine works out...based on whether the end of the path is reached.  Really this looks like it moves one step a time.</p>
+<p>So in my early dealings with path dispatch, I'd try to formalize this a bit better...putting horse-blinders on the PD_Xxx() function by giving it narrow parameterization, and removing the PVS as a parameter.  Yet I tripped over "bad" path dispatchers like PD_Gob(), which <a href="https://github.com/rebol/rebol/blob/25033f897b2bd466068d7663563cd3ff64740b94/src/core/t-gob.c#L676">called Next_Path() in their implementations</a>.</p>
+<p>But the "bad" handling of GOB! was closer to the right general answer:</p>
+<ul>
+<li>
+<p>Some portion of the path is consumed by each step in the SET-PATH!</p>
+</li>
+<li>
+<p>It then it hands the remainder off to what it can't handle via a recursive call...</p>
+<ul>
+<li>The return value of this recursive call is either NULL or an updated image of the cell bits that must be updated in the container to reflect an immediate type.</li>
+</ul>
+</li>
+</ul>
+<h2><a name="p-5471-walking-through-the-process-with-gob-7" class="anchor" href="https://rebol.metaeducation.com#p-5471-walking-through-the-process-with-gob-7"></a>Walking Through The Process With GOB!</h2>
+<p>Imagine you write:</p>
+<pre><code>&gt;&gt; obj/gob/size/x: 304
+</code></pre>
+<p>It might happen like this:</p>
+<ul>
+<li>
+<p>POKE asks OBJECT! <em>"Hey, I want to write gob/size/x.  How much of that can you do?"</em></p>
+</li>
+<li>
+<p>OBJECT! says <em>"I will update myself if GOB! can tell me the answer to what it wants to be if size/x is written."</em></p>
+</li>
+<li>
+<p>GOB! says <em>"I consumed the entirety of size/x: 304 and there were no changes to my bit pattern that my caller need be aware about."</em> (because gobs are allocated in handles, REBGOB*, so the modification of the size bits is not the concern of the reference in object as it still points to that same REBGOB*)</p>
+</li>
+<li>
+<p>OBJECT! says <em>"Okay fine then."</em></p>
+</li>
+</ul>
+<p>Notice that <strong>We never got PAIR! involved in the dispatch, even though the answer to gob/size is a PAIR!.</strong></p>
+<p>That's not the only way to do it.  There's actually three ways this could work:</p>
+<ol>
+<li>
+<p>(the above way) Don't just consume one of the steps, but go ahead and do two--e.g. take control of what <code>size.x</code> means and don't synthesize a PAIR! at all.</p>
+</li>
+<li>
+<p>Synthesize a PAIR! and allow it to do whatever modification it wishes, but ignore its <code>nullptr</code> return status and pack the full pair value down to the low-level bits in the GOB!</p>
+</li>
+<li>
+<p>Drop this micro-optimization and store a PAIR! cell in the GOB! structure.</p>
+</li>
+</ol>
+<p>I actually think <span class="hashtag-raw">#3</span> is the best answer, but, the point here is to study being general.</p>
+<h2><a name="p-5471-the-new-formulation-is-about-as-good-as-this-can-get-8" class="anchor" href="https://rebol.metaeducation.com#p-5471-the-new-formulation-is-about-as-good-as-this-can-get-8"></a>The New Formulation Is About As Good As This Can Get</h2>
+<p>It's interesting to be able to do this kind of optimization, and things like the FFI need it.  I mentioned <strong><code>some-struct.million-int-array.1</code></strong>.  Naive approaches will be too inefficient to handle this.</p>
+<p>So path processing needs this nuance.  And we'd like an answer that doesn't make the author of STRUCT! have to worry about <strong><code>some-struct.million-int-array.(1 + 2)</code></strong>, so the processing of GROUP!s has to be done by the pathing.</p>
+<p>Long story long: this is a PITA and I'm making some headway on framing the problem.  Things seem in better shape, as the oddly-shaped PD_Xxx are eliminated.</p>
+            <p><small>2 posts - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/the-pathing-and-picking-predicament-pans-out/1704">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/the-pathing-and-picking-predicament-pans-out/1704</link>
+          <pubDate>Sun, 05 Sep 2021 08:43:19 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-1704</guid>
+          <source url="https://rebol.metaeducation.com/t/the-pathing-and-picking-predicament-pans-out/1704.rss">The Pathing and Picking Predicament Pans Out</source>
+        </item>
+        <item>
+          <title>Vaporizing Failed Conditionals In REDUCE</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Internals</category>
+          <description><![CDATA[
+            <p>The question of what to do when REDUCE encounters NULL has been a thorn ever since its introduction.  By definition you can't put NULL in a BLOCK!.</p>
+<p>So you've seemingly got three choices:</p>
+<ul>
+<li>
+<p>Vaporize the expression slot: <strong>reduce [1 null 2]</strong> =&gt; <strong>[1 2]</strong></p>
+</li>
+<li>
+<p>Raise an error: <strong>reduce [1 null 2]</strong> =&gt; <strong><code>** Error: NULLs illegal in REDUCE</code></strong></p>
+</li>
+<li>
+<p>Put some value there: <strong>reduce [1 null 2]</strong> =&gt; <strong>[1 ~null~ 2]</strong> or <strong>[1 _ 2]</strong></p>
+</li>
+</ul>
+<p>I'm exaggerating to call these the "only options".  When you throw in refinements or pass in functions, you've got more options.  I've also made the REDUCE-EACH function, which lets you get involved with the result of each expression evaluation...sky's the limit:</p>
+<pre><code>collect [
+    reduce-each x [1 + 2 null 10 + 20] [
+        if integer? x [keep :[&lt;int&gt; x]]
+        if null? x [keep &lt;null&gt;]
+    ]
+]
+== [[&lt;int&gt; 3] &lt;null&gt; [&lt;int&gt; 30]]
+</code></pre>
+<p>But with no parameterization I think there are only three reasonable choices: You vaporize, you error, or you put <strong>~null~</strong> or <strong>_</strong> there.</p>
+<h2><a name="p-5370-several-people-have-favored-vaporization-1" class="anchor" href="https://rebol.metaeducation.com#p-5370-several-people-have-favored-vaporization-1"></a>Several People Have Favored Vaporization</h2>
+<p>I myself have <em>usually</em> usually been on the side of erroring.</p>
+<p>But the place that vaporization feels most convenient is when you're doing something like an append of data to a block, and you want to cut out some items.</p>
+<pre><code>&gt;&gt; use-preface: false
+
+&gt;&gt; append data reduce [if use-preface [&lt;preface&gt;] 1 + 2 "Hello"]
+== [1 + 2 "Hello"]
+</code></pre>
+<p>The key to why vaporization works here is that <strong>you're dealing with a situation that has no positional expectations</strong>.</p>
+<p><em>(Historically I didn't use REDUCE in these cases, because it couldn't splice.  But with SPLICE! antiforms, now it can!)</em></p>
+<h2><a name="p-5370-weve-tried-vaporizing-null-and-i-dont-think-i-like-it-2" class="anchor" href="https://rebol.metaeducation.com#p-5370-weve-tried-vaporizing-null-and-i-dont-think-i-like-it-2"></a>We've Tried Vaporizing NULL and... <em>I Don't Think I Like It</em></h2>
+<p>Let's look at situations like the use of GET-BLOCK! (I believe must be a synonym for REDUCE) to do ranges in UPARSE.</p>
+<pre><code>; Set min to null so we can easily test if it has been set or not, but is
+; still "a little ornery".  Must set it before running the rule.
+;
+min: null
+
+; Set max to blank so it can opt out by default if we have no max
+;
+max: _
+
+&lt;&lt;BUNCH OF CODE THAT MUST SET MIN AND MAY OR MAY NOT SET MAX&gt;&gt;
+
+uparse data [repeat (:[min max]) rule]
+</code></pre>
+<p>The reason I didn't say <strong><code>(min: ~)</code></strong> or <strong><code>(min: ~overwrite-me~)</code></strong> is because I wanted min to be "middlingly ornery".  So I wanted to use it in expressions like <strong>any [min, ...]</strong> but I didn't want it to be able to be used as an opt out intention.  This is the weird zone that NULL occupies and we're making the most of it.</p>
+<p>Under this understanding...I'd be displeased if that turned into <strong><code>[repeat ([_]) rule]</code></strong>, because I'd have liked to have been told about the issue.</p>
+<p><strong>Remember that it was not too long ago that the non-valued state would error on the variable fetch itself.</strong>  We've made a lot of concessions to get to the point where it is falsey and can be retrieved without a problem.</p>
+<p>So long as the answer isn't vaporization, it would have been okay.  Making <strong><code>[repeat ([~null~ _]) rule]</code></strong> would have been poisonous enough to cause a problem.  And raising an error would have been fine too.</p>
+<h2><a name="p-5370-a-compromise-maybe-where-maybe-null-vanishes-3" class="anchor" href="https://rebol.metaeducation.com#p-5370-a-compromise-maybe-where-maybe-null-vanishes-3"></a>A Compromise: MAYBE where MAYBE NULL vanishes?</h2>
+<p>If you really want a REDUCE to make nulls go away instead of becoming a ~null~ QUASI-WORD! or raising an error, how about this?</p>
+<pre><code>&gt;&gt; reduce [1 maybe if 10 &lt; 20 [&lt;x&gt;] 2]
+== [1 &lt;x&gt; 2]
+
+&gt;&gt; reduce [1 maybe if 10 &gt; 20 [&lt;x&gt;] 2]
+== [1 2]
+
+&gt;&gt; reduce [1 if 10 &gt; 20 [&lt;x&gt;] 2]
+** Error: NULLs illegal in REDUCE
+</code></pre>
+<p>This gives the tool for removing things conditionally, while keeping the REDUCE number of expressions consistent.</p>
+<h2><a name="p-5370-we-can-also-make-a-reduce-which-drops-nulls-4" class="anchor" href="https://rebol.metaeducation.com#p-5370-we-can-also-make-a-reduce-which-drops-nulls-4"></a>We Can Also Make a REDUCE* Which Drops NULLs</h2>
+<p>...and I've talked about predicates and all the other possibilities.  But I think vaporization just isn't the default I want.  MAYBE seems a good way to get past the problem.</p>
+<p>It seems worth trying out.</p>
+            <p><small>2 posts - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/vaporizing-failed-conditionals-in-reduce/1665">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/vaporizing-failed-conditionals-in-reduce/1665</link>
+          <pubDate>Mon, 16 Aug 2021 02:13:44 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-1665</guid>
+          <source url="https://rebol.metaeducation.com/t/vaporizing-failed-conditionals-in-reduce/1665.rss">Vaporizing Failed Conditionals In REDUCE</source>
+        </item>
+        <item>
+          <title>Understanding FRAME! &quot;Lensing&quot;</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Internals</category>
+          <description><![CDATA[
+            <p>Good news: <a href="https://github.com/metaeducation/ren-c/issues/393"><strong>an old issue is (seemingly) mostly addressed!</strong></a></p>
+<p>Among the various implications of this design improvement, you can AUGMENT a function with new fields that share the name of either locals or specialized values.  The only names you cannot use in extending a function are those that are public parameters on the interface!</p>
+<pre><code>&gt;&gt; /ap10: specialize append/ [value: 10]
+&gt;&gt; ap10 [a b c]
+== [a b c 10]
+
+&gt;&gt; /wow: adapt (augment ap10/ [:value [integer!]]) [insert series value]
+&gt;&gt; wow:value [a b c] 20
+== [20 a b c 10]
+</code></pre>
+<p>So what's going on here is that underneath the hood, the <em>single</em> FRAME! for this function call has <em>two</em> slots with the label <strong><code>value</code></strong>.  But they're never in effect and visible at the same time.  This is great news for composability of functions.</p>
+<p>I'm going to try to explain here a little bit of how this works.</p>
+<h2><a name="p-5284-every-function-has-a-paramlist-frame-1" class="anchor" href="https://rebol.metaeducation.com#p-5284-every-function-has-a-paramlist-frame-1"></a>Every Function Has a "ParamList" FRAME!</h2>
+<p>Some time ago I penned the prophetic post: <a href="https://rebol.metaeducation.com/t/seeing-all-action-s-as-variadic-frame-makers/1002">"Seeing all ACTION!s as Variadic FRAME! Makers"</a>.  This set the stage for what ultimately became an implementation mechanism where the interface to all actions are defined by a FRAME!.</p>
+<p>So if you write something like:</p>
+<pre><code>/foo: func [return: [integer!] x [tag! text!] y [integer!] &lt;local&gt; z] [
+    print ["internal foo view:" mold binding of $x]
+    return 5
+]
+</code></pre>
+<p>Inside of FOO there is a FRAME! that lays out a map of the parameters and locals.  This is called the "ParamList".  Internally, it looks something like this:</p>
+<pre><code>#[frame! [
+    return: #[parameter! [integer!]]
+    x: ~#[parameter! [tag! text!]]~
+    y: ~#[parameter! [integer!]]~
+    z: ~
+]]
+</code></pre>
+<p>This isn't an "execution" frame for the function.  X and Y don't hold legitimate values for a function invocation...they are holding antiform parameters.  RETURN is a special slot known to FUNC which it will fill in with a Except for Z which is a local, so it holds the value that it will have when a frame is made.  <em>(more on that in a second)</em></p>
+<p>So now let's try making an ordinary frame for the function:</p>
+<pre><code>&gt;&gt; f: make frame! foo/
+== #[frame! [
+    x: ~
+    y: ~
+]]
+</code></pre>
+<p>Okay, that's neat.  It doesn't <em>seem</em> to have the RETURN or Z fields because we aren't supposed to be setting those.  They are there--the memory is part of the frame, and part of what will actually be backing the variables when you EVAL the frame function.  But they are hidden.</p>
+<p>I put code inside the function to print out its internal view of that same frame.  Let's try running and see what it says:</p>
+<pre><code>&gt;&gt; f.x: "Hello"
+
+&gt;&gt; f.y: 1020
+
+&gt;&gt; do f
+internal foo view: #[frame! [
+    return: ~#[frame! [^atom :run]]~
+    x: "Hello"
+    y: 1020
+    z: ~
+]]
+</code></pre>
+<p>Hey, look at that.  <strong>When we see the frame from <em>inside</em> the function, it has access to RETURN and Z.</strong>  How does it know to hide the fields on the outside, but give access to them on the inside?</p>
+<p>The answer is that each FRAME! Cell instance can optionally hold a <strong>"Lens"</strong>.  A Lens is itself is a ParamList.  The Lens informs which of the fields are supposed to be visible.</p>
+<h2><a name="p-5284-now-lets-specialize-it-2" class="anchor" href="https://rebol.metaeducation.com#p-5284-now-lets-specialize-it-2"></a>Now, Let's SPECIALIZE It...</h2>
+<p>Let's make a new function SPFOO which fixes the value of Y.</p>
+<pre><code>/spfoo: specialize foo/ [y: 304]
+</code></pre>
+<p>And now let's look at what its internal "fake" exemplar FRAME! looks like:</p>
+<pre><code>#[frame! [
+    return: #[parameter! [integer!]]
+    x: ~#[parameter! [tag! text!]]~
+    y: 304
+    z: ~
+]]
+</code></pre>
+<p>Something you'll notice is that <em>the type information for Y is now lost, and the slot where the type information would have been has been replaced by the specialized value</em>.  That's a nice little efficiency trick.  (We can still check the type, because FOO's ParamList has it.)</p>
+<p>Now if we make a frame for SPFOO, the only thing it will let us set is X:</p>
+<pre><code>&gt;&gt; f: make frame! spfoo/
+== #[frame! [
+    x: ~
+]]
+</code></pre>
+<h2><a name="p-5284-what-if-we-were-to-adapt-the-specialization-3" class="anchor" href="https://rebol.metaeducation.com#p-5284-what-if-we-were-to-adapt-the-specialization-3"></a>What if We Were to ADAPT the Specialization?</h2>
+<p>So this raises an interesting question about the "inside" and "outside" view of things.</p>
+<p>At an interface level, I would argue that it should not usually be possible to tell the difference between SPFOO and any other function that takes a single parameter X.</p>
+<p>So what happens if we ADAPT the SPFOO function and get access to the frame on the inside?</p>
+<pre><code>/adspfoo: adapt spfoo/ [
+    print ["inside adaptation:" mold binding of $x]
+]
+
+&gt;&gt; adspfoo "What happens?"
+inside adaptation: make frame! [
+    x: "What happens?"
+]
+internal foo view: make frame! [
+    return: ~#[frame! [^atom :run]]~
+    x: "What happens?"
+    y: 304
+    z: ~
+]
+</code></pre>
+<p>Ta-da.  ADAPT only saw a function with an X parameter, and none of the other details are exposed to it.  Its view of the frame only sees X.  <em>But it's all the same frame...</em> memory is being reused, just the access to it is controlled.</p>
+<p><strong>Pretty slick, huh?</strong>  Anyway, I'm sure there are bugs but the groundwork is there.  Please experiment and let me know if anything seems to be counterintuitive.</p>
+<p><em>(Note that when you're inside the ADAPT, you don't have access to RETURN.  It's not part of the interface, and we want you to be able to ADAPT functions that don't have RETURN.  If you need greater control, use ENCLOSE.)</em></p>
+            <p><small>2 posts - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/understanding-frame-lensing/1645">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/understanding-frame-lensing/1645</link>
+          <pubDate>Wed, 04 Aug 2021 17:32:38 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-1645</guid>
+          <source url="https://rebol.metaeducation.com/t/understanding-frame-lensing/1645.rss">Understanding FRAME! &quot;Lensing&quot;</source>
+        </item>
+        <item>
+          <title>Thinking We Might Should Nix PROTECT/HIDE For Now</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Internals</category>
+          <description><![CDATA[
+            <p>R3-Alpha had an interesting feature, <a href="http://www.rebol.net/r3blogs/0189.html">which let you "hide" fields in contexts</a>.</p>
+<p>It was actually something that drew me in to the language in the beginning as "oh, that's cool".</p>
+<p>So it has stuck around in some form, and simple examples do still seem to work:</p>
+<pre><code>&gt;&gt; obj: make object! [x: 10 y: 20]
+== make object! [
+    x: 10
+    y: 20
+]
+
+&gt;&gt; protect/hide 'obj/y
+== obj/y
+
+&gt;&gt; obj
+== make object! [
+    x: 10
+]
+</code></pre>
+<p><strong>But this is a very complex feature to honor systemically.</strong>  Doing it poorly is easy.  Doing it pervasively and correctly is rather difficult.</p>
+<p>In particular, what bothers me about this "user controlled hidden bit" is that I'm trying to get some system-level hidden mechanics working correctly.  And the interaction between things the system needs to hide and this "user can hide anything they want" is somewhat maddening, especially because I know how hard it is to do such a thing <em>right</em>.</p>
+<p>It's an intriguing feature that seems to have been a bit of an off-the-cuff experiment.  I don't see it as mission-critical...and all it does is interfere with the hardening needed to solve the mission-critical problems related to contexts.</p>
+<p>Not going to delete it immediately, but it's certainly in the crosshairs if it causes any more trouble with something I'm trying to fix.</p>
+            <p><small>2 posts - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/thinking-we-might-should-nix-protect-hide-for-now/1644">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/thinking-we-might-should-nix-protect-hide-for-now/1644</link>
+          <pubDate>Tue, 03 Aug 2021 09:05:08 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-1644</guid>
+          <source url="https://rebol.metaeducation.com/t/thinking-we-might-should-nix-protect-hide-for-now/1644.rss">Thinking We Might Should Nix PROTECT/HIDE For Now</source>
+        </item>
+        <item>
+          <title>Should REEVALUATE apply LET bindings?</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Internals</category>
+          <description><![CDATA[
+            <p>So the idea of REEVALUATE (short name REEVAL) is that you get the same behavior "as if" you had written the thing in place:</p>
+<pre><code>&gt;&gt; x: 10
+&gt;&gt; reeval (first [x:]) 20  ; acts like X: 10
+&gt;&gt; x
+== 20
+</code></pre>
+<p>But how far should this "as if you'd written it there" go?  Should the binding be applied?</p>
+<pre><code>&gt;&gt; x: 1000
+&gt;&gt; code: '(x + 20)
+&gt;&gt; do [let x: 284, reeval code]
+== ?
+</code></pre>
+<p>Does it see the new value for X?  Should that give you 1020, or 304?</p>
+<p>I vote 1020.  Seems to me that only source-level code should see the LET's binding.</p>
+<p>But there's an implementation problem because the evaluator has to know to suppress LET bindings on reevaluations.  REEVAL takes pains to make sure it's running through the same code path as the evaluator normally would.  It's not exactly clear what bits to check or flip to know how to control this behavior.</p>
+<p>Tricky as that is, it would get even trickier if we said you <em>wanted</em> to apply the LET binding...because it gets hard to know whether you've applied it twice.  Imagine if you said instead:</p>
+<pre><code>&gt;&gt; x: 1000
+&gt;&gt; code: '(x + 20)
+&gt;&gt; do compose [let x: 284, reeval '(code)]
+== 304  ; we want it to see the LET X
+</code></pre>
+<p>How does REEVAL know if the <strong>let x: 284</strong> was taken into account already or not?  This depends on whether the argument was literal or fetched through a variable.  But REEVAL isn't supposed to know anything about its argument besides its value.  <a href="https://github.com/metaeducation/ren-c/commit/b1721727665d286be3ccafebb70461e2770b108a">I rigged up a fix</a>, and we can see how well it holds up.</p>
+<p><strong>I think this points to the idea that LET and USE should probably stick to having near-parity in outcomes.</strong>  That means the binding only applies to source, not things fetched and then "treated as source" later.</p>
+<p>Anyway, difficult stuff...all on the way to <a href="https://rebol.metaeducation.com/t/what-to-do-about-funct-including-not-calling-it-that/1518">getting rid of FUNCT-behavior-of-FUNCTION</a>.  Since there's such a big monster of a codebase to try it on (including the Mezzanine, Rebmake, and ReplPad) it's getting exercised fairly heavily.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/should-reevaluate-apply-let-bindings/1521">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/should-reevaluate-apply-let-bindings/1521</link>
+          <pubDate>Wed, 24 Feb 2021 20:13:58 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-1521</guid>
+          <source url="https://rebol.metaeducation.com/t/should-reevaluate-apply-let-bindings/1521.rss">Should REEVALUATE apply LET bindings?</source>
+        </item>
+        <item>
+          <title>Restoring Case-Insensitive Binding</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Internals</category>
+          <description><![CDATA[
+            <p>I've been working on the frustrating question of how to make case-insensitive binding work without sacrificing the gain of space of a platform pointer per word cell.</p>
+<p>It's rough and not pushed to master yet.  But it's mixing with Virtual Binding:</p>
+<pre><code>&gt;&gt; abba: 304
+&gt;&gt; obj: make object! [abba: 1020]
+&gt;&gt; code: [ABBA 'Abba ''abbA '''aBBa ''''AbbA '''''aBba]
+
+&gt;&gt; do in obj compose [map-each x (code) [get dequote x]]
+== [1020 1020 1020 1020 1020 1020]
+
+&gt;&gt; map-each x code [get dequote x]
+== [304 304 304 304 304 304]
+</code></pre>
+<h2><a name="p-4610-strategy-assume-more-than-3-casing-variations-uncommon-1" class="anchor" href="https://rebol.metaeducation.com#p-4610-strategy-assume-more-than-3-casing-variations-uncommon-1"></a>Strategy: Assume More Than 3 Casing Variations Uncommon</h2>
+<p>The design I've gone with is to assume that there aren't that many case variations of the same word in most situations.  Maybe you have <code>accept-headers</code>, <code>Accept-Headers</code> and <code>ACCEPT-HEADERS</code>.  But you won't go too far beyond that with <code>ACcept-HEAdERS</code> etc.  If you do, then the words start to "cost more".</p>
+<p><strong>Some of this stuff gets pretty vague in terms of whether I'm playing by the "rules" or just twisting code into a pretzel</strong>.</p>
+<p>I've oft-mentioned the "4 platform pointers per cell" baseline.  That's pretty limited.  Also limiting is that R3-Alpha tried to do essentially everything with arrays and linked lists... and this is a far cry from being able to easily pick from any of dozens of vetted data structures to suit your problem.</p>
+<p>So what's going on here is that if you use a "sufficiently weird spelling", then your cell turns into the kind that points to another cell for its content.  This is how QUOTED!s at the higher levels (4 quoting levels or more) work.</p>
+<p><strong>The ramifications are subtle and pervasive.</strong>  A lot of code would assume it could just go and muck with parts of cells, but now that these expanded format cells can be shared you can impact cells you didn't mean to.  If you want to tweak a WORD! cell so that it's a SET-WORD!, you have to worry about whether it's an unusual-spelling word...and if so, you need to make a copy of the shared cell to update its bit patterns.  I've established ways to check some of this at compile-time, but it's kind of hacked together at the moment and needs tuning.</p>
+<p>I'm suspecting that the average program would never need any of these cells (4 levels of quoting or 4 case-variations)...but that makes it all the more important to find ways to test it, by making the uncommon case common.  Basically forcing all words to use the expanded format and seeing what breaks.</p>
+<h2><a name="p-4610-object-keys-are-now-canon-lowercase-2" class="anchor" href="https://rebol.metaeducation.com#p-4610-object-keys-are-now-canon-lowercase-2"></a>Object Keys Are Now Canon (Lowercase)</h2>
+<p>This applies to MAKE OBJECT!, and things like function arguments:</p>
+<pre><code>&gt;&gt; make object! [ABC: 10, Def: 20]
+== make object! [
+    abc: 10
+    def: 20
+]
+
+&gt;&gt; func [ABC /Def] [print "Functions too."]
+== #[action! [abc /def]]
+</code></pre>
+<p>I've written about how I believe this is the only sane answer to dealing with it <a href="https://rebol.metaeducation.com/t/case-insensitivity-vs-case-preservation-cant-have-both/1439/14">("Case Insensitivity vs. Case Preservation (can't have both)")</a>.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/restoring-case-insensitive-binding/1472">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/restoring-case-insensitive-binding/1472</link>
+          <pubDate>Sun, 24 Jan 2021 08:58:08 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-1472</guid>
+          <source url="https://rebol.metaeducation.com/t/restoring-case-insensitive-binding/1472.rss">Restoring Case-Insensitive Binding</source>
+        </item>
+        <item>
+          <title>Advancements In Information-Hiding: Sealed FRAME! Members</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Internals</category>
+          <description><![CDATA[
+            <p><strong>Having local variables be invisible to the outside of a function is something that has been important in Ren-C since the beginning.</strong></p>
+<p>Superficially, we want to protect against the following kind of bug, e.g. that Red has inherited from Rebol2 and R3-Alpha:</p>
+<pre><code>red&gt;&gt; maybe-format-drive: func [user password /local permissions] [
+         if check-supervisor user password [
+              permissions: &lt;supervisor&gt;
+         ]
+         if permissions = &lt;supervisor&gt; [
+              print "Formatting hard drive"
+         ]
+    ]
+</code></pre>
+<p>The code above is assuming that permissions will default to NONE!.  But the problem is that you can slip the permissions in via the /LOCAL refinement:</p>
+<pre><code>red&gt;&gt; maybe-format-hard-drive/local "mallory" "password" &lt;supervisor&gt;
+</code></pre>
+<p><strong>This is why Ren-C makes sure all true locals are set to <code>~undefined~</code> when a function runs.</strong>  While being undefined makes them more prickly than BLANK! or NULL, you can default them using DEFAULT.</p>
+<h2><a name="p-4269-but-wanting-to-hide-things-has-more-motivation-than-that-1" class="anchor" href="https://rebol.metaeducation.com#p-4269-but-wanting-to-hide-things-has-more-motivation-than-that-1"></a>But Wanting To Hide Things has More Motivation Than That</h2>
+<p>Clearly we're not dealing with a very "secure" language model.  So there's a bigger reason.</p>
+<p>It's important for us to contractually establish that the locals are none of the caller's business.  Because once we have this information hiding, <em>it offers the potential for name reuse</em>.</p>
+<p><a href="https://rebol.metaeducation.com/t/augment-add-parameters-and-refinements-after-the-fact/1216">Remember <strong>AUGMENT</strong>?</a>  It lets you add parameters to a function frame.  This lets you do things like make a version of SWITCH that has /DEFAULT but inherits the interface of SWITCH and runs all in the same memory block.</p>
+<p>But what if just incidentally, the implementation of SWITCH used a local variable called "default"?  Then you'd wind up with a frame with two keys with the same name.</p>
+<p>Having a frame with two keys that have the same name sounds like a pretty big problem for binding...<em>unless there were some way to tell which names were in effect for a FRAME! based on which phase of a function composition it was in.</em></p>
+<p><strong>This is where frame phasing comes in.</strong></p>
+<h2><a name="p-4269-quick-demo-of-frame-phasing-2" class="anchor" href="https://rebol.metaeducation.com#p-4269-quick-demo-of-frame-phasing-2"></a>Quick Demo of FRAME! Phasing</h2>
+<pre><code>foo: func [public &lt;local&gt; private] [
+    private: 304
+    return binding of 'public  ; return a FRAME! with the internal view
+]
+
+&gt;&gt; f-outside: make frame! :foo
+== make frame! [
+    public: ~undefined~   ; from the outside, you don't see `private` 
+]
+
+&gt;&gt; f-outside/public: 1020
+
+&gt;&gt; f-inside: do f-outside   ; Note: DO kills the outside view, unless you copy
+== make frame! [
+    return: 'make action! [[@value /vanishable] [...]]
+    public: 1020
+    private: 304
+]
+</code></pre>
+<p>We're seeing <strong>two different views of the same memory</strong>.  The outside view is unaware of the locals.  The inside view reveals them.</p>
+<p>Important to observe is that what view we see doesn't depend on which stack level we're at, but the bits of the value in our hand.</p>
+<p>Now, how about that augmentation?  Let's add a /PRIVATE refinement to a layer on top of FOO that uses the same frame:</p>
+<pre><code>&gt;&gt; f-prelude: null
+
+&gt;&gt; bar: adapt augment 'foo [/private [tag!]] [
+       f-prelude: binding of 'private
+   ]        
+
+&gt;&gt; f-outside: make frame! :bar
+&gt;&gt; f-outside/public: 1020
+&gt;&gt; f-outside/private: &lt;different!&gt;
+
+&gt;&gt; f-inside: do f-outside
+== make frame! [
+    return: 'make action! [[@value /vanishable] [...]]
+    public: 1020
+    private: 304
+]
+
+&gt;&gt; f-prelude
+== make frame! [
+    public: 1020
+    private: &lt;different!&gt;
+]
+</code></pre>
+<p><strong><code>f-inside</code> and <code>f-prelude</code> (and <code>f-outside</code>) are all the same frame, which reveal a different PRIVATE field based on the phase.</strong></p>
+<p><strong><a href="https://github.com/metaeducation/ren-c/issues/393">This addresses Ren-C's oldest open issue, from Feb 2017.</a></strong>  Which I hope to be able to close shortly.</p>
+<h2><a name="p-4269-how-does-it-work-3" class="anchor" href="https://rebol.metaeducation.com#p-4269-how-does-it-work-3"></a>How Does It Work?</h2>
+<p>I've said time and again that a value cell is the size of 4 platform-pointers.  That's a rule of the game.</p>
+<ol>
+<li>
+<p>Like all cells, a FRAME! cell needs to give up one of those for the header...to say (among other things) that it's a frame and not an integer, etc.</p>
+</li>
+<li>
+<p>Next you have a binding.  This binding is important for instance when you MAKE a FRAME! for a RETURN function.  It needs to know where to return to.</p>
+</li>
+<li>
+<p>Then you need to have a "varlist", to point at the list of values that the frame's variables currently hold.</p>
+</li>
+<li>
+<p>The final slot is either a <strong>frame phase</strong> or a <strong>frame label</strong></p>
+</li>
+</ol>
+<p>If the phase slot is a label, you assume that the FRAME! value you are looking at has no special privileges to see locals or anything.  It gets its keylist from the archetype of the frame...e.g. the pointer held by the varlist itself.  In this particular no-phase case, all locals and specialized-out values are hidden from the phase.</p>
+<p>If the phase slot is not a label, then that's the phase...and the parameters of the action are used as the keylist.  Locals are counted since there is a phase...but "sealed" variables are not (these are what would have been considered "local" by the function that this phase derived from.)</p>
+<p>The upshot of this is that many operations which used to just be able to take a varlist now need to take a whole ANY-CONTEXT! value, so the phase information is present.  Which fields are in play due to the phase is important not just for molding, but also for binding and lookup.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/advancements-in-information-hiding-sealed-frame-members/1396">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/advancements-in-information-hiding-sealed-frame-members/1396</link>
+          <pubDate>Mon, 09 Nov 2020 20:56:13 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-1396</guid>
+          <source url="https://rebol.metaeducation.com/t/advancements-in-information-hiding-sealed-frame-members/1396.rss">Advancements In Information-Hiding: Sealed FRAME! Members</source>
+        </item>
+        <item>
+          <title>The Most Vexing Evaluation: -&gt; meets THEN/ELSE</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Internals</category>
+          <description><![CDATA[
+            <p>Whenever the evaluator code gets churned around, there are a few things that break first.</p>
+<p>One of the most frequent nightmares is having to fix the mixture of arrows and then/else.  Here's the working behavior:</p>
+<pre><code>&gt;&gt; if 1 &lt; 2 [&lt;branch&gt;] then x -&gt; [print ["THEN" x]] else [print "ELSE"]
+THEN &lt;branch&gt;
+
+&gt;&gt; if 1 &gt; 2 [&lt;branch&gt;] then x -&gt; [print ["THEN" x]] else [print "ELSE"]
+ELSE
+</code></pre>
+<p><strong>This is a showpiece of composition.</strong>  It's one of the things that I want people to encounter and go "wow" when they see how it's being done.  So letting it break is not an option.</p>
+<h2><a name="p-4115-what-typically-breaks-1" class="anchor" href="https://rebol.metaeducation.com#p-4115-what-typically-breaks-1"></a>What Typically Breaks</h2>
+<p>When it goes south, what happens is the ELSE won't run.</p>
+<p>We want the precedence to work out as if you had written this:</p>
+<pre><code>((if null [&lt;branch&gt;]) then (x -&gt; [print ["THEN" x]])) else [print "ELSE"]
+</code></pre>
+<p>So when the THEN goes to get its branch argument, it gets the function constructed from the arrow <em>but stops there</em>...deferring the ELSE.  The THEN runs, and the ELSE acts on the completed output of the entire IF..THEN expression.</p>
+<p>Instead, when this breaks, the typical broken interpretation is:</p>
+<pre><code>(if null [&lt;branch&gt;]) then ((x -&gt; [print ["THEN" x]]) else [print "ELSE"])
+</code></pre>
+<p>Here we see that THEN went to get its branch argument of the arrow.  But the arrow--once constructed--is passed as the first argument to ELSE, and the ELSE runs.  Since the arrow isn't void or null, the ELSE evaluates to that arrow...which the THEN runs.  If the THEN gets void or null as input it doesn't run, and now considers itself the end of the chain...since the ELSE ran prematurely.</p>
+<h2><a name="p-4115-why-does-it-break-2" class="anchor" href="https://rebol.metaeducation.com#p-4115-why-does-it-break-2"></a>Why Does It Break?</h2>
+<p>Remember that THEN and ELSE are "INFIX:DEFER operations".  This is to say that they don't greedily take the first opportunity to run as infix (the way something like <strong><code>+</code></strong> does).  Instead, they pass on that first opportunity...and run on the <em>second</em> opportunity.</p>
+<p>Consider that if ELSE ran on its first infix opportunity, it would be pointless:</p>
+<pre><code> if null [print "not run"] else [print "run"]
+</code></pre>
+<p>The first time ELSE gets seen by the evaluator is while it's putting the <code>[print "not run"]</code> argument into IF's branch argument slot.  If it ran at that moment, you'd have:</p>
+<pre><code>if null ([print "not run"] else [print "run"])
+</code></pre>
+<p>The ELSE would have a block on its left that wasn't void, and evaluate to that.  So this would act the same as:</p>
+<pre><code>if null [print "not run"]
+</code></pre>
+<p>So now back to our broken situation:</p>
+<pre><code>if false [&lt;branch&gt;] then x -&gt; [print ["THEN" x]] else [print "ELSE"]
+</code></pre>
+<p><strong>ELSE will only defer <em>once</em></strong>.  Which means it should only be "seen" twice.  When it breaks it gets seen <em>three</em> times:</p>
+<ol>
+<li>It gets seen while <code>-&gt;</code> is fulfilling <code>[print ["THEN" x]]</code> into its second argument, and does a lookahead.</li>
+<li>It gets seen after THEN fulfills its argument</li>
+<li>It gets seen after THEN executes</li>
+</ol>
+<p>We definitely want the second time ELSE is seen--when it executes--to be at (3).  But which of (1) or (2) is the right "first" time to see ELSE?  Both can't happen...but one of them has to happen.</p>
+<h2><a name="p-4115-a-case-of-conflicting-requirements-for-lookahead-3" class="anchor" href="https://rebol.metaeducation.com#p-4115-a-case-of-conflicting-requirements-for-lookahead-3"></a>A Case Of Conflicting Requirements for Lookahead</h2>
+<p>We know that <code>1 + 2 * 3</code> is 9 and not 7.   So the first time <code>*</code> gets a chance to be looked-ahead-at is <em>after</em> the <code>1 + 2</code> infix is finished.</p>
+<p>If we looked only at this rule, it would suggest (1) is the "bad" time for ELSE to be "seen".  <code>-&gt;</code> is infix like <code>+</code> is, and ELSE is infix like <code>*</code> is.  So we might see an analogy:</p>
+<ul>
+<li><code>1 + 2 * 3</code> =&gt; <code>(1 + 2) * 3</code></li>
+<li><code>x -&gt; [...] else [...]</code> =&gt; <code>(x -&gt; [...]) else [...]</code></li>
+</ul>
+<p>But if infix operators don't look ahead in their argument fulfillment, why would the <code>-&gt;</code> have been seen during the THEN?  Why wouldn't it be:</p>
+<pre><code>((if null [&lt;branch&gt;] then x) -&gt; [print ["THEN" x]]) else [print "ELSE"]
+</code></pre>
+<p>It looks like we pretty much have to gerrymander this so that something about the properties of the parts get the desired outcome.</p>
+<h2><a name="p-4115-something-has-to-bend-4" class="anchor" href="https://rebol.metaeducation.com#p-4115-something-has-to-bend-4"></a>Something Has To Bend</h2>
+<p>The easiest-seeming option is: <strong>Quoted lookbacks like the one done by -&gt; supersede the "no lookahead" rule</strong>.</p>
+<blockquote>
+<p><strong>UPDATE:</strong> See also: <a href="https://rebol.metaeducation.com/t/implicit-escaping-to-tiebreak-literal-arguments/2290" class="inline-onebox">Implicit Escaping To Tiebreak Literal Arguments</a></p>
+</blockquote>
+<p>That would mean you get this:</p>
+<pre><code>&gt;&gt; 1 + 2 * 3
+== 9  ; `*` is not left literal
+
+&gt;&gt; left-literal-multiplier: infix func [@left right] [
+       print ["left-literal-multiplier" left right]
+       left * right
+   ]
+
+&gt;&gt; 1 + 2 left-literal-multiplier 3
+left-literal-multiplier 2 3
+== 7  ; what happens when you take the argument literally
+</code></pre>
+<p>I don't know if it's the <em>best</em> rule.  But it doesn't seem to come into conflict with any of the crazy examples I've come up with yet.  <em>(And I try a fair number of "crazy" things.)</em></p>
+<p>I'm patching the latest breakage of this behavior, and I'm kind of sure it will probably break again.  But I wanted to have a reference to why this seems to work by taking away the "(1)" case.</p>
+<p>A key point I want to make here is that since we've gotten this far with it, <em>I'm not foreseeing accepting any designs which don't allow this to work</em>.</p>
+            <p><small>1 post - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/the-most-vexing-evaluation-meets-then-else/1361">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/the-most-vexing-evaluation-meets-then-else/1361</link>
+          <pubDate>Thu, 08 Oct 2020 21:59:25 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-1361</guid>
+          <source url="https://rebol.metaeducation.com/t/the-most-vexing-evaluation-meets-then-else/1361.rss">The Most Vexing Evaluation: -&gt; meets THEN/ELSE</source>
+        </item>
+        <item>
+          <title>From Liability to Asset: WORD! and PATH! always running code</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Internals</category>
+          <description><![CDATA[
+            <p>Since there are no parentheses in function application, Rebol winds up with the somewhat sketchy aspect that you can't tell when looking at a WORD! or PATH! if it's going to give you a value or run arbitrary code.</p>
+<p>Tonight I've reached a point in the generic tuple + path change such that <strong>/foo</strong>, <strong>.foo</strong>, <strong>foo.</strong>, and <strong>foo/</strong> are all forms of PATH! and TUPLE! that fit efficiently into a single cell.  But once things like <strong><code>foo.</code></strong> existed I had to make them do something... so I went ahead with trying my suggestion:</p>
+<pre><code>&gt;&gt; foo: 10
+== 10
+
+&gt;&gt; foo.
+== 10
+
+&gt;&gt; foo/
+** Error: Terminal slash in PATH! did not follow ACTION!
+
+&gt;&gt; append/ [1 2 3] 4
+== [1 2 3 4]
+
+&gt;&gt; append.
+** Error: Picking from action on left of dot in TUPLE!
+</code></pre>
+<p><em>Kinda neat</em>.  (Error messages need some thought).  And I noticed something else neat about terminal slash...which is that it makes a good shortcut for REEVAL to get a function value then force its execution:</p>
+<pre><code>&gt;&gt; (specialize 'add [value2: 10]) 20
+== 20  ; GROUP! evaluated to an ACTION! and was discarded
+
+&gt;&gt; reeval (specialize 'add [value2: 10]) 20
+== 30  ; this is how you previously did it without a new variable for the action
+
+&gt;&gt; (specialize 'add [value2: 10])/ 20
+== 30  ; shorthand!
+</code></pre>
+<h2><a name="p-4080-but-is-there-more-untapped-power-lurking-here-1" class="anchor" href="https://rebol.metaeducation.com#p-4080-but-is-there-more-untapped-power-lurking-here-1"></a>But Is There More Untapped Power Lurking Here?</h2>
+<p>My first thought went to protecting from Rebol's dangerous "always execute IF a function" semantics.</p>
+<p>But being able to make member access look the same when calling a function or not is a sought-after ability in other languages.  Most discussions of the feature involve <em>"Property Getters and Setters"</em>...where you can override non-parentheses access and assignment for a field.  <a href="https://docs.microsoft.com/en-us/dotnet/csharp/programming-guide/classes-and-structs/using-properties">For instance, in C#:</a></p>
+<blockquote>
+<p>"Properties combine aspects of both fields and methods. <strong>To the user of an object, a property appears to be a field, accessing the property requires the same syntax. To the implementer of a class, a property is one or two code blocks, representing a <a href="https://docs.microsoft.com/en-us/dotnet/csharp/language-reference/keywords/get">get</a> accessor and/or a <a href="https://docs.microsoft.com/en-us/dotnet/csharp/language-reference/keywords/set">set</a> accessor"</strong></p>
+</blockquote>
+<p>By its nature, Rebol has "getters" because you don't need parentheses to get an object member.  Just make a function with no arguments:</p>
+<pre><code>&gt;&gt; my-object: make object! [
+       x-private: 10
+       x: func [] [
+            print "Getting X!"
+            return x-private + 20
+       ]
+ ]
+            
+&gt;&gt; my-object.x
+Getting X!
+== 30
+</code></pre>
+<p>But it doesn't have overrideable behavior for SET-PATH! or SET-WORD!, so you can't make something like <code>my-object.x: 10</code> call code.  The X function just gets overridden.</p>
+<p>The little inkling of a thought I had was that we might be able to use the PATH!/TUPLE! distinction somehow to tell the difference between <em>calling the setter/getter function</em> and <em>dealing with the function itself</em>.</p>
+<pre><code> &gt;&gt; foo.x: 1000 
+ Calling the Setter Function!
+ == 1000  ; imagine setter stores value - 20
+
+ &gt;&gt; foo.x-private
+ == 980  ; ...so it updated the private value
+
+ &gt;&gt; foo.x
+ Getting X
+ == 1000 
+
+ &gt;&gt; foo.x.: &lt;dead&gt;  ; notice the terminal `.`
+ == &lt;dead&gt;
+
+ &gt;&gt; foo.x
+ == &lt;dead&gt;   ; no setter or getter anymore
+</code></pre>
+<p>It's just an inkling at this point of something that might be interesting.  I was kind of lamenting how many <code>/</code> there are in the codebase, when it seemed to me I'd be wanting to use <code>.</code> almost always.  But that got me to wondering about the kinds of motivations that people would have for using one form vs. the other.  Maybe this plays into it.</p>
+<p>All that aside... really just kind of announcing that generic tuple and path unification with compression to single cells is coming up shortly.  There are a few "big" issues to think about, but the mechanics are working...for the most part.</p>
+            <p><small>4 posts - 2 participants</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/from-liability-to-asset-word-and-path-always-running-code/1354">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/from-liability-to-asset-word-and-path-always-running-code/1354</link>
+          <pubDate>Sat, 03 Oct 2020 05:23:00 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-1354</guid>
+          <source url="https://rebol.metaeducation.com/t/from-liability-to-asset-word-and-path-always-running-code/1354.rss">From Liability to Asset: WORD! and PATH! always running code</source>
+        </item>
+        <item>
+          <title>O noes, Unicode Normalization</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Internals</category>
+          <description><![CDATA[
+            <p>UTF8-Everywhere has been running along relatively well...even without any optimization on ASCII strings.</p>
+<p>But there's a next level of bugaboo to worry about, and that's unicode normalization.  This is where certain codepoint sequences are considered to make the same "glyph"...e.g. there can be a single accented form of a character with an accent, or a two-codepoint sequence that is the unaccented character and the codepoint for an accent.</p>
+<p>Since there's more than one form for the codepoints, one can ask what form you canonize them to.  You can either try to get them to the fewest codepoints (for the smallest file to transmit) or the most (to make it easier to process them as their decomposed parts).</p>
+<p>On the plus side... unicode provides a documented standard and instructions for how to do these normalizations.  The Julia language has what seems to be a nicely factored implementation in C with few dependencies, called <strong>"<a href="https://github.com/JuliaStrings/utf8proc">utf8proc</a>"</strong>  It should not be hard to incorporate that.</p>
+<p>On the minus side... pretty much everything about dealing with unicode normalization.  <img src="https://rebol.metaeducation.com/images/emoji/twitter/roll_eyes.png?v=14" title=":roll_eyes:" class="emoji" alt=":roll_eyes:" loading="lazy" width="20" height="20">  There have been cases of bugs where filenames got normalized but then were not recognized as the same filename by the filesystem with the shuffled codepoints...despite looking the same visually.  So you can wind up with data loss if you're not careful about where and when you do these normalizations.</p>
+<p>This could get arbitrarily weird, especially with WORD! lookups.  Consider the kinds of things that can happen historically:</p>
+<pre><code>&gt;&gt; o: make object! [LetTer: "A"]
+&gt;&gt; find words-of o 'letter
+== [LetTer]
+</code></pre>
+<p>The casing has to match, but also be preserved...and this means you could get a wacky casing you weren't expecting pretty easily.  Now add unicode normalization (I haven't even mentioned case folding).</p>
+<ul>
+<li>Do we preserve different un-normalized versions as distinct synonyms?</li>
+<li>When you AS TEXT! convert a WORD! does the sequence of codepoints vary from one same-looking word to another?</li>
+<li>Are conversions between TEXT! &lt;=&gt; WORD! guaranteed not to change the bytes?</li>
+</ul>
+<p>It's pretty crazy stuff.  I'm tempted to say this is another instance where making a strong bet could be a win.  For instance: say that all TEXT! must use the minimal canon forms--and if your file isn't in that format, you must convert it or process it as a BINARY!.</p>
+<p>Or there could also be an alternative type, maybe something like UTF8!...which supported the full codepoint range?</p>
+<p>Anyway...this stuff is the kind of thing you can't opt-out of making a decision on.  I'm gathering there should probably be a conservative mode that lets you avoid potential damage from emoji and wild characters altogether, and then these modes relax with certain settings based on what kind of data you're dealing with.</p>
+            <p><small>14 posts - 4 participants</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/o-noes-unicode-normalization/1322">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/o-noes-unicode-normalization/1322</link>
+          <pubDate>Thu, 27 Aug 2020 16:08:09 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-1322</guid>
+          <source url="https://rebol.metaeducation.com/t/o-noes-unicode-normalization/1322.rss">O noes, Unicode Normalization</source>
+        </item>
+        <item>
+          <title>MAP-EACH + generic Identity Swapping vs. REMOVE-EACH</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Internals</category>
+          <description><![CDATA[
+            <p>REMOVE-EACH is a somewhat problematic operation, in that it is doing a low-level manipulation of an array's contents...and you don't want to expose any intermediate states that aren't valid.</p>
+<p>The efficiency of it is questionable...e.g. if you have an array that is 1,000 items long and you remove half of them, your array will now have 500 unused slots.  Also, each time you remove an item you have to slide the rest of the array down...otherwise you leave an array which may have outstanding references in a potentially invalid state.</p>
+<p>Ren-C went to some extremes to try and make REMOVE-EACH "rigorous".  But it seems that it might be better to just write something like</p>
+<pre><code>remove-each: func [
+    {Removes values for each block that returns true.}
+
+    return: "Number of removed series items, or null if BREAK"
+        [&lt;opt&gt; integer!]
+    'vars "Word or block of words to set each time (local)"
+        [blank! word! block!]
+    data "The series to traverse (modified)" ; should BLANK! opt-out?
+        [&lt;blank&gt; any-series!]
+    body "Block to evaluate (return TRUE to remove)"
+        [&lt;const&gt; block!]  ; !! Should support ACTION!
+][
+    if empty? :body [body: [void]]  ; GROUP!s vaporize when empty, address it
+
+    let mp: either block? vars [:map-each/splice] [:map-each]
+
+    let new-data: mp (vars) data compose/deep [
+        if not (as group! body) [get/any '(vars)]
+    ]
+    if null? new-data [return null]  ; BREAK
+
+    let diff: (length of data) - (length of new-data)
+    swap-contents data new-data
+    return diff
+]
+</code></pre>
+<p>This hinges on the SWAP-CONTENTS low-level operation (better name sought), which would simply take the guts of the new series and swap it out with the old series.  Code for this already exists.</p>
+<p>What this means is that any code which accessed the original array during the removal process would see it as the pre-modified form.  Which is basically what the Ren-C bulletproofing did, just much more awkwardly.  :-/</p>
+<p>REMOVE-EACH isn't all that terribly common, and the acrobatics required to make it safe aren't really a good use of time...especially to port here in stackless.  It's better to invest more into making MAP-EACH stackless and rigorous, and spending time on more important problems.</p>
+            <p><small>2 posts - 1 participant</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/map-each-generic-identity-swapping-vs-remove-each/1316">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/map-each-generic-identity-swapping-vs-remove-each/1316</link>
+          <pubDate>Tue, 04 Aug 2020 20:07:18 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-1316</guid>
+          <source url="https://rebol.metaeducation.com/t/map-each-generic-identity-swapping-vs-remove-each/1316.rss">MAP-EACH + generic Identity Swapping vs. REMOVE-EACH</source>
+        </item>
+        <item>
+          <title>Should GET-WORD! of unset variables raise an error?</title>
+          <dc:creator><![CDATA[hostilefork]]></dc:creator>
+          <category>Internals</category>
+          <description><![CDATA[
+            <p>The following is the behavior of Rebol2 when a GET-WORD! is used on an "UNSET!" value:</p>
+<pre><code>rebol2&gt;&gt; unset 'x
+rebol2&gt;&gt; type? :x
+** Script Error: x has no value
+</code></pre>
+<p>So you would have to fall back on GET/ANY to really get an unset:</p>
+<pre><code>rebol2&gt;&gt; type? get/any 'x
+== unset!
+</code></pre>
+<p>But R3-Alpha decided to be more lenient in this respect, and Red followed the lead:</p>
+<pre><code>r3-alpha&gt;&gt; unset 'x
+r3-alpha&gt;&gt; type? :x
+== unset!
+
+red&gt;&gt; unset 'x
+red&gt;&gt; type? :x
+== unset!
+</code></pre>
+<p>I've always been skeptical of this, because quite often the reason you are using a GET-WORD! is because you think the thing in your hand might be a function and you don't want to call it.  But when you let it mean "get a thing that's not set" as well, you're opening the doors to letting typos through:</p>
+<pre><code>return reduce ["My Action" :my-actionn]  ; whoops, I meant MY-ACTION!
+</code></pre>
+<p>Is it worth the tradeoff?  If anyone would say yes, it would probably be me... because I argue for the importance of being able to write truly generic code... so that usermode can be as rigorous as the internals.  But I'm not really sure.  Maybe most generic code should choke on unset unless you really wanted to process them... and maybe that added step of having to use GET/ANY is what it should take.</p>
+<p><a class="mention" href="https://rebol.metaeducation.com/u/rgchris">@rgchris</a> <a href="https://chat.stackoverflow.com/transcript/message/49923584#49923584">suggests some agreement</a>:</p>
+<blockquote>
+<p>I feel  <strong>:var</strong>  should be the route to disarming functions/errors as the imperative usage—makes passing them on more intuitive.</p>
+</blockquote>
+<p><strong>I will point out that if we go back to the Rebol2 style, there's nothing stopping versions of the future from opening it back up to the R3-Alpha and Red style.</strong>  But if people write code expecting GET-WORD!s to return void it will be harder to backpedal later when any significant codebases exist.</p>
+<p>This leads me to think we might want to try going back to erroring on unset with GET-WORD! and see where the pain points are.  There may be tools for addressing that pain that are shaped other ways.</p>
+<p>Any objections?</p>
+            <p><small>6 posts - 2 participants</small></p>
+            <p><a href="https://rebol.metaeducation.com/t/should-get-word-of-unset-variables-raise-an-error/1301">Read full topic</a></p>
+          ]]></description>
+          <link>https://rebol.metaeducation.com/t/should-get-word-of-unset-variables-raise-an-error/1301</link>
+          <pubDate>Wed, 15 Jul 2020 03:35:31 +0000</pubDate>
+          <discourse:topicPinned>No</discourse:topicPinned>
+          <discourse:topicClosed>No</discourse:topicClosed>
+          <discourse:topicArchived>No</discourse:topicArchived>
+          <guid isPermaLink="false">rebol.metaeducation.com-topic-1301</guid>
+          <source url="https://rebol.metaeducation.com/t/should-get-word-of-unset-variables-raise-an-error/1301.rss">Should GET-WORD! of unset variables raise an error?</source>
+        </item>
+  </channel>
+</rss>

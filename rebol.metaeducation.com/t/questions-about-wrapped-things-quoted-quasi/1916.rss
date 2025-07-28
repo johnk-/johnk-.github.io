@@ -1,0 +1,297 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Questions About &quot;Wrapped&quot; Things (QUOTED!, QUASI!)</title>
+    <link>https://forum.rebol.info/t/questions-about-wrapped-things-quoted-quasi/1916</link>
+    <description>I&#39;ve been held up on the new generalized isotopes due to looking at examples like this one:
+
+    attempt: func [
+        return: [&lt;opt&gt; any-value!]
+        code [block!]
+        &lt;local&gt; last&#39;
+    ][
+        last&#39;: the ~
+        reduce-each ^result&#39; code [
+            if error? result&#39; [return null]
+            if @void = result&#39; [continue]
+            last&#39;: result&#39;
+        ]
+        return unmeta last&#39;
+    ]
+
+Here you see ATTEMPT running a REDUCE-EACH, but asking for the ^META of each expression.  Asking for the result in meta form suppresses the automatic promotion of a definitional error (isotopic) to a generic failure.  (Re-read the [definitional failure post](https://forum.rebol.info/t/fail-vs-return-fail-the-new-age-of-definitional-failures/1852) for a refresher.)
+
+The meta of the isotopic error was received as a plain ERROR!.  And it handles it by returning null.  A void state is handled by continuing--leaving the cumulative result as-is.
+
+*([I&#39;ve explained why the meta state for void is weird.](https://forum.rebol.info/t/q-should-be-the-meta-of-void-a-no/1915)  For the sake of argument, let&#39;s say it doesn&#39;t change under the new rules.)*
+
+## The BAD! Touch
+
+I&#39;ve [enumerated the reasons](https://forum.rebol.info/t/should-everything-have-an-isotopic-form/1889/7?u=hostilefork) why having isotopes generate a ^META which is actually a &quot;BAD! ERROR!&quot; has several advantages.  Wrapping up meta in BAD! makes it a better generalized inverse evaluator (UNEVAL) as well as making all the meta states truthy.
+
+**But I&#39;m displeased with the impact this has here.**
+
+        last&#39;: the ~
+        reduce-each ^result&#39; code [
+            all [
+                bad? result&#39;
+                error? unbad result&#39;
+            ] then [
+                return null
+            ]
+            if @void = result&#39; [continue]
+            last&#39;: result&#39;
+        ]
+        return unmeta last&#39;
+
+Obviously the naming is... bad.  But I don&#39;t like not being able to ask it in a single step, as I could before.  It makes it tempting to introduce constructs like BAD-ERROR?
+
+        last&#39;: the ~
+        reduce-each ^result&#39; code [
+            if bad-error? result&#39; [return null]
+            if @void = result&#39; [continue]
+            last&#39;: result&#39;
+        ]
+        return unmeta last&#39;
+
+## Can We Avoid Making BAD-XXX? or QUOTED-XXX? Tests
+
+One strategy could be if there was some kind of arity-2 BAD test, like:
+
+    &gt;&gt; badly? integer! (first [~10~])
+    == #[true]
+
+This would avoid having to fill the global namespace with a bunch of things like BAD-INTEGER?
+
+You might get the idea that a TYPE OF could encode this, like:
+
+    &#39;~integer!~ = type of (first [~10~])
+   
+But that&#39;s not a BAD! DATATYPE! you&#39;re getting on the left.  It&#39;s a BAD! WORD!, and we don&#39;t have any kind of WORD!-to-DATATYPE! equivalence (there are reasons for this, beyond the scope of this thread).
+
+Maybe there&#39;s a dialect of containment of some kind (?) like:
+
+     match [bad!.integer!] (first [~10~])
+
+Given some recent suggestions, it might be possible to say something like:
+
+    if integer? try unbad (first [~10~])
+
+The concept being that if it wasn&#39;t wrapped up like ~10~, then you&#39;d get the original value out of the TRY instead of a type error.  But then this would be conflated if your original input had been an integer.  It would work for the error case since things that aren&#39;t bad are quoted, but it doesn&#39;t feel good.
+
+## It Seems We Should Have a Way Of Asking This...
+
+I look at the ^META code where it doesn&#39;t have the bad wrapper on it, and I think &quot;that&#39;s so much cleaner&quot;.  When you multiply it across all the other places that want to process meta arguments, it just feels wrong to throw in all the extra complexity.
+
+Yet it feels like something of a failure that we don&#39;t have an easy way of asking if a value is a datatype wrapped in tildes or not.  It&#39;s a weakness that exists in our ability to ask questions about quoted types as well.
+
+Ultimately, is it the best solution to backpedal on the QUOTE/META unification and accept different tracks?
+
+* **META &amp; UNMETA** - promotes isotopes to undecorated form, NULL &lt;=&gt; NULL, promotes non-isotopes to one level quoted higher than they were.  Because it can generate blanks and logic false, NULL is **not** the only falsey result you can receive from a META operation.
+
+* **QUOTE &amp; UNQUOTE** - promotes isotopes to their ~bad~ value forms, NULL &lt;=&gt; single apostrophe (&#39;), quotes everything else.  Acts as a proxy for &quot;UNEVAL/EVAL&quot; of single values.
+
+Then the question remains about what construct something like FOR-BOTH should use.  It wants to act like QUOTE and UNQUOTE except with NULL and VOID passthrough.
+
+Under these rules, it&#39;s really a special &quot;don&#39;t quote quite everything&quot; version of QUOTE so maybe less is more, and just give it an asterisk... to say &quot;quote but with some kind of twist&quot;.
+
+    for-both: lambda [&#39;var blk1 blk2 body] [
+        unquote* all [
+            quote* for-each (var) blk1 body
+            quote* for-each (var) blk2 body
+        ]
+    ]
+
+I can&#39;t think of what this could be as a refinement.  QUOTE/PASSTHRU-NULL-AND-VOID?  QUOTE/WITH-HOLES-IN-IT?  QUOTE/LEAKY?  QUOTE/USUALLY?   
+
+Not sure, but I really feel like these should be true by default:
+
+    &gt;&gt; quote null
+    == &#39;
+
+    &gt;&gt; quote void
+    ** Error: VOID has no quoted form, use META (or QUOTE* if you want to passthru)
+
+Anyway, this is just the same thing from a week ago running around, and I can&#39;t make progress until I pin it down!  I&#39;ll sleep on it a bit.</description>
+    
+    <lastBuildDate>Sat, 24 Jun 2023 10:33:38 +0000</lastBuildDate>
+    <category>Internals</category>
+    <atom:link href="https://forum.rebol.info/t/questions-about-wrapped-things-quoted-quasi/1916.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Questions About &quot;Wrapped&quot; Things (QUOTED!, QUASI!)</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="1916">
+<div class="title">
+<div class="quote-controls"></div>
+<img loading="lazy" alt="" width="20" height="20" src="https://forum.rebol.info/user_avatar/forum.rebol.info/hostilefork/40/26_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>Anyway, this is just the same thing from a week ago running around, and I can't make progress until I pin it down! I'll sleep on it a bit.</p>
+</blockquote>
+</aside>
+<p>Okay, I did sleep on it.  Then I woke up deciding <a href="https://forum.rebol.info/t/im-not-bad-im-just-mold-ed-that-way/1911/3">I'm probably not going to come up with a better name for "BAD!" than QUASI!</a></p>
+<p>Setting that down, it makes the code a bit less infuriating to me.</p>
+<pre><code>last': the ~
+reduce-each ^result' code [
+    if (quasi? result') and (error? unquasi result') [return null]
+    if @void = result' [continue]
+    last': result'
+]
+return unmeta last'
+</code></pre>
+<p>I'll point out that if we decide that the void state is best treated as being truly unset, this would instead look like:</p>
+<pre><code>last': the ~
+reduce-each ^result' code [
+    if unset? the result' [continue]
+    if (quasi? result') and (error? unquasi result') [return null]
+    last': result'
+]
+return unmeta last'
+</code></pre>
+<p>I'm using <strong>unset? the result'</strong> instead of <strong>unset? 'result'</strong> due to variables with leading and trailing quotes being confusing.</p>
+<p>Were we to introduce a new test for isotopic errors that would tolerate them and not promote them to raised errors, we might call it FAILURE?.  It might have to be first, or it might be argued that things that take their arguments as ^META like VOID? would not trigger failures:</p>
+<pre><code>last': the ~
+reduce-each ^result' code [
+    if failure? :result' [return null]
+    if void? :result' [continue]
+    last': result'
+]
+return :last'
+</code></pre>
+<p>Similar tests like SPLICE? might test for isotopic blocks, to make this style of coding easier.</p>
+<p><em><strong>Moving in the direction of these changes involved, it doesn't feel so horrible.</strong></em>  And it brings us back to our happy place with FOR-BOTH.</p>
+<pre><code>for-both: lambda ['var blk1 blk2 body] [
+    unmeta all [
+        meta for-each (var) blk1 body
+        meta for-each (var) blk2 body
+    ]
+]
+</code></pre>
+<p><strong>It actually looks like there's a kind of odd completion here, if the META of VOID is always void, but we say the only way a variable can convey voidness is through the approximation of being unset.</strong></p>
+<p>Previously it was a subtlety of the word form of META when compared with the operator form of ^ to say that the word form would pass through voids "as is" instead of creating a weird signal like <code>@void</code>--hence being usable in something like FOR-BOTH.  But if the meta form is actually an unset variable, we can say that's really just the closest thing you can get to the "ground zero" meta...where meta of void is void.</p>
+<p>Also, when I started thinking seriously about the idea that ^META things wouldn't be decorated as ~QUASI~ items, it makes the code harder to interpret:</p>
+<pre><code> reduce-each ^item' block [
+    if _ = item' [print "React to a 'none' variable, e.g. unset"]
+    if 'null = item' [print "React to a null isotope"]
+    ;...
+ ]
+</code></pre>
+<p>The relationship or meta status isn't reinforced, the way it does if the quasi state is carried along:</p>
+<pre><code> reduce-each ^item' block [
+    if '~ = item' [print "React to a 'none' variable, e.g. unset"]
+    if '~null~ = item' [print "React to a null isotope"]
+    ;...
+ ]
+</code></pre>
+<p>Here you see QUASI!-things and you think "oh, something meta must be going on".  That seems stronger.</p>
+<p><strong>No promises that this answers everything, but I feel better about it.</strong></p>
+          <p><a href="https://forum.rebol.info/t/questions-about-wrapped-things-quoted-quasi/1916/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/questions-about-wrapped-things-quoted-quasi/1916/2</link>
+        <pubDate>Tue, 16 Aug 2022 02:42:15 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1916-2</guid>
+        <source url="https://forum.rebol.info/t/questions-about-wrapped-things-quoted-quasi/1916.rss">Questions About &quot;Wrapped&quot; Things (QUOTED!, QUASI!)</source>
+      </item>
+      <item>
+        <title>Questions About &quot;Wrapped&quot; Things (QUOTED!, QUASI!)</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>I've been held up on the new generalized isotopes due to looking at examples like this one:</p>
+<pre><code>attempt: func [
+    return: [&lt;opt&gt; any-value!]
+    code [block!]
+    &lt;local&gt; last'
+][
+    last': the ~
+    reduce-each ^result' code [
+        if error? result' [return null]
+        if @void = result' [continue]
+        last': result'
+    ]
+    return unmeta last'
+]
+</code></pre>
+<p>Here you see ATTEMPT running a REDUCE-EACH, but asking for the ^META of each expression.  Asking for the result in meta form suppresses the automatic promotion of a definitional error (isotopic) to a generic failure.  (Re-read the <a href="https://forum.rebol.info/t/fail-vs-return-fail-the-new-age-of-definitional-failures/1852">definitional failure post</a> for a refresher.)</p>
+<p>The meta of the isotopic error was received as a plain ERROR!.  And it handles it by returning null.  A void state is handled by continuing--leaving the cumulative result as-is.</p>
+<p><em>(<a href="https://forum.rebol.info/t/q-should-be-the-meta-of-void-a-no/1915">I've explained why the meta state for void is weird.</a>  For the sake of argument, let's say it doesn't change under the new rules.)</em></p>
+<h2>The BAD! Touch</h2>
+<p>I've <a href="https://forum.rebol.info/t/should-everything-have-an-isotopic-form/1889/7">enumerated the reasons</a> why having isotopes generate a ^META which is actually a "BAD! ERROR!" has several advantages.  Wrapping up meta in BAD! makes it a better generalized inverse evaluator (UNEVAL) as well as making all the meta states truthy.</p>
+<p><strong>But I'm displeased with the impact this has here.</strong></p>
+<pre><code>    last': the ~
+    reduce-each ^result' code [
+        all [
+            bad? result'
+            error? unbad result'
+        ] then [
+            return null
+        ]
+        if @void = result' [continue]
+        last': result'
+    ]
+    return unmeta last'
+</code></pre>
+<p>Obviously the naming is... bad.  But I don't like not being able to ask it in a single step, as I could before.  It makes it tempting to introduce constructs like BAD-ERROR?</p>
+<pre><code>    last': the ~
+    reduce-each ^result' code [
+        if bad-error? result' [return null]
+        if @void = result' [continue]
+        last': result'
+    ]
+    return unmeta last'
+</code></pre>
+<h2>Can We Avoid Making BAD-XXX? or QUOTED-XXX? Tests</h2>
+<p>One strategy could be if there was some kind of arity-2 BAD test, like:</p>
+<pre><code>&gt;&gt; badly? integer! (first [~10~])
+== #[true]
+</code></pre>
+<p>This would avoid having to fill the global namespace with a bunch of things like BAD-INTEGER?</p>
+<p>You might get the idea that a TYPE OF could encode this, like:</p>
+<pre><code>'~integer!~ = type of (first [~10~])
+</code></pre>
+<p>But that's not a BAD! DATATYPE! you're getting on the left.  It's a BAD! WORD!, and we don't have any kind of WORD!-to-DATATYPE! equivalence (there are reasons for this, beyond the scope of this thread).</p>
+<p>Maybe there's a dialect of containment of some kind (?) like:</p>
+<pre><code> match [bad!.integer!] (first [~10~])
+</code></pre>
+<p>Given some recent suggestions, it might be possible to say something like:</p>
+<pre><code>if integer? try unbad (first [~10~])
+</code></pre>
+<p>The concept being that if it wasn't wrapped up like ~10~, then you'd get the original value out of the TRY instead of a type error.  But then this would be conflated if your original input had been an integer.  It would work for the error case since things that aren't bad are quoted, but it doesn't feel good.</p>
+<h2>It Seems We Should Have a Way Of Asking This...</h2>
+<p>I look at the ^META code where it doesn't have the bad wrapper on it, and I think "that's so much cleaner".  When you multiply it across all the other places that want to process meta arguments, it just feels wrong to throw in all the extra complexity.</p>
+<p>Yet it feels like something of a failure that we don't have an easy way of asking if a value is a datatype wrapped in tildes or not.  It's a weakness that exists in our ability to ask questions about quoted types as well.</p>
+<p>Ultimately, is it the best solution to backpedal on the QUOTE/META unification and accept different tracks?</p>
+<ul>
+<li>
+<p><strong>META &amp; UNMETA</strong> - promotes isotopes to undecorated form, NULL &lt;=&gt; NULL, promotes non-isotopes to one level quoted higher than they were.  Because it can generate blanks and logic false, NULL is <strong>not</strong> the only falsey result you can receive from a META operation.</p>
+</li>
+<li>
+<p><strong>QUOTE &amp; UNQUOTE</strong> - promotes isotopes to their ~bad~ value forms, NULL &lt;=&gt; single apostrophe ('), quotes everything else.  Acts as a proxy for "UNEVAL/EVAL" of single values.</p>
+</li>
+</ul>
+<p>Then the question remains about what construct something like FOR-BOTH should use.  It wants to act like QUOTE and UNQUOTE except with NULL and VOID passthrough.</p>
+<p>Under these rules, it's really a special "don't quote quite everything" version of QUOTE so maybe less is more, and just give it an asterisk... to say "quote but with some kind of twist".</p>
+<pre><code>for-both: lambda ['var blk1 blk2 body] [
+    unquote* all [
+        quote* for-each (var) blk1 body
+        quote* for-each (var) blk2 body
+    ]
+]
+</code></pre>
+<p>I can't think of what this could be as a refinement.  QUOTE/PASSTHRU-NULL-AND-VOID?  QUOTE/WITH-HOLES-IN-IT?  QUOTE/LEAKY?  QUOTE/USUALLY?</p>
+<p>Not sure, but I really feel like these should be true by default:</p>
+<pre><code>&gt;&gt; quote null
+== '
+
+&gt;&gt; quote void
+** Error: VOID has no quoted form, use META (or QUOTE* if you want to passthru)
+</code></pre>
+<p>Anyway, this is just the same thing from a week ago running around, and I can't make progress until I pin it down!  I'll sleep on it a bit.</p>
+          <p><a href="https://forum.rebol.info/t/questions-about-wrapped-things-quoted-quasi/1916/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://forum.rebol.info/t/questions-about-wrapped-things-quoted-quasi/1916/1</link>
+        <pubDate>Mon, 15 Aug 2022 18:22:28 +0000</pubDate>
+        <guid isPermaLink="false">forum.rebol.info-post-1916-1</guid>
+        <source url="https://forum.rebol.info/t/questions-about-wrapped-things-quoted-quasi/1916.rss">Questions About &quot;Wrapped&quot; Things (QUOTED!, QUASI!)</source>
+      </item>
+  </channel>
+</rss>

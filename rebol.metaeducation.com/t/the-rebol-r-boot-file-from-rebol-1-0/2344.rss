@@ -1,0 +1,449 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>The %rebol.r Boot File From Rebol 1.0</title>
+    <link>https://rebol.metaeducation.com/t/the-rebol-r-boot-file-from-rebol-1-0/2344</link>
+    <description>While we don&#39;t have the C source code for Rebol 1.0, we do have the `%rebol.r` initialization file:
+
+   https://gist.github.com/hostilefork/d6cfac90141688bd41b1b38a9a203b02
+
+It would seem that if there were an ability to pack source code in with the executable, they would have done it...given that the Quick Start says *&quot;do not modify `rebol.r`. If you accidentally do modify `rebol.r`, reinstall it.&quot;*
+
+***Hence this is probably the entire portion of Rebol 1.0 that&#39;s written in Rebol, e.g. the whole &quot;Mezzanine&quot;.***
+
+It says:
+
+    ;;; Note: Code in rebol.r runs in the system context.  The system
+    ;;; context [has] all the built in bindings of the user context, but also
+    ;;; has extra bindings to allow rebol to be bootstrapped.  Many of the 
+    ;;; rebol functions available in user code are actually written in
+    ;;; terms of simpler rebol natives, or in terms of special
+    ;;; system natives.
+
+    ;;; REBOL reserves the right to change the system natives at any time, 
+    ;;; so you shouldn&#39;t depend on them for portable code.
+
+# Remarks On Contents, In No Particular Order
+
+## FUNC Definition
+
+    func: make function! [args body] [make function! :args :body]
+
+I found it a bit interesting that the [User Guide talked about how FUNC was defined](https://rebol.metaeducation.com/t/rebol-1-0-2-users-guide/2340/6#p-7944-func-shortcut-5), as an illustrative example, of an important thing for users to know about.  (It turns out there&#39;s a [brief mention in the Rebol2 User&#39;s Guide](https://www.rebol.com/docs/core23/rebolcore-9.html), but the Rebol 1.0 Guide writes it up twice, probably on accident.)
+
+It&#39;s worth pointing out that there&#39;s big questions even in this seemingly simple definition.  Such as, should a function copy its arguments or body?  What should this do?
+
+     body: [print &quot;Hello&quot;]
+     foo: func [] body
+     append body [print &quot;Goodbye&quot;]
+     bar: func [] body
+
+Does **foo** print just &quot;Hello&quot;, or does it print &quot;Hello&quot; and &quot;Goodbye&quot;?
+
+I don&#39;t yet know what Rebol1 did, but Rebol2&#39;s MAKE FUNCTION! would *not* copy the body.  So FUNC would do a deep copy as the &quot;higher level&quot; operator, before passing it to MAKE FUNCTION!.
+
+But during bootstrap, it used a definition of FUNC that *didn&#39;t* copy the body, for performance reasons...which it switched over to the copying implementation at the end of boot.  :roll_eyes: 
+
+Some version of these crazy optimizations are on the table for future Ren-C.
+
+## PRINT, PRIN, PROBE
+
+    write-block-or-element:
+        make function! [port element] [
+                 do
+                    if block? :element [:write-block] else [:form-to-port]
+                    :port
+                    :element]
+
+    write-block: func [port block] [    ; !!! needs work
+        foreach element :block [form-to-port :port :element form-to-port :port &quot; &quot;]
+    ]
+
+    prin: func [value] [
+        if block? :value [write-block output-port reduce :value]
+        else [form-to-port output-port :value]
+        exit
+    ]
+
+    print: func [value] [
+        prin :value
+        linefeed-port output-port
+        exit
+    ]
+
+    probe: func [value] [
+         prin &quot; PROBE --&gt; &quot;
+         send output-port :value
+         linefeed-port output-port
+         :value
+     ]
+
+Weird.  (and prints a space after every element, so you get a space at the end of the line vs. just delimited between, etc.)
+
+At least one interesting aspect of this is to see the rigid &quot;EXIT&quot; at the end to make sure that PRIN and PRINT don&#39;t leak a result on accident.  Things like this feel like a vindication of Ren-C&#39;s [requirement to use a RETURN](https://rebol.metaeducation.com/t/implicit-execution-of-return-in-functions-bad/1656) in order to give back a result from FUNC (but not LAMBDA).
+
+## IS? as TO-LOGIC
+
+    is?: func [value] [not not :value]
+
+This was called TRUE? in Rebol2, and I very much disliked the ambiguity of that vs. testing to see if a value was `= #[true]` the LOGIC! literal.
+
+I wrote something up about [how DID could be the opposite of NOT](http://blog.hostilefork.com/did-programming-opposite-of-not/) (which even goes together as DIDN&#39;T for DID NOT).  But due to some various shades of meaning the current state is that it means THEN? and DIDN&#39;T means ELSE? as prefix tests for the trigger conditions that would run THEN or ELSE.  It needs thought.
+
+Anyway, interesting to see the choice of `IS?` here.
+
+## A Recursive Folding ANY and ALL :interrobang: 
+
+    any: func [block] [
+        eval-one block
+            make function! [value rest] [
+                if not value [any rest]
+                else [value]
+            ]
+            make function! [value] [value]
+    ]
+
+    all: func [block] [
+        eval-one block
+            make function! [value rest] [
+                if is? value [all rest]
+                else [false]
+            ]
+            make function! [value] [value]
+    ]
+
+So this is based on a function called EVAL-ONE, that takes a list and two functions.  It isn&#39;t defined in %rebol.r and isn&#39;t in the reference guide either.  But it&#39;s a right fold with early termination.  
+
+One can definitely imagine the Joe Marshall and Carl friction on this (*&quot;why are you making all these usermode functions and calls, why not just use a loop?&quot;*).
+
+While there&#39;s a time and a place for this, I do think that if you are starting to push out into the usermode layers and finding this mentality is driving it...you&#39;re going to end up with something that isn&#39;t hitting the mark that Rebol was aiming at.
+
+## Why Is PICK So Weird?
+
+    pick: func [series index] [
+      do make function! [offset] [
+        if (:offset + index? :series) &lt;= 1
+            [none]
+        else [do make function! [disp] [
+                if (length? :disp) = 0 
+                   [none]
+                else
+                   [&amp;peek :disp 0]
+                ] skip :series if :offset &lt; 0 [:offset] else [:offset - 1]
+             ]
+        ] if logic? :index [if :index [1] else [2]] else [:index]
+    ]
+
+My guess here is that the pattern:
+
+    do make function! [arg] [...code with arg...] value-for-arg
+
+...is probably some holdover from before USE existed.  Or maybe USE is just an abstraction built on functions, and so it&#39;s done this way for optimization.  I dunno.
+
+## Poor-Man&#39;s EXPORT
+
+    ;;; These functions can be defined in terms of system natives that are
+    ;;; not available in the user context.  Since we made the functions in 
+    ;;; this context, the values of the words in the body are relative to
+    ;;; this context.  But we place the functions in the user context so
+    ;;; that the users can call them.  This allows the user to call the
+    ;;; system natives through a defined API in a controlled manner.
+
+    user-functions: [
+        dir? [file] [do func [info] [info/dir?] info? :file]
+        size? [file] [do func [info] [info/size] info? :file]
+        ...
+    ]
+
+    foreach [name args body] user-functions [
+        context-set user-context name func args body
+    ]
+
+So the comment says what&#39;s going on here, it&#39;s the attempt to push functions out into the user context when they&#39;re implemented in terms of functions that aren&#39;t available in the user context.  I&#39;m not sure what&#39;s not available *(these implementations of DIR? and FILE? are based on INFO?, is that not exported to the user context?)*
+
+As far as I know, there&#39;s nothing like this in Rebol2 (there&#39;s no separate `user-context` from a `system-context`, is there?)  Interesting if that was something that disappeared in Rebol2 and came back in Rebol3.
+
+## More Modularization: EVAL-REDUCE Takes Context
+
+    if not none? REBOL/script [
+        if exists? REBOL/script [
+            do make function! [] [
+                    top-level-continuation: :return
+                    if not REBOL/silent [
+                            linefeed
+                            prin &quot;Loading script &quot;
+                            print REBOL/script]
+                    eval-reduce [do REBOL/script] user-context
+                    ]
+            ]
+        ]
+
+Rebol1 seems to have been working with modularization ideas, because even during startup, the script you pass on the command line is run via something called EVAL-REDUCE that takes a parameter of where to do the evaluation.
+
+So definitely a shame that Rebol2 seems to have moved away from the idea that evaluations needed to be done in a context.
+
+## CATCH is defined in terms of CATCH-FUNC
+
+We know from the `user-functions` exporting that this:
+
+    catch [word block] [catch-func func reduce [word] :block]
+
+Is actually:
+
+    catch: func [word block] [catch-func func reduce [word] :block]
+
+Since there&#39;s no type checking, there&#39;s a `:BLOCK` GET-WORD! just to be sure it&#39;s not a function, I guess?  And then it&#39;s FUNC&#39;s job to do a check in its implementation.  But then, why not `:WORD` just to be sure WORD! isn&#39;t a function you&#39;re calling?  *(I like pointing this out, due to Ren-C&#39;s better answers to this issue...avoiding the &quot;pox of documenting what you **don&#39;t** know&quot;)*
+
+So the idea of using functions as proxies for &quot;virtual binding&quot; is the *old way*.  What&#39;s going on here is that the block contains code that wants to be bound to whatever the throw construct is, and so that block is made the body of a function, that you call and pass the thing you want bound to that name as the argument.  (COLLECT+KEEP worked this way).  But it&#39;s undesirable, because it means you&#39;ve lost the fluidity of having the currency of a structural BLOCK!...replaced with the black box of a function just because you wanted to bind something.
+
+I&#39;m pretty sure this CATCH mechanic (being called a &quot;continuation&quot;) is stackful and can&#39;t do anything too bizarre, but I&#39;d like an executable to try and ensure that.</description>
+    
+    <lastBuildDate>Sun, 01 Dec 2024 15:19:16 +0000</lastBuildDate>
+    <category>Redbol</category>
+    <atom:link href="https://rebol.metaeducation.com/t/the-rebol-r-boot-file-from-rebol-1-0/2344.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>The %rebol.r Boot File From Rebol 1.0</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <h2><a name="p-7954-exception-handling-1" class="anchor" href="https://rebol.metaeducation.com#p-7954-exception-handling-1"></a>Exception Handling</h2>
+<pre><code>do-with-exception-handler: make function! [handler body] [
+    do make function! [outside-value inside-value] [
+        shield [outside-value: :exception-handler-stack
+                exception-handler-stack: :inside-value]
+               :body
+               [inside-value: :exception-handler-stack
+                exception-handler-stack: :outside-value]
+        ] :exception-handler-stack 
+          stack-push :exception-handler-stack :handler
+    ]
+</code></pre>
+<p>So DO-WITH-EXCEPTION-HANDLER is defined in <code>%rebol.r</code>, but not used by it (e.g. it's not how the REPL traps errors).  Hence we don't see any usages of the exception handling functions.</p>
+<p>But what we do see is that it depends on a native called SHIELD, which is in the user guide:</p>
+<pre><code>shield before-block main-block after-block
+</code></pre>
+<p>This appears to be a convenience of some kind, to let you register a handler to keep you from having to go around SHIELD-ing all your individual calls.</p>
+<h2><a name="p-7954-readevalprint-loop-repl-2" class="anchor" href="https://rebol.metaeducation.com#p-7954-readevalprint-loop-repl-2"></a>Read/Eval/Print Loop (REPL)</h2>
+<p>The REPL is initialized by a call to INIT-REPL, which passes in some messages and ports, and a context to do evaluations in:</p>
+<pre><code>init-repl
+    [linefeed prin "REBOL top level."]         ; start-message
+    [linefeed prin "Returning to top level."]  ; resume-message
+    "&gt;&gt; "                                      ; prompt
+    user-context                               ; repl-context
+    input-port                                 ; repl-input-port
+    output-port                                ; repl-output-port
+</code></pre>
+<p>The meat of INIT-REPL is in this code that it passes to PUSH-REPL, which I've</p>
+<pre><code>do make function! [form] [
+     write-block-or-element :repl-output-port (
+         shield [&amp;trace repl-trace nearest-repl]  ; before-block
+                [eval-reduce :form :repl-context]  ; main-block
+                [&amp;trace false]  ; after-block
+     )
+] (port-read :repl-input-port)
+</code></pre>
+<p>If we were to make this a bit less obtuse:</p>
+<pre><code>form: port-read :repl-input-port  ; READ
+
+result: shield [&amp;trace repl-trace nearest-repl] 
+               [eval-reduce :form :repl-context]  ; EVAL
+               [&amp;trace false]
+
+write-block-or-element :repl-output-port :result  ; PRINT
+</code></pre>
+<p>So I gather the SHIELD is there to make sure that if code was being traced and there was an error, you don't wind up tracing the REPL itself.  It doesn't actually catch errors or throws, it just seems to make sure your AFTER-BLOCK code runs.  <img src="https://rebol.metaeducation.com/images/emoji/twitter/confused.png?v=14" title=":confused:" class="emoji" alt=":confused:" loading="lazy" width="20" height="20"></p>
+<p><strong>I don't see anything about printing error messages, and there's nothing in the user's guide about an ERROR! type, so it seems like errors aren't values.</strong></p>
+<p>So what probably happens when there's an error is that the interpreter just prints it.  I don't know what the SHIELD's result is... NONE?</p>
+<p>It would be easier to understand the situation with errors or uncaught throws with a working interpreter.</p>
+<h2><a name="p-7954-ctrl-c-handling-3" class="anchor" href="https://rebol.metaeducation.com#p-7954-ctrl-c-handling-3"></a>Ctrl-C Handling</h2>
+<pre><code>;;; The repl-driver drives the console interaction.  The argument
+;;; 'once' is assumed to do a single interaction.  We capture a return 
+;;; continuation and then turn on the interrupts before calling
+;;; 'once'.  If an error or control C happens, control is transfered
+;;; to the captured continuation.  Since this continuation is captured 
+;;; in a (dynamic) context with interrupts turned off, the interrupts
+;;; are disabled while iterating around the loop (so the loop cannot
+;;; be broken by a lucky interrupt).
+</code></pre>
+<p>So at least this has something in common with Ren-C, which is the implementation of the REPL in usermode...and being sensitive to questions like not wanting you to be able to Ctrl-C the REPL implementation itself.  Ren-C also disables the Ctrl-C while inside the console's implementation.</p>
+<p><em>(Though interestingly, you can Ctrl-C if you're in console <em>skin</em> code...a misbehaving skin where you've customized your I/O can be canceled, and it will fall back on the default skin.)</em></p>
+<p>There's a definition exported to the user context:</p>
+<pre><code> halt: func [] [top-level-continuation none]
+</code></pre>
+<p>Which this does the same thing as Ctrl-C.  I still kind of want to understand the limits of what is possible with these "throws" that are being called continuations, and just how arbitrarily you can throw the program around.</p>
+<p>Anyway, it's still a bit murky what some of it is doing, but by-and-large I pretty much understand it.</p>
+          <p><a href="https://rebol.metaeducation.com/t/the-rebol-r-boot-file-from-rebol-1-0/2344/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/the-rebol-r-boot-file-from-rebol-1-0/2344/2</link>
+        <pubDate>Sun, 01 Dec 2024 12:44:23 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2344-2</guid>
+        <source url="https://rebol.metaeducation.com/t/the-rebol-r-boot-file-from-rebol-1-0/2344.rss">The %rebol.r Boot File From Rebol 1.0</source>
+      </item>
+      <item>
+        <title>The %rebol.r Boot File From Rebol 1.0</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>While we don't have the C source code for Rebol 1.0, we do have the <code>%rebol.r</code> initialization file:</p>
+<p><a href="https://gist.github.com/hostilefork/d6cfac90141688bd41b1b38a9a203b02" class="inline-onebox">Rebol 1.0.2 Initialization File (October 7, 1998) · GitHub</a></p>
+<p>It would seem that if there were an ability to pack source code in with the executable, they would have done it...given that the Quick Start says <em>"do not modify <code>rebol.r</code>. If you accidentally do modify <code>rebol.r</code>, reinstall it."</em></p>
+<p><em><strong>Hence this is probably the entire portion of Rebol 1.0 that's written in Rebol, e.g. the whole "Mezzanine".</strong></em></p>
+<p>It says:</p>
+<pre><code>;;; Note: Code in rebol.r runs in the system context.  The system
+;;; context [has] all the built in bindings of the user context, but also
+;;; has extra bindings to allow rebol to be bootstrapped.  Many of the 
+;;; rebol functions available in user code are actually written in
+;;; terms of simpler rebol natives, or in terms of special
+;;; system natives.
+
+;;; REBOL reserves the right to change the system natives at any time, 
+;;; so you shouldn't depend on them for portable code.
+</code></pre>
+<h1><a name="p-7953-remarks-on-contents-in-no-particular-order-1" class="anchor" href="https://rebol.metaeducation.com#p-7953-remarks-on-contents-in-no-particular-order-1"></a>Remarks On Contents, In No Particular Order</h1>
+<h2><a name="p-7953-func-definition-2" class="anchor" href="https://rebol.metaeducation.com#p-7953-func-definition-2"></a>FUNC Definition</h2>
+<pre><code>func: make function! [args body] [make function! :args :body]
+</code></pre>
+<p>I found it a bit interesting that the <a href="https://rebol.metaeducation.com/t/rebol-1-0-2-users-guide/2340/6#p-7944-func-shortcut-5">User Guide talked about how FUNC was defined</a>, as an illustrative example, of an important thing for users to know about.  (It turns out there's a <a href="https://www.rebol.com/docs/core23/rebolcore-9.html">brief mention in the Rebol2 User's Guide</a>, but the Rebol 1.0 Guide writes it up twice, probably on accident.)</p>
+<p>It's worth pointing out that there's big questions even in this seemingly simple definition.  Such as, should a function copy its arguments or body?  What should this do?</p>
+<pre><code> body: [print "Hello"]
+ foo: func [] body
+ append body [print "Goodbye"]
+ bar: func [] body
+</code></pre>
+<p>Does <strong>foo</strong> print just "Hello", or does it print "Hello" and "Goodbye"?</p>
+<p>I don't yet know what Rebol1 did, but Rebol2's MAKE FUNCTION! would <em>not</em> copy the body.  So FUNC would do a deep copy as the "higher level" operator, before passing it to MAKE FUNCTION!.</p>
+<p>But during bootstrap, it used a definition of FUNC that <em>didn't</em> copy the body, for performance reasons...which it switched over to the copying implementation at the end of boot.  <img src="https://rebol.metaeducation.com/images/emoji/twitter/roll_eyes.png?v=14" title=":roll_eyes:" class="emoji" alt=":roll_eyes:" loading="lazy" width="20" height="20"></p>
+<p>Some version of these crazy optimizations are on the table for future Ren-C.</p>
+<h2><a name="p-7953-print-prin-probe-3" class="anchor" href="https://rebol.metaeducation.com#p-7953-print-prin-probe-3"></a>PRINT, PRIN, PROBE</h2>
+<pre><code>write-block-or-element:
+    make function! [port element] [
+             do
+                if block? :element [:write-block] else [:form-to-port]
+                :port
+                :element]
+
+write-block: func [port block] [    ; !!! needs work
+    foreach element :block [form-to-port :port :element form-to-port :port " "]
+]
+
+prin: func [value] [
+    if block? :value [write-block output-port reduce :value]
+    else [form-to-port output-port :value]
+    exit
+]
+
+print: func [value] [
+    prin :value
+    linefeed-port output-port
+    exit
+]
+
+probe: func [value] [
+     prin " PROBE --&gt; "
+     send output-port :value
+     linefeed-port output-port
+     :value
+ ]
+</code></pre>
+<p>Weird.  (and prints a space after every element, so you get a space at the end of the line vs. just delimited between, etc.)</p>
+<p>At least one interesting aspect of this is to see the rigid "EXIT" at the end to make sure that PRIN and PRINT don't leak a result on accident.  Things like this feel like a vindication of Ren-C's <a href="https://rebol.metaeducation.com/t/implicit-execution-of-return-in-functions-bad/1656">requirement to use a RETURN</a> in order to give back a result from FUNC (but not LAMBDA).</p>
+<h2><a name="p-7953-is-as-to-logic-4" class="anchor" href="https://rebol.metaeducation.com#p-7953-is-as-to-logic-4"></a>IS? as TO-LOGIC</h2>
+<pre><code>is?: func [value] [not not :value]
+</code></pre>
+<p>This was called TRUE? in Rebol2, and I very much disliked the ambiguity of that vs. testing to see if a value was <code>= #[true]</code> the LOGIC! literal.</p>
+<p>I wrote something up about <a href="http://blog.hostilefork.com/did-programming-opposite-of-not/">how DID could be the opposite of NOT</a> (which even goes together as DIDN'T for DID NOT).  But due to some various shades of meaning the current state is that it means THEN? and DIDN'T means ELSE? as prefix tests for the trigger conditions that would run THEN or ELSE.  It needs thought.</p>
+<p>Anyway, interesting to see the choice of <code>IS?</code> here.</p>
+<h2><a name="p-7953-a-recursive-folding-any-and-all-interrobang-5" class="anchor" href="https://rebol.metaeducation.com#p-7953-a-recursive-folding-any-and-all-interrobang-5"></a>A Recursive Folding ANY and ALL <img src="https://rebol.metaeducation.com/images/emoji/twitter/interrobang.png?v=14" title=":interrobang:" class="emoji" alt=":interrobang:" loading="lazy" width="20" height="20"></h2>
+<pre><code>any: func [block] [
+    eval-one block
+        make function! [value rest] [
+            if not value [any rest]
+            else [value]
+        ]
+        make function! [value] [value]
+]
+
+all: func [block] [
+    eval-one block
+        make function! [value rest] [
+            if is? value [all rest]
+            else [false]
+        ]
+        make function! [value] [value]
+]
+</code></pre>
+<p>So this is based on a function called EVAL-ONE, that takes a list and two functions.  It isn't defined in %rebol.r and isn't in the reference guide either.  But it's a right fold with early termination.</p>
+<p>One can definitely imagine the Joe Marshall and Carl friction on this (<em>"why are you making all these usermode functions and calls, why not just use a loop?"</em>).</p>
+<p>While there's a time and a place for this, I do think that if you are starting to push out into the usermode layers and finding this mentality is driving it...you're going to end up with something that isn't hitting the mark that Rebol was aiming at.</p>
+<h2><a name="p-7953-why-is-pick-so-weird-6" class="anchor" href="https://rebol.metaeducation.com#p-7953-why-is-pick-so-weird-6"></a>Why Is PICK So Weird?</h2>
+<pre><code>pick: func [series index] [
+  do make function! [offset] [
+    if (:offset + index? :series) &lt;= 1
+        [none]
+    else [do make function! [disp] [
+            if (length? :disp) = 0 
+               [none]
+            else
+               [&amp;peek :disp 0]
+            ] skip :series if :offset &lt; 0 [:offset] else [:offset - 1]
+         ]
+    ] if logic? :index [if :index [1] else [2]] else [:index]
+]
+</code></pre>
+<p>My guess here is that the pattern:</p>
+<pre><code>do make function! [arg] [...code with arg...] value-for-arg
+</code></pre>
+<p>...is probably some holdover from before USE existed.  Or maybe USE is just an abstraction built on functions, and so it's done this way for optimization.  I dunno.</p>
+<h2><a name="p-7953-poor-mans-export-7" class="anchor" href="https://rebol.metaeducation.com#p-7953-poor-mans-export-7"></a>Poor-Man's EXPORT</h2>
+<pre><code>;;; These functions can be defined in terms of system natives that are
+;;; not available in the user context.  Since we made the functions in 
+;;; this context, the values of the words in the body are relative to
+;;; this context.  But we place the functions in the user context so
+;;; that the users can call them.  This allows the user to call the
+;;; system natives through a defined API in a controlled manner.
+
+user-functions: [
+    dir? [file] [do func [info] [info/dir?] info? :file]
+    size? [file] [do func [info] [info/size] info? :file]
+    ...
+]
+
+foreach [name args body] user-functions [
+    context-set user-context name func args body
+]
+</code></pre>
+<p>So the comment says what's going on here, it's the attempt to push functions out into the user context when they're implemented in terms of functions that aren't available in the user context.  I'm not sure what's not available <em>(these implementations of DIR? and FILE? are based on INFO?, is that not exported to the user context?)</em></p>
+<p>As far as I know, there's nothing like this in Rebol2 (there's no separate <code>user-context</code> from a <code>system-context</code>, is there?)  Interesting if that was something that disappeared in Rebol2 and came back in Rebol3.</p>
+<h2><a name="p-7953-more-modularization-eval-reduce-takes-context-8" class="anchor" href="https://rebol.metaeducation.com#p-7953-more-modularization-eval-reduce-takes-context-8"></a>More Modularization: EVAL-REDUCE Takes Context</h2>
+<pre><code>if not none? REBOL/script [
+    if exists? REBOL/script [
+        do make function! [] [
+                top-level-continuation: :return
+                if not REBOL/silent [
+                        linefeed
+                        prin "Loading script "
+                        print REBOL/script]
+                eval-reduce [do REBOL/script] user-context
+                ]
+        ]
+    ]
+</code></pre>
+<p>Rebol1 seems to have been working with modularization ideas, because even during startup, the script you pass on the command line is run via something called EVAL-REDUCE that takes a parameter of where to do the evaluation.</p>
+<p>So definitely a shame that Rebol2 seems to have moved away from the idea that evaluations needed to be done in a context.</p>
+<h2><a name="p-7953-catch-is-defined-in-terms-of-catch-func-9" class="anchor" href="https://rebol.metaeducation.com#p-7953-catch-is-defined-in-terms-of-catch-func-9"></a>CATCH is defined in terms of CATCH-FUNC</h2>
+<p>We know from the <code>user-functions</code> exporting that this:</p>
+<pre><code>catch [word block] [catch-func func reduce [word] :block]
+</code></pre>
+<p>Is actually:</p>
+<pre><code>catch: func [word block] [catch-func func reduce [word] :block]
+</code></pre>
+<p>Since there's no type checking, there's a <code>:BLOCK</code> GET-WORD! just to be sure it's not a function, I guess?  And then it's FUNC's job to do a check in its implementation.  But then, why not <code>:WORD</code> just to be sure WORD! isn't a function you're calling?  <em>(I like pointing this out, due to Ren-C's better answers to this issue...avoiding the "pox of documenting what you <strong>don't</strong> know")</em></p>
+<p>So the idea of using functions as proxies for "virtual binding" is the <em>old way</em>.  What's going on here is that the block contains code that wants to be bound to whatever the throw construct is, and so that block is made the body of a function, that you call and pass the thing you want bound to that name as the argument.  (COLLECT+KEEP worked this way).  But it's undesirable, because it means you've lost the fluidity of having the currency of a structural BLOCK!...replaced with the black box of a function just because you wanted to bind something.</p>
+<p>I'm pretty sure this CATCH mechanic (being called a "continuation") is stackful and can't do anything too bizarre, but I'd like an executable to try and ensure that.</p>
+          <p><a href="https://rebol.metaeducation.com/t/the-rebol-r-boot-file-from-rebol-1-0/2344/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/the-rebol-r-boot-file-from-rebol-1-0/2344/1</link>
+        <pubDate>Sun, 01 Dec 2024 12:40:58 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2344-1</guid>
+        <source url="https://rebol.metaeducation.com/t/the-rebol-r-boot-file-from-rebol-1-0/2344.rss">The %rebol.r Boot File From Rebol 1.0</source>
+      </item>
+  </channel>
+</rss>

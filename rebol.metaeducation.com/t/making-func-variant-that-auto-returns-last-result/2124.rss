@@ -1,0 +1,276 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Making FUNC Variant That Auto-Returns Last Result</title>
+    <link>https://rebol.metaeducation.com/t/making-func-variant-that-auto-returns-last-result/2124</link>
+    <description>I had offered that people could use this simple wrapper to get the old behavior of FUNC, to drop out its last result (instead of returning nothing):
+
+    func: adapt lib.func/ [body: compose [return (as group! body)]]
+
+The concept is that if you write:
+
+     foo: func [x] [
+         if x &lt; 0 [return x + 10]
+         x - 10
+     ]
+
+What you&#39;d actually get would be:
+
+     foo: lib/func [x] [
+         return (
+             if x &lt; 0 [return x + 10]
+             x - 10
+         )
+     ]
+
+## Broken Under New Binding Model
+
+Under the new binding model, an array which is bound will by default hold onto its binding.
+
+* The BODY was a BLOCK! that evaluated at the callsite and captured its environment (e.g. to the user context, module context, outer function context, etc.)
+
+* When you convert it to a GROUP! it will still have that binding.
+
+* The surgery which is done to inject the frame containing X into the environment will thus apply only at the outermost level.  So the outer block where the return lives would see it, but never make it to the inner group.
+
+      func: adapt lib.func/ [
+          body: compose [
+              print [&quot;Here would see the X:&quot; x]
+              return (as group! body)  ; &lt;-- inside group will not
+          ]
+      ]
+
+## Mimicking FUNC&#39;s Surgery
+ 
+One idea would be to use a utility that can do something like what LIB.FUNC did to put the frame onto the proxy body, on the original body.
+
+But awkwardly, you can&#39;t do this surgery inside the COMPOSE, because it has to be done once the function is running.  If we call that surgery OVERBIND, one answer would look something like this:
+
+    func: adapt lib.func/ [
+        body: compose [
+            return eval overbind binding of $return (body)
+        ]
+    ]
+
+*(I&#39;ll mention that this OVERBIND is not as efficient as what FUNC does, because the frame itself has a pointer to the inherited environment when it&#39;s made.  But it only has one slot for that pointer.  So if you try to build a specifier chain with the frame that points to another environment, it has to fabricate a &quot;frame holder&quot; which has its own pointer to put in the chain.)*
+
+Notice that we only want the frame, here... which we get from the binding of the RETURN.  We don&#39;t want to inject awareness of everything in this FUNC adaptation&#39;s scope.  So not **`overbind here (body)`**.  If such a thing were even legal to do... body probably has its own copy of lib inherited from another module, and then you&#39;ve got another module and its lib... we&#39;re trying to avoid that kind of conundrum with conservative binding preservation.
+
+## Another Approach: Steal The Binding And Unbind
+
+Another approach would be to steal the binding off of the body and put it on the composition, then remove the binding from the body:
+
+    func: adapt lib.func/ [
+        body: in body bindable compose [
+            return (bindable as group! body)
+        ]
+    ]
+
+You can put the BINDABLE before or after the AS GROUP!.
+
+I actually think this reads less insanely if we just go with UNBIND as being a &quot;tip-unbinding&quot; operation by default, and then have UNBIND:DEEP.  *(Maybe UNBIND:SHALLOW for one level of depth?)*:
+
+    func: adapt lib.func/ [
+        body: in body unbind compose [
+            return (as group! unbind body)
+        ]
+    ]
+
+It&#39;s much better to do it this way.  You&#39;re doing cheaper operations and doing them at FUNC creation time.
+
+## Note That I Still Hate Implicit RETURN
+
+There&#39;s a reason the default FUNC doesn&#39;t do it.  If you start doing cool things with RETURN you&#39;ll break things in a way that lurks.
+
+Sample cool thing that works today:
+
+     foo: func [x y] [
+         return: adapt augment return/ [arg2] [
+             ^value: ^value + arg2  ; ADAPT runs in full meta-protocol
+         ]
+         if x &gt; 10 [
+             return x y  ; arity 2 return, adds args and returns sum!
+        ]
+    ]
+
+    &gt;&gt; foo 20 30
+    == 50
+
+    &gt;&gt; foo 5 5
+    == \~\  ; antiform (trash!) &quot;tripwire&quot;
+
+If anything, I feel like the nothing result isn&#39;t going far enough--and it should actually error if you skip out on a return.  Maybe there was some important finalization work to do.
+
+But my example shows that putting it in implicitly means it doesn&#39;t necessarily roll with whatever updated definition you give to return.  You&#39;ll just get a confusing error in a bit of hidden code.  Not good for a fundamental part.</description>
+    
+    <lastBuildDate>Mon, 02 Jun 2025 16:52:39 +0000</lastBuildDate>
+    <category>Functions</category>
+    <atom:link href="https://rebol.metaeducation.com/t/making-func-variant-that-auto-returns-last-result/2124.rss" rel="self" type="application/rss+xml" />
+      <item>
+        <title>Making FUNC Variant That Auto-Returns Last Result</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>A more elaborate version was created at one point, that turns RETURN arity-0 when you say <strong><code>return: []</code></strong></p>
+<pre><code>adapted-func-body: [
+    body: if find spec spread [return: []] [
+        compose2 '(&lt;*&gt;) [  ; only compose groups marked with &lt;*&gt;
+            return: adapt augment (
+                specialize return/ [^value: ~]
+            ) [^end-test [&lt;end&gt; any-value!]] [
+                if not null? end-test [
+                    panic [
+                        "arity-0 RETURN enforced when return: []"
+                    ]
+                ]
+            ]
+            (&lt;*&gt; as group! body)  ; returns in body will be arity-0
+            return  ; all functions must return (in case hooked)
+        ]
+    ] else [
+        compose [return (as group! body)]
+    ]
+]
+
+func: adapt lib.func/ adapted-func-body
+</code></pre>
+<p>This shows the weakness of the approach of proxying the binding when you're using any words besides the words you know will be in the frame.</p>
+<p>The usage wasn't critical, so I took it out of the file it was in and put it here for further thought.</p>
+          <p><a href="https://rebol.metaeducation.com/t/making-func-variant-that-auto-returns-last-result/2124/3">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/making-func-variant-that-auto-returns-last-result/2124/3</link>
+        <pubDate>Thu, 01 Feb 2024 21:03:15 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2124-3</guid>
+        <source url="https://rebol.metaeducation.com/t/making-func-variant-that-auto-returns-last-result/2124.rss">Making FUNC Variant That Auto-Returns Last Result</source>
+      </item>
+      <item>
+        <title>Making FUNC Variant That Auto-Returns Last Result</title>
+        <dc:creator><![CDATA[bradrn]]></dc:creator>
+        <description><![CDATA[
+            <aside class="quote no-group quote-modified" data-username="hostilefork" data-post="1" data-topic="2124">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<p>I actually think this reads less insanely if we just go with UNBIND as being a "tip-unbinding" operation by default, and then have UNBIND/DEEP.</p>
+</blockquote>
+</aside>
+<p>I’m not sure I understand what this proposed UNBIND:DEEP would do. Would it remove the bindings from <em>all</em> nested BLOCK!s?</p>
+<aside class="quote no-group" data-username="hostilefork" data-post="1" data-topic="2124">
+<div class="title">
+<div class="quote-controls"></div>
+<img alt="" width="24" height="24" src="https://rebol.metaeducation.com/user_avatar/rebol.metaeducation.com/hostilefork/48/421_2.png" class="avatar"> hostilefork:</div>
+<blockquote>
+<pre data-code-wrap="plaintext"><code class="lang-plaintext">func: adapt lib.func/ [
+    body: in body unbind compose [
+        return (as group! unbind body)
+    ]
+]
+</code></pre>
+</blockquote>
+</aside>
+<p>I like this solution! This feels like a good use of UNBIND to me — removing the environment from one point to re-add it elsewhere.</p>
+          <p><a href="https://rebol.metaeducation.com/t/making-func-variant-that-auto-returns-last-result/2124/2">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/making-func-variant-that-auto-returns-last-result/2124/2</link>
+        <pubDate>Fri, 19 Jan 2024 04:37:17 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2124-2</guid>
+        <source url="https://rebol.metaeducation.com/t/making-func-variant-that-auto-returns-last-result/2124.rss">Making FUNC Variant That Auto-Returns Last Result</source>
+      </item>
+      <item>
+        <title>Making FUNC Variant That Auto-Returns Last Result</title>
+        <dc:creator><![CDATA[hostilefork]]></dc:creator>
+        <description><![CDATA[
+            <p>I had offered that people could use this simple wrapper to get the old behavior of FUNC, to drop out its last result (instead of returning nothing):</p>
+<pre><code>func: adapt lib.func/ [body: compose [return (as group! body)]]
+</code></pre>
+<p>The concept is that if you write:</p>
+<pre><code> foo: func [x] [
+     if x &lt; 0 [return x + 10]
+     x - 10
+ ]
+</code></pre>
+<p>What you'd actually get would be:</p>
+<pre><code> foo: lib/func [x] [
+     return (
+         if x &lt; 0 [return x + 10]
+         x - 10
+     )
+ ]
+</code></pre>
+<h2><a name="p-7001-broken-under-new-binding-model-1" class="anchor" href="https://rebol.metaeducation.com#p-7001-broken-under-new-binding-model-1"></a>Broken Under New Binding Model</h2>
+<p>Under the new binding model, an array which is bound will by default hold onto its binding.</p>
+<ul>
+<li>
+<p>The BODY was a BLOCK! that evaluated at the callsite and captured its environment (e.g. to the user context, module context, outer function context, etc.)</p>
+</li>
+<li>
+<p>When you convert it to a GROUP! it will still have that binding.</p>
+</li>
+<li>
+<p>The surgery which is done to inject the frame containing X into the environment will thus apply only at the outermost level.  So the outer block where the return lives would see it, but never make it to the inner group.</p>
+<pre><code>func: adapt lib.func/ [
+    body: compose [
+        print ["Here would see the X:" x]
+        return (as group! body)  ; &lt;-- inside group will not
+    ]
+]
+</code></pre>
+</li>
+</ul>
+<h2><a name="p-7001-mimicking-funcs-surgery-2" class="anchor" href="https://rebol.metaeducation.com#p-7001-mimicking-funcs-surgery-2"></a>Mimicking FUNC's Surgery</h2>
+<p>One idea would be to use a utility that can do something like what LIB.FUNC did to put the frame onto the proxy body, on the original body.</p>
+<p>But awkwardly, you can't do this surgery inside the COMPOSE, because it has to be done once the function is running.  If we call that surgery OVERBIND, one answer would look something like this:</p>
+<pre><code>func: adapt lib.func/ [
+    body: compose [
+        return eval overbind binding of $return (body)
+    ]
+]
+</code></pre>
+<p><em>(I'll mention that this OVERBIND is not as efficient as what FUNC does, because the frame itself has a pointer to the inherited environment when it's made.  But it only has one slot for that pointer.  So if you try to build a specifier chain with the frame that points to another environment, it has to fabricate a "frame holder" which has its own pointer to put in the chain.)</em></p>
+<p>Notice that we only want the frame, here... which we get from the binding of the RETURN.  We don't want to inject awareness of everything in this FUNC adaptation's scope.  So not <strong><code>overbind here (body)</code></strong>.  If such a thing were even legal to do... body probably has its own copy of lib inherited from another module, and then you've got another module and its lib... we're trying to avoid that kind of conundrum with conservative binding preservation.</p>
+<h2><a name="p-7001-another-approach-steal-the-binding-and-unbind-3" class="anchor" href="https://rebol.metaeducation.com#p-7001-another-approach-steal-the-binding-and-unbind-3"></a>Another Approach: Steal The Binding And Unbind</h2>
+<p>Another approach would be to steal the binding off of the body and put it on the composition, then remove the binding from the body:</p>
+<pre><code>func: adapt lib.func/ [
+    body: in body bindable compose [
+        return (bindable as group! body)
+    ]
+]
+</code></pre>
+<p>You can put the BINDABLE before or after the AS GROUP!.</p>
+<p>I actually think this reads less insanely if we just go with UNBIND as being a "tip-unbinding" operation by default, and then have UNBIND:DEEP.  <em>(Maybe UNBIND:SHALLOW for one level of depth?)</em>:</p>
+<pre><code>func: adapt lib.func/ [
+    body: in body unbind compose [
+        return (as group! unbind body)
+    ]
+]
+</code></pre>
+<p>It's much better to do it this way.  You're doing cheaper operations and doing them at FUNC creation time.</p>
+<h2><a name="p-7001-note-that-i-still-hate-implicit-return-4" class="anchor" href="https://rebol.metaeducation.com#p-7001-note-that-i-still-hate-implicit-return-4"></a>Note That I Still Hate Implicit RETURN</h2>
+<p>There's a reason the default FUNC doesn't do it.  If you start doing cool things with RETURN you'll break things in a way that lurks.</p>
+<p>Sample cool thing that works today:</p>
+<pre><code> foo: func [x y] [
+     return: adapt augment return/ [arg2] [
+         ^value: ^value + arg2  ; ADAPT runs in full meta-protocol
+     ]
+     if x &gt; 10 [
+         return x y  ; arity 2 return, adds args and returns sum!
+    ]
+]
+
+&gt;&gt; foo 20 30
+== 50
+
+&gt;&gt; foo 5 5
+== \~\  ; antiform (trash!) "tripwire"
+</code></pre>
+<p>If anything, I feel like the nothing result isn't going far enough--and it should actually error if you skip out on a return.  Maybe there was some important finalization work to do.</p>
+<p>But my example shows that putting it in implicitly means it doesn't necessarily roll with whatever updated definition you give to return.  You'll just get a confusing error in a bit of hidden code.  Not good for a fundamental part.</p>
+          <p><a href="https://rebol.metaeducation.com/t/making-func-variant-that-auto-returns-last-result/2124/1">Read full topic</a></p>
+        ]]></description>
+        <link>https://rebol.metaeducation.com/t/making-func-variant-that-auto-returns-last-result/2124/1</link>
+        <pubDate>Thu, 18 Jan 2024 19:23:59 +0000</pubDate>
+        <guid isPermaLink="false">rebol.metaeducation.com-post-2124-1</guid>
+        <source url="https://rebol.metaeducation.com/t/making-func-variant-that-auto-returns-last-result/2124.rss">Making FUNC Variant That Auto-Returns Last Result</source>
+      </item>
+  </channel>
+</rss>
